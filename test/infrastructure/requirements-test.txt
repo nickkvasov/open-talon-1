@@ -1,0 +1,8 @@
+pytest
+testcontainers[compose]
+psycopg
+psycopg-binary
+confluent-kafka
+hvac
+redis
+pgvector
