@@ -3,28 +3,28 @@ services:
     image: pgvector/pgvector:pg16
     container_name: postgres
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: app_db
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-app_db}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     restart: unless-stopped
 
   kafka:
-    image: apache/kafka:3.8.0
+    image: apache/kafka:4.2.0
     container_name: kafka
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: controller,broker
       KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:${KAFKA_PORT:-9092}
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
     ports:
-      - "9092:9092"
+      - "${KAFKA_PORT:-9092}:9092"
     volumes:
       - ./data/kafka:/var/lib/kafka/data
     restart: unless-stopped
@@ -34,12 +34,12 @@ services:
     container_name: openbao
     command: server -dev
     environment:
-      BAO_DEV_ROOT_TOKEN_ID: root
+      BAO_DEV_ROOT_TOKEN_ID: ${BAO_ROOT_TOKEN:-root}
       BAO_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
-      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_DEV_ROOT_TOKEN_ID: ${BAO_ROOT_TOKEN:-root}
       VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
     ports:
-      - "8200:8200"
+      - "${BAO_PORT:-8200}:8200"
     cap_add:
       - IPC_LOCK
     restart: unless-stopped
@@ -48,7 +48,7 @@ services:
     image: valkey/valkey:latest
     container_name: valkey
     ports:
-      - "6379:6379"
+      - "${VALKEY_PORT:-6379}:6379"
     volumes:
       - ./data/valkey:/data
     restart: unless-stopped
@@ -56,8 +56,11 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
+    environment:
+      REQUIRED_MODELS: ${REQUIRED_MODELS:-gemma4:31b,gemma4:e4b}
+      OLLAMA_MODELS: /root/.ollama
     ports:
-      - "11434:11434"
+      - "${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ./data/ollama:/root/.ollama
       - ./ollama-entrypoint.sh:/entrypoint.sh

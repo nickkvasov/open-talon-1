@@ -10,9 +10,11 @@ while ! ollama list > /dev/null 2>&1; do
 done
 
 # Pull the desired models
-echo "Ollama API is ready! Pulling models..."
-ollama pull gemma4:31b
-ollama pull gemma4:e4b
+echo "Ollama API is ready! Pulling models: $REQUIRED_MODELS"
+for model in $(echo $REQUIRED_MODELS | tr ',' ' '); do
+    echo "Pulling model: $model"
+    ollama pull $model
+done
 
 echo "Models pulled successfully! Bringing Ollama back to the foreground..."
 # Wait on the original process to keep the container running

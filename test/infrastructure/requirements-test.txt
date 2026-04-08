@@ -6,3 +6,4 @@ confluent-kafka
 hvac
 redis
 pgvector
+python-dotenv

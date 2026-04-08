@@ -7,8 +7,26 @@ import hvac
 import uuid
 import subprocess
 from confluent_kafka import Producer, Consumer
+from dotenv import load_dotenv
 
 COMPOSE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../infrastructure'))
+load_dotenv(os.path.join(COMPOSE_PATH, '.env'))
+
+# Configuration from environment
+POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
+POSTGRES_USER = os.getenv("POSTGRES_USER", "admin")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "password")
+POSTGRES_DB = os.getenv("POSTGRES_DB", "app_db")
+
+VALKEY_PORT = os.getenv("VALKEY_PORT", "6379")
+
+BAO_PORT = os.getenv("BAO_PORT", "8200")
+BAO_ROOT_TOKEN = os.getenv("BAO_ROOT_TOKEN", "root")
+
+KAFKA_PORT = os.getenv("KAFKA_PORT", "9092")
+
+OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
+OLLAMA_MODELS = [m.strip() for m in os.getenv("REQUIRED_MODELS", "gemma4:31b,gemma4:e4b").split(',') if m.strip()]
 
 @pytest.fixture(scope="session")
 def infrastructure():
@@ -18,25 +36,25 @@ def infrastructure():
     
     # Wait for Postgres
     wait_for_service(
-        lambda: psycopg.connect("host=localhost port=5432 user=admin password=password dbname=app_db"), 
+        lambda: psycopg.connect(f"host=localhost port={POSTGRES_PORT} user={POSTGRES_USER} password={POSTGRES_PASSWORD} dbname={POSTGRES_DB}"), 
         "Postgres"
     )
     
     # Wait for Valkey
     wait_for_service(
-        lambda: redis.Redis(host='localhost', port=6379, db=0).ping(),
+        lambda: redis.Redis(host='localhost', port=int(VALKEY_PORT), db=0).ping(),
         "Valkey"
     )
     
     # Wait for OpenBao
     def check_bao():
-        client = hvac.Client(url='http://localhost:8200', token='root')
+        client = hvac.Client(url=f'http://localhost:{BAO_PORT}', token=BAO_ROOT_TOKEN)
         return client.is_authenticated()
     wait_for_service(check_bao, "OpenBao")
 
     # Wait for Kafka
     def check_kafka():
-        p = Producer({'bootstrap.servers': 'localhost:9092'})
+        p = Producer({'bootstrap.servers': f'localhost:{KAFKA_PORT}'})
         p.list_topics(timeout=5)
         return True
         
@@ -47,14 +65,12 @@ def infrastructure():
         import json
         import urllib.request
         try:
-            req = urllib.request.Request('http://localhost:11434/api/tags')
+            req = urllib.request.Request(f'http://localhost:{OLLAMA_PORT}/api/tags')
             with urllib.request.urlopen(req) as response:
                 if response.status != 200: return False
                 data = json.loads(response.read().decode())
                 models = [m['name'] for m in data.get('models', [])]
-                has_gemma4_31b = any(m.startswith('gemma4:31b') for m in models)
-                has_gemma4_e4b = any(m.startswith('gemma4:e4b') or m == 'gemma4:latest' for m in models)
-                return has_gemma4_31b and has_gemma4_e4b
+                return all(any(m.startswith(config_model) for m in models) for config_model in OLLAMA_MODELS)
         except Exception:
             return False
             
@@ -79,7 +95,7 @@ def wait_for_service(connect_func, name, max_retries=60, sleep_seconds=2):
 
 def test_postgres_and_pgvector(infrastructure):
     """Test Postgres connection and pgvector extension."""
-    with psycopg.connect("host=localhost port=5432 user=admin password=password dbname=app_db") as conn:
+    with psycopg.connect(f"host=localhost port={POSTGRES_PORT} user={POSTGRES_USER} password={POSTGRES_PASSWORD} dbname={POSTGRES_DB}") as conn:
         with conn.cursor() as cur:
             # Check if pgvector is available
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
@@ -89,13 +105,13 @@ def test_postgres_and_pgvector(infrastructure):
 
 def test_valkey_connection(infrastructure):
     """Test Valkey set and get operations."""
-    r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+    r = redis.Redis(host='localhost', port=int(VALKEY_PORT), db=0, decode_responses=True)
     r.set('test_key', 'test_value')
     assert r.get('test_key') == 'test_value'
 
 def test_openbao_connection(infrastructure):
     """Test OpenBao secret write and read."""
-    client = hvac.Client(url='http://localhost:8200', token='root')
+    client = hvac.Client(url=f'http://localhost:{BAO_PORT}', token=BAO_ROOT_TOKEN)
     assert client.is_authenticated()
     
     # In OpenBao dev mode, the 'secret' KV v2 engine is enabled by default
@@ -119,7 +135,7 @@ def test_kafka_connection(infrastructure):
     topic = f'test-topic-{uuid.uuid4()}'
     
     # Ensure topic exists
-    admin = AdminClient({'bootstrap.servers': '127.0.0.1:9092'})
+    admin = AdminClient({'bootstrap.servers': f'127.0.0.1:{KAFKA_PORT}'})
     fs = admin.create_topics([NewTopic(topic, num_partitions=1, replication_factor=1)])
     for topic_name, f in fs.items():
         try:
@@ -128,13 +144,13 @@ def test_kafka_connection(infrastructure):
             pass
             
     # Produce message
-    producer = Producer({'bootstrap.servers': '127.0.0.1:9092'})
+    producer = Producer({'bootstrap.servers': f'127.0.0.1:{KAFKA_PORT}'})
     producer.produce(topic, key='key', value='test_message')
     producer.flush()
     
     # Consume message via explicit assignment (bypasses consumer group join delay)
     consumer = Consumer({
-        'bootstrap.servers': '127.0.0.1:9092',
+        'bootstrap.servers': f'127.0.0.1:{KAFKA_PORT}',
         'group.id': f'test-group-{uuid.uuid4()}',
         'auto.offset.reset': 'earliest'
     })
@@ -153,7 +169,7 @@ def test_kafka_connection(infrastructure):
 
 def test_functional_pgvector_similarity_search(infrastructure):
     """Test inserting vectors and performing a similarity search."""
-    with psycopg.connect("host=127.0.0.1 port=5432 user=admin password=password dbname=app_db", autocommit=True) as conn:
+    with psycopg.connect(f"host=127.0.0.1 port={POSTGRES_PORT} user={POSTGRES_USER} password={POSTGRES_PASSWORD} dbname={POSTGRES_DB}", autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
             cur.execute("DROP TABLE IF EXISTS items;")
@@ -169,7 +185,7 @@ def test_functional_pgvector_similarity_search(infrastructure):
 
 def test_functional_valkey_hash_and_ttl(infrastructure):
     """Test Valkey hash operations and TTL expirations."""
-    r = redis.Redis(host='127.0.0.1', port=6379, db=0, decode_responses=True)
+    r = redis.Redis(host='127.0.0.1', port=int(VALKEY_PORT), db=0, decode_responses=True)
     r.hset("user:1000", mapping={"name": "Alice", "status": "active"})
     assert r.hget("user:1000", "name") == "Alice"
     assert r.hgetall("user:1000") == {"name": "Alice", "status": "active"}
@@ -181,7 +197,7 @@ def test_functional_valkey_hash_and_ttl(infrastructure):
 
 def test_functional_openbao_versioned_secrets(infrastructure):
     """Test OpenBao KV v2 engine's secret versioning capabilities."""
-    client = hvac.Client(url='http://127.0.0.1:8200', token='root')
+    client = hvac.Client(url=f'http://127.0.0.1:{BAO_PORT}', token=BAO_ROOT_TOKEN)
     
     client.secrets.kv.v2.create_or_update_secret(
         path='config_secret',
@@ -209,19 +225,19 @@ def test_functional_kafka_json_payloads(infrastructure):
     
     topic = f'json-topic-{uuid.uuid4()}'
     
-    admin = AdminClient({'bootstrap.servers': '127.0.0.1:9092'})
+    admin = AdminClient({'bootstrap.servers': f'127.0.0.1:{KAFKA_PORT}'})
     fs = admin.create_topics([NewTopic(topic, num_partitions=1, replication_factor=1)])
     for topic_name, f in fs.items():
         try: f.result()
         except: pass
         
-    producer = Producer({'bootstrap.servers': '127.0.0.1:9092'})
+    producer = Producer({'bootstrap.servers': f'127.0.0.1:{KAFKA_PORT}'})
     payload = {"event_type": "user_signup", "user_id": 12345}
     producer.produce(topic, key='user_12345', value=json.dumps(payload))
     producer.flush()
     
     consumer = Consumer({
-        'bootstrap.servers': '127.0.0.1:9092',
+        'bootstrap.servers': f'127.0.0.1:{KAFKA_PORT}',
         'group.id': f'test-group-{uuid.uuid4()}',
         'auto.offset.reset': 'earliest'
     })
@@ -246,21 +262,21 @@ def test_functional_ollama_serving(infrastructure):
     import json
     
     # Check if models are available (we know they are from wait hook, but test explicitly)
-    req = urllib.request.Request('http://127.0.0.1:11434/api/tags')
+    req = urllib.request.Request(f'http://127.0.0.1:{OLLAMA_PORT}/api/tags')
     with urllib.request.urlopen(req) as response:
         data = json.loads(response.read().decode())
         models = [m['name'] for m in data['models']]
-        assert any(m.startswith('gemma4:31b') for m in models)
-        assert any(m.startswith('gemma4:e4b') or m == 'gemma4:latest' for m in models)
+        for config_model in OLLAMA_MODELS:
+            assert any(m.startswith(config_model) for m in models)
         
     # Perform basic inference generation for both models
-    for model_name in ["gemma4:latest", "gemma4:31b"]:
+    for model_name in OLLAMA_MODELS:
         payload = json.dumps({
             "model": model_name,
             "prompt": "Reply with precisely the word: hello",
             "stream": False
         }).encode('utf-8')
-        req = urllib.request.Request('http://127.0.0.1:11434/api/generate', data=payload, headers={'Content-Type': 'application/json'})
+        req = urllib.request.Request(f'http://127.0.0.1:{OLLAMA_PORT}/api/generate', data=payload, headers={'Content-Type': 'application/json'})
         # Timeout is set high (120s) because loading large 9B models into memory on first run takes significant time
         with urllib.request.urlopen(req, timeout=120) as response:
             result = json.loads(response.read().decode())
