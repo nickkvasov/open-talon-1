@@ -1,4 +1,4 @@
-# Open Senate Repository Structure Proposal
+# Open Talon Repository Structure Proposal
 
 ## Objective
 
@@ -30,7 +30,7 @@ This makes the gateway the accidental center of the system.
 ## Proposed Top-Level Structure
 
 ```text
-open-senate/
+open-talon/
   apps/
     web/
     tui/
@@ -222,7 +222,7 @@ This is just a rename/elevation of the current infrastructure folder.
 ## Proposed Concrete Tree
 
 ```text
-open-senate/
+open-talon/
   apps/
     web/
       package.json
@@ -282,7 +282,7 @@ open-senate/
   packages/
     contracts/
       pyproject.toml
-      open_senate_contracts/
+      open_talon_contracts/
         events.py
         commands.py
         workspace.py
@@ -292,20 +292,20 @@ open-senate/
         artifact.py
     events-sdk/
       pyproject.toml
-      open_senate_events/
+      open_talon_events/
         producer.py
         consumer.py
         topics.py
         envelope.py
     auth-sdk/
       pyproject.toml
-      open_senate_auth/
+      open_talon_auth/
         principals.py
         permissions.py
         policies.py
     testing/
       pyproject.toml
-      open_senate_testing/
+      open_talon_testing/
         fixtures/
         fakes/
         builders/
@@ -405,11 +405,11 @@ Proposed:
 
 - `api-gateway/app/models.py`
   -> split across:
-  - `packages/contracts/open_senate_contracts/events.py`
-  - `packages/contracts/open_senate_contracts/thread.py`
-  - `packages/contracts/open_senate_contracts/participant.py`
-  - `packages/contracts/open_senate_contracts/task.py`
-  - `packages/contracts/open_senate_contracts/api.py`
+  - `packages/contracts/open_talon_contracts/events.py`
+  - `packages/contracts/open_talon_contracts/thread.py`
+  - `packages/contracts/open_talon_contracts/participant.py`
+  - `packages/contracts/open_talon_contracts/task.py`
+  - `packages/contracts/open_talon_contracts/api.py`
 
 ### apps
 

@@ -1,5 +1,5 @@
 /* ───────────────────────────────────────────────────────────────── *
- *  Open Senate Gateway — Web UI JavaScript
+ *  Open Talon Gateway — Web UI JavaScript
  *  - WebSocket streaming for real-time responses
  *  - Session persistence via localStorage
  *  - Auth mode switching (none / api_key / openbao)
@@ -8,7 +8,7 @@
 
 const API_BASE  = `${location.origin}`;
 const WS_BASE   = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
-const LS_KEY    = 'open_senate_session_id';
+const LS_KEY    = 'open_talon_session_id';
 
 // ── State ────────────────────────────────────────────────────────
 let sessionId   = null;   // UUID string

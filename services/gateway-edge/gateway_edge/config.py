@@ -62,8 +62,8 @@ class Settings(BaseSettings):
 
     # ── Kafka ────────────────────────────────────────────────────────────────
     kafka_bootstrap_servers: str = "localhost:9092"
-    kafka_request_topic: str = "senate.chat.requests"
-    kafka_response_topic: str = "senate.chat.responses"
+    kafka_request_topic: str = "talon.chat.requests"
+    kafka_response_topic: str = "talon.chat.responses"
     kafka_consumer_group: str = "api-gateway"
     kafka_response_timeout_seconds: float = 120.0
     kafka_startup_timeout_seconds: float = 30.0

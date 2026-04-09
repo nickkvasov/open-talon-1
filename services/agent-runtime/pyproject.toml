@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "open-senate-agent-runtime"
+name = "open-talon-agent-runtime"
 version = "0.1.0"
-description = "Reusable agent runtime for Open Senate"
+description = "Reusable agent runtime for Open Talon"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.7",

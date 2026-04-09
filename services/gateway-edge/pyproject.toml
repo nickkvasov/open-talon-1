@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "open-senate-gateway-edge"
+name = "open-talon-gateway-edge"
 version = "0.1.0"
-description = "Open Senate gateway edge service"
+description = "Open Talon gateway edge service"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.scripts]
-senate-gateway-edge = "gateway_edge.main:main"
+talon-gateway-edge = "gateway_edge.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["gateway_edge"]

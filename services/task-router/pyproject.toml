@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "open-senate-task-router"
+name = "open-talon-task-router"
 version = "0.1.0"
-description = "Task routing service for Open Senate"
+description = "Task routing service for Open Talon"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.7",

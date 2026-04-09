@@ -1,4 +1,4 @@
-# Open Senate — API Gateway
+# Open Talon — API Gateway
 
 This package is the legacy gateway layout kept for compatibility during the repo split. New development should use the repository-root `.venv` and the extracted service in `services/gateway-edge`.
 
@@ -19,7 +19,7 @@ Multi-interface Kafka-driven API gateway that connects any frontend (Web, Termin
               │  FastAPI + uvicorn
               └─────────────────┘
               ↓ kafka producer     ↑ kafka consumer
-       senate.chat.requests    senate.chat.responses
+       talon.chat.requests    talon.chat.responses
               ↓                    ↑
               └──── Agent Swarm ───┘  (separate PR)
 ```
@@ -90,7 +90,7 @@ Set `AUTH_MODE` env var:
 
 ## Kafka Wire Format
 
-**Request** (`senate.chat.requests`):
+**Request** (`talon.chat.requests`):
 ```json
 {
   "correlation_id": "uuid",
@@ -101,7 +101,7 @@ Set `AUTH_MODE` env var:
 }
 ```
 
-**Response** (`senate.chat.responses`):
+**Response** (`talon.chat.responses`):
 ```json
 {
   "correlation_id": "uuid",

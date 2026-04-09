@@ -100,8 +100,8 @@ services:
       VALKEY_PORT: "6379"
       # ── Kafka ────────────────────────────────────────────────────
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
-      KAFKA_REQUEST_TOPIC: ${KAFKA_REQUEST_TOPIC:-senate.chat.requests}
-      KAFKA_RESPONSE_TOPIC: ${KAFKA_RESPONSE_TOPIC:-senate.chat.responses}
+      KAFKA_REQUEST_TOPIC: ${KAFKA_REQUEST_TOPIC:-talon.chat.requests}
+      KAFKA_RESPONSE_TOPIC: ${KAFKA_RESPONSE_TOPIC:-talon.chat.responses}
       KAFKA_CONSUMER_GROUP: ${KAFKA_CONSUMER_GROUP:-api-gateway}
       # ── OpenBao ──────────────────────────────────────────────────
       OPENBAO_ADDRESS: http://openbao:8200

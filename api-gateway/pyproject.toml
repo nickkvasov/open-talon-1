@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "open-senate-api-gateway"
+name = "open-talon-api-gateway"
 version = "0.1.0"
-description = "Open Senate API Gateway — multi-interface Kafka-driven chat layer"
+description = "Open Talon API Gateway — multi-interface Kafka-driven chat layer"
 requires-python = ">=3.12"
 dependencies = [
     # ── Web framework ──────────────────────────────────────────────────────────
@@ -40,9 +40,9 @@ dev = [
 
 [project.scripts]
 # Gateway
-senate-gateway = "app.main:main"
+talon-gateway = "app.main:main"
 # TUI
-senate-tui = "tui.main:main"
+talon-tui = "tui.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app", "tui"]

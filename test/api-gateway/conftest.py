@@ -1,5 +1,5 @@
 """
-Shared pytest fixtures for the Open Senate API Gateway test suite.
+Shared pytest fixtures for the Open Talon API Gateway test suite.
 
 Two test layers
 ---------------

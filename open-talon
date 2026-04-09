@@ -70,15 +70,15 @@ stop_cmd() {
 
 tui_cmd() {
   ensure_python
-  exec "${PYTHON_BIN}" -m open_senate_tui.main --gateway http://localhost:8000 "$@"
+  exec "${PYTHON_BIN}" -m open_talon_tui.main --gateway http://localhost:8000 "$@"
 }
 
 usage() {
   cat <<EOF
 Usage:
-  ./open-senate start
-  ./open-senate stop
-  ./open-senate tui [extra tui args]
+  ./open-talon start
+  ./open-talon stop
+  ./open-talon tui [extra tui args]
 EOF
 }
 

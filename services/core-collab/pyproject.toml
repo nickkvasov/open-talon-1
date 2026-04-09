@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "open-senate-core-collab"
+name = "open-talon-core-collab"
 version = "0.1.0"
-description = "Canonical collaboration kernel for Open Senate"
+description = "Canonical collaboration kernel for Open Talon"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.7",

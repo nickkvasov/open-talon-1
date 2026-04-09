@@ -1,6 +1,6 @@
-# Open Senate
+# Open Talon
 
-This repository contains the local infrastructure, Python services, and client apps for Open Senate. The canonical developer Python environment is the repository-root `.venv`.
+This repository contains the local infrastructure, Python services, and client apps for Open Talon. The canonical developer Python environment is the repository-root `.venv`.
 
 ## Architecture Stack
 

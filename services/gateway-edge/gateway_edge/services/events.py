@@ -3,9 +3,9 @@ Kafka event service.
 
 Gateway → agent flow
 --------------------
-1. Gateway publishes a KafkaChatRequest to ``senate.chat.requests``.
+1. Gateway publishes a KafkaChatRequest to ``talon.chat.requests``.
 2. An agent (separate repo) consumes the request, calls Ollama, and publishes
-   a KafkaChatResponse to ``senate.chat.responses``.
+   a KafkaChatResponse to ``talon.chat.responses``.
 3. This service's background consumer receives the response and resolves the
    matching asyncio.Future (REST) or drains into an asyncio.Queue (WS/SSE).
 

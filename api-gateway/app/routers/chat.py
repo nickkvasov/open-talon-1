@@ -124,7 +124,7 @@ async def chat(body: ChatRequest) -> ChatResponse:
     except TimeoutError:
         raise HTTPException(
             status_code=504,
-            detail="Agent did not respond in time. Is an agent consuming senate.chat.requests?",
+            detail="Agent did not respond in time. Is an agent consuming talon.chat.requests?",
         )
 
     # Save assistant message

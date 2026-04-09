@@ -1,5 +1,5 @@
 """
-Open Senate — Terminal UI
+Open Talon — Terminal UI
 
 Usage
 -----
@@ -10,7 +10,7 @@ Usage
   python -m tui.main --openbao-token <token>
 
 The TUI connects to the gateway via WebSocket for real-time streaming.
-Sessions are persisted in ~/.open-senate/session.json.
+Sessions are persisted in ~/.open-talon/session.json.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from textual.reactive import reactive
 from textual.widgets import Footer, Header, Input, Label, RichLog, Static
 
 # ── Session persistence ───────────────────────────────────────────
-_CFG_DIR  = Path.home() / ".open-senate"
+_CFG_DIR  = Path.home() / ".open-talon"
 _CFG_FILE = _CFG_DIR / "session.json"
 
 
@@ -106,9 +106,9 @@ Screen {
 
 
 class ChatApp(App):
-    """Open Senate Terminal Chat Client."""
+    """Open Talon Terminal Chat Client."""
 
-    TITLE   = "Open Senate"
+    TITLE   = "Open Talon"
     SUB_TITLE = "Gateway TUI"
     CSS     = CSS
     BINDINGS = [
@@ -291,7 +291,7 @@ class ChatApp(App):
 # ── CLI entry point ───────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Open Senate Gateway — Terminal UI",
+        description="Open Talon Gateway — Terminal UI",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--gateway",       default="http://localhost:8000", help="Gateway base URL")

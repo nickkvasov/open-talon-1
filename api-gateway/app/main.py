@@ -27,7 +27,7 @@ _WEB_DIR = Path(__file__).parent.parent / "web"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────────
-    logger.info("Starting Open Senate API Gateway …")
+    logger.info("Starting Open Talon API Gateway …")
     await setup_postgres()
     await setup_valkey()
     await event_service.start()
@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="Open Senate API Gateway",
+        title="Open Talon API Gateway",
         description=(
             "Multi-interface API gateway: REST, SSE streaming, WebSocket.\n\n"
             "Publishes chat requests to Kafka and waits for agent responses."

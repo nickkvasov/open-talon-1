@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "open-senate-workspace-memory"
+name = "open-talon-workspace-memory"
 version = "0.1.0"
-description = "Workspace whiteboard memory service for Open Senate"
+description = "Workspace whiteboard memory service for Open Talon"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.7",

@@ -1,4 +1,4 @@
-# Open Senate Peer Collaboration Design
+# Open Talon Peer Collaboration Design
 
 ## Goal
 

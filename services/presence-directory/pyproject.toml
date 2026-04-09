@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "open-senate-presence-directory"
+name = "open-talon-presence-directory"
 version = "0.1.0"
-description = "Participant directory and presence service for Open Senate"
+description = "Participant directory and presence service for Open Talon"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.7",

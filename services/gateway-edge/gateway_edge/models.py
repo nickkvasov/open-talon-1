@@ -15,7 +15,7 @@ if _CONTRACTS_DIR.is_dir():
         sys.path.insert(0, contracts_path)
 
 try:
-    from open_senate_contracts.models import (
+    from open_talon_contracts.models import (
         ApiKeyCreate,
         ApiKeyInfo,
         ChatRequest,
