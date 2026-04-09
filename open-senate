@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUN_DIR="${ROOT_DIR}/.run"
+PID_FILE="${RUN_DIR}/gateway-edge.pid"
+LOG_FILE="${RUN_DIR}/gateway-edge.log"
+PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
+
+mkdir -p "${RUN_DIR}"
+
+ensure_python() {
+  if [[ ! -x "${PYTHON_BIN}" ]]; then
+    echo "Missing ${PYTHON_BIN}. Run ./scripts/bootstrap-python.sh first." >&2
+    exit 1
+  fi
+}
+
+start_cmd() {
+  ensure_python
+
+  echo "Starting infrastructure services..."
+  (
+    cd "${ROOT_DIR}/infrastructure"
+    docker compose up -d postgres kafka valkey openbao ollama
+  )
+
+  if [[ -f "${PID_FILE}" ]]; then
+    EXISTING_PID="$(cat "${PID_FILE}")"
+    if kill -0 "${EXISTING_PID}" >/dev/null 2>&1; then
+      echo "Gateway already running with PID ${EXISTING_PID}."
+      echo "Infrastructure is up."
+      return
+    fi
+    rm -f "${PID_FILE}"
+  fi
+
+  echo "Starting local gateway-edge..."
+  nohup "${PYTHON_BIN}" -m uvicorn gateway_edge.main:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    >"${LOG_FILE}" 2>&1 &
+
+  GATEWAY_PID="$!"
+  echo "${GATEWAY_PID}" > "${PID_FILE}"
+
+  echo "Gateway PID: ${GATEWAY_PID}"
+  echo "Gateway log: ${LOG_FILE}"
+}
+
+stop_cmd() {
+  if [[ -f "${PID_FILE}" ]]; then
+    GATEWAY_PID="$(cat "${PID_FILE}")"
+    if kill -0 "${GATEWAY_PID}" >/dev/null 2>&1; then
+      echo "Stopping local gateway-edge PID ${GATEWAY_PID}..."
+      kill "${GATEWAY_PID}"
+      wait "${GATEWAY_PID}" 2>/dev/null || true
+    fi
+    rm -f "${PID_FILE}"
+  else
+    echo "No local gateway PID file found."
+  fi
+
+  echo "Stopping infrastructure services..."
+  (
+    cd "${ROOT_DIR}/infrastructure"
+    docker compose down
+  )
+}
+
+tui_cmd() {
+  ensure_python
+  exec "${PYTHON_BIN}" -m open_senate_tui.main --gateway http://localhost:8000 "$@"
+}
+
+usage() {
+  cat <<EOF
+Usage:
+  ./open-senate start
+  ./open-senate stop
+  ./open-senate tui [extra tui args]
+EOF
+}
+
+case "${1:-}" in
+  start)
+    shift
+    start_cmd "$@"
+    ;;
+  stop)
+    shift
+    stop_cmd "$@"
+    ;;
+  tui)
+    shift
+    tui_cmd "$@"
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac
