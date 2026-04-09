@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -7,6 +8,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 import redis.asyncio as aioredis
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.config import settings
 from app.models import SessionInfo
@@ -32,12 +34,32 @@ async def get_redis() -> aioredis.Redis:
 async def setup_valkey() -> None:
     global _redis
     t0 = time.monotonic()
-    _redis = aioredis.from_url(
-        settings.valkey_url,
-        decode_responses=True,
-        socket_connect_timeout=5,
-    )
-    await _redis.ping()
+    deadline = time.monotonic() + settings.valkey_startup_timeout_seconds
+    attempt = 1
+    while True:
+        try:
+            _redis = aioredis.from_url(
+                settings.valkey_url,
+                decode_responses=True,
+                socket_connect_timeout=5,
+            )
+            await _redis.ping()
+            break
+        except (OSError, RedisConnectionError) as exc:
+            if _redis:
+                await _redis.aclose()
+                _redis = None
+            if time.monotonic() >= deadline:
+                logger.error("Valkey failed to start after %s attempts", attempt)
+                raise
+            logger.warning(
+                "Valkey startup attempt %s failed: %s; retrying in %.1fs",
+                attempt,
+                exc,
+                settings.valkey_startup_retry_interval_seconds,
+            )
+            attempt += 1
+            await asyncio.sleep(settings.valkey_startup_retry_interval_seconds)
     logger.info("Valkey ready (%.0f ms)", (time.monotonic() - t0) * 1000)
 
 

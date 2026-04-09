@@ -1,6 +1,6 @@
-# Open Senate Infrastructure
+# Open Senate
 
-This repository contains the foundational infrastructure for the project. It explicitly builds a locally containerized ecosystem enabling robust transient execution while persistently maintaining explicit host bindings for heavy AI model caching.
+This repository contains the local infrastructure, Python services, and client apps for Open Senate. The canonical developer Python environment is the repository-root `.venv`.
 
 ## Architecture Stack
 
@@ -9,7 +9,7 @@ This repository contains the foundational infrastructure for the project. It exp
 - **OpenBao**: Open-source fork of Hashicorp Vault running securely in Development mode tracking explicit Version 2 isolated secrets.
 - **Valkey**: Drop-in compatible Redis equivalent caching infrastructure configured to handle immediate TTL caching.
 - **Ollama AI**: Serves dynamic generative model orchestration natively mapped across standard REST.
-    - Operates natively against Google's modern **Gemma 4** models, spinning up explicitly via an asynchronous startup script natively pulling both `gemma4:31b` and `gemma4:e4b`.
+    - Operates natively against Google's modern **Gemma 4** models, with the default test setup pulling the lightweight `gemma4:latest` model.
 
 ## Persistence Design
 
@@ -18,18 +18,39 @@ Standard container operations or isolated unit tests can freely execute `docker 
 
 > **Note**: Do not commit the `infrastructure/data/` payloads directly. It contains multi-gigabyte neural weight matrices specifically blocked via the repository `.gitignore` configuration.
 
+## Python Environment
+
+Use one virtualenv at the repository root for all local Python work:
+
+```bash
+./scripts/bootstrap-python.sh
+source .venv/bin/activate
+```
+
+That root environment installs:
+
+- shared contracts from `packages/contracts`
+- the gateway edge service from `services/gateway-edge`
+- the TUI app from `apps/tui`
+- repo-level test dependencies for gateway and infrastructure suites
+
+The nested `api-gateway/.venv` is now legacy-only and should not be the default for day-to-day development.
+
 ## Pytest Orchestration
 
 Automations operate sequentially leveraging `pytest` through explicit Python networking wrappers. Calling testing natively maps background parallel assertions executing directly toward HTTP/TCP components actively checking if they are locally alive. You do not need to manually launch anything; `pytest` implicitly binds `./infrastructure/docker-compose.yaml` using Python `subprocess`.
 
 ```bash
-# Enable the virtual environment
+# Enable the repository virtual environment
 source .venv/bin/activate
 
-# Execute tests locally using standard verbosity while enabling stdout tracing
+# Gateway tests
+pytest tests/gateway-edge -q
+
+# Infrastructure tests
 pytest test/infrastructure/test_infrastructure.py -v -s
 ```
 
 ## AI Model Initialization Note
 
-First-time execution will recursively wait locally until Ollama has successfully traversed fetching BOTH standard `gemma4` configurations (roughly 22+ Total GB). This polling loop guarantees you never execute tests against empty orchestration containers. The testing suite will politely stall upwards to 25 minutes allowing gigabit pulls prior to continuing sequentially cleanly.
+First-time execution will wait for Ollama to fetch the configured default model from `infrastructure/.env`. The suite still allows long waits for first-run downloads, but it no longer assumes multiple heavyweight models by default.

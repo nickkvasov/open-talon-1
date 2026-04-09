@@ -1,0 +1,15 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "open-senate-contracts"
+version = "0.1.0"
+description = "Shared contracts for Open Senate services and apps"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["open_senate_contracts"]

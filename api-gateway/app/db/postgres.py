@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import textwrap
 import time
@@ -53,11 +54,28 @@ async def get_pool() -> asyncpg.Pool:
 async def setup_postgres() -> None:
     global _pool
     t0 = time.monotonic()
-    _pool = await asyncpg.create_pool(
-        dsn=settings.postgres_dsn,
-        min_size=settings.postgres_min_pool,
-        max_size=settings.postgres_max_pool,
-    )
+    deadline = time.monotonic() + settings.postgres_startup_timeout_seconds
+    attempt = 1
+    while True:
+        try:
+            _pool = await asyncpg.create_pool(
+                dsn=settings.postgres_dsn,
+                min_size=settings.postgres_min_pool,
+                max_size=settings.postgres_max_pool,
+            )
+            break
+        except OSError as exc:
+            if time.monotonic() >= deadline:
+                logger.error("Postgres failed to start after %s attempts", attempt)
+                raise
+            logger.warning(
+                "Postgres startup attempt %s failed: %s; retrying in %.1fs",
+                attempt,
+                exc,
+                settings.postgres_startup_retry_interval_seconds,
+            )
+            attempt += 1
+            await asyncio.sleep(settings.postgres_startup_retry_interval_seconds)
     # Run migrations
     async with _pool.acquire() as conn:
         await conn.execute(_MIGRATIONS)

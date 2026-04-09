@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Open Senate — AI Gateway</title>
+  <meta name="description" content="Open Senate multi-interface AI gateway chat UI" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Ambient background orbs -->
+  <div class="bg-orb bg-orb--1" aria-hidden="true"></div>
+  <div class="bg-orb bg-orb--2" aria-hidden="true"></div>
+  <div class="bg-orb bg-orb--3" aria-hidden="true"></div>
+
+  <div class="layout">
+    <!-- ── Sidebar ──────────────────────────────────────────────── -->
+    <aside class="sidebar" id="sidebar" role="complementary" aria-label="Session panel">
+      <div class="sidebar__brand">
+        <span class="sidebar__logo" aria-hidden="true">⚖</span>
+        <span class="sidebar__title">Open Senate</span>
+      </div>
+
+      <button class="btn btn--new" id="btn-new-session" aria-label="Start new session">
+        <span class="btn__icon" aria-hidden="true">＋</span> New Session
+      </button>
+
+      <div class="sidebar__section-label">Session</div>
+      <div class="session-card" id="session-card" aria-live="polite">
+        <div class="session-card__label">ID</div>
+        <div class="session-card__value mono" id="session-id-display">—</div>
+        <div class="session-card__label">Messages</div>
+        <div class="session-card__value" id="session-msg-count">0</div>
+      </div>
+
+      <div class="sidebar__section-label">Connection</div>
+      <div class="status-row" id="status-row" aria-live="polite">
+        <span class="status-dot" id="status-dot" aria-hidden="true"></span>
+        <span id="status-label">Connecting…</span>
+      </div>
+
+      <div class="sidebar__section-label">Auth mode</div>
+      <div class="auth-section">
+        <select class="input-select" id="auth-mode-select" aria-label="Authentication mode">
+          <option value="none">None (dev)</option>
+          <option value="api_key">API Key</option>
+          <option value="openbao">OpenBao Bearer</option>
+        </select>
+        <input class="input-text" id="auth-token-input" type="password"
+               placeholder="Paste key / token…" aria-label="Auth credential" style="display:none"/>
+      </div>
+
+      <button class="btn btn--secondary sidebar__toggle-mobile" id="sidebar-close" aria-label="Close sidebar">
+        ✕ Close
+      </button>
+    </aside>
+
+    <!-- ── Main ─────────────────────────────────────────────────── -->
+    <main class="main" role="main">
+      <header class="topbar">
+        <button class="btn btn--icon topbar__menu-btn" id="sidebar-open" aria-label="Open sidebar" aria-expanded="false" aria-controls="sidebar">
+          ☰
+        </button>
+        <h1 class="topbar__title">Chat</h1>
+        <div class="topbar__actions">
+          <button class="btn btn--icon" id="btn-clear-history" title="Clear history" aria-label="Clear history">🗑</button>
+        </div>
+      </header>
+
+      <div class="messages" id="messages" role="log" aria-live="polite" aria-label="Chat messages">
+        <div class="welcome" id="welcome-msg">
+          <div class="welcome__icon" aria-hidden="true">⚖</div>
+          <h2 class="welcome__heading">Open Senate Gateway</h2>
+          <p class="welcome__sub">Kafka-driven • Multi-interface • Self-hosted</p>
+          <p class="welcome__hint">Send a message to begin</p>
+        </div>
+      </div>
+
+      <div class="composer" role="form" aria-label="Message composer">
+        <div class="composer__inner">
+          <textarea
+            class="composer__input"
+            id="message-input"
+            rows="1"
+            placeholder="Send a message…"
+            aria-label="Message input"
+            autocomplete="off"
+            spellcheck="true"
+          ></textarea>
+          <button class="btn btn--send" id="btn-send" aria-label="Send message" disabled>
+            <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+          </button>
+        </div>
+        <div class="composer__hint" id="composer-hint" aria-live="polite"></div>
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js" defer></script>
+</body>
+</html>

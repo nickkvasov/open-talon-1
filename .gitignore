@@ -20,3 +20,7 @@ env/
 
 # Local Infrastructure Bind Mounts
 infrastructure/data/
+deploy/infrastructure/data/
+
+# Future frontend app dependencies
+apps/web/node_modules/

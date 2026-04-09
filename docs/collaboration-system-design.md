@@ -4,8 +4,11 @@
 
 Extend the current single-user request/response chat flow into a collaboration system where:
 
+- multiple workspaces can exist with different participants
 - multiple users can participate in the same shared thread
 - multiple agents can participate as first-class peers
+- every workspace has associated shared whiteboard memory
+- every workspace can have several parallel or consecutive threads
 - all peers communicate through the event system
 - clients can observe the same shared timeline in near real time
 - the system remains auditable, replayable, and safe to evolve
@@ -33,9 +36,13 @@ The collaboration design should therefore move from `request -> response` to `sh
 
 ### Functional
 
+- multiple workspaces with independent participant sets
+- workspace-scoped shared whiteboard memory
 - shared workspaces and threads
 - multiple concurrent human participants
 - multiple concurrent agent participants
+- several parallel active threads in the same workspace
+- several consecutive threads chained over time
 - peer-to-peer messaging through Kafka events
 - presence and membership tracking
 - support for public messages, private agent messages, and system events
@@ -55,13 +62,15 @@ The collaboration design should therefore move from `request -> response` to `sh
 ### Primary entities
 
 - `Workspace`
-  - top-level tenant or collaboration boundary
+  - top-level collaboration boundary
 - `Thread`
   - a shared room for users and agents
 - `Participant`
   - either `user` or `agent`
 - `Membership`
   - participant joined a thread with a role and permissions
+- `WorkspaceMemory`
+  - shared editable whiteboard memory for the workspace
 - `Message`
   - user, agent, or system content shown in the timeline
 - `Task`
@@ -77,6 +86,7 @@ The collaboration design should therefore move from `request -> response` to `sh
 - `thread_id`
 - `participant_id`
 - `membership_id`
+- `memory_entry_id`
 - `message_id`
 - `task_id`
 - `artifact_id`
@@ -132,10 +142,26 @@ Every command-derived event should use one common envelope.
 
 ### Membership and presence
 
+- `workspace.created`
+- `workspace.updated`
 - `participant.joined`
 - `participant.left`
 - `presence.updated`
 - `participant.role_changed`
+
+### Workspace memory
+
+- `workspace.memory_entry_created`
+- `workspace.memory_entry_updated`
+- `workspace.memory_entry_deleted`
+- `workspace.memory_entry_linked_to_thread`
+
+### Thread lifecycle
+
+- `thread.created`
+- `thread.updated`
+- `thread.archived`
+- `thread.linked`
 
 ### Timeline
 
@@ -168,7 +194,6 @@ Every command-derived event should use one common envelope.
 
 - `access.granted`
 - `access.revoked`
-- `thread.archived`
 
 ## Three Architecture Options
 
@@ -268,6 +293,7 @@ It fits the current architecture best because:
 - Kafka is already the backbone
 - Postgres already exists for durable history
 - Valkey already exists for ephemeral state
+- workspaces, whiteboards, and threads all map naturally to event streams + projections
 - the current gateway can evolve into a client edge instead of being thrown away
 - it supports multiple users and multiple agents without committing to a fully decentralized design too early
 
@@ -278,12 +304,14 @@ Clients (web, tui, bots)
   -> API Gateway
   -> Collaboration Kernel
   -> Kafka
+     - workspace events
      - commands
      - canonical events
      - agent tasks
      - presence
   -> Postgres
      - event log
+     - workspace projections
      - projections
   -> Valkey
      - presence
@@ -294,10 +322,17 @@ Clients (web, tui, bots)
 
 ## Recommended Kafka Topics
 
+### Workspace events
+
+- `senate.workspace.events`
+  - key: `workspace_id`
+  - produced by: collaboration kernel
+  - consumed by: gateway fan-out, workspace projections, agents
+
 ### Commands
 
 - `senate.collab.commands`
-  - key: `thread_id`
+  - key: `workspace_id` or `thread_id`
   - producers: gateway, agents, internal services
   - consumed by: collaboration kernel
 
@@ -340,14 +375,161 @@ This gives:
 - deterministic client rebuild
 - easier conflict resolution
 
+For workspace-scoped data such as whiteboard memory and participant directory updates:
+
+- partition workspace events by `workspace_id`
+- assign workspace-local sequence numbers in the collaboration kernel
+- keep thread-local ordering separate from workspace-local ordering
+
+## Workspace As The Main Collaboration Boundary
+
+The workspace should be the primary boundary for identity, permissions, memory, and discovery.
+
+### A workspace contains
+
+- participant directory
+- shared whiteboard memory
+- active threads
+- archived threads
+- workspace artifacts
+- routing policies
+- access rules
+
+### A thread contains
+
+- timeline of messages and events
+- participants currently involved
+- task and run references
+- linked whiteboard memory entries
+- optional thread-local summary
+
+This separation is important:
+
+- workspace whiteboard is curated, editable, and long-lived
+- thread timeline is append-only, replayable, and execution-focused
+
+## Workspace Participant Directory
+
+Users and agents should both publish discoverable workspace profiles so all workspace members can understand who is present and what they can do.
+
+### Participant profile fields
+
+- `participant_id`
+- `workspace_id`
+- `participant_type`
+- `display_name`
+- `description`
+- `roles`
+- `capabilities`
+- `status`
+- `visibility_scope`
+
+### Suggested participant events
+
+- `participant.registered`
+- `participant.profile_updated`
+- `participant.capabilities_updated`
+- `participant.status_updated`
+
+This gives the workspace a shared directory of human and agent peers.
+
+## Workspace Whiteboard Memory
+
+Every workspace should have a shared whiteboard memory that acts as long-lived, editable collaboration memory.
+
+### The whiteboard is for
+
+- goals
+- decisions
+- facts
+- constraints
+- plans
+- open questions
+- artifact references
+
+### The whiteboard is not for
+
+- raw chat history
+- streaming deltas
+- temporary token output
+
+### Recommended whiteboard entry model
+
+- `memory_entry_id`
+- `workspace_id`
+- `entry_type`
+- `title`
+- `content`
+- `tags`
+- `created_by`
+- `updated_by`
+- `version`
+- `visibility`
+
+### Whiteboard behavior
+
+- whiteboard entries are versioned and editable
+- important thread outcomes should be promoted into whiteboard memory
+- threads may link to whiteboard entries instead of copying context repeatedly
+
+## Parallel And Consecutive Threads
+
+A workspace may contain multiple threads that are active at the same time, as well as new threads that continue older work.
+
+### Parallel threads
+
+Use for:
+
+- independent workstreams
+- multiple agent task groups
+- simultaneous investigations
+- separate decision tracks
+
+### Consecutive threads
+
+Use for:
+
+- phase transitions
+- archiving long discussions
+- resuming work with a cleaner context window
+- splitting execution from planning
+
+### Recommended thread relationship fields
+
+- `parent_thread_id`
+- `previous_thread_id`
+- `related_thread_ids`
+- `workspace_id`
+
+### Recommended thread states
+
+- `active`
+- `paused`
+- `resolved`
+- `archived`
+
+## Thread And Whiteboard Interaction
+
+The most useful pattern is:
+
+1. discussion happens in a thread
+2. a decision, fact, or plan becomes stable
+3. that outcome is promoted into workspace whiteboard memory
+4. later threads can link back to that memory entry
+
+This keeps thread timelines readable and keeps reusable knowledge at the workspace level.
+
 ## State Ownership
 
 ### Collaboration kernel owns
 
+- workspace membership validation
 - membership validation
 - permission checks
+- workspace and thread sequence numbers
 - canonical sequence numbers
 - event persistence
+- whiteboard lifecycle
 - task lifecycle
 - visibility rules
 
@@ -361,6 +543,9 @@ This gives:
 ### Postgres stores
 
 - append-only event log
+- workspace projection
+- participant directory projection
+- whiteboard projection
 - thread projection
 - message projection
 - task projection
@@ -405,9 +590,12 @@ To make users and agents true peers, use the same core event types for both, but
 
 ### Shared peer actions
 
+- join workspace
 - join thread
 - post message
 - reply to message
+- update profile
+- propose whiteboard changes
 - create task
 - claim task
 - attach artifact
@@ -423,6 +611,7 @@ To make users and agents true peers, use the same core event types for both, but
 ### Human-only or policy-gated actions
 
 - invite/remove participants
+- approve whiteboard changes if governance requires it
 - approve final actions
 - change visibility level
 - archive a thread
@@ -450,6 +639,10 @@ This preserves peer behavior while preventing chaos.
 ### New REST resources
 
 - `POST /v1/workspaces`
+- `GET /v1/workspaces/{workspace_id}`
+- `GET /v1/workspaces/{workspace_id}/participants`
+- `GET /v1/workspaces/{workspace_id}/whiteboard`
+- `POST /v1/workspaces/{workspace_id}/whiteboard`
 - `POST /v1/threads`
 - `GET /v1/threads/{thread_id}`
 - `POST /v1/threads/{thread_id}/commands`
@@ -459,13 +652,17 @@ This preserves peer behavior while preventing chaos.
 
 ### New streaming interfaces
 
+- `WS /v1/workspaces/{workspace_id}/stream`
 - `WS /v1/threads/{thread_id}/stream`
+- `SSE /v1/workspaces/{workspace_id}/events`
 - `SSE /v1/threads/{thread_id}/events`
 
 ### Command examples
 
+- `join_workspace`
 - `join_thread`
 - `post_message`
+- `update_whiteboard_entry`
 - `create_task`
 - `claim_task`
 - `complete_task`
@@ -478,8 +675,8 @@ The current `session_id` should no longer be the primary collaboration boundary.
 ### Recommended replacements
 
 - keep `session_id` for one client connection or UI session
-- add `thread_id` as the shared collaboration boundary
 - add `workspace_id` as the tenant boundary
+- add `thread_id` as the shared execution boundary inside a workspace
 - add `participant_id` and `participant_type`
 
 ### Message model evolution
@@ -494,6 +691,20 @@ Add:
 - `reply_to_message_id`
 - `status`
 - `task_id` optional
+
+### Workspace memory model
+
+Add a separate workspace memory projection instead of overloading message history:
+
+- `memory_entry_id`
+- `workspace_id`
+- `entry_type`
+- `title`
+- `content`
+- `tags`
+- `linked_thread_ids`
+- `version`
+- `updated_at`
 
 ## Failure Handling
 
@@ -513,6 +724,7 @@ Add:
 ### Recovery
 
 - rebuild projections from event log
+- rebuild workspace whiteboard and participant directory from workspace events
 - resume gateway fan-out from canonical event stream
 - restore presence separately from durable history
 
@@ -527,6 +739,7 @@ Add:
 
 - membership at workspace and thread scope
 - role-based permissions
+- whiteboard edit permissions
 - explicit rules for internal events and private artifacts
 
 ### Audit
@@ -539,6 +752,7 @@ Add:
 ## Phase 1: Introduce collaboration identities
 
 - add `workspace_id`, `thread_id`, `participant_id`
+- add workspace directory and participant profiles
 - keep current chat API as a compatibility adapter
 - map current `session_id` chat into a synthetic single-user thread
 
@@ -547,10 +761,12 @@ Add:
 - add command envelope
 - add canonical event envelope
 - add collaboration kernel service
-- introduce event log and thread projections
+- introduce workspace and thread event logs
+- introduce whiteboard and thread projections
 
 ## Phase 3: Multi-user shared threads
 
+- shared workspaces
 - thread membership
 - presence
 - shared WebSocket stream for the same thread
@@ -558,6 +774,7 @@ Add:
 
 ## Phase 4: Multi-agent peer collaboration
 
+- workspace-level agent directory
 - task lifecycle
 - agent claims
 - private/internal visibility
@@ -565,6 +782,7 @@ Add:
 
 ## Phase 5: Advanced coordination
 
+- whiteboard promotion and memory compaction
 - approvals
 - handoffs
 - agent capability routing
@@ -578,6 +796,7 @@ The safest path is an adapter-based migration.
 ### Keep current compatibility
 
 - current `POST /v1/chat` becomes:
+  - create workspace if needed
   - create thread if absent
   - emit `post_message` command
   - wait for first public `message.completed` from the selected agent
@@ -592,7 +811,9 @@ This lets the current UI continue working while the underlying collaboration mod
 If we want the fastest path that will still scale into true collaboration:
 
 - implement a new collaboration kernel service
+- make `workspace_id` the top-level collaboration boundary
 - make `thread_id` the ordering key
+- add versioned workspace whiteboard memory as a first-class projection
 - use one canonical event envelope for both humans and agents
 - treat agent work as `tasks` rather than letting every agent answer every message
 - keep private and public visibility in the event schema from day one

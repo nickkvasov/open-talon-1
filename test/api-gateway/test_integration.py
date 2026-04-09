@@ -33,7 +33,10 @@ import pytest
 _REPO_ROOT    = Path(__file__).parent.parent.parent
 _COMPOSE_DIR  = _REPO_ROOT / "infrastructure"
 _GW_DIR       = _REPO_ROOT / "api-gateway"
-_GW_VENV      = _GW_DIR / ".venv" / "bin" / "python"
+_GW_PYTHONS   = (
+    _REPO_ROOT / ".venv" / "bin" / "python",
+    _GW_DIR / ".venv" / "bin" / "python",
+)
 GATEWAY_URL   = os.getenv("GATEWAY_URL", "http://localhost:8000")
 KAFKA_PORT    = os.getenv("KAFKA_PORT", "9092")
 POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
@@ -79,9 +82,9 @@ def infrastructure():
 def gateway_process(infrastructure):
     """
     Start the gateway as a subprocess with echo agent enabled.
-    Uses the api-gateway/.venv Python interpreter.
+    Prefers the repository-root Python interpreter when available.
     """
-    python = str(_GW_VENV) if _GW_VENV.exists() else sys.executable
+    python = _select_gateway_python()
     env = {
         **os.environ,
         "ECHO_AGENT_ENABLED": "true",
@@ -234,6 +237,30 @@ def _wait_for(name: str, fn, max_retries: int = 60, sleep: float = 1.0) -> None:
             pass
         time.sleep(sleep)
     raise RuntimeError(f"{name} not ready after {max_retries * sleep}s")
+
+
+def _select_gateway_python() -> str:
+    for candidate in _GW_PYTHONS:
+        if not candidate.exists():
+            continue
+        if _python_has_module(candidate, "uvicorn"):
+            return str(candidate)
+    if _python_has_module(Path(sys.executable), "uvicorn"):
+        return sys.executable
+    raise RuntimeError(
+        "No usable Python interpreter found for legacy gateway integration tests; "
+        "expected one with uvicorn installed."
+    )
+
+
+def _python_has_module(python: Path, module: str) -> bool:
+    probe = subprocess.run(
+        [str(python), "-c", f"import importlib.util; raise SystemExit(0 if importlib.util.find_spec({module!r}) else 1)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return probe.returncode == 0
 
 
 def _tcp_connect(host: str, port: int) -> bool:

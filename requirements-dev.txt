@@ -1,0 +1,11 @@
+-e ./packages/contracts
+-e ./services/gateway-edge
+-e ./apps/tui
+pytest>=8
+pytest-asyncio>=0.23
+psycopg[binary]>=3.2
+redis>=5
+hvac>=2.3
+confluent-kafka>=2.5
+python-dotenv>=1.0
+ruff>=0.4

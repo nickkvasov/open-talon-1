@@ -1,0 +1,15 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "open-senate-agent-runtime"
+version = "0.1.0"
+description = "Reusable agent runtime for Open Senate"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["agent_runtime"]

@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import AsyncIterator
 from uuid import UUID
 
@@ -53,7 +54,7 @@ class EventService:
             bootstrap_servers=settings.kafka_bootstrap_servers,
             value_serializer=lambda v: json.dumps(v).encode(),
         )
-        await self._producer.start()
+        await self._start_kafka_client(self._producer.start, "producer")
 
         self._consumer = AIOKafkaConsumer(
             settings.kafka_response_topic,
@@ -63,7 +64,7 @@ class EventService:
             auto_offset_reset="latest",
             enable_auto_commit=True,
         )
-        await self._consumer.start()
+        await self._start_kafka_client(self._consumer.start, "consumer")
         self._consumer_task = asyncio.create_task(
             self._consume_loop(), name="kafka-consumer"
         )
@@ -96,6 +97,35 @@ class EventService:
         if self._producer:
             await self._producer.stop()
         logger.info("Kafka event service stopped")
+
+    async def _start_kafka_client(
+        self,
+        starter: Callable[[], Awaitable[None]],
+        client_name: str,
+    ) -> None:
+        deadline = time.monotonic() + settings.kafka_startup_timeout_seconds
+        attempt = 1
+        while True:
+            try:
+                await starter()
+                return
+            except KafkaConnectionError as exc:
+                if time.monotonic() >= deadline:
+                    logger.error(
+                        "Kafka %s failed to start after %s attempts",
+                        client_name,
+                        attempt,
+                    )
+                    raise
+                logger.warning(
+                    "Kafka %s startup attempt %s failed: %s; retrying in %.1fs",
+                    client_name,
+                    attempt,
+                    exc,
+                    settings.kafka_startup_retry_interval_seconds,
+                )
+                attempt += 1
+                await asyncio.sleep(settings.kafka_startup_retry_interval_seconds)
 
     # ── Pre-registration (call before publish to eliminate dispatch race) ─────
 

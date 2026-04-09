@@ -1,5 +1,7 @@
 # Open Senate — API Gateway
 
+This package is the legacy gateway layout kept for compatibility during the repo split. New development should use the repository-root `.venv` and the extracted service in `services/gateway-edge`.
+
 ## Overview
 
 Multi-interface Kafka-driven API gateway that connects any frontend (Web, Terminal, or future bot adapters) to the agent swarm via a clean, unified HTTP API.
@@ -25,15 +27,15 @@ Multi-interface Kafka-driven API gateway that connects any frontend (Web, Termin
 ## Quick Start
 
 ```bash
-# Copy env template
-cp .env.example .env
-
-# Create a venv and install
-python -m venv .venv
+# From repository root, create the canonical shared Python env
+./scripts/bootstrap-python.sh
 source .venv/bin/activate
-pip install -e "."
+
+# Copy env template for this legacy package if needed
+cp api-gateway/.env.example api-gateway/.env
 
 # Run (infrastructure must be up)
+cd api-gateway
 uvicorn app.main:app --reload
 
 # Open the Web UI
@@ -51,9 +53,6 @@ ECHO_AGENT_ENABLED=true uvicorn app.main:app --reload
 ### Terminal UI
 
 ```bash
-# Install TUI extras
-pip install -e ".[tui]"
-
 # Run
 python -m tui.main
 python -m tui.main --gateway http://remote-host:8000
