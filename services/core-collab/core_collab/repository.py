@@ -24,6 +24,7 @@ from .contracts import (
     TimelineMessage,
     Workspace,
 )
+from .migrations import apply_pending_migrations
 
 
 class UserRecord:
@@ -41,16 +42,12 @@ class UserRecord:
         self.created_at = created_at
         self.updated_at = updated_at
         self.metadata = metadata or {}
-from .schema import MIGRATIONS
-
-
 class CollaborationRepository:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
     async def setup_schema(self) -> None:
-        async with self._pool.acquire() as conn:
-            await conn.execute(MIGRATIONS)
+        await apply_pending_migrations(self._pool)
 
     async def next_workspace_sequence(
         self, conn: asyncpg.Connection, workspace_id: UUID

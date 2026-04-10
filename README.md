@@ -140,6 +140,45 @@ That root environment installs:
 
 `services/gateway-edge` is the only supported local gateway path for day-to-day development.
 
+## Database Migrations
+
+Database schema changes are tracked as `dbmate`-style SQL files in [`db/migrations`](/Users/nikolay.kvasov/Development/open-talon-1/db/migrations).
+
+- App startup and tests apply pending migrations through the repo's Python migration runner.
+- For local manual migration work, use [`scripts/dbmate.sh`](/Users/nikolay.kvasov/Development/open-talon-1/scripts/dbmate.sh).
+- `dbmate` itself is the recommended CLI for creating and applying new migration files.
+- Default local values for `DATABASE_URL` and `DBMATE_MIGRATIONS_DIR` are documented in [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example).
+
+Examples:
+
+```bash
+# create a new migration file
+./scripts/dbmate.sh new add_threads_archive_state
+
+# apply pending migrations
+./scripts/dbmate.sh up
+
+# inspect migration status
+./scripts/dbmate.sh status
+```
+
+Migration authoring rules:
+
+- Treat each migration file as immutable once committed.
+- Prefer additive migrations plus explicit backfills over editing old SQL files.
+- Keep one logical schema/data change per migration when practical.
+- Test new migrations locally with `./scripts/dbmate.sh up` before merging.
+
+CI snippet:
+
+```bash
+source .venv/bin/activate
+./scripts/dbmate.sh up
+pytest -q
+```
+
+For a longer reference, see [`docs/db-migrations.md`](/Users/nikolay.kvasov/Development/open-talon-1/docs/db-migrations.md).
+
 ## Langfuse
 
 The local compose stack now includes a self-hosted Langfuse deployment:
