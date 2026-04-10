@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -28,6 +29,119 @@ from open_talon_contracts.models import (  # noqa: E402
 logger = logging.getLogger(__name__)
 
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+
+
+class RuntimeObservation(Protocol):
+    def update(self, **kwargs: Any) -> None: ...
+
+
+class RuntimeObservability(Protocol):
+    def start_span(
+        self,
+        *,
+        name: str,
+        input: Any | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Any: ...
+
+    def start_generation(
+        self,
+        *,
+        name: str,
+        model: str | None = None,
+        input: Any | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Any: ...
+
+    def flush(self) -> None: ...
+
+
+class _NoopObservation:
+    def __enter__(self) -> "_NoopObservation":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def update(self, **kwargs: Any) -> None:
+        return None
+
+
+class LangfuseRuntimeObserver:
+    def __init__(self, client: Any | None = None) -> None:
+        self._client = client
+
+    @classmethod
+    def from_env(cls) -> "LangfuseRuntimeObserver":
+        public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
+        secret_key = os.getenv("LANGFUSE_SECRET_KEY")
+        if not public_key or not secret_key:
+            return cls()
+
+        base_url = (
+            os.getenv("LANGFUSE_BASE_URL")
+            or os.getenv("LANGFUSE_HOST")
+            or os.getenv("LANGFUSE_PUBLIC_URL")
+        )
+        if base_url and "LANGFUSE_BASE_URL" not in os.environ:
+            os.environ["LANGFUSE_BASE_URL"] = base_url
+
+        try:
+            from langfuse import get_client
+        except ImportError:
+            logger.warning(
+                "Langfuse credentials are configured but the Python SDK is not installed. "
+                "Install the 'langfuse' package to enable runtime tracing."
+            )
+            return cls()
+
+        try:
+            return cls(get_client())
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Failed to initialize Langfuse client: %s", exc)
+            return cls()
+
+    def start_span(
+        self,
+        *,
+        name: str,
+        input: Any | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Any:
+        if self._client is None:
+            return _NoopObservation()
+        return self._client.start_as_current_observation(
+            name=name,
+            as_type="span",
+            input=input,
+            metadata=metadata,
+        )
+
+    def start_generation(
+        self,
+        *,
+        name: str,
+        model: str | None = None,
+        input: Any | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Any:
+        if self._client is None:
+            return _NoopObservation()
+        return self._client.start_as_current_observation(
+            name=name,
+            as_type="generation",
+            model=model,
+            input=input,
+            metadata=metadata,
+        )
+
+    def flush(self) -> None:
+        if self._client is None:
+            return
+        try:
+            self._client.flush()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Langfuse flush failed: %s", exc)
 
 
 class RuntimeKernel(Protocol):
@@ -71,8 +185,14 @@ class AgentExecutor(Protocol):
 
 
 class LocalOllamaExecutor:
-    def __init__(self, *, timeout_seconds: float = 60.0) -> None:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = 60.0,
+        observability: RuntimeObservability | None = None,
+    ) -> None:
         self._timeout_seconds = timeout_seconds
+        self._observability = observability or LangfuseRuntimeObserver()
 
     async def execute(self, context: AgentExecutionContext) -> AgentRunResult:
         endpoint = context.system_agent.endpoint
@@ -89,24 +209,41 @@ class LocalOllamaExecutor:
             model,
             context.thread.thread_id,
         )
-        async with httpx.AsyncClient(
-            timeout=self._timeout_seconds,
-            trust_env=False,
-        ) as client:
-            response = await client.post(
-                url,
-                json={
-                    "model": model,
-                    "system": context.system_agent.system_prompt,
-                    "prompt": prompt,
-                    "stream": False,
-                },
-            )
-            response.raise_for_status()
-            payload = response.json()
+        request_payload = {
+            "model": model,
+            "system": context.system_agent.system_prompt,
+            "prompt": prompt,
+            "stream": False,
+        }
+        _debug_prompt_payload("local-ollama", context, request_payload)
+        with self._observability.start_generation(
+            name="local-ollama-generate",
+            model=model,
+            input=request_payload,
+            metadata=_langfuse_metadata(context, endpoint_url=url, provider="ollama"),
+        ) as observation:
+            async with httpx.AsyncClient(
+                timeout=self._timeout_seconds,
+                trust_env=False,
+            ) as client:
+                response = await client.post(url, json=request_payload)
+                response.raise_for_status()
+                payload = response.json()
         message = _format_thread_message(
             context,
             _extract_text_response(payload),
+        )
+        usage_details = _ollama_usage_details(payload)
+        observation.update(
+            output=message,
+            model=model,
+            usage_details=usage_details or None,
+            metadata={
+                "provider": "ollama",
+                "endpoint_kind": endpoint.kind,
+                "done": payload.get("done"),
+                "done_reason": payload.get("done_reason"),
+            },
         )
         return AgentRunResult(
             stop_reason="completed",
@@ -121,9 +258,16 @@ class LocalOllamaExecutor:
 
 
 class HttpEndpointExecutor:
-    def __init__(self, *, timeout_seconds: float = 60.0, endpoint_scope: str = "remote") -> None:
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = 60.0,
+        endpoint_scope: str = "remote",
+        observability: RuntimeObservability | None = None,
+    ) -> None:
         self._timeout_seconds = timeout_seconds
         self._endpoint_scope = endpoint_scope
+        self._observability = observability or LangfuseRuntimeObserver()
 
     async def execute(self, context: AgentExecutionContext) -> AgentRunResult:
         endpoint = context.system_agent.endpoint
@@ -138,29 +282,52 @@ class HttpEndpointExecutor:
             endpoint.url,
             context.thread.thread_id,
         )
-        async with httpx.AsyncClient(
-            timeout=self._timeout_seconds,
-            trust_env=False,
-        ) as client:
-            response = await client.post(
-                endpoint.url,
-                json={
-                    "agent": context.system_agent.model_dump(mode="json"),
-                    "participant": context.participant.model_dump(mode="json"),
-                    "context": context.model_dump(mode="json"),
-                    "system_prompt": context.system_agent.system_prompt,
-                    "interaction_contract": _interaction_contract(
-                        context
-                    ).model_dump(mode="json"),
-                    "prompt": render_prompt(context),
+        request_payload = {
+            "agent": context.system_agent.model_dump(mode="json"),
+            "participant": context.participant.model_dump(mode="json"),
+            "context": context.model_dump(mode="json"),
+            "system_prompt": context.system_agent.system_prompt,
+            "interaction_contract": _interaction_contract(context).model_dump(mode="json"),
+            "prompt": render_prompt(context),
+        }
+        _debug_prompt_payload(f"{self._endpoint_scope}-endpoint", context, request_payload)
+        use_generation = bool(endpoint.model)
+        start_observation = (
+            self._observability.start_generation
+            if use_generation
+            else self._observability.start_span
+        )
+        kwargs = {
+            "name": f"{self._endpoint_scope}-agent-execute",
+            "input": request_payload,
+            "metadata": _langfuse_metadata(
+                context,
+                endpoint_url=endpoint.url,
+                provider=self._endpoint_scope,
+            ),
+        }
+        if use_generation:
+            kwargs["model"] = endpoint.model
+        with start_observation(**kwargs) as observation:
+            async with httpx.AsyncClient(
+                timeout=self._timeout_seconds,
+                trust_env=False,
+            ) as client:
+                response = await client.post(endpoint.url, json=request_payload)
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "")
+                if "application/json" in content_type:
+                    payload = response.json()
+                else:
+                    payload = {"message": response.text}
+            observation.update(
+                output=payload,
+                metadata={
+                    "provider": self._endpoint_scope,
+                    "endpoint_kind": endpoint.kind,
+                    "status_code": response.status_code,
                 },
             )
-            response.raise_for_status()
-            content_type = response.headers.get("content-type", "")
-            if "application/json" in content_type:
-                payload = response.json()
-            else:
-                payload = {"message": response.text}
         return _coerce_run_result(payload, context=context)
 
 
@@ -175,6 +342,7 @@ class AgentTaskRuntime:
         progress_events_enabled: bool = True,
         model_timeout_seconds: float = 60.0,
         executors: dict[str, AgentExecutor] | None = None,
+        observability: RuntimeObservability | None = None,
     ) -> None:
         self._kernel = kernel
         self._publish_events = publish_events
@@ -183,15 +351,21 @@ class AgentTaskRuntime:
         self._progress_events_enabled = progress_events_enabled
         self._loop_task: asyncio.Task[None] | None = None
         self._processing_tasks: dict[UUID, asyncio.Task[None]] = {}
+        self._observability = observability or LangfuseRuntimeObserver.from_env()
         self._executors = executors or {
-            "local": LocalOllamaExecutor(timeout_seconds=model_timeout_seconds),
+            "local": LocalOllamaExecutor(
+                timeout_seconds=model_timeout_seconds,
+                observability=self._observability,
+            ),
             "remote": HttpEndpointExecutor(
                 timeout_seconds=model_timeout_seconds,
                 endpoint_scope="remote",
+                observability=self._observability,
             ),
             "system": HttpEndpointExecutor(
                 timeout_seconds=model_timeout_seconds,
                 endpoint_scope="system",
+                observability=self._observability,
             ),
         }
 
@@ -212,6 +386,7 @@ class AgentTaskRuntime:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self._processing_tasks.clear()
+        self._observability.flush()
         logger.info("Agent task runtime stopped")
 
     async def _run_loop(self) -> None:
@@ -268,18 +443,37 @@ class AgentTaskRuntime:
                 )
             run_id = claim.run.run_id
             context = claim.context
-            if self._progress_events_enabled:
-                progress = await self._kernel.append_run_progress(
-                    run_id,
-                    system_agent_id,
-                    f"Executing {context.system_agent.display_name}",
+            with self._observability.start_span(
+                name="agent-task-run",
+                input={
+                    "task_id": str(task_id),
+                    "run_id": str(run_id),
+                    "system_agent_id": str(system_agent_id),
+                    "thread_id": str(context.thread.thread_id),
+                },
+                metadata=_langfuse_metadata(
+                    context,
+                    task_id=task_id,
+                    run_id=run_id,
+                    provider=context.system_agent.endpoint.kind,
+                ),
+            ) as observation:
+                if self._progress_events_enabled:
+                    progress = await self._kernel.append_run_progress(
+                        run_id,
+                        system_agent_id,
+                        f"Executing {context.system_agent.display_name}",
+                    )
+                    await self._publish_events(progress.events)
+                executor = self._executor_for(context)
+                result = await executor.execute(context)
+                result = _normalize_run_result(result, context=context)
+                observation.update(
+                    output=result.model_dump(mode="json"),
+                    metadata={"stop_reason": result.stop_reason},
                 )
-                await self._publish_events(progress.events)
-            executor = self._executor_for(context)
-            result = await executor.execute(context)
-            result = _normalize_run_result(result, context=context)
-            completion = await self._kernel.complete_run(run_id, system_agent_id, result)
-            await self._publish_events(completion.events)
+                completion = await self._kernel.complete_run(run_id, system_agent_id, result)
+                await self._publish_events(completion.events)
         except asyncio.CancelledError:  # pragma: no cover - shutdown path
             raise
         except Exception as exc:
@@ -296,6 +490,8 @@ class AgentTaskRuntime:
                     str(exc),
                 )
                 await self._publish_events(failed.events)
+        finally:
+            self._observability.flush()
 
     def _executor_for(self, context: AgentExecutionContext) -> AgentExecutor:
         kind = context.system_agent.endpoint.kind
@@ -505,3 +701,78 @@ def _interaction_contract(context: AgentExecutionContext) -> AgentInteractionCon
         or context.system_agent.interaction_contract
         or AgentInteractionContract()
     )
+
+
+def _langfuse_metadata(
+    context: AgentExecutionContext,
+    *,
+    endpoint_url: str | None = None,
+    provider: str | None = None,
+    task_id: UUID | None = None,
+    run_id: UUID | None = None,
+) -> dict[str, Any]:
+    return {
+        "workspace_id": str(context.workspace.workspace_id),
+        "thread_id": str(context.thread.thread_id),
+        "system_agent_id": str(context.system_agent.agent_id),
+        "participant_id": str(context.participant.participant_id),
+        "trigger_message_id": (
+            str(context.trigger_message.message_id) if context.trigger_message else None
+        ),
+        "endpoint_kind": context.system_agent.endpoint.kind,
+        "endpoint_url": endpoint_url,
+        "provider": provider,
+        "task_id": str(task_id) if task_id else None,
+        "run_id": str(run_id) if run_id else None,
+    }
+
+
+def _ollama_usage_details(payload: Any) -> dict[str, int]:
+    if not isinstance(payload, dict):
+        return {}
+    prompt_tokens = payload.get("prompt_eval_count")
+    completion_tokens = payload.get("eval_count")
+    usage: dict[str, int] = {}
+    if isinstance(prompt_tokens, int):
+        usage["prompt_tokens"] = prompt_tokens
+    if isinstance(completion_tokens, int):
+        usage["completion_tokens"] = completion_tokens
+    if usage:
+        usage["total_tokens"] = usage.get("prompt_tokens", 0) + usage.get(
+            "completion_tokens", 0
+        )
+    return usage
+
+
+def _debug_prompt_payload(
+    source: str,
+    context: AgentExecutionContext,
+    request_payload: dict[str, Any],
+) -> None:
+    if os.getenv("AGENT_RUNTIME_DEBUG_PROMPTS", "").lower() not in {"1", "true", "yes", "on"}:
+        return
+
+    record = {
+        "source": source,
+        "workspace_id": str(context.workspace.workspace_id),
+        "thread_id": str(context.thread.thread_id),
+        "system_agent_id": str(context.system_agent.agent_id),
+        "task_id": str(context.task.task_id),
+        "run_id": str(context.run.run_id),
+        "message_count": len(context.messages),
+        "trigger_message_id": (
+            str(context.trigger_message.message_id) if context.trigger_message is not None else None
+        ),
+        "request": request_payload,
+    }
+
+    target = os.getenv("AGENT_RUNTIME_DEBUG_PROMPTS_FILE")
+    if target:
+        target_path = Path(target)
+    else:
+        target_path = Path.cwd() / ".run" / "agent-runtime-prompts.jsonl"
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    with target_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=True, default=str))
+        handle.write("\n")

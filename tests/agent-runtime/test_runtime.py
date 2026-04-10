@@ -5,7 +5,9 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 from types import SimpleNamespace
+from types import ModuleType
 from uuid import UUID, uuid4
 
 import pytest
@@ -20,7 +22,13 @@ for path in (_AGENT_RUNTIME_DIR, _CONTRACTS_DIR):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from agent_runtime.runtime import AgentTaskRuntime, render_prompt
+from agent_runtime.runtime import (
+    AgentTaskRuntime,
+    HttpEndpointExecutor,
+    LangfuseRuntimeObserver,
+    LocalOllamaExecutor,
+    render_prompt,
+)
 from open_talon_contracts.models import (
     ActorRef,
     AgentDefinition,
@@ -563,3 +571,259 @@ def test_render_prompt_includes_participants_memory_and_thread_context():
 
 def kernel_safe_processing_tasks(runtime: AgentTaskRuntime) -> list[asyncio.Task[None]]:
     return list(runtime._processing_tasks.values())
+
+
+class RecordingObservation:
+    def __init__(self, sink: list[dict[str, object]], kind: str, payload: dict[str, object]):
+        self._sink = sink
+        self._entry = {"kind": kind, **payload, "updates": []}
+
+    def __enter__(self):
+        self._sink.append(self._entry)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def update(self, **kwargs):
+        self._entry["updates"].append(kwargs)
+
+
+class RecordingObserver:
+    def __init__(self) -> None:
+        self.records: list[dict[str, object]] = []
+        self.flush_count = 0
+
+    def start_span(self, *, name, input=None, metadata=None):
+        return RecordingObservation(
+            self.records,
+            "span",
+            {"name": name, "input": input, "metadata": metadata},
+        )
+
+    def start_generation(self, *, name, model=None, input=None, metadata=None):
+        return RecordingObservation(
+            self.records,
+            "generation",
+            {"name": name, "model": model, "input": input, "metadata": metadata},
+        )
+
+    def flush(self):
+        self.flush_count += 1
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_emits_task_span_to_observer():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    observer = RecordingObserver()
+
+    class SuccessfulExecutor:
+        async def execute(self, context: AgentExecutionContext) -> AgentRunResult:
+            return AgentRunResult(
+                stop_reason="completed",
+                message="Summary: done.",
+                summary="ok",
+            )
+
+    async def publish(events: list[EventEnvelope]) -> None:
+        return None
+
+    runtime = AgentTaskRuntime(
+        kernel=kernel,
+        publish_events=publish,
+        poll_interval_seconds=0.01,
+        observability=observer,
+        executors={
+            "local": SuccessfulExecutor(),
+            "remote": SuccessfulExecutor(),
+            "system": SuccessfulExecutor(),
+        },
+    )
+
+    await runtime._run_iteration()
+    await asyncio.gather(*kernel_safe_processing_tasks(runtime))
+
+    assert observer.records[0]["kind"] == "span"
+    assert observer.records[0]["name"] == "agent-task-run"
+    updates = observer.records[0]["updates"]
+    assert any(update.get("metadata", {}).get("stop_reason") == "completed" for update in updates)
+    assert observer.flush_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_local_ollama_executor_emits_generation_observation(monkeypatch):
+    kernel = _build_fixture_context(endpoint_kind="local")
+    observer = RecordingObserver()
+
+    class FakeResponse:
+        headers = {"content-type": "application/json"}
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "response": "Validated the request.",
+                "prompt_eval_count": 12,
+                "eval_count": 7,
+                "done": True,
+                "done_reason": "stop",
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json):
+            return FakeResponse()
+
+    monkeypatch.setattr("agent_runtime.runtime.httpx.AsyncClient", FakeAsyncClient)
+
+    executor = LocalOllamaExecutor(timeout_seconds=1.0, observability=observer)
+    result = await executor.execute(kernel.context)
+
+    assert "Testing Agent (testing agent)" in (result.message or "")
+    assert observer.records[0]["kind"] == "generation"
+    assert observer.records[0]["name"] == "local-ollama-generate"
+    langfuse_input = observer.records[0]["input"]
+    assert langfuse_input["prompt"] == render_prompt(kernel.context)
+    update = observer.records[0]["updates"][0]
+    assert update["usage_details"] == {
+        "prompt_tokens": 12,
+        "completion_tokens": 7,
+        "total_tokens": 19,
+    }
+
+
+@pytest.mark.asyncio
+async def test_http_executor_emits_generation_when_model_present(monkeypatch):
+    kernel = _build_fixture_context(endpoint_kind="remote")
+    observer = RecordingObserver()
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"message": "Remote validation complete."}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json):
+            return FakeResponse()
+
+    monkeypatch.setattr("agent_runtime.runtime.httpx.AsyncClient", FakeAsyncClient)
+
+    executor = HttpEndpointExecutor(
+        timeout_seconds=1.0,
+        endpoint_scope="remote",
+        observability=observer,
+    )
+    result = await executor.execute(kernel.context)
+
+    assert "Testing Agent (testing agent)" in (result.message or "")
+    assert observer.records[0]["kind"] == "generation"
+    assert observer.records[0]["name"] == "remote-agent-execute"
+    assert observer.records[0]["input"]["prompt"] == render_prompt(kernel.context)
+
+
+def test_langfuse_runtime_observer_uses_observation_api_for_generation():
+    calls: list[dict[str, object]] = []
+
+    class FakeClient:
+        def start_as_current_observation(self, **kwargs):
+            calls.append(kwargs)
+            return RecordingObservation([], "generation", kwargs)
+
+    observer = LangfuseRuntimeObserver(FakeClient())
+    with observer.start_generation(
+        name="runtime-generate",
+        model="gemma4:latest",
+        input={"message": "hi"},
+        metadata={"provider": "ollama"},
+    ):
+        pass
+
+    assert calls == [
+        {
+            "name": "runtime-generate",
+            "as_type": "generation",
+            "model": "gemma4:latest",
+            "input": {"message": "hi"},
+            "metadata": {"provider": "ollama"},
+        }
+    ]
+
+
+def test_langfuse_runtime_observer_from_env_uses_sdk_client(monkeypatch):
+    fake_client = object()
+    fake_module = ModuleType("langfuse")
+    fake_module.get_client = lambda: fake_client
+
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_URL", "http://localhost:3000")
+    monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
+    monkeypatch.setitem(sys.modules, "langfuse", fake_module)
+
+    observer = LangfuseRuntimeObserver.from_env()
+
+    assert observer._client is fake_client
+    assert os.environ["LANGFUSE_BASE_URL"] == "http://localhost:3000"
+
+
+@pytest.mark.asyncio
+async def test_local_ollama_executor_debug_dump_writes_request_payload(monkeypatch, tmp_path):
+    kernel = _build_fixture_context(endpoint_kind="local")
+    debug_file = tmp_path / "agent-runtime-prompts.jsonl"
+
+    class FakeResponse:
+        headers = {"content-type": "application/json"}
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"response": "Validated the request."}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json):
+            return FakeResponse()
+
+    monkeypatch.setattr("agent_runtime.runtime.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setenv("AGENT_RUNTIME_DEBUG_PROMPTS", "1")
+    monkeypatch.setenv("AGENT_RUNTIME_DEBUG_PROMPTS_FILE", str(debug_file))
+
+    executor = LocalOllamaExecutor(timeout_seconds=1.0, observability=RecordingObserver())
+    await executor.execute(kernel.context)
+
+    record = json.loads(debug_file.read_text(encoding="utf-8").strip())
+    assert record["source"] == "local-ollama"
+    assert record["message_count"] == 2
+    assert record["request"]["prompt"] == render_prompt(kernel.context)

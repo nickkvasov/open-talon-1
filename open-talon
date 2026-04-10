@@ -6,8 +6,18 @@ RUN_DIR="${ROOT_DIR}/.run"
 PID_FILE="${RUN_DIR}/gateway-edge.pid"
 LOG_FILE="${RUN_DIR}/gateway-edge.log"
 PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
+INFRA_ENV_FILE="${ROOT_DIR}/infrastructure/.env"
 
 mkdir -p "${RUN_DIR}"
+
+load_local_env() {
+  if [[ -f "${INFRA_ENV_FILE}" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${INFRA_ENV_FILE}"
+    set +a
+  fi
+}
 
 ensure_python() {
   if [[ ! -x "${PYTHON_BIN}" ]]; then
@@ -68,6 +78,7 @@ PY
 
 start_cmd() {
   ensure_python
+  load_local_env
   local pythonpath
   pythonpath="$(repo_pythonpath)"
 
@@ -152,6 +163,7 @@ PY
 }
 
 stop_cmd() {
+  load_local_env
   if [[ -f "${PID_FILE}" ]]; then
     GATEWAY_PID="$(cat "${PID_FILE}")"
     if kill -0 "${GATEWAY_PID}" >/dev/null 2>&1; then
@@ -173,6 +185,7 @@ stop_cmd() {
 
 tui_cmd() {
   ensure_python
+  load_local_env
   local pythonpath
   pythonpath="$(repo_pythonpath)"
   exec env PYTHONPATH="${pythonpath}" "${PYTHON_BIN}" -m open_talon_tui.main --gateway http://127.0.0.1:8000 "$@"

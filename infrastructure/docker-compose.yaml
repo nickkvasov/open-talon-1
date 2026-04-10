@@ -125,6 +125,17 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  minio-init:
+    image: minio/mc:RELEASE.2025-03-12T17-29-24Z
+    container_name: minio-init
+    depends_on:
+      - minio
+    environment:
+      MC_HOST_local: http://${LANGFUSE_MINIO_ROOT_USER:-minio}:${LANGFUSE_MINIO_ROOT_PASSWORD:-miniosecret}@minio:9000
+      LANGFUSE_S3_BUCKET: ${LANGFUSE_S3_BUCKET:-langfuse}
+    command: ["mb", "--ignore-existing", "local/${LANGFUSE_S3_BUCKET:-langfuse}"]
+    restart: "no"
+
   langfuse-worker:
     image: langfuse/langfuse-worker:3
     container_name: langfuse-worker
@@ -134,6 +145,7 @@ services:
       - valkey
       - clickhouse
       - minio
+      - minio-init
     environment: &langfuse-env
       NEXTAUTH_URL: ${LANGFUSE_PUBLIC_URL:-http://localhost:3000}
       DATABASE_URL: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-password}@postgres:5432/${LANGFUSE_POSTGRES_DB:-langfuse_db}
@@ -177,6 +189,7 @@ services:
       - valkey
       - clickhouse
       - minio
+      - minio-init
     environment:
       <<: *langfuse-env
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-langfuse-dev-secret}
