@@ -38,7 +38,7 @@ LANGFUSE_VALKEY_PASSWORD = os.getenv("LANGFUSE_VALKEY_PASSWORD", "langfuse-dev-s
 @pytest.fixture(scope="session")
 def infrastructure():
     print(f"Starting docker-compose from {COMPOSE_PATH}")
-    subprocess.run(["docker", "compose", "up", "-d", "--build", "--wait"], cwd=COMPOSE_PATH, check=True)
+    subprocess.run(["docker", "compose", "up", "-d", "--build"], cwd=COMPOSE_PATH, check=True)
     print("docker-compose up complete. Waiting for services to fully initialize...")
     
     # Wait for Postgres

@@ -116,7 +116,7 @@ The local compose stack now includes a self-hosted Langfuse deployment:
 - `clickhouse` on ports `8123` and `9000`
 - `minio` on ports `9090` and `9091`
 
-This setup reuses the repository Postgres server and Valkey container, but Langfuse now uses its own Postgres database (`LANGFUSE_POSTGRES_DB`) so Prisma migrations do not collide with the application schema. Defaults live in [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example) and mirrored deploy settings live in [`deploy/infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/deploy/infrastructure/.env.example).
+This setup reuses the repository Postgres server and Valkey container, but Langfuse now uses its own Postgres database (`LANGFUSE_POSTGRES_DB`) so Prisma migrations do not collide with the application schema. Defaults live in [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example).
 
 Infra defaults are defined in [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example), including:
 
