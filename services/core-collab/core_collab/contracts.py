@@ -11,6 +11,7 @@ if _CONTRACTS_DIR.is_dir():
 
 from open_talon_contracts.models import (  # noqa: E402
     ActorRef,
+    AssumeParticipantRoleRequest,
     Artifact,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
@@ -23,6 +24,7 @@ from open_talon_contracts.models import (  # noqa: E402
     ParticipantInput,
     ParticipantProfile,
     PresenceState,
+    RoleDefinition,
     Run,
     Task,
     TargetRef,
@@ -30,6 +32,7 @@ from open_talon_contracts.models import (  # noqa: E402
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    UpsertRoleDefinitionRequest,
     UpdateMemoryEntryRequest,
     Workspace,
     WorkspaceDetail,
@@ -37,6 +40,7 @@ from open_talon_contracts.models import (  # noqa: E402
 
 __all__ = [
     "ActorRef",
+    "AssumeParticipantRoleRequest",
     "Artifact",
     "CreateMemoryEntryRequest",
     "CreateMessageRequest",
@@ -49,6 +53,7 @@ __all__ = [
     "ParticipantInput",
     "ParticipantProfile",
     "PresenceState",
+    "RoleDefinition",
     "Run",
     "Task",
     "TargetRef",
@@ -56,6 +61,7 @@ __all__ = [
     "ThreadDetail",
     "TimelineMessage",
     "TimelinePage",
+    "UpsertRoleDefinitionRequest",
     "UpdateMemoryEntryRequest",
     "Workspace",
     "WorkspaceDetail",

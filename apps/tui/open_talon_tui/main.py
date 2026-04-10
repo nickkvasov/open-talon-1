@@ -12,6 +12,7 @@ import json
 import logging
 import os
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from urllib.parse import urlencode
@@ -111,6 +112,16 @@ class WorkspaceCommandSuggester(Suggester):
                 for target in workspace_targets:
                     if target.casefold().startswith(typed_target):
                         return prefix + target
+        if stripped.startswith("/role "):
+            role_targets = self.app.role_suggestion_targets
+            for prefix in ("/role assume ", "/role create "):
+                if stripped.startswith(prefix):
+                    typed_target = stripped[len(prefix) :].strip().casefold()
+                    if not typed_target:
+                        return prefix + (role_targets[0] if role_targets else "")
+                    for target in role_targets:
+                        if target.casefold().startswith(typed_target):
+                            return prefix + target
         return None
 
 
@@ -213,12 +224,16 @@ class CollaborationApp(App):
             "/workspace create ",
             "/workspace switch ",
             "/workspace delete ",
+            "/role create ",
+            "/role show",
+            "/role assume ",
             "/ws list",
             "/ws create ",
             "/ws switch ",
             "/ws delete ",
         ]
         self._workspace_suggestions: list[dict[str, str]] = []
+        self._role_suggestions: list[str] = []
 
     @property
     def _auth_headers(self) -> dict[str, str]:
@@ -248,6 +263,10 @@ class CollaborationApp(App):
                     targets.append(candidate)
         return targets
 
+    @property
+    def role_suggestion_targets(self) -> list[str]:
+        return list(self._role_suggestions)
+
     async def _list_workspaces(self) -> list[dict]:
         assert self._http_client is not None
         response = await self._http_client.get(f"{self.gateway}/v1/workspaces")
@@ -266,6 +285,17 @@ class CollaborationApp(App):
         )
         response.raise_for_status()
         return response.json()
+
+    async def _get_workspace_detail(self, workspace_id: str) -> dict:
+        assert self._http_client is not None
+        response = await self._http_client.get(f"{self.gateway}/v1/workspaces/{workspace_id}")
+        response.raise_for_status()
+        detail = response.json()
+        self._role_suggestions = [
+            role_definition["name"]
+            for role_definition in detail.get("role_definitions", [])
+        ]
+        return detail
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -428,6 +458,46 @@ class CollaborationApp(App):
         await self._switch_workspace(workspace_id)
         self._write_system(f"workspace created: {name} ({workspace_id[:8]})")
 
+    async def _assume_role(
+        self,
+        *,
+        role: str,
+        description: str | None,
+        capabilities: list[str],
+    ) -> dict:
+        assert self._http_client is not None
+        assert self.state.workspace_id is not None
+        response = await self._http_client.patch(
+            f"{self.gateway}/v1/workspaces/{self.state.workspace_id}/participants/{self.state.participant_id}/role",
+            json={
+                "actor": self.actor_payload,
+                "role": role,
+                "description": description,
+                "capabilities": capabilities,
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def _create_role_definition(
+        self,
+        *,
+        name: str,
+        definition: str,
+    ) -> dict:
+        assert self._http_client is not None
+        assert self.state.workspace_id is not None
+        response = await self._http_client.put(
+            f"{self.gateway}/v1/workspaces/{self.state.workspace_id}/roles/{name}",
+            json={
+                "actor": self.actor_payload,
+                "name": name,
+                "definition": definition,
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def _handle_workspace_command(self, command: str) -> None:
         parts = command.strip().split(maxsplit=2)
         if len(parts) < 2:
@@ -499,6 +569,100 @@ class CollaborationApp(App):
 
         self._write_system(f"unknown workspace action: {action}", style="yellow")
 
+    async def _handle_role_command(self, command: str) -> None:
+        if not self.state.workspace_id:
+            self._write_system("join or create a workspace first", style="red")
+            return
+
+        parts = command.strip().split(maxsplit=2)
+        if len(parts) < 2 or parts[1] == "show":
+            detail = await self._get_workspace_detail(self.state.workspace_id)
+            participants = detail.get("participants", [])
+            role_definitions = detail.get("role_definitions", [])
+            current = next(
+                (
+                    participant
+                    for participant in participants
+                    if participant["participant_id"] == self.state.participant_id
+                ),
+                None,
+            )
+            if current is None:
+                self._write_system("participant profile not found", style="red")
+                return
+            roles = ", ".join(current.get("roles", [])) or "unassigned"
+            capabilities = ", ".join(current.get("capabilities", [])) or "none"
+            description = current.get("description") or "no description"
+            self._write_system("My Role")
+            self._write_system(f"role: {roles}", style="cyan")
+            self._write_system(f"description: {description}", style="dim")
+            self._write_system(f"capabilities: {capabilities}", style="dim")
+            if role_definitions:
+                self._write_system("Workspace Roles")
+                for role_definition in role_definitions:
+                    self._write_system(
+                        f"{role_definition['name']}",
+                        style="magenta",
+                    )
+                    self._write_system(
+                        f"  {role_definition['definition']}",
+                        style="dim",
+                    )
+            return
+
+        if parts[1] == "create":
+            if len(parts) < 3 or "::" not in parts[2]:
+                self._write_system(
+                    "usage: /role create <name> :: <definition>",
+                    style="yellow",
+                )
+                return
+            name, definition = [segment.strip() for segment in parts[2].split("::", 1)]
+            if not name or not definition:
+                self._write_system(
+                    "usage: /role create <name> :: <definition>",
+                    style="yellow",
+                )
+                return
+            role_definition = await self._create_role_definition(
+                name=name,
+                definition=definition,
+            )
+            self._write_system(
+                f"role definition saved: {role_definition['name']}",
+            )
+            self._write_system(role_definition["definition"], style="dim")
+            return
+
+        if parts[1] != "assume" or len(parts) < 3:
+            self._write_system(
+                "role commands: /role show | /role create <name> :: <definition> | /role assume <role> [:: <description> :: <cap1, cap2>]",
+                style="yellow",
+            )
+            return
+
+        segments = [segment.strip() for segment in parts[2].split("::")]
+        role = segments[0]
+        description = None
+        capabilities = []
+        if len(segments) >= 2:
+            description = segments[1] or None
+        if len(segments) > 2 and segments[2]:
+            capabilities = [item.strip() for item in segments[2].split(",") if item.strip()]
+        if not role:
+            self._write_system(
+                "usage: /role assume <role> [:: <description> :: <cap1, cap2>]",
+                style="yellow",
+            )
+            return
+        profile = await self._assume_role(
+            role=role,
+            description=description,
+            capabilities=capabilities,
+        )
+        self._write_system(f"role assumed: {profile['roles'][0]}")
+        self._write_system(f"capabilities: {', '.join(profile['capabilities']) or 'none'}", style='dim')
+
     def _resolve_workspace_target(self, workspaces: list[dict], target: str) -> dict | None:
         normalized = target.strip()
         if not normalized or normalized == "current":
@@ -535,6 +699,8 @@ class CollaborationApp(App):
         lowered = stripped.lower()
         if "workspace" in lowered:
             return " Tip: use /workspaces or /workspace switch <id|name>"
+        if "role" in lowered:
+            return " Tip: /role show | /role create <name> :: <definition> | /role assume <role>"
         if lowered in {"list", "show", "where"}:
             return " Tip: /workspaces lists available workspaces"
         if lowered.startswith("switch"):
@@ -543,7 +709,7 @@ class CollaborationApp(App):
             return " Tip: /workspace create <name>"
         if lowered.startswith("delete") or lowered.startswith("remove"):
             return " Tip: /workspace delete <id|name|current>"
-        return " Enter sends a message. Use /workspace commands to manage workspaces."
+        return " Enter sends a message. Use /workspace or /role commands for collaboration context."
 
     async def _load_timeline(self) -> None:
         assert self._http_client is not None
@@ -648,6 +814,18 @@ class CollaborationApp(App):
         else:
             self._write_system(event_type or "event received", style="dim")
 
+    @staticmethod
+    def _format_message_time(message: dict) -> str:
+        raw_timestamp = message.get("created_at") or message.get("updated_at")
+        if not raw_timestamp:
+            return "--:--"
+        try:
+            normalized = raw_timestamp.replace("Z", "+00:00")
+            timestamp = datetime.fromisoformat(normalized)
+            return timestamp.astimezone().strftime("%H:%M")
+        except Exception:
+            return "--:--"
+
     def _render_message(self, message: dict) -> None:
         message_id = message.get("message_id")
         if message_id:
@@ -657,8 +835,9 @@ class CollaborationApp(App):
         prefix = "You" if actor_id == self.state.participant_id else f"Peer {actor_id[:8]}"
         colour = "cyan" if actor_id == self.state.participant_id else "magenta"
         content = message.get("content", "")
+        time_mark = self._format_message_time(message)
         self.query_one("#timeline", RichLog).write(
-            f"[bold {colour}]{prefix}:[/bold {colour}] {content}"
+            f"[dim]{time_mark}[/dim] [bold {colour}]{prefix}:[/bold {colour}] {content}"
         )
 
     def _write_system(self, content: str, *, style: str = "dim") -> None:
@@ -709,6 +888,15 @@ class CollaborationApp(App):
                 logger.exception("TUI workspace command failed")
                 self._write_system(f"workspace command failed: {exc}", style="red")
                 self._update_status("err", "Workspace failed")
+            return
+        if text == "/role" or text.startswith("/role "):
+            try:
+                await self._handle_role_command(text)
+                self._update_status("ok", "Connected")
+            except Exception as exc:
+                logger.exception("TUI role command failed")
+                self._write_system(f"role command failed: {exc}", style="red")
+                self._update_status("err", "Role failed")
             return
         if not self.state.thread_id:
             self._write_system("thread not ready yet", style="red")

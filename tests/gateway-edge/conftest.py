@@ -39,6 +39,7 @@ class MockCollaborationService:
 
         self.workspaces = {}
         self.participants = {}
+        self.role_definitions = {}
         self.threads = {}
         self.memberships = {}
         self.messages = {}
@@ -79,8 +80,13 @@ class MockCollaborationService:
         self.participants.setdefault(str(workspace.workspace_id), {})[
             str(participant.participant_id)
         ] = participant
+        self.role_definitions[str(workspace.workspace_id)] = {}
         self.workspace_sequences[str(workspace.workspace_id)] = 2
-        return WorkspaceDetail(workspace=workspace, participants=[participant])
+        return WorkspaceDetail(
+            workspace=workspace,
+            participants=[participant],
+            role_definitions=[],
+        )
 
     async def list_workspaces(self):
         return list(self.workspaces.values())
@@ -90,6 +96,7 @@ class MockCollaborationService:
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
         self.participants.pop(str(workspace_id), None)
+        self.role_definitions.pop(str(workspace_id), None)
         thread_ids = [
             thread_id
             for thread_id, thread in self.threads.items()
@@ -113,15 +120,88 @@ class MockCollaborationService:
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
         participants = list(self.participants.get(str(workspace_id), {}).values())
-        return WorkspaceDetail(workspace=workspace, participants=participants)
+        role_definitions = list(self.role_definitions.get(str(workspace_id), {}).values())
+        return WorkspaceDetail(
+            workspace=workspace,
+            participants=participants,
+            role_definitions=role_definitions,
+        )
+
+    async def upsert_role_definition(self, workspace_id: UUID, payload):
+        from gateway_edge.models import RoleDefinition
+
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        role_definition = RoleDefinition(
+            name=payload.name,
+            definition=payload.definition,
+            updated_by=payload.actor.participant_id,
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.role_definitions.setdefault(str(workspace_id), {})[payload.name] = role_definition
+        return role_definition
+
+    async def assume_participant_role(self, workspace_id: UUID, participant_id: UUID, payload):
+        from gateway_edge.models import ParticipantProfile
+
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        if participant_id != payload.actor.participant_id:
+            raise ValueError("Participants may only assume roles for themselves")
+        workspace_participants = self.participants.setdefault(str(workspace_id), {})
+        existing = workspace_participants.get(str(participant_id))
+        now = datetime.now(timezone.utc)
+        role_definition = self.role_definitions.get(str(workspace_id), {}).get(payload.role)
+        description = payload.description or (
+            role_definition.definition if role_definition is not None else None
+        )
+        if description is None:
+            raise ValueError(
+                f"Role {payload.role!r} is not defined in this workspace; provide a description or create the role first"
+            )
+        participant = ParticipantProfile(
+            participant_id=participant_id,
+            workspace_id=workspace_id,
+            participant_type=payload.actor.participant_type,
+            display_name=payload.actor.display_name,
+            description=description,
+            roles=[payload.role],
+            capabilities=payload.capabilities,
+            status=existing.status if existing is not None else "active",
+            visibility_scope=payload.actor.visibility_scope,
+            created_at=existing.created_at if existing is not None else now,
+            updated_at=now,
+            metadata=existing.metadata if existing is not None else {},
+        )
+        workspace_participants[str(participant_id)] = participant
+        return participant
 
     async def create_thread(self, workspace_id: UUID, payload):
-        from gateway_edge.models import Membership, Thread, ThreadDetail
+        from gateway_edge.models import Membership, ParticipantProfile, Thread, ThreadDetail
 
         workspace = self.workspaces.get(str(workspace_id))
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
         now = datetime.now(timezone.utc)
+        self.participants.setdefault(str(workspace_id), {})[str(payload.actor.participant_id)] = (
+            self.participants.get(str(workspace_id), {}).get(
+                str(payload.actor.participant_id),
+                ParticipantProfile(
+                    participant_id=payload.actor.participant_id,
+                    workspace_id=workspace_id,
+                    participant_type=payload.actor.participant_type,
+                    display_name=payload.actor.display_name,
+                    description=payload.actor.description,
+                    roles=payload.actor.roles,
+                    capabilities=payload.actor.capabilities,
+                    visibility_scope=payload.actor.visibility_scope,
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+        )
         thread = Thread(
             thread_id=uuid4(),
             workspace_id=workspace_id,

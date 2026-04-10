@@ -76,6 +76,13 @@ class ParticipantProfile(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class RoleDefinition(BaseModel):
+    name: str
+    definition: str
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
 class Membership(BaseModel):
     membership_id: UUID
     workspace_id: UUID
@@ -220,6 +227,19 @@ class DeleteWorkspaceRequest(BaseModel):
     actor: ParticipantInput
 
 
+class AssumeParticipantRoleRequest(BaseModel):
+    actor: ParticipantInput
+    role: str
+    description: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+
+
+class UpsertRoleDefinitionRequest(BaseModel):
+    actor: ParticipantInput
+    name: str
+    definition: str
+
+
 class CreateThreadRequest(BaseModel):
     title: str
     actor: ParticipantInput
@@ -259,6 +279,7 @@ class UpdateMemoryEntryRequest(BaseModel):
 class WorkspaceDetail(BaseModel):
     workspace: Workspace
     participants: list[ParticipantProfile] = Field(default_factory=list)
+    role_definitions: list[RoleDefinition] = Field(default_factory=list)
 
 
 class ThreadDetail(BaseModel):

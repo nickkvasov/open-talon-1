@@ -1,5 +1,6 @@
 from .models import (
     ActorRef,
+    AssumeParticipantRoleRequest,
     ApiKeyCreate,
     ApiKeyInfo,
     Artifact,
@@ -16,6 +17,7 @@ from .models import (
     ParticipantInput,
     ParticipantProfile,
     PresenceState,
+    RoleDefinition,
     Run,
     ServiceStatus,
     Task,
@@ -24,6 +26,7 @@ from .models import (
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    UpsertRoleDefinitionRequest,
     UpdateMemoryEntryRequest,
     Workspace,
     WorkspaceDetail,
@@ -31,6 +34,7 @@ from .models import (
 
 __all__ = [
     "ActorRef",
+    "AssumeParticipantRoleRequest",
     "ApiKeyCreate",
     "ApiKeyInfo",
     "Artifact",
@@ -47,6 +51,7 @@ __all__ = [
     "ParticipantInput",
     "ParticipantProfile",
     "PresenceState",
+    "RoleDefinition",
     "Run",
     "ServiceStatus",
     "Task",
@@ -55,6 +60,7 @@ __all__ = [
     "ThreadDetail",
     "TimelineMessage",
     "TimelinePage",
+    "UpsertRoleDefinitionRequest",
     "UpdateMemoryEntryRequest",
     "Workspace",
     "WorkspaceDetail",

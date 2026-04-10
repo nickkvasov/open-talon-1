@@ -9,6 +9,7 @@ import asyncpg
 
 from .contracts import (
     ActorRef,
+    AssumeParticipantRoleRequest,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
     CreateThreadRequest,
@@ -20,12 +21,14 @@ from .contracts import (
     ParticipantInput,
     ParticipantProfile,
     PresenceState,
+    RoleDefinition,
     Task,
     TargetRef,
     Thread,
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    UpsertRoleDefinitionRequest,
     UpdateMemoryEntryRequest,
     Workspace,
     WorkspaceDetail,
@@ -60,6 +63,16 @@ class MessageCommandResult(CommandResult):
 @dataclass
 class MemoryCommandResult(CommandResult):
     entry: MemoryEntry | None = None
+
+
+@dataclass
+class ParticipantCommandResult(CommandResult):
+    participant: ParticipantProfile | None = None
+
+
+@dataclass
+class RoleDefinitionCommandResult(CommandResult):
+    role_definition: RoleDefinition | None = None
 
 
 class CollaborationKernel:
@@ -126,7 +139,11 @@ class CollaborationKernel:
                 for event in events:
                     await self._repository.record_event(conn, event)
 
-        detail = WorkspaceDetail(workspace=workspace, participants=[participant])
+        detail = WorkspaceDetail(
+            workspace=workspace,
+            participants=[participant],
+            role_definitions=self._role_definitions_from_workspace(workspace),
+        )
         logger.debug(
             "Kernel create_workspace complete workspace_id=%s event_count=%s",
             workspace_id,
@@ -160,7 +177,131 @@ class CollaborationKernel:
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
         participants = await self._repository.list_participants(workspace_id)
-        return WorkspaceDetail(workspace=workspace, participants=participants)
+        return WorkspaceDetail(
+            workspace=workspace,
+            participants=participants,
+            role_definitions=self._role_definitions_from_workspace(workspace),
+        )
+
+    async def upsert_role_definition(
+        self,
+        workspace_id: UUID,
+        payload: UpsertRoleDefinitionRequest,
+    ) -> RoleDefinitionCommandResult:
+        logger.debug(
+            "Kernel upsert_role_definition workspace_id=%s actor_id=%s name=%r",
+            workspace_id,
+            payload.actor.participant_id,
+            payload.name,
+        )
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+        role_definition = RoleDefinition(
+            name=payload.name,
+            definition=payload.definition,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+        )
+        role_map = {
+            role.name: role.model_dump(mode="json")
+            for role in self._role_definitions_from_workspace(workspace)
+        }
+        role_map[role_definition.name] = role_definition.model_dump(mode="json")
+        updated_workspace = workspace.model_copy(
+            update={
+                "updated_at": now,
+                "metadata": {
+                    **workspace.metadata,
+                    "role_definitions": role_map,
+                },
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_workspace(conn, updated_workspace)
+                event = await self._build_workspace_event(
+                    conn,
+                    workspace_id,
+                    "role_definition.upserted",
+                    actor=actor,
+                    target=TargetRef(type="workspace", id=workspace_id),
+                    payload=role_definition.model_dump(mode="json"),
+                    visibility="workspace",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        return RoleDefinitionCommandResult(role_definition=role_definition, events=[event])
+
+    async def assume_participant_role(
+        self,
+        workspace_id: UUID,
+        participant_id: UUID,
+        payload: AssumeParticipantRoleRequest,
+    ) -> ParticipantCommandResult:
+        logger.debug(
+            "Kernel assume_participant_role workspace_id=%s participant_id=%s actor_id=%s role=%r capability_count=%s",
+            workspace_id,
+            participant_id,
+            payload.actor.participant_id,
+            payload.role,
+            len(payload.capabilities),
+        )
+        if participant_id != payload.actor.participant_id:
+            raise ValueError("Participants may only assume roles for themselves")
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+        existing = await self._repository.fetch_participant(workspace_id, participant_id)
+        role_definitions = {
+            role_definition.name: role_definition
+            for role_definition in self._role_definitions_from_workspace(workspace)
+        }
+        role_definition = role_definitions.get(payload.role)
+        if payload.description is None and role_definition is None:
+            raise ValueError(
+                f"Role {payload.role!r} is not defined in this workspace; provide a description or create the role first"
+            )
+        description = payload.description or (role_definition.definition if role_definition else None)
+        participant = ParticipantProfile(
+            participant_id=participant_id,
+            workspace_id=workspace_id,
+            participant_type=payload.actor.participant_type,
+            display_name=payload.actor.display_name,
+            description=description,
+            roles=[payload.role],
+            capabilities=payload.capabilities,
+            status=existing.status if existing is not None else "active",
+            visibility_scope=payload.actor.visibility_scope,
+            created_at=existing.created_at if existing is not None else now,
+            updated_at=now,
+            metadata=(existing.metadata if existing is not None else {}),
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_participant(conn, participant)
+                event = await self._build_workspace_event(
+                    conn,
+                    workspace_id,
+                    "participant.role_assumed",
+                    actor=actor,
+                    target=TargetRef(type="participant", id=participant.participant_id),
+                    payload=participant.model_dump(mode="json"),
+                    visibility="workspace",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        logger.debug(
+            "Kernel assume_participant_role complete workspace_id=%s participant_id=%s sequence=%s",
+            workspace_id,
+            participant_id,
+            event.sequence,
+        )
+        return ParticipantCommandResult(participant=participant, events=[event])
 
     async def create_thread(
         self, workspace_id: UUID, payload: CreateThreadRequest
@@ -700,6 +841,15 @@ class CollaborationKernel:
             created_at=now,
             updated_at=now,
         )
+
+    @staticmethod
+    def _role_definitions_from_workspace(workspace: Workspace) -> list[RoleDefinition]:
+        raw = workspace.metadata.get("role_definitions", {})
+        if isinstance(raw, dict):
+            return [RoleDefinition.model_validate(item) for item in raw.values()]
+        if isinstance(raw, list):
+            return [RoleDefinition.model_validate(item) for item in raw]
+        return []
 
     @staticmethod
     def _now() -> datetime:

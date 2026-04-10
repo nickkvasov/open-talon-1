@@ -18,6 +18,7 @@ from core_collab import CollaborationKernel, CollaborationRepository  # noqa: E4
 
 from gateway_edge.db.postgres import get_pool
 from gateway_edge.models import (
+    AssumeParticipantRoleRequest,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
     CreateThreadRequest,
@@ -26,10 +27,12 @@ from gateway_edge.models import (
     EventEnvelope,
     MemoryEntry,
     ParticipantInput,
+    RoleDefinition,
     Thread,
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    UpsertRoleDefinitionRequest,
     UpdateMemoryEntryRequest,
     Workspace,
     WorkspaceDetail,
@@ -89,6 +92,44 @@ class CollaborationService:
     async def get_workspace(self, workspace_id: UUID) -> WorkspaceDetail:
         logger.debug("Service get_workspace workspace_id=%s", workspace_id)
         return await self._require_kernel().get_workspace_detail(workspace_id)
+
+    async def upsert_role_definition(
+        self,
+        workspace_id: UUID,
+        payload: UpsertRoleDefinitionRequest,
+    ) -> RoleDefinition:
+        logger.debug(
+            "Service upsert_role_definition workspace_id=%s actor_id=%s name=%r",
+            workspace_id,
+            payload.actor.participant_id,
+            payload.name,
+        )
+        result = await self._require_kernel().upsert_role_definition(workspace_id, payload)
+        await self._publish_events(result.events)
+        assert result.role_definition is not None
+        return result.role_definition
+
+    async def assume_participant_role(
+        self,
+        workspace_id: UUID,
+        participant_id: UUID,
+        payload: AssumeParticipantRoleRequest,
+    ):
+        logger.debug(
+            "Service assume_participant_role workspace_id=%s participant_id=%s actor_id=%s role=%r",
+            workspace_id,
+            participant_id,
+            payload.actor.participant_id,
+            payload.role,
+        )
+        result = await self._require_kernel().assume_participant_role(
+            workspace_id,
+            participant_id,
+            payload,
+        )
+        await self._publish_events(result.events)
+        assert result.participant is not None
+        return result.participant
 
     async def create_thread(
         self, workspace_id: UUID, payload: CreateThreadRequest

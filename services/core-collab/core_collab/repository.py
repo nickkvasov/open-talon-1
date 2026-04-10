@@ -420,6 +420,22 @@ class CollaborationRepository:
         )
         return [self._participant_from_row(row) for row in rows]
 
+    async def fetch_participant(
+        self, workspace_id: UUID, participant_id: UUID
+    ) -> ParticipantProfile | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT participant_id, workspace_id, participant_type, display_name, description,
+                   roles, capabilities, status, visibility_scope, created_at, updated_at, metadata
+            FROM participants
+            WHERE workspace_id = $1
+              AND participant_id = $2
+            """,
+            workspace_id,
+            participant_id,
+        )
+        return self._participant_from_row(row) if row else None
+
     async def fetch_thread(self, thread_id: UUID) -> Thread | None:
         row = await self._pool.fetchrow(
             """

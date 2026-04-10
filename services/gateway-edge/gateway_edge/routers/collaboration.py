@@ -10,6 +10,7 @@ from gateway_edge.auth.api_key import validate_api_key
 from gateway_edge.auth.openbao import validate_openbao_token
 from gateway_edge.config import settings
 from gateway_edge.models import (
+    AssumeParticipantRoleRequest,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
     CreateThreadRequest,
@@ -17,10 +18,13 @@ from gateway_edge.models import (
     DeleteWorkspaceRequest,
     MemoryEntry,
     ParticipantInput,
+    ParticipantProfile,
+    RoleDefinition,
     Thread,
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    UpsertRoleDefinitionRequest,
     UpdateMemoryEntryRequest,
     Workspace,
     WorkspaceDetail,
@@ -133,6 +137,60 @@ async def get_workspace(workspace_id: UUID) -> WorkspaceDetail:
     logger.debug("HTTP get_workspace workspace_id=%s", workspace_id)
     try:
         return await collab_svc.collaboration_service.get_workspace(workspace_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch(
+    "/workspaces/{workspace_id}/participants/{participant_id}/role",
+    response_model=ParticipantProfile,
+    summary="Assume a participant role in a workspace",
+)
+async def assume_participant_role(
+    workspace_id: UUID,
+    participant_id: UUID,
+    payload: AssumeParticipantRoleRequest,
+):
+    logger.debug(
+        "HTTP assume_participant_role workspace_id=%s participant_id=%s actor=%s role=%r capability_count=%s",
+        workspace_id,
+        participant_id,
+        _actor_log(payload.actor),
+        payload.role,
+        len(payload.capabilities),
+    )
+    try:
+        return await collab_svc.collaboration_service.assume_participant_role(
+            workspace_id,
+            participant_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.put(
+    "/workspaces/{workspace_id}/roles/{role_name}",
+    response_model=RoleDefinition,
+    summary="Create or update a named workspace role definition",
+)
+async def upsert_role_definition(
+    workspace_id: UUID,
+    role_name: str,
+    payload: UpsertRoleDefinitionRequest,
+) -> RoleDefinition:
+    logger.debug(
+        "HTTP upsert_role_definition workspace_id=%s role_name=%r actor=%s",
+        workspace_id,
+        role_name,
+        _actor_log(payload.actor),
+    )
+    payload = payload.model_copy(update={"name": role_name})
+    try:
+        return await collab_svc.collaboration_service.upsert_role_definition(
+            workspace_id,
+            payload,
+        )
     except Exception as exc:
         raise _http_error(exc) from exc
 
