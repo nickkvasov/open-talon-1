@@ -574,7 +574,7 @@ class CollaborationRepository:
             """
             SELECT workspace_id, name, description, created_at, updated_at, metadata
             FROM workspaces
-            ORDER BY p.created_at ASC
+            ORDER BY created_at ASC
             """
         )
         return [self._workspace_from_row(row) for row in rows]
@@ -608,7 +608,6 @@ class CollaborationRepository:
         row = await self._pool.fetchrow(
             """
             SELECT p.participant_id, p.workspace_id, p.participant_type, p.user_id, p.system_agent_id,
-                   p.display_name AS legacy_display_name,
                    p.description, p.roles, p.capabilities, p.status, p.visibility_scope,
                    p.created_at, p.updated_at, p.metadata,
                    u.display_name AS user_display_name,
@@ -637,7 +636,6 @@ class CollaborationRepository:
         rows = await self._pool.fetch(
             """
             SELECT p.participant_id, p.workspace_id, p.participant_type, p.user_id, p.system_agent_id,
-                   p.display_name AS legacy_display_name,
                    p.description, p.roles, p.capabilities, p.status, p.visibility_scope,
                    p.created_at, p.updated_at, p.metadata,
                    u.display_name AS user_display_name,
@@ -664,7 +662,6 @@ class CollaborationRepository:
         row = await self._pool.fetchrow(
             """
             SELECT p.participant_id, p.workspace_id, p.participant_type, p.user_id, p.system_agent_id,
-                   p.display_name AS legacy_display_name,
                    p.description, p.roles, p.capabilities, p.status, p.visibility_scope,
                    p.created_at, p.updated_at, p.metadata,
                    u.display_name AS user_display_name,
@@ -940,7 +937,7 @@ class CollaborationRepository:
             row["agent_display_name"]
             if participant_type == "agent"
             else row["user_display_name"]
-        ) or row["legacy_display_name"]
+        )
         description = (
             row["agent_description"]
             if participant_type == "agent"

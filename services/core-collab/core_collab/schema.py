@@ -132,15 +132,25 @@ MIGRATIONS = textwrap.dedent(
     ALTER TABLE participants
         ADD COLUMN IF NOT EXISTS system_agent_id UUID REFERENCES system_agents(agent_id) ON DELETE SET NULL;
 
-    ALTER TABLE participants
-        ALTER COLUMN display_name DROP NOT NULL;
-
-    INSERT INTO users (user_id, display_name, metadata, created_at, updated_at)
-    SELECT participant_id, display_name, '{}'::jsonb, created_at, updated_at
-    FROM participants
-    WHERE participant_type = 'user'
-      AND display_name IS NOT NULL
-    ON CONFLICT (user_id) DO NOTHING;
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name = 'participants'
+              AND column_name = 'display_name'
+        ) THEN
+            EXECUTE $migrate_users$
+                INSERT INTO users (user_id, display_name, metadata, created_at, updated_at)
+                SELECT participant_id, display_name, '{}'::jsonb, created_at, updated_at
+                FROM participants
+                WHERE participant_type = 'user'
+                  AND display_name IS NOT NULL
+                ON CONFLICT (user_id) DO NOTHING
+            $migrate_users$;
+        END IF;
+    END
+    $$;
 
     UPDATE participants
     SET user_id = participant_id
