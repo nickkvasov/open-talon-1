@@ -2,6 +2,27 @@
 
 This repository contains the local infrastructure, Python services, and client apps for Open Talon. The canonical developer Python environment is the repository-root `.venv`.
 
+## System Overview
+
+Open Talon is a local-first collaboration system where users and agents are first-class participants.
+
+At a high level:
+
+- `services/gateway-edge` is the main entrypoint for clients and developer tools
+- `apps/tui` provides a terminal UI that talks to the gateway
+- `services/core-collab` manages shared collaboration concepts like workspaces, threads, participants, presence, and timelines across both humans and agents
+- `services/agent-runtime` runs background agent work and publishes events back into the system
+- `packages/contracts` defines shared models and contracts used across services
+- `infrastructure` provides the local backing services that make the system work end to end
+
+The typical flow is:
+
+1. A client sends a request to `gateway-edge`.
+2. The gateway reads and writes state in Postgres and Valkey, and publishes asynchronous work through Kafka.
+3. Collaboration and agent services process that work and emit events for both user and agent participants.
+4. The gateway streams results back to clients over HTTP, SSE, or WebSocket.
+5. Langfuse captures observability data for prompts, traces, and evaluations.
+
 ## Architecture Stack
 
 - **PostgreSQL**: Deployed via `pgvector/pgvector:pg16` directly supporting native `JSONB` properties alongside algorithmic embeddings operations for Vector Similarity Searching natively in the engine.
@@ -14,7 +35,7 @@ This repository contains the local infrastructure, Python services, and client a
 
 ## Infrastructure
 
-`./open-talon start` brings up the full local infrastructure stack and then starts the supported local gateway from [`services/gateway-edge`](/Users/nikolay.kvasov/Development/open-talon-1/services/gateway-edge).
+`./open-talon start` brings up the full local infrastructure stack and then starts the supported local gateway from `services/gateway-edge`.
 
 Local services:
 
@@ -78,7 +99,7 @@ Default local development credentials:
   username: `langfuse`
   password: `langfuse`
 
-These are local dev defaults from [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example). Override them in your local env before starting the stack if you need different values.
+These are local dev defaults from `infrastructure/.env.example`. Override them in your local env before starting the stack if you need different values.
 
 ## Persistence Design
 
@@ -116,9 +137,9 @@ The local compose stack now includes a self-hosted Langfuse deployment:
 - `clickhouse` on ports `8123` and `9000`
 - `minio` on ports `9090` and `9091`
 
-This setup reuses the repository Postgres server and Valkey container, but Langfuse now uses its own Postgres database (`LANGFUSE_POSTGRES_DB`) so Prisma migrations do not collide with the application schema. Defaults live in [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example).
+This setup reuses the repository Postgres server and Valkey container, but Langfuse now uses its own Postgres database (`LANGFUSE_POSTGRES_DB`) so Prisma migrations do not collide with the application schema. Defaults live in `infrastructure/.env.example`.
 
-Infra defaults are defined in [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example), including:
+Infra defaults are defined in `infrastructure/.env.example`, including:
 
 - core ports for Postgres, Kafka, OpenBao, Valkey, Ollama, and Langfuse
 - Langfuse database name and bootstrap credentials
