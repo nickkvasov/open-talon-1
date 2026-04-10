@@ -16,8 +16,50 @@ ensure_python() {
   fi
 }
 
+repo_pythonpath() {
+  local entries=(
+    "${ROOT_DIR}/packages/contracts"
+    "${ROOT_DIR}/services/core-collab"
+    "${ROOT_DIR}/services/gateway-edge"
+    "${ROOT_DIR}/services/agent-runtime"
+    "${ROOT_DIR}/apps/tui"
+  )
+  local joined
+  joined="$(IFS=:; echo "${entries[*]}")"
+  if [[ -n "${PYTHONPATH:-}" ]]; then
+    printf '%s:%s\n' "${joined}" "${PYTHONPATH}"
+  else
+    printf '%s\n' "${joined}"
+  fi
+}
+
+gateway_supports_current_api() {
+  local pythonpath="$1"
+  local url="${2:-http://localhost:8000/openapi.json}"
+  PYTHONPATH="${pythonpath}" "${PYTHON_BIN}" - <<PY
+import json
+import sys
+import urllib.request
+
+try:
+    with urllib.request.urlopen("${url}", timeout=2) as response:
+        data = json.load(response)
+    paths = data.get("paths", {})
+    required = {
+        "/v1/workspaces",
+        "/v1/threads/{thread_id}/timeline",
+        "/v1/threads/{thread_id}/events/stream",
+    }
+    raise SystemExit(0 if required.issubset(paths) else 1)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
 start_cmd() {
   ensure_python
+  local pythonpath
+  pythonpath="$(repo_pythonpath)"
 
   echo "Starting infrastructure services..."
   (
@@ -28,24 +70,65 @@ start_cmd() {
   if [[ -f "${PID_FILE}" ]]; then
     EXISTING_PID="$(cat "${PID_FILE}")"
     if kill -0 "${EXISTING_PID}" >/dev/null 2>&1; then
-      echo "Gateway already running with PID ${EXISTING_PID}."
-      echo "Infrastructure is up."
-      return
+      if gateway_supports_current_api "${pythonpath}"; then
+        echo "Gateway already running with PID ${EXISTING_PID}."
+        echo "Infrastructure is up."
+        return
+      fi
+      echo "Restarting stale gateway-edge PID ${EXISTING_PID}..."
+      kill "${EXISTING_PID}" >/dev/null 2>&1 || true
+      wait "${EXISTING_PID}" 2>/dev/null || true
     fi
     rm -f "${PID_FILE}"
   fi
 
   echo "Starting local gateway-edge..."
-  nohup "${PYTHON_BIN}" -m uvicorn gateway_edge.main:app \
-    --host 0.0.0.0 \
-    --port 8000 \
-    >"${LOG_FILE}" 2>&1 &
+  GATEWAY_PID="$(
+    PYTHONPATH="${pythonpath}" ROOT_DIR="${ROOT_DIR}" LOG_FILE="${LOG_FILE}" PYTHON_BIN="${PYTHON_BIN}" "${PYTHON_BIN}" - <<'PY'
+import os
+import subprocess
 
-  GATEWAY_PID="$!"
+env = os.environ.copy()
+with open(os.environ["LOG_FILE"], "ab", buffering=0) as log_file:
+    proc = subprocess.Popen(
+        [
+            os.environ["PYTHON_BIN"],
+            "-m",
+            "uvicorn",
+            "gateway_edge.main:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8000",
+        ],
+        cwd=os.environ["ROOT_DIR"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        close_fds=True,
+    )
+print(proc.pid)
+PY
+  )"
   echo "${GATEWAY_PID}" > "${PID_FILE}"
 
-  echo "Gateway PID: ${GATEWAY_PID}"
-  echo "Gateway log: ${LOG_FILE}"
+  for _ in {1..20}; do
+    sleep 1
+    if gateway_supports_current_api "${pythonpath}"; then
+      echo "Gateway PID: ${GATEWAY_PID}"
+      echo "Gateway log: ${LOG_FILE}"
+      return
+    fi
+    if ! kill -0 "${GATEWAY_PID}" >/dev/null 2>&1; then
+      break
+    fi
+  done
+
+  echo "Gateway failed to start correctly. See ${LOG_FILE}" >&2
+  rm -f "${PID_FILE}"
+  exit 1
 }
 
 stop_cmd() {
@@ -70,7 +153,9 @@ stop_cmd() {
 
 tui_cmd() {
   ensure_python
-  exec "${PYTHON_BIN}" -m open_talon_tui.main --gateway http://localhost:8000 "$@"
+  local pythonpath
+  pythonpath="$(repo_pythonpath)"
+  exec env PYTHONPATH="${pythonpath}" "${PYTHON_BIN}" -m open_talon_tui.main --gateway http://127.0.0.1:8000 "$@"
 }
 
 usage() {

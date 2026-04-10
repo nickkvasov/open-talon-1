@@ -1,4 +1,6 @@
 -e ./packages/contracts
+-e ./services/core-collab
+-e ./services/agent-runtime
 -e ./services/gateway-edge
 -e ./apps/tui
 pytest>=8

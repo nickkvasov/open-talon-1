@@ -62,10 +62,13 @@ class Settings(BaseSettings):
 
     # ── Kafka ────────────────────────────────────────────────────────────────
     kafka_bootstrap_servers: str = "localhost:9092"
-    kafka_request_topic: str = "talon.chat.requests"
-    kafka_response_topic: str = "talon.chat.responses"
+    kafka_collab_commands_topic: str = "talon.collab.commands"
+    kafka_collab_events_topic: str = "talon.collab.events"
+    kafka_workspace_events_topic: str = "talon.workspace.events"
+    kafka_agent_tasks_topic: str = "talon.agent.tasks"
+    kafka_agent_events_topic: str = "talon.agent.events"
+    kafka_presence_topic: str = "talon.presence"
     kafka_consumer_group: str = "api-gateway"
-    kafka_response_timeout_seconds: float = 120.0
     kafka_startup_timeout_seconds: float = 30.0
     kafka_startup_retry_interval_seconds: float = 1.0
 

@@ -1,3 +1,3 @@
 # agent-runtime
 
-Reusable runtime for task-claiming agents.
+Reusable runtime helpers for task-claiming Open Talon agents that emit `task.*` and `run.*` collaboration events.

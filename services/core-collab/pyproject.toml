@@ -9,6 +9,7 @@ description = "Canonical collaboration kernel for Open Talon"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.7",
+    "asyncpg>=0.29",
 ]
 
 [tool.hatch.build.targets.wheel]

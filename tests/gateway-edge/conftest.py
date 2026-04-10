@@ -1,208 +1,388 @@
-"""
-Shared pytest fixtures for the Open Talon API Gateway test suite.
-
-Two test layers
----------------
-Unit tests (default — no docker needed):
-    pytest tests/gateway-edge/ -m "not integration"
-
-Integration tests (requires running infra + gateway):
-    pytest tests/gateway-edge/ -m integration
-
-The unit layer patches all IO (Postgres → asyncpg, Valkey → redis, Kafka →
-aiokafka) with lightweight in-process fakes so tests run in milliseconds.
-
-Key fixtures
-------------
-session_store   dict  – in-memory Valkey substitute
-history_store   dict  – in-memory Postgres substitute
-mock_event      MockEventService – controllable Kafka stand-in
-patched         fixture – applies ALL patches; use as fixture dep
-client          AsyncClient against the ASGI app (unit tests)
-sync_client     TestClient with WebSocket support (unit tests)
-"""
 from __future__ import annotations
 
-import sys
+import asyncio
 import os
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncIterator
-from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from unittest.mock import AsyncMock
 
-# ── Make the migrated service + contracts importable ─────────────────────────
 _GW_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../../services/gateway-edge")
 )
 _CONTRACTS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../../packages/contracts")
 )
-for path in (_GW_DIR, _CONTRACTS_DIR):
+_CORE_COLLAB_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../services/core-collab")
+)
+for path in (_GW_DIR, _CONTRACTS_DIR, _CORE_COLLAB_DIR):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-# ── Null lifespan — skips real service connections ────────────────────────────
 
 @asynccontextmanager
 async def _null_lifespan(app: FastAPI):  # type: ignore[type-arg]
     yield
 
 
-# ── Mock EventService ─────────────────────────────────────────────────────────
-
-class MockEventService:
-    """
-    Drop-in replacement for EventService.
-
-    Tests can customise:
-      mock_event.response_content  – what wait_for_response returns
-      mock_event.stream_tokens     – token list yielded by stream_response
-      mock_event.stream_error      – if set, stream_response yields an error event
-      mock_event.published         – list of KafkaChatRequest published
-    """
-
+class MockCollaborationService:
     def __init__(self) -> None:
-        self.response_content: str = "Mock assistant response"
-        self.stream_tokens: list[str] = ["Hello", " world"]
-        self.stream_error: str | None = None
-        self.published: list = []
-        self._registry: dict[str, UUID] = {}
+        from gateway_edge.models import Workspace
+
+        self.workspaces = {}
+        self.participants = {}
+        self.threads = {}
+        self.memberships = {}
+        self.messages = {}
+        self.memory_entries = {}
+        self.events = {}
+        self.workspace_sequences = {}
+        self.thread_sequences = {}
+        self.subscriptions = {}
 
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
 
-    def register_response_future(self, correlation_id: UUID) -> None: ...
-    def register_stream_queue(self, correlation_id: UUID) -> None: ...
+    async def create_workspace(self, payload):
+        from gateway_edge.models import Workspace, WorkspaceDetail, ParticipantProfile
 
-    async def publish_chat_request(self, request) -> None:
-        self.published.append(request)
-        self._registry[str(request.correlation_id)] = request.session_id
+        now = datetime.now(timezone.utc)
+        workspace = Workspace(
+            workspace_id=uuid4(),
+            name=payload.name,
+            description=payload.description,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        participant = ParticipantProfile(
+            participant_id=payload.actor.participant_id,
+            workspace_id=workspace.workspace_id,
+            participant_type=payload.actor.participant_type,
+            display_name=payload.actor.display_name,
+            description=payload.actor.description,
+            roles=payload.actor.roles,
+            capabilities=payload.actor.capabilities,
+            visibility_scope=payload.actor.visibility_scope,
+            created_at=now,
+            updated_at=now,
+        )
+        self.workspaces[str(workspace.workspace_id)] = workspace
+        self.participants.setdefault(str(workspace.workspace_id), {})[
+            str(participant.participant_id)
+        ] = participant
+        self.workspace_sequences[str(workspace.workspace_id)] = 2
+        return WorkspaceDetail(workspace=workspace, participants=[participant])
 
-    async def wait_for_response(self, correlation_id: UUID, timeout=None):
-        from gateway_edge.models import KafkaChatResponse
-        sid = self._registry.get(str(correlation_id), uuid4())
-        return KafkaChatResponse(
-            correlation_id=correlation_id,
-            session_id=sid,
-            type="response",
-            content=self.response_content,
+    async def list_workspaces(self):
+        return list(self.workspaces.values())
+
+    async def delete_workspace(self, workspace_id: UUID, payload):
+        workspace = self.workspaces.pop(str(workspace_id), None)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        self.participants.pop(str(workspace_id), None)
+        thread_ids = [
+            thread_id
+            for thread_id, thread in self.threads.items()
+            if thread.workspace_id == workspace_id
+        ]
+        for thread_id in thread_ids:
+            self.threads.pop(thread_id, None)
+            self.memberships.pop(thread_id, None)
+            self.messages.pop(thread_id, None)
+            self.events.pop(thread_id, None)
+            self.thread_sequences.pop(thread_id, None)
+            self.subscriptions.pop(thread_id, None)
+        self.memory_entries.pop(str(workspace_id), None)
+        self.workspace_sequences.pop(str(workspace_id), None)
+        return {"deleted": True, "workspace_id": str(workspace_id)}
+
+    async def get_workspace(self, workspace_id: UUID):
+        from gateway_edge.models import WorkspaceDetail
+
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        participants = list(self.participants.get(str(workspace_id), {}).values())
+        return WorkspaceDetail(workspace=workspace, participants=participants)
+
+    async def create_thread(self, workspace_id: UUID, payload):
+        from gateway_edge.models import Membership, Thread, ThreadDetail
+
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        now = datetime.now(timezone.utc)
+        thread = Thread(
+            thread_id=uuid4(),
+            workspace_id=workspace_id,
+            title=payload.title,
+            parent_thread_id=payload.parent_thread_id,
+            previous_thread_id=payload.previous_thread_id,
+            related_thread_ids=payload.related_thread_ids,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        membership = Membership(
+            membership_id=uuid4(),
+            workspace_id=workspace_id,
+            thread_id=thread.thread_id,
+            participant_id=payload.actor.participant_id,
+            role="owner",
+            permissions=["post_messages", "manage_thread", "edit_memory"],
+            joined_at=now,
+        )
+        self.threads[str(thread.thread_id)] = thread
+        self.memberships.setdefault(str(thread.thread_id), []).append(membership)
+        self.thread_sequences[str(thread.thread_id)] = 2
+        self.events.setdefault(str(thread.thread_id), [])
+        return ThreadDetail(thread=thread, memberships=[membership])
+
+    async def list_threads(self, workspace_id: UUID):
+        if str(workspace_id) not in self.workspaces:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        return [
+            thread
+            for thread in self.threads.values()
+            if thread.workspace_id == workspace_id
+        ]
+
+    async def get_thread(self, thread_id: UUID):
+        from gateway_edge.models import ThreadDetail
+
+        thread = self.threads.get(str(thread_id))
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
+        memberships = self.memberships.get(str(thread_id), [])
+        return ThreadDetail(thread=thread, memberships=memberships)
+
+    async def get_timeline(self, thread_id: UUID):
+        from gateway_edge.models import TimelinePage
+
+        if str(thread_id) not in self.threads:
+            raise KeyError(f"Thread {thread_id} not found")
+        return TimelinePage(
+            thread_id=thread_id,
+            messages=self.messages.get(str(thread_id), []),
         )
 
-    async def stream_response(self, correlation_id: UUID) -> AsyncIterator:
-        from gateway_edge.models import StreamEvent
-        sid = self._registry.get(str(correlation_id), uuid4())
-        if self.stream_error:
-            yield StreamEvent(type="error", session_id=sid, correlation_id=correlation_id, error=self.stream_error)
-            return
-        for token in self.stream_tokens:
-            yield StreamEvent(type="token", session_id=sid, correlation_id=correlation_id, content=token)
-        yield StreamEvent(type="done", session_id=sid, correlation_id=correlation_id, content="")
+    async def post_message(self, thread_id: UUID, payload):
+        from gateway_edge.models import ActorRef, EventEnvelope, TargetRef, TimelineMessage
 
-
-# ── Simple in-memory stores ───────────────────────────────────────────────────
-
-@pytest.fixture
-def session_store() -> dict:
-    """Blank in-memory session dict for each test."""
-    return {}
-
-
-@pytest.fixture
-def history_store() -> dict:
-    """Blank in-memory history dict for each test."""
-    return {}
-
-
-@pytest.fixture
-def mock_event() -> MockEventService:
-    """Controllable Kafka stand-in for each test."""
-    return MockEventService()
-
-
-# ── Master patch fixture ──────────────────────────────────────────────────────
-
-@pytest.fixture
-def patched(monkeypatch, session_store, history_store, mock_event):
-    """
-    Apply all IO-layer patches.  Depends on session_store, history_store,
-    and mock_event so tests can inspect and mutate them.
-    """
-    from gateway_edge.models import SessionInfo
-
-    # ── Session service ───────────────────────────────────────────────────────
-    async def _create_session(sid: UUID) -> SessionInfo:
+        thread = self.threads.get(str(thread_id))
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
         now = datetime.now(timezone.utc)
-        data = {
-            "session_id": str(sid),
-            "created_at": now.isoformat(),
-            "last_active": now.isoformat(),
-            "message_count": 0,
-        }
-        session_store[str(sid)] = data
-        return SessionInfo(**data)
+        next_sequence = self.thread_sequences.get(str(thread_id), 0) + 1
+        self.thread_sequences[str(thread_id)] = next_sequence
+        message = TimelineMessage(
+            message_id=uuid4(),
+            workspace_id=thread.workspace_id,
+            thread_id=thread_id,
+            actor=ActorRef(type=payload.actor.participant_type, id=payload.actor.participant_id),
+            visibility=payload.visibility,
+            content=payload.content,
+            status="completed",
+            correlation_id=uuid4(),
+            sequence=next_sequence,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        self.messages.setdefault(str(thread_id), []).append(message)
+        event = EventEnvelope(
+            event_type="message.created",
+            workspace_id=thread.workspace_id,
+            thread_id=thread_id,
+            actor=message.actor,
+            target=TargetRef(type="message", id=message.message_id),
+            visibility=payload.visibility,
+            correlation_id=message.correlation_id,
+            sequence=message.sequence,
+            timestamp=now,
+            payload=message.model_dump(mode="json"),
+        )
+        self.events.setdefault(str(thread_id), []).append(event)
+        await self._fan_out(thread_id, event)
+        if payload.create_task:
+            task_event = EventEnvelope(
+                event_type="task.created",
+                workspace_id=thread.workspace_id,
+                thread_id=thread_id,
+                actor=message.actor,
+                target=TargetRef(type="task", id=uuid4()),
+                visibility="agents_only",
+                correlation_id=message.correlation_id,
+                causation_id=message.message_id,
+                sequence=message.sequence + 1,
+                timestamp=now,
+                payload={"thread_id": str(thread_id)},
+            )
+            self.thread_sequences[str(thread_id)] = message.sequence + 1
+            self.events[str(thread_id)].append(task_event)
+            await self._fan_out(thread_id, task_event)
+        return message
 
-    async def _get_session(sid: UUID) -> SessionInfo | None:
-        data = session_store.get(str(sid))
-        return SessionInfo(**data) if data else None
+    async def list_memory_entries(self, workspace_id: UUID):
+        if str(workspace_id) not in self.workspaces:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        return list(self.memory_entries.get(str(workspace_id), {}).values())
 
-    async def _touch_session(sid: UUID, increment_count: bool = False) -> None:
-        if str(sid) in session_store:
-            session_store[str(sid)]["last_active"] = datetime.now(timezone.utc).isoformat()
-            if increment_count:
-                session_store[str(sid)]["message_count"] += 1
+    async def create_memory_entry(self, workspace_id: UUID, payload):
+        from gateway_edge.models import MemoryEntry
 
-    async def _delete_session(sid: UUID) -> bool:
-        return bool(session_store.pop(str(sid), None))
+        if str(workspace_id) not in self.workspaces:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        now = datetime.now(timezone.utc)
+        entry = MemoryEntry(
+            memory_entry_id=uuid4(),
+            workspace_id=workspace_id,
+            entry_type=payload.entry_type,
+            title=payload.title,
+            content=payload.content,
+            tags=payload.tags,
+            created_by=payload.actor.participant_id,
+            updated_by=payload.actor.participant_id,
+            visibility=payload.visibility,
+            linked_thread_ids=payload.linked_thread_ids,
+            created_at=now,
+            updated_at=now,
+        )
+        self.memory_entries.setdefault(str(workspace_id), {})[
+            str(entry.memory_entry_id)
+        ] = entry
+        return entry
 
-    monkeypatch.setattr("gateway_edge.services.session.create_session", _create_session)
-    monkeypatch.setattr("gateway_edge.services.session.get_session",    _get_session)
-    monkeypatch.setattr("gateway_edge.services.session.touch_session",  _touch_session)
-    monkeypatch.setattr("gateway_edge.services.session.delete_session", _delete_session)
-    monkeypatch.setattr("gateway_edge.services.session.setup_valkey",   AsyncMock())
-    monkeypatch.setattr("gateway_edge.services.session.teardown_valkey", AsyncMock())
+    async def update_memory_entry(self, workspace_id: UUID, memory_entry_id: UUID, payload):
+        entries = self.memory_entries.get(str(workspace_id), {})
+        entry = entries.get(str(memory_entry_id))
+        if entry is None:
+            raise KeyError(f"Memory entry {memory_entry_id} not found")
+        updated = entry.model_copy(
+            update={
+                "title": payload.title if payload.title is not None else entry.title,
+                "content": payload.content if payload.content is not None else entry.content,
+                "tags": payload.tags if payload.tags is not None else entry.tags,
+                "visibility": payload.visibility if payload.visibility is not None else entry.visibility,
+                "linked_thread_ids": payload.linked_thread_ids
+                if payload.linked_thread_ids is not None
+                else entry.linked_thread_ids,
+                "updated_by": payload.actor.participant_id,
+                "updated_at": datetime.now(timezone.utc),
+                "version": entry.version + 1,
+            }
+        )
+        entries[str(memory_entry_id)] = updated
+        return updated
 
-    # ── History service ───────────────────────────────────────────────────────
-    async def _save_message(session_id: UUID, message, correlation_id=None) -> None:
-        history_store.setdefault(str(session_id), []).append(message)
+    async def delete_memory_entry(self, workspace_id: UUID, memory_entry_id: UUID, actor):
+        entries = self.memory_entries.get(str(workspace_id), {})
+        if str(memory_entry_id) not in entries:
+            raise KeyError(f"Memory entry {memory_entry_id} not found")
+        entries.pop(str(memory_entry_id))
+        return {"deleted": True, "memory_entry_id": str(memory_entry_id)}
 
-    async def _get_history(session_id: UUID, limit: int = 50) -> list:
-        return history_store.get(str(session_id), [])[:limit]
+    async def publish_presence(self, *, thread_id: UUID, actor, status: str, connection_id: str | None = None):
+        from gateway_edge.models import EventEnvelope, TargetRef, ActorRef
 
-    async def _delete_history(session_id: UUID) -> int:
-        removed = history_store.pop(str(session_id), [])
-        return len(removed)
+        thread = self.threads.get(str(thread_id))
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
+        sequence = self.thread_sequences.get(str(thread_id), 0) + 1
+        self.thread_sequences[str(thread_id)] = sequence
+        event = EventEnvelope(
+            event_type="presence.updated",
+            workspace_id=thread.workspace_id,
+            thread_id=thread_id,
+            actor=ActorRef(type=actor.participant_type, id=actor.participant_id),
+            target=TargetRef(type="participant", id=actor.participant_id),
+            visibility="workspace",
+            correlation_id=uuid4(),
+            sequence=sequence,
+            timestamp=datetime.now(timezone.utc),
+            payload={
+                "participant_id": str(actor.participant_id),
+                "status": status,
+                "connection_id": connection_id,
+            },
+        )
+        self.events.setdefault(str(thread_id), []).append(event)
+        await self._fan_out(thread_id, event)
+        return event
 
-    monkeypatch.setattr("gateway_edge.services.history.save_message",   _save_message)
-    monkeypatch.setattr("gateway_edge.services.history.get_history",    _get_history)
-    monkeypatch.setattr("gateway_edge.services.history.delete_history", _delete_history)
+    async def on_thread_connected(self, *, thread_id: UUID, actor, connection_id: str):
+        return await self.publish_presence(
+            thread_id=thread_id,
+            actor=actor,
+            status="active",
+            connection_id=connection_id,
+        )
 
-    # ── Postgres lifecycle ────────────────────────────────────────────────────
-    monkeypatch.setattr("gateway_edge.db.postgres.setup_postgres",   AsyncMock())
+    async def on_thread_disconnected(self, *, thread_id: UUID, actor, connection_id: str):
+        return await self.publish_presence(
+            thread_id=thread_id,
+            actor=actor,
+            status="offline",
+            connection_id=connection_id,
+        )
+
+    async def stream_thread_events(self, thread_id: UUID, *, after_sequence: int | None = None, follow: bool = True):
+        if str(thread_id) not in self.threads:
+            raise KeyError(f"Thread {thread_id} not found")
+        sequence_floor = after_sequence or 0
+        for event in self.events.get(str(thread_id), []):
+            if (event.sequence or 0) > sequence_floor:
+                yield event
+        if not follow:
+            return
+        queue: asyncio.Queue = asyncio.Queue()
+        self.subscriptions.setdefault(str(thread_id), set()).add(queue)
+        try:
+            while True:
+                yield await queue.get()
+        finally:
+            self.subscriptions[str(thread_id)].discard(queue)
+
+    async def touch_presence(self, *, thread_id: UUID, actor, connection_id: str | None = None, status: str = "active"):
+        return None
+
+    async def _fan_out(self, thread_id: UUID, event) -> None:
+        for queue in list(self.subscriptions.get(str(thread_id), set())):
+            await queue.put(event)
+
+
+@pytest.fixture
+def mock_collaboration_service():
+    return MockCollaborationService()
+
+
+@pytest.fixture
+def patched(monkeypatch, mock_collaboration_service):
+    monkeypatch.setattr("gateway_edge.services.collaboration.collaboration_service", mock_collaboration_service)
+    monkeypatch.setattr("gateway_edge.routers.collaboration.collab_svc.collaboration_service", mock_collaboration_service)
+    monkeypatch.setattr("gateway_edge.db.postgres.setup_postgres", AsyncMock())
     monkeypatch.setattr("gateway_edge.db.postgres.teardown_postgres", AsyncMock())
+    monkeypatch.setattr("gateway_edge.services.session.setup_valkey", AsyncMock())
+    monkeypatch.setattr("gateway_edge.services.session.teardown_valkey", AsyncMock())
+    monkeypatch.setattr("gateway_edge.services.events.event_service.start", AsyncMock())
+    monkeypatch.setattr("gateway_edge.services.events.event_service.stop", AsyncMock())
+    return mock_collaboration_service
 
-    # ── EventService singleton ────────────────────────────────────────────────
-    monkeypatch.setattr("gateway_edge.services.events.event_service",      mock_event)
-    monkeypatch.setattr("gateway_edge.routers.chat.event_svc.event_service", mock_event)
-
-    return {
-        "session_store": session_store,
-        "history_store": history_store,
-        "mock_event":    mock_event,
-    }
-
-
-# ── Async HTTP client (unit tests) ────────────────────────────────────────────
 
 @pytest_asyncio.fixture
 async def client(patched) -> AsyncIterator[AsyncClient]:
-    """Async HTTPX client against the mocked ASGI gateway_edge."""
     from gateway_edge.main import create_app
+
     app = create_app()
     app.router.lifespan_context = _null_lifespan
     async with AsyncClient(
@@ -212,14 +392,21 @@ async def client(patched) -> AsyncIterator[AsyncClient]:
         yield ac
 
 
-# ── Sync TestClient with WebSocket support (unit tests) ───────────────────────
-
 @pytest.fixture
 def sync_client(patched):
-    """Synchronous Starlette TestClient — used for WebSocket tests."""
     from starlette.testclient import TestClient
     from gateway_edge.main import create_app
+
     app = create_app()
     app.router.lifespan_context = _null_lifespan
-    with TestClient(app, raise_server_exceptions=True) as tc:
+    with TestClient(app) as tc:
         yield tc
+
+
+@pytest.fixture
+def actor_payload() -> dict[str, str]:
+    return {
+        "participant_id": str(uuid4()),
+        "participant_type": "user",
+        "display_name": "Nikolay",
+    }

@@ -1,3 +1,3 @@
 # gateway-edge
 
-FastAPI edge service for HTTP, SSE, WebSocket, auth, and client connection management.
+FastAPI edge service for Open Talon collaboration APIs, SSE/WebSocket event streams, auth, and client connection management.

@@ -22,5 +22,8 @@ env/
 infrastructure/data/
 deploy/infrastructure/data/
 
+# Local runtime artifacts
+.run/
+
 # Future frontend app dependencies
 apps/web/node_modules/

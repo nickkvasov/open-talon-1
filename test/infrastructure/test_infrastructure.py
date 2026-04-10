@@ -9,6 +9,8 @@ import subprocess
 from confluent_kafka import Producer, Consumer
 from dotenv import load_dotenv
 
+pytestmark = pytest.mark.integration
+
 COMPOSE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../infrastructure'))
 load_dotenv(os.path.join(COMPOSE_PATH, '.env'))
 

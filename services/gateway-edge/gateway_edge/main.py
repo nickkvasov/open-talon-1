@@ -11,7 +11,8 @@ from fastapi.staticfiles import StaticFiles
 from gateway_edge.auth.middleware import AuthMiddleware
 from gateway_edge.config import settings
 from gateway_edge.db.postgres import setup_postgres, teardown_postgres
-from gateway_edge.routers import admin, chat, health
+from gateway_edge.routers import admin, collaboration, health
+from gateway_edge.services.collaboration import collaboration_service
 from gateway_edge.services.events import event_service
 from gateway_edge.services.session import setup_valkey, teardown_valkey
 
@@ -31,10 +32,12 @@ async def lifespan(app: FastAPI):
     await setup_postgres()
     await setup_valkey()
     await event_service.start()
+    await collaboration_service.start()
     logger.info("Gateway ready — auth_mode=%s", settings.auth_mode)
     yield
     # ── Shutdown ─────────────────────────────────────────────────────────────
     logger.info("Shutting down …")
+    await collaboration_service.stop()
     await event_service.stop()
     await teardown_valkey()
     await teardown_postgres()
@@ -46,7 +49,7 @@ def create_app() -> FastAPI:
         title="Open Talon API Gateway",
         description=(
             "Multi-interface API gateway: REST, SSE streaming, WebSocket.\n\n"
-            "Publishes chat requests to Kafka and waits for agent responses."
+            "Fronts the Open Talon collaboration kernel for workspaces, threads, and shared event timelines."
         ),
         version="0.1.0",
         lifespan=lifespan,
@@ -73,7 +76,7 @@ def create_app() -> FastAPI:
 
     # ── Routers ───────────────────────────────────────────────────────────────
     app.include_router(health.router)
-    app.include_router(chat.router)
+    app.include_router(collaboration.router)
     app.include_router(admin.router)
 
     # ── Static Web UI ─────────────────────────────────────────────────────────

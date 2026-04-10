@@ -30,6 +30,8 @@ source .venv/bin/activate
 That root environment installs:
 
 - shared contracts from `packages/contracts`
+- the collaboration kernel from `services/core-collab`
+- the agent runtime helpers from `services/agent-runtime`
 - the gateway edge service from `services/gateway-edge`
 - the TUI app from `apps/tui`
 - repo-level test dependencies for gateway and infrastructure suites
@@ -44,11 +46,14 @@ Automations operate sequentially leveraging `pytest` through explicit Python net
 # Enable the repository virtual environment
 source .venv/bin/activate
 
-# Gateway tests
+# Default maintained unit suite
+pytest -q
+
+# Gateway tests only
 pytest tests/gateway-edge -q
 
-# Infrastructure tests
-pytest test/infrastructure/test_infrastructure.py -v -s
+# Infrastructure integration tests
+pytest -m integration test/infrastructure/test_infrastructure.py -v -s
 ```
 
 ## AI Model Initialization Note
