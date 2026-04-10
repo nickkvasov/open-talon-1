@@ -6,11 +6,34 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-admin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
       POSTGRES_DB: ${POSTGRES_DB:-app_db}
+      TZ: UTC
+      PGTZ: UTC
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     restart: unless-stopped
+
+  langfuse-db-init:
+    image: pgvector/pgvector:pg16
+    container_name: langfuse-db-init
+    depends_on:
+      - postgres
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-password}
+      LANGFUSE_POSTGRES_DB: ${LANGFUSE_POSTGRES_DB:-langfuse_db}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        until pg_isready -h postgres -p 5432 -U "${POSTGRES_USER:-admin}"; do
+          sleep 1
+        done
+        psql -h postgres -p 5432 -U "${POSTGRES_USER:-admin}" -d postgres -tc \
+          "SELECT 1 FROM pg_database WHERE datname = '$${LANGFUSE_POSTGRES_DB}'" | grep -q 1 || \
+        psql -h postgres -p 5432 -U "${POSTGRES_USER:-admin}" -d postgres -c \
+          "CREATE DATABASE \"$${LANGFUSE_POSTGRES_DB}\""
+    restart: "no"
 
   kafka:
     image: apache/kafka:4.2.0
@@ -53,10 +76,127 @@ services:
   valkey:
     image: valkey/valkey:latest
     container_name: valkey
+    command: ["valkey-server", "--requirepass", "${LANGFUSE_VALKEY_PASSWORD:-langfuse-dev-secret}"]
     ports:
       - "${VALKEY_PORT:-6379}:6379"
     volumes:
       - ./data/valkey:/data
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: clickhouse
+    environment:
+      CLICKHOUSE_DB: ${LANGFUSE_CLICKHOUSE_DB:-default}
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-langfuse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-langfuse}
+      TZ: UTC
+    ports:
+      - "${LANGFUSE_CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "${LANGFUSE_CLICKHOUSE_NATIVE_PORT:-9000}:9000"
+    volumes:
+      - ./data/clickhouse:/var/lib/clickhouse
+      - ./data/clickhouse-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-28T09-55-16Z
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${LANGFUSE_MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_ROOT_PASSWORD:-miniosecret}
+    ports:
+      - "${LANGFUSE_MINIO_API_PORT:-9090}:9000"
+      - "${LANGFUSE_MINIO_CONSOLE_PORT:-9091}:9001"
+    volumes:
+      - ./data/minio:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: langfuse-worker
+    depends_on:
+      - postgres
+      - langfuse-db-init
+      - valkey
+      - clickhouse
+      - minio
+    environment: &langfuse-env
+      NEXTAUTH_URL: ${LANGFUSE_PUBLIC_URL:-http://localhost:3000}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-admin}:${POSTGRES_PASSWORD:-password}@postgres:5432/${LANGFUSE_POSTGRES_DB:-langfuse_db}
+      SALT: ${LANGFUSE_SALT:-langfuse-dev-salt}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      TELEMETRY_ENABLED: ${LANGFUSE_TELEMETRY_ENABLED:-false}
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-langfuse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-langfuse}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_BUCKET:-langfuse}
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_REGION:-auto}
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD:-miniosecret}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: ${LANGFUSE_S3_EVENT_PREFIX:-events/}
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: ${LANGFUSE_S3_BUCKET:-langfuse}
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: ${LANGFUSE_S3_REGION:-auto}
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD:-miniosecret}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_MEDIA_UPLOAD_ENDPOINT:-http://localhost:9090}
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: ${LANGFUSE_S3_MEDIA_PREFIX:-media/}
+      LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+      REDIS_HOST: valkey
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${LANGFUSE_VALKEY_PASSWORD:-langfuse-dev-secret}
+      REDIS_TLS_ENABLED: "false"
+    ports:
+      - "${LANGFUSE_WORKER_PORT:-3030}:3030"
+    restart: unless-stopped
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    container_name: langfuse-web
+    depends_on:
+      - postgres
+      - langfuse-db-init
+      - valkey
+      - clickhouse
+      - minio
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-langfuse-dev-secret}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-Open Talon}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-Default Project}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@example.com}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-Admin}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-admin123456}
+    ports:
+      - "${LANGFUSE_PORT:-3000}:3000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "HOST=$(hostname) node -e \"require('http').get('http://' + process.env.HOST + ':3000', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     restart: unless-stopped
 
   ollama:
@@ -71,49 +211,4 @@ services:
       - ./data/ollama:/root/.ollama
       - ./ollama-entrypoint.sh:/entrypoint.sh
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
-    restart: unless-stopped
-
-  api-gateway:
-    build:
-      context: ../api-gateway
-      dockerfile: Dockerfile
-    container_name: api-gateway
-    depends_on:
-      - postgres
-      - kafka
-      - valkey
-      - openbao
-    environment:
-      # ── Gateway ─────────────────────────────────────────────────
-      PORT: ${GATEWAY_PORT:-8000}
-      LOG_LEVEL: ${GATEWAY_LOG_LEVEL:-info}
-      AUTH_MODE: ${AUTH_MODE:-none}
-      CORS_ORIGINS: ${CORS_ORIGINS:-*}
-      # ── Postgres ─────────────────────────────────────────────────
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: "5432"
-      POSTGRES_USER: ${POSTGRES_USER:-admin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
-      POSTGRES_DB: ${POSTGRES_DB:-app_db}
-      # ── Valkey ───────────────────────────────────────────────────
-      VALKEY_HOST: valkey
-      VALKEY_PORT: "6379"
-      # ── Kafka ────────────────────────────────────────────────────
-      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
-      KAFKA_REQUEST_TOPIC: ${KAFKA_REQUEST_TOPIC:-talon.chat.requests}
-      KAFKA_RESPONSE_TOPIC: ${KAFKA_RESPONSE_TOPIC:-talon.chat.responses}
-      KAFKA_CONSUMER_GROUP: ${KAFKA_CONSUMER_GROUP:-api-gateway}
-      # ── OpenBao ──────────────────────────────────────────────────
-      OPENBAO_ADDRESS: http://openbao:8200
-      OPENBAO_ADMIN_TOKEN: ${BAO_ROOT_TOKEN:-root}
-      # ── Dev ──────────────────────────────────────────────────────
-      ECHO_AGENT_ENABLED: ${ECHO_AGENT_ENABLED:-false}
-    ports:
-      - "${GATEWAY_PORT:-8000}:8000"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 15s
-      timeout: 5s
-      start_period: 20s
-      retries: 5
     restart: unless-stopped

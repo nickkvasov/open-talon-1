@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     kafka_agent_tasks_topic: str = "talon.agent.tasks"
     kafka_agent_events_topic: str = "talon.agent.events"
     kafka_presence_topic: str = "talon.presence"
-    kafka_consumer_group: str = "api-gateway"
+    kafka_consumer_group: str = "gateway-edge"
     kafka_startup_timeout_seconds: float = 30.0
     kafka_startup_retry_interval_seconds: float = 1.0
 

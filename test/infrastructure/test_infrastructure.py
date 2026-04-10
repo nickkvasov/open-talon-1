@@ -6,6 +6,7 @@ import redis
 import hvac
 import uuid
 import subprocess
+import urllib.request
 from confluent_kafka import Producer, Consumer
 from dotenv import load_dotenv
 
@@ -29,6 +30,10 @@ KAFKA_PORT = os.getenv("KAFKA_PORT", "9092")
 
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
 OLLAMA_MODELS = [m.strip() for m in os.getenv("REQUIRED_MODELS", "gemma4:31b,gemma4:e4b").split(',') if m.strip()]
+LANGFUSE_PORT = os.getenv("LANGFUSE_PORT", "3000")
+LANGFUSE_CLICKHOUSE_HTTP_PORT = os.getenv("LANGFUSE_CLICKHOUSE_HTTP_PORT", "8123")
+LANGFUSE_MINIO_API_PORT = os.getenv("LANGFUSE_MINIO_API_PORT", "9090")
+LANGFUSE_VALKEY_PASSWORD = os.getenv("LANGFUSE_VALKEY_PASSWORD", "langfuse-dev-secret")
 
 @pytest.fixture(scope="session")
 def infrastructure():
@@ -44,7 +49,12 @@ def infrastructure():
     
     # Wait for Valkey
     wait_for_service(
-        lambda: redis.Redis(host='localhost', port=int(VALKEY_PORT), db=0).ping(),
+        lambda: redis.Redis(
+            host='localhost',
+            port=int(VALKEY_PORT),
+            db=0,
+            password=LANGFUSE_VALKEY_PASSWORD,
+        ).ping(),
         "Valkey"
     )
     
@@ -61,11 +71,31 @@ def infrastructure():
         return True
         
     wait_for_service(check_kafka, "Kafka")
+
+    def check_clickhouse():
+        req = urllib.request.Request(f"http://localhost:{LANGFUSE_CLICKHOUSE_HTTP_PORT}/ping")
+        with urllib.request.urlopen(req) as response:
+            return response.status == 200
+
+    wait_for_service(check_clickhouse, "ClickHouse")
+
+    def check_minio():
+        req = urllib.request.Request(f"http://localhost:{LANGFUSE_MINIO_API_PORT}/minio/health/live")
+        with urllib.request.urlopen(req) as response:
+            return response.status == 200
+
+    wait_for_service(check_minio, "MinIO")
+
+    def check_langfuse():
+        req = urllib.request.Request(f"http://localhost:{LANGFUSE_PORT}")
+        with urllib.request.urlopen(req) as response:
+            return response.status == 200
+
+    wait_for_service(check_langfuse, "Langfuse")
     
     # Wait for Ollama and models
     def check_ollama_and_models():
         import json
-        import urllib.request
         try:
             req = urllib.request.Request(f'http://localhost:{OLLAMA_PORT}/api/tags')
             with urllib.request.urlopen(req) as response:
@@ -107,7 +137,13 @@ def test_postgres_and_pgvector(infrastructure):
 
 def test_valkey_connection(infrastructure):
     """Test Valkey set and get operations."""
-    r = redis.Redis(host='localhost', port=int(VALKEY_PORT), db=0, decode_responses=True)
+    r = redis.Redis(
+        host='localhost',
+        port=int(VALKEY_PORT),
+        db=0,
+        password=LANGFUSE_VALKEY_PASSWORD,
+        decode_responses=True,
+    )
     r.set('test_key', 'test_value')
     assert r.get('test_key') == 'test_value'
 
@@ -187,7 +223,13 @@ def test_functional_pgvector_similarity_search(infrastructure):
 
 def test_functional_valkey_hash_and_ttl(infrastructure):
     """Test Valkey hash operations and TTL expirations."""
-    r = redis.Redis(host='127.0.0.1', port=int(VALKEY_PORT), db=0, decode_responses=True)
+    r = redis.Redis(
+        host='127.0.0.1',
+        port=int(VALKEY_PORT),
+        db=0,
+        password=LANGFUSE_VALKEY_PASSWORD,
+        decode_responses=True,
+    )
     r.hset("user:1000", mapping={"name": "Alice", "status": "active"})
     assert r.hget("user:1000", "name") == "Alice"
     assert r.hgetall("user:1000") == {"name": "Alice", "status": "active"}
@@ -257,6 +299,12 @@ def test_functional_kafka_json_payloads(infrastructure):
     assert received_payload["event_type"] == "user_signup"
     assert received_payload["user_id"] == 12345
     consumer.close()
+
+def test_langfuse_ui_reachable(infrastructure):
+    """Test that the Langfuse UI is reachable."""
+    req = urllib.request.Request(f"http://127.0.0.1:{LANGFUSE_PORT}")
+    with urllib.request.urlopen(req) as response:
+        assert response.status == 200
 
 def test_functional_ollama_serving(infrastructure):
     """Test Ollama serving specific language models."""

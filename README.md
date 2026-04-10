@@ -8,6 +8,7 @@ This repository contains the local infrastructure, Python services, and client a
 - **Kafka**: Deployed using `apache/kafka:3.8.0` utilizing `KRaft` mode (omitting Zookeeper), configured natively on mapped loops using high level partition assignments.
 - **OpenBao**: Open-source fork of Hashicorp Vault running securely in Development mode tracking explicit Version 2 isolated secrets.
 - **Valkey**: Drop-in compatible Redis equivalent caching infrastructure configured to handle immediate TTL caching.
+- **Langfuse**: Self-hosted LLM observability stack for traces, prompts, and evaluations, deployed with Langfuse Web/Worker plus ClickHouse and MinIO.
 - **Ollama AI**: Serves dynamic generative model orchestration natively mapped across standard REST.
     - Operates natively against Google's modern **Gemma 4** models, with the default test setup pulling the lightweight `gemma4:latest` model.
 
@@ -36,7 +37,18 @@ That root environment installs:
 - the TUI app from `apps/tui`
 - repo-level test dependencies for gateway and infrastructure suites
 
-The nested `api-gateway/.venv` is now legacy-only and should not be the default for day-to-day development.
+`services/gateway-edge` is the only supported local gateway path for day-to-day development.
+
+## Langfuse
+
+The local compose stack now includes a self-hosted Langfuse deployment:
+
+- `langfuse-web` on `http://localhost:3000`
+- `langfuse-worker` on port `3030`
+- `clickhouse` on ports `8123` and `9000`
+- `minio` on ports `9090` and `9091`
+
+This setup reuses the repository Postgres server and Valkey container, but Langfuse now uses its own Postgres database (`LANGFUSE_POSTGRES_DB`) so Prisma migrations do not collide with the application schema. Defaults live in [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example) and mirrored deploy settings live in [`deploy/infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/deploy/infrastructure/.env.example).
 
 ## Pytest Orchestration
 

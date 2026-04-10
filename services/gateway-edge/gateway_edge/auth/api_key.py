@@ -33,6 +33,14 @@ def _redis_key(key_id: str) -> str:
     return f"{_PREFIX}{key_id}"
 
 
+def _decode(value: str | bytes | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode()
+    return value
+
+
 async def create_api_key(payload: ApiKeyCreate) -> ApiKeyInfo:
     r: aioredis.Redis = await get_redis()
     key_id = str(uuid4())
@@ -69,9 +77,12 @@ async def validate_api_key(raw_key: str) -> bool:
     r: aioredis.Redis = await get_redis()
     key_hash = _hash_key(raw_key)
     # Scan all keys — acceptable for expected key volume (<10k)
-    all_ids: set[str] = await r.smembers(_INDEX)  # type: ignore[assignment]
-    for key_id in all_ids:
-        stored_hash = await r.hget(_redis_key(key_id), "key_hash")
+    all_ids = await r.smembers(_INDEX)
+    for key_id_raw in all_ids:
+        key_id = _decode(key_id_raw)
+        if key_id is None:
+            continue
+        stored_hash = _decode(await r.hget(_redis_key(key_id), "key_hash"))
         if stored_hash == key_hash:
             return True
     return False
@@ -86,19 +97,23 @@ async def revoke_api_key(key_id: str) -> bool:
 
 async def list_api_keys() -> list[ApiKeyInfo]:
     r: aioredis.Redis = await get_redis()
-    all_ids: set[str] = await r.smembers(_INDEX)  # type: ignore[assignment]
+    all_ids = await r.smembers(_INDEX)
     keys: list[ApiKeyInfo] = []
-    for key_id in all_ids:
-        data = await r.hgetall(_redis_key(key_id))
+    for key_id_raw in all_ids:
+        key_id = _decode(key_id_raw)
+        if key_id is None:
+            continue
+        raw_data = await r.hgetall(_redis_key(key_id))
+        data = {_decode(k): _decode(v) for k, v in raw_data.items()}
         if not data:
             continue
         keys.append(
             ApiKeyInfo(
-                key_id=data["key_id"],
-                label=data["label"],
-                created_at=datetime.fromisoformat(data["created_at"]),
+                key_id=data["key_id"],  # type: ignore[index]
+                label=data["label"],  # type: ignore[index]
+                created_at=datetime.fromisoformat(data["created_at"]),  # type: ignore[index]
                 expires_at=(
-                    datetime.fromisoformat(data["expires_at"])
+                    datetime.fromisoformat(data["expires_at"])  # type: ignore[index]
                     if data.get("expires_at")
                     else None
                 ),

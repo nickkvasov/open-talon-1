@@ -6,12 +6,13 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from gateway_edge.auth.middleware import AuthMiddleware
 from gateway_edge.config import settings
 from gateway_edge.db.postgres import setup_postgres, teardown_postgres
-from gateway_edge.routers import admin, collaboration, health
+from gateway_edge.routers import admin, chat, collaboration, health
 from gateway_edge.services.collaboration import collaboration_service
 from gateway_edge.services.events import event_service
 from gateway_edge.services.session import setup_valkey, teardown_valkey
@@ -76,12 +77,17 @@ def create_app() -> FastAPI:
 
     # ── Routers ───────────────────────────────────────────────────────────────
     app.include_router(health.router)
+    app.include_router(chat.router)
     app.include_router(collaboration.router)
     app.include_router(admin.router)
 
     # ── Static Web UI ─────────────────────────────────────────────────────────
     if _WEB_DIR.is_dir():
-        app.mount("/", StaticFiles(directory=str(_WEB_DIR), html=True), name="web")
+        app.mount("/static", StaticFiles(directory=str(_WEB_DIR)), name="web-static")
+
+        @app.get("/", include_in_schema=False)
+        async def web_index():
+            return FileResponse(_WEB_DIR / "index.html")
 
     return app
 

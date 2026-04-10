@@ -33,6 +33,16 @@ repo_pythonpath() {
   fi
 }
 
+valkey_password() {
+  if [[ -n "${VALKEY_PASSWORD:-}" ]]; then
+    printf '%s\n' "${VALKEY_PASSWORD}"
+  elif [[ -n "${LANGFUSE_VALKEY_PASSWORD:-}" ]]; then
+    printf '%s\n' "${LANGFUSE_VALKEY_PASSWORD}"
+  else
+    printf '%s\n' "langfuse-dev-secret"
+  fi
+}
+
 gateway_supports_current_api() {
   local pythonpath="$1"
   local url="${2:-http://localhost:8000/openapi.json}"
@@ -64,7 +74,17 @@ start_cmd() {
   echo "Starting infrastructure services..."
   (
     cd "${ROOT_DIR}/infrastructure"
-    docker compose up -d postgres kafka valkey openbao ollama
+    docker compose up -d \
+      postgres \
+      kafka \
+      valkey \
+      openbao \
+      ollama \
+      clickhouse \
+      minio \
+      langfuse-db-init \
+      langfuse-worker \
+      langfuse-web
   )
 
   if [[ -f "${PID_FILE}" ]]; then
@@ -84,7 +104,7 @@ start_cmd() {
 
   echo "Starting local gateway-edge..."
   GATEWAY_PID="$(
-    PYTHONPATH="${pythonpath}" ROOT_DIR="${ROOT_DIR}" LOG_FILE="${LOG_FILE}" PYTHON_BIN="${PYTHON_BIN}" "${PYTHON_BIN}" - <<'PY'
+    PYTHONPATH="${pythonpath}" ROOT_DIR="${ROOT_DIR}" LOG_FILE="${LOG_FILE}" PYTHON_BIN="${PYTHON_BIN}" VALKEY_PASSWORD="$(valkey_password)" "${PYTHON_BIN}" - <<'PY'
 import os
 import subprocess
 
