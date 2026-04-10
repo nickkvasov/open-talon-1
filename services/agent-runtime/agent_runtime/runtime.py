@@ -533,6 +533,12 @@ def render_prompt(context: AgentExecutionContext) -> str:
     for role_definition in context.role_definitions:
         role_lines.append(f"- {role_definition.name}: {role_definition.definition}")
 
+    tool_lines = []
+    for tool in context.workspace_tools:
+        tool_lines.append(
+            f"- {tool.name} | enabled: {'yes' if tool.enabled else 'no'} | {tool.description}"
+        )
+
     trigger_text = context.trigger_message.content if context.trigger_message else ""
     sections = [
         f"Workspace: {context.workspace.name}",
@@ -546,6 +552,9 @@ def render_prompt(context: AgentExecutionContext) -> str:
         "",
         "Workspace role catalog:",
         "\n".join(role_lines) or "- none",
+        "",
+        "Workspace tools:",
+        "\n".join(tool_lines) or "- none",
         "",
         "Workspace memory:",
         "\n".join(memory_lines) or "- none",

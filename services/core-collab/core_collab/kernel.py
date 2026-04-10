@@ -15,15 +15,18 @@ from .contracts import (
     AgentExecutionContext,
     AgentRunResult,
     AgentTaskRouting,
+    AttachWorkspaceToolRequest,
     AssumeParticipantRoleRequest,
     Artifact,
     CreateAgentParticipantRequest,
     CreateSystemAgentRequest,
+    CreateSystemToolRequest,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
     DeleteParticipantRequest,
+    DeleteWorkspaceToolRequest,
     DeleteWorkspaceRequest,
     EventEnvelope,
     Membership,
@@ -32,6 +35,7 @@ from .contracts import (
     ParticipantProfile,
     PresenceState,
     RoleDefinition,
+    SystemToolDefinition,
     Task,
     TargetRef,
     Thread,
@@ -42,12 +46,15 @@ from .contracts import (
     StopReason,
     UpdateSystemAgentRequest,
     UpsertRoleDefinitionRequest,
+    UpdateSystemToolRequest,
     build_default_interaction_contract,
     interaction_contract_is_empty,
     UpdateAgentParticipantRequest,
     UpdateMemoryEntryRequest,
+    UpdateWorkspaceToolRequest,
     Workspace,
     WorkspaceDetail,
+    WorkspaceTool,
 )
 from .repository import CollaborationRepository, UserRecord
 
@@ -89,6 +96,16 @@ class ParticipantCommandResult(CommandResult):
 @dataclass
 class RoleDefinitionCommandResult(CommandResult):
     role_definition: RoleDefinition | None = None
+
+
+@dataclass
+class WorkspaceToolCommandResult(CommandResult):
+    tool: WorkspaceTool | None = None
+
+
+@dataclass
+class SystemToolCommandResult(CommandResult):
+    tool: SystemToolDefinition | None = None
 
 
 @dataclass
@@ -181,6 +198,7 @@ class CollaborationKernel:
             workspace=workspace,
             participants=[participant],
             role_definitions=self._role_definitions_from_workspace(workspace),
+            tools=[],
         )
         logger.debug(
             "Kernel create_workspace complete workspace_id=%s event_count=%s",
@@ -215,10 +233,15 @@ class CollaborationKernel:
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
         participants = await self._repository.list_participants(workspace_id)
+        tools = await self._repository.list_workspace_tools(workspace_id)
         return WorkspaceDetail(
             workspace=workspace,
-            participants=participants,
+            participants=[
+                self._advertise_workspace_tools(participant, tools)
+                for participant in participants
+            ],
             role_definitions=self._role_definitions_from_workspace(workspace),
+            tools=tools,
         )
 
     async def list_workspace_participants(
@@ -228,7 +251,12 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
-        return await self._repository.list_participants(workspace_id)
+        tools = await self._repository.list_workspace_tools(workspace_id)
+        participants = await self._repository.list_participants(workspace_id)
+        return [
+            self._advertise_workspace_tools(participant, tools)
+            for participant in participants
+        ]
 
     async def delete_participant(
         self,
@@ -312,6 +340,64 @@ class CollaborationKernel:
 
     async def list_system_agents(self) -> list[AgentDefinition]:
         return await self._repository.list_system_agents()
+
+    async def create_system_tool(
+        self, payload: CreateSystemToolRequest
+    ) -> SystemToolCommandResult:
+        now = self._now()
+        tool = SystemToolDefinition(
+            tool_id=uuid4(),
+            name=payload.name,
+            description=payload.description,
+            parameter_contract=payload.parameter_contract,
+            input_schema=payload.input_schema,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_system_tool(conn, tool)
+        return SystemToolCommandResult(tool=tool)
+
+    async def list_system_tools(self) -> list[SystemToolDefinition]:
+        return await self._repository.list_system_tools()
+
+    async def update_system_tool(
+        self, tool_id: UUID, payload: UpdateSystemToolRequest
+    ) -> SystemToolCommandResult:
+        existing = await self._repository.fetch_system_tool(tool_id)
+        if existing is None:
+            raise KeyError(f"System tool {tool_id} not found")
+        updated = existing.model_copy(
+            update={
+                "name": payload.name or existing.name,
+                "description": payload.description or existing.description,
+                "parameter_contract": (
+                    payload.parameter_contract
+                    if payload.parameter_contract is not None
+                    else existing.parameter_contract
+                ),
+                "input_schema": (
+                    payload.input_schema
+                    if payload.input_schema is not None
+                    else existing.input_schema
+                ),
+                "updated_by": payload.actor.participant_id,
+                "updated_at": self._now(),
+                "metadata": (
+                    {**existing.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else existing.metadata
+                ),
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_system_tool(conn, updated)
+        return SystemToolCommandResult(tool=updated)
 
     async def update_system_agent(
         self, agent_id: UUID, payload: UpdateSystemAgentRequest
@@ -435,6 +521,158 @@ class CollaborationKernel:
                 await self._repository.record_event(conn, event)
         return RoleDefinitionCommandResult(role_definition=role_definition, events=[event])
 
+    async def list_workspace_tools(self, workspace_id: UUID) -> list[WorkspaceTool]:
+        logger.debug("Kernel list_workspace_tools workspace_id=%s", workspace_id)
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        return await self._repository.list_workspace_tools(workspace_id)
+
+    async def attach_workspace_tool(
+        self,
+        workspace_id: UUID,
+        payload: AttachWorkspaceToolRequest,
+    ) -> WorkspaceToolCommandResult:
+        logger.debug(
+            "Kernel attach_workspace_tool workspace_id=%s actor_id=%s tool_id=%s enabled=%s",
+            workspace_id,
+            payload.actor.participant_id,
+            payload.tool_id,
+            payload.enabled,
+        )
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        system_tool = await self._repository.fetch_system_tool(payload.tool_id)
+        if system_tool is None:
+            raise KeyError(f"System tool {payload.tool_id} not found")
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+        tool = WorkspaceTool(
+            tool_id=system_tool.tool_id,
+            name=system_tool.name,
+            description=system_tool.description,
+            parameter_contract=system_tool.parameter_contract,
+            input_schema=system_tool.input_schema,
+            enabled=payload.enabled,
+            attached_by=payload.actor.participant_id,
+            attached_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_workspace_tool(
+                    conn,
+                    workspace_id=workspace_id,
+                    tool=tool,
+                )
+                event = await self._build_workspace_event(
+                    conn,
+                    workspace_id,
+                    "workspace.tool_attached",
+                    actor=actor,
+                    target=TargetRef(type="workspace", id=workspace_id),
+                    payload=tool.model_dump(mode="json"),
+                    visibility="workspace",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        return WorkspaceToolCommandResult(tool=tool, events=[event])
+
+    async def update_workspace_tool(
+        self,
+        workspace_id: UUID,
+        tool_id: UUID,
+        payload: UpdateWorkspaceToolRequest,
+    ) -> WorkspaceToolCommandResult:
+        logger.debug(
+            "Kernel update_workspace_tool workspace_id=%s actor_id=%s tool_id=%s",
+            workspace_id,
+            payload.actor.participant_id,
+            tool_id,
+        )
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        existing = await self._repository.fetch_workspace_tool(workspace_id, tool_id)
+        if existing is None:
+            raise KeyError(f"Workspace tool {tool_id} not attached to workspace {workspace_id}")
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+        updated = existing.model_copy(
+            update={
+                "enabled": existing.enabled if payload.enabled is None else payload.enabled,
+                "updated_at": now,
+                "metadata": (
+                    {**existing.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else existing.metadata
+                ),
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_workspace_tool(
+                    conn,
+                    workspace_id=workspace_id,
+                    tool=updated,
+                )
+                event = await self._build_workspace_event(
+                    conn,
+                    workspace_id,
+                    "workspace.tool_updated",
+                    actor=actor,
+                    target=TargetRef(type="workspace", id=workspace_id),
+                    payload=updated.model_dump(mode="json"),
+                    visibility="workspace",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        return WorkspaceToolCommandResult(tool=updated, events=[event])
+
+    async def delete_workspace_tool(
+        self,
+        workspace_id: UUID,
+        tool_id: UUID,
+        payload: DeleteWorkspaceToolRequest,
+    ) -> dict[str, bool | str]:
+        logger.debug(
+            "Kernel delete_workspace_tool workspace_id=%s actor_id=%s tool_id=%s",
+            workspace_id,
+            payload.actor.participant_id,
+            tool_id,
+        )
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        removed = await self._repository.fetch_workspace_tool(workspace_id, tool_id)
+        if removed is None:
+            raise KeyError(f"Workspace tool {tool_id} not attached to workspace {workspace_id}")
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                deleted = await self._repository.delete_workspace_tool(
+                    conn,
+                    workspace_id=workspace_id,
+                    tool_id=tool_id,
+                )
+                if not deleted:
+                    raise KeyError(f"Workspace tool {tool_id} not attached to workspace {workspace_id}")
+                event = await self._build_workspace_event(
+                    conn,
+                    workspace_id,
+                    "workspace.tool_deleted",
+                    actor=actor,
+                    target=TargetRef(type="workspace", id=workspace_id),
+                    payload=removed.model_dump(mode="json"),
+                    visibility="workspace",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        return {"deleted": True, "workspace_id": str(workspace_id), "tool_id": str(tool_id)}
+
     async def assume_participant_role(
         self,
         workspace_id: UUID,
@@ -523,6 +761,7 @@ class CollaborationKernel:
         system_agent = await self._repository.fetch_system_agent(payload.agent_id)
         if system_agent is None:
             raise KeyError(f"System agent {payload.agent_id} not found")
+        workspace_tools = await self._repository.list_workspace_tools(workspace_id)
         now = self._now()
         actor = self._actor_from_input(payload.actor)
         participant = ParticipantProfile(
@@ -533,7 +772,10 @@ class CollaborationKernel:
             display_name=system_agent.display_name,
             description=system_agent.description,
             roles=[system_agent.role],
-            capabilities=system_agent.capabilities,
+            capabilities=self._advertised_agent_capabilities(
+                system_agent.capabilities,
+                workspace_tools,
+            ),
             status="active",
             visibility_scope="workspace",
             agent_config=AgentConfiguration(
@@ -560,7 +802,10 @@ class CollaborationKernel:
                     timestamp=now,
                 )
                 await self._repository.record_event(conn, event)
-        return ParticipantCommandResult(participant=participant, events=[event])
+        return ParticipantCommandResult(
+            participant=self._advertise_workspace_tools(participant, workspace_tools),
+            events=[event],
+        )
 
     async def update_agent_participant(
         self,
@@ -584,6 +829,7 @@ class CollaborationKernel:
             raise ValueError("Only agent participants can be updated via the agent API")
         now = self._now()
         actor = self._actor_from_input(payload.actor)
+        workspace_tools = await self._repository.list_workspace_tools(workspace_id)
         updated = existing.model_copy(
             update={
                 "visibility_scope": (
@@ -612,7 +858,10 @@ class CollaborationKernel:
                     timestamp=now,
                 )
                 await self._repository.record_event(conn, event)
-        return ParticipantCommandResult(participant=updated, events=[event])
+        return ParticipantCommandResult(
+            participant=self._advertise_workspace_tools(updated, workspace_tools),
+            events=[event],
+        )
 
     async def create_thread(
         self, workspace_id: UUID, payload: CreateThreadRequest
@@ -873,7 +1122,11 @@ class CollaborationKernel:
                 f"System agent {system_agent_id} is not attached to workspace {task.workspace_id}"
             )
         run = await self._resolve_run_for_context(task, participant, run_id)
-        participants = await self._repository.list_participants(task.workspace_id)
+        workspace_tools = await self._repository.list_workspace_tools(task.workspace_id)
+        participants = [
+            self._advertise_workspace_tools(item, workspace_tools)
+            for item in await self._repository.list_participants(task.workspace_id)
+        ]
         memory_entries = await self._repository.list_memory_entries(task.workspace_id)
         messages = await self._repository.list_timeline_messages(task.thread_id)
         trigger_message = (
@@ -897,9 +1150,10 @@ class CollaborationKernel:
             run=run,
             routing=routing,
             system_agent=system_agent,
-            participant=participant,
+            participant=self._advertise_workspace_tools(participant, workspace_tools),
             participants=participants,
             role_definitions=self._role_definitions_from_workspace(workspace),
+            workspace_tools=workspace_tools,
             messages=visible_messages,
             memory_entries=visible_memory_entries,
             trigger_message=trigger_message,
@@ -1970,6 +2224,34 @@ class CollaborationKernel:
         if isinstance(raw, list):
             return [RoleDefinition.model_validate(item) for item in raw]
         return []
+
+    @staticmethod
+    def _advertised_agent_capabilities(
+        base_capabilities: list[str],
+        workspace_tools: list[WorkspaceTool],
+    ) -> list[str]:
+        combined = list(base_capabilities)
+        for tool in workspace_tools:
+            if tool.enabled:
+                combined.append(f"tool:{tool.name}")
+        return list(dict.fromkeys(combined))
+
+    @classmethod
+    def _advertise_workspace_tools(
+        cls,
+        participant: ParticipantProfile,
+        workspace_tools: list[WorkspaceTool],
+    ) -> ParticipantProfile:
+        if participant.participant_type != "agent":
+            return participant
+        return participant.model_copy(
+            update={
+                "capabilities": cls._advertised_agent_capabilities(
+                    participant.capabilities,
+                    workspace_tools,
+                )
+            }
+        )
 
     @staticmethod
     def _now() -> datetime:

@@ -42,8 +42,10 @@ class MockCollaborationService:
     def __init__(self) -> None:
         self.workspaces = {}
         self.system_agents = {}
+        self.system_tools = {}
         self.participants = {}
         self.role_definitions = {}
+        self.workspace_tools = {}
         self.threads = {}
         self.memberships = {}
         self.messages = {}
@@ -85,11 +87,13 @@ class MockCollaborationService:
             str(participant.participant_id)
         ] = participant
         self.role_definitions[str(workspace.workspace_id)] = {}
+        self.workspace_tools[str(workspace.workspace_id)] = {}
         self.workspace_sequences[str(workspace.workspace_id)] = 2
         return WorkspaceDetail(
             workspace=workspace,
             participants=[participant],
             role_definitions=[],
+            tools=[],
         )
 
     async def list_workspaces(self):
@@ -101,6 +105,7 @@ class MockCollaborationService:
             raise KeyError(f"Workspace {workspace_id} not found")
         self.participants.pop(str(workspace_id), None)
         self.role_definitions.pop(str(workspace_id), None)
+        self.workspace_tools.pop(str(workspace_id), None)
         thread_ids = [
             thread_id
             for thread_id, thread in self.threads.items()
@@ -125,10 +130,12 @@ class MockCollaborationService:
             raise KeyError(f"Workspace {workspace_id} not found")
         participants = list(self.participants.get(str(workspace_id), {}).values())
         role_definitions = list(self.role_definitions.get(str(workspace_id), {}).values())
+        tools = list(self.workspace_tools.get(str(workspace_id), {}).values())
         return WorkspaceDetail(
             workspace=workspace,
             participants=participants,
             role_definitions=role_definitions,
+            tools=tools,
         )
 
     async def list_workspace_participants(self, workspace_id: UUID):
@@ -188,6 +195,50 @@ class MockCollaborationService:
     async def list_system_agents(self):
         return list(self.system_agents.values())
 
+    async def create_system_tool(self, payload):
+        from gateway_edge.models import SystemToolDefinition
+
+        now = datetime.now(timezone.utc)
+        tool = SystemToolDefinition(
+            tool_id=uuid4(),
+            name=payload.name,
+            description=payload.description,
+            parameter_contract=payload.parameter_contract,
+            input_schema=payload.input_schema,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        self.system_tools[str(tool.tool_id)] = tool
+        return tool
+
+    async def list_system_tools(self):
+        return list(self.system_tools.values())
+
+    async def update_system_tool(self, tool_id: UUID, payload):
+        tool = self.system_tools.get(str(tool_id))
+        if tool is None:
+            raise KeyError(f"System tool {tool_id} not found")
+        updated = tool.model_copy(
+            update={
+                "name": payload.name or tool.name,
+                "description": payload.description or tool.description,
+                "parameter_contract": (
+                    payload.parameter_contract
+                    if payload.parameter_contract is not None
+                    else tool.parameter_contract
+                ),
+                "input_schema": payload.input_schema if payload.input_schema is not None else tool.input_schema,
+                "updated_by": payload.actor.participant_id,
+                "updated_at": datetime.now(timezone.utc),
+                "metadata": {**tool.metadata, **payload.metadata} if payload.metadata is not None else tool.metadata,
+            }
+        )
+        self.system_tools[str(tool_id)] = updated
+        return updated
+
     async def update_system_agent(self, agent_id: UUID, payload):
         agent = self.system_agents.get(str(agent_id))
         if agent is None:
@@ -238,6 +289,63 @@ class MockCollaborationService:
         )
         self.role_definitions.setdefault(str(workspace_id), {})[payload.name] = role_definition
         return role_definition
+
+    async def list_workspace_tools(self, workspace_id: UUID):
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        return list(self.workspace_tools.get(str(workspace_id), {}).values())
+
+    async def attach_workspace_tool(self, workspace_id: UUID, payload):
+        from gateway_edge.models import WorkspaceTool
+
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        system_tool = self.system_tools.get(str(payload.tool_id))
+        if system_tool is None:
+            raise KeyError(f"System tool {payload.tool_id} not found")
+        now = datetime.now(timezone.utc)
+        tool = WorkspaceTool(
+            tool_id=system_tool.tool_id,
+            name=system_tool.name,
+            description=system_tool.description,
+            parameter_contract=system_tool.parameter_contract,
+            input_schema=system_tool.input_schema,
+            enabled=payload.enabled,
+            attached_by=payload.actor.participant_id,
+            attached_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        self.workspace_tools.setdefault(str(workspace_id), {})[str(tool.tool_id)] = tool
+        return tool
+
+    async def update_workspace_tool(self, workspace_id: UUID, tool_id: UUID, payload):
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        tool = self.workspace_tools.get(str(workspace_id), {}).get(str(tool_id))
+        if tool is None:
+            raise KeyError(f"Workspace tool {tool_id} not found")
+        updated = tool.model_copy(
+            update={
+                "enabled": tool.enabled if payload.enabled is None else payload.enabled,
+                "updated_at": datetime.now(timezone.utc),
+                "metadata": {**tool.metadata, **payload.metadata} if payload.metadata is not None else tool.metadata,
+            }
+        )
+        self.workspace_tools.setdefault(str(workspace_id), {})[str(tool_id)] = updated
+        return updated
+
+    async def delete_workspace_tool(self, workspace_id: UUID, tool_id: UUID, payload):
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        removed = self.workspace_tools.get(str(workspace_id), {}).pop(str(tool_id), None)
+        if removed is None:
+            raise KeyError(f"Workspace tool {tool_id!r} not found")
+        return {"deleted": True, "workspace_id": str(workspace_id), "tool_id": str(tool_id)}
 
     async def assume_participant_role(self, workspace_id: UUID, participant_id: UUID, payload):
         from gateway_edge.models import ParticipantProfile
@@ -293,7 +401,11 @@ class MockCollaborationService:
             display_name=system_agent.display_name,
             description=system_agent.description,
             roles=[system_agent.role],
-            capabilities=system_agent.capabilities,
+            capabilities=system_agent.capabilities + [
+                f"tool:{tool.name}"
+                for tool in self.workspace_tools.get(str(workspace_id), {}).values()
+                if tool.enabled
+            ],
             visibility_scope="workspace",
             agent_config=AgentConfiguration(
                 endpoint=system_agent.endpoint,

@@ -144,6 +144,46 @@ class RoleDefinition(BaseModel):
     updated_at: datetime = Field(default_factory=utcnow)
 
 
+class ToolParameterDefinition(BaseModel):
+    name: str
+    type: str
+    description: str
+    required: bool = True
+    default: Any | None = None
+    enum: list[Any] = Field(default_factory=list)
+
+
+class ToolParameterContract(BaseModel):
+    parameters: list[ToolParameterDefinition] = Field(default_factory=list)
+    additional_properties: bool = False
+
+
+class SystemToolDefinition(BaseModel):
+    tool_id: UUID
+    name: str
+    description: str
+    parameter_contract: ToolParameterContract = Field(default_factory=ToolParameterContract)
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceTool(BaseModel):
+    tool_id: UUID
+    name: str
+    description: str
+    parameter_contract: ToolParameterContract = Field(default_factory=ToolParameterContract)
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+    attached_by: UUID
+    attached_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class Membership(BaseModel):
     membership_id: UUID
     workspace_id: UUID
@@ -330,6 +370,41 @@ class UpsertRoleDefinitionRequest(BaseModel):
     definition: str
 
 
+class CreateSystemToolRequest(BaseModel):
+    actor: ParticipantInput
+    name: str
+    description: str
+    parameter_contract: ToolParameterContract = Field(default_factory=ToolParameterContract)
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateSystemToolRequest(BaseModel):
+    actor: ParticipantInput
+    name: str | None = None
+    description: str | None = None
+    parameter_contract: ToolParameterContract | None = None
+    input_schema: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class AttachWorkspaceToolRequest(BaseModel):
+    actor: ParticipantInput
+    tool_id: UUID
+    enabled: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateWorkspaceToolRequest(BaseModel):
+    actor: ParticipantInput
+    enabled: bool | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class DeleteWorkspaceToolRequest(BaseModel):
+    actor: ParticipantInput
+
+
 class CreateAgentParticipantRequest(BaseModel):
     actor: ParticipantInput
     agent_id: UUID
@@ -410,6 +485,7 @@ class WorkspaceDetail(BaseModel):
     workspace: Workspace
     participants: list[ParticipantProfile] = Field(default_factory=list)
     role_definitions: list[RoleDefinition] = Field(default_factory=list)
+    tools: list[WorkspaceTool] = Field(default_factory=list)
 
 
 class ThreadDetail(BaseModel):
@@ -432,6 +508,7 @@ class AgentExecutionContext(BaseModel):
     participant: ParticipantProfile
     participants: list[ParticipantProfile] = Field(default_factory=list)
     role_definitions: list[RoleDefinition] = Field(default_factory=list)
+    workspace_tools: list[WorkspaceTool] = Field(default_factory=list)
     messages: list[TimelineMessage] = Field(default_factory=list)
     memory_entries: list[MemoryEntry] = Field(default_factory=list)
     trigger_message: TimelineMessage | None = None

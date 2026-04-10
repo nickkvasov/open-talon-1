@@ -207,6 +207,196 @@ async def test_create_or_update_named_role_definition_in_workspace(client, actor
     assert roles["reviewer"]["definition"] == "Reviews code, architecture, and rollout risk with a QA mindset."
 
 
+async def test_create_workspace_tool_exposes_it_in_workspace_detail(client, actor_payload):
+    workspace_resp = await client.post(
+        "/v1/workspaces",
+        json={"name": "Tool Catalog", "actor": actor_payload},
+    )
+    workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+
+    system_tool_resp = await client.post(
+        "/v1/tools",
+        json={
+            "actor": actor_payload,
+            "name": "repo_search",
+            "description": "Searches the current workspace source tree.",
+            "parameter_contract": {
+                "parameters": [
+                    {
+                        "name": "query",
+                        "type": "string",
+                        "description": "Search text to look up in the repository.",
+                        "required": True,
+                    }
+                ],
+                "additional_properties": False,
+            },
+            "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+            "metadata": {"provider": "workspace"},
+        },
+    )
+    tool_id = system_tool_resp.json()["tool_id"]
+    tool_resp = await client.put(
+        f"/v1/workspaces/{workspace_id}/tools/{tool_id}",
+        json={
+            "actor": actor_payload,
+            "tool_id": tool_id,
+            "enabled": True,
+            "metadata": {"provider": "workspace"},
+        },
+    )
+
+    assert tool_resp.status_code == 200
+    assert system_tool_resp.status_code == 200
+    assert tool_resp.json()["name"] == "repo_search"
+    assert tool_resp.json()["description"] == "Searches the current workspace source tree."
+    assert tool_resp.json()["parameter_contract"]["parameters"][0]["name"] == "query"
+
+    detail_resp = await client.get(f"/v1/workspaces/{workspace_id}")
+    assert detail_resp.status_code == 200
+    tools = {tool["name"]: tool for tool in detail_resp.json()["tools"]}
+    assert tools["repo_search"]["enabled"] is True
+    assert tools["repo_search"]["metadata"]["provider"] == "workspace"
+
+
+async def test_system_tools_can_be_listed_and_updated(client, actor_payload):
+    create_resp = await client.post(
+        "/v1/tools",
+        json={
+            "actor": actor_payload,
+            "name": "repo_search",
+            "description": "Searches the current workspace source tree.",
+            "parameter_contract": {
+                "parameters": [
+                    {
+                        "name": "query",
+                        "type": "string",
+                        "description": "Search text to look up in the repository.",
+                        "required": True,
+                    }
+                ],
+                "additional_properties": False,
+            },
+            "input_schema": {"type": "object"},
+        },
+    )
+    assert create_resp.status_code == 200
+    tool_id = create_resp.json()["tool_id"]
+
+    list_resp = await client.get("/v1/tools")
+    assert list_resp.status_code == 200
+    assert [tool["name"] for tool in list_resp.json()] == ["repo_search"]
+
+    update_resp = await client.patch(
+        f"/v1/tools/{tool_id}",
+        json={
+            "actor": actor_payload,
+            "description": "Searches repository code and metadata.",
+            "metadata": {"version": 2},
+        },
+    )
+    assert update_resp.status_code == 200
+    body = update_resp.json()
+    assert body["tool_id"] == tool_id
+    assert body["description"] == "Searches repository code and metadata."
+    assert body["metadata"]["version"] == 2
+    assert body["parameter_contract"]["parameters"][0]["name"] == "query"
+
+
+async def test_workspace_tool_attachment_can_be_disabled_and_removed(client, actor_payload):
+    workspace_resp = await client.post(
+        "/v1/workspaces",
+        json={"name": "Tool Lifecycle", "actor": actor_payload},
+    )
+    workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+
+    agent_resp = await client.post(
+        "/v1/agents",
+        json={
+            "actor": actor_payload,
+            "display_name": "Research Analyst",
+            "description": "Investigates product questions and synthesizes findings.",
+            "role": "research analyst",
+            "capabilities": ["research", "synthesis"],
+            "endpoint": {
+                "kind": "remote",
+                "url": "https://api.example.com/v1/responses",
+                "model": "gpt-5.4",
+            },
+            "system_prompt": "You are a research-focused agent.",
+        },
+    )
+    agent_id = agent_resp.json()["agent_id"]
+
+    system_tool_resp = await client.post(
+        "/v1/tools",
+        json={
+            "actor": actor_payload,
+            "name": "repo_search",
+            "description": "Searches the current workspace source tree.",
+            "parameter_contract": {
+                "parameters": [
+                    {
+                        "name": "query",
+                        "type": "string",
+                        "description": "Search text to look up in the repository.",
+                        "required": True,
+                    }
+                ],
+                "additional_properties": False,
+            },
+        },
+    )
+    tool_id = system_tool_resp.json()["tool_id"]
+
+    attach_resp = await client.put(
+        f"/v1/workspaces/{workspace_id}/tools/{tool_id}",
+        json={
+            "actor": actor_payload,
+            "tool_id": tool_id,
+            "enabled": True,
+        },
+    )
+    assert attach_resp.status_code == 200
+
+    disable_resp = await client.patch(
+        f"/v1/workspaces/{workspace_id}/tools/{tool_id}",
+        json={
+            "actor": actor_payload,
+            "enabled": False,
+            "metadata": {"reason": "maintenance"},
+        },
+    )
+    assert disable_resp.status_code == 200
+    assert disable_resp.json()["enabled"] is False
+    assert disable_resp.json()["metadata"]["reason"] == "maintenance"
+
+    workspace_detail = await client.get(f"/v1/workspaces/{workspace_id}")
+    assert workspace_detail.status_code == 200
+    tools = {tool["tool_id"]: tool for tool in workspace_detail.json()["tools"]}
+    assert tools[tool_id]["enabled"] is False
+
+    attach_agent_resp = await client.post(
+        f"/v1/workspaces/{workspace_id}/agents",
+        json={"actor": actor_payload, "agent_id": agent_id},
+    )
+    assert attach_agent_resp.status_code == 200
+    assert "tool:repo_search" not in attach_agent_resp.json()["capabilities"]
+
+    delete_resp = await client.request(
+        "DELETE",
+        f"/v1/workspaces/{workspace_id}/tools/{tool_id}",
+        json={"actor": actor_payload},
+    )
+    assert delete_resp.status_code == 200
+    assert delete_resp.json()["deleted"] is True
+    assert delete_resp.json()["tool_id"] == tool_id
+
+    final_detail = await client.get(f"/v1/workspaces/{workspace_id}")
+    assert final_detail.status_code == 200
+    assert final_detail.json()["tools"] == []
+
+
 async def test_assume_precreated_role_uses_workspace_role_definition(client, actor_payload):
     workspace_resp = await client.post(
         "/v1/workspaces",
@@ -268,6 +458,25 @@ async def test_create_agent_participant_advertises_capabilities_and_llm_config(c
     )
     agent_id = create_resp.json()["agent_id"]
 
+    system_tool_resp = await client.post(
+        "/v1/tools",
+        json={
+            "actor": actor_payload,
+            "name": "repo_search",
+            "description": "Searches the current workspace source tree.",
+        },
+    )
+    tool_id = system_tool_resp.json()["tool_id"]
+    tool_resp = await client.put(
+        f"/v1/workspaces/{workspace_id}/tools/{tool_id}",
+        json={
+            "actor": actor_payload,
+            "tool_id": tool_id,
+            "enabled": True,
+        },
+    )
+    assert tool_resp.status_code == 200
+
     attach_resp = await client.post(
         f"/v1/workspaces/{workspace_id}/agents",
         json={"actor": actor_payload, "agent_id": agent_id},
@@ -281,7 +490,7 @@ async def test_create_agent_participant_advertises_capabilities_and_llm_config(c
     assert body["participant_type"] == "agent"
     assert body["system_agent_id"] == agent_id
     assert body["roles"] == ["research analyst"]
-    assert body["capabilities"] == ["research", "synthesis", "briefs"]
+    assert body["capabilities"] == ["research", "synthesis", "briefs", "tool:repo_search"]
     assert body["agent_config"]["endpoint"]["kind"] == "remote"
     assert body["agent_config"]["endpoint"]["url"] == "https://api.example.com/v1/responses"
     assert body["agent_config"]["endpoint"]["model"] == "gpt-5.4"
@@ -298,6 +507,7 @@ async def test_create_agent_participant_advertises_capabilities_and_llm_config(c
     assert len(agents) == 1
     assert agents[0]["display_name"] == "Research Analyst"
     assert agents[0]["agent_config"]["endpoint"]["kind"] == "remote"
+    assert "tool:repo_search" in agents[0]["capabilities"]
 
 
 async def test_update_agent_participant_changes_endpoint_prompt_and_role(client, actor_payload):

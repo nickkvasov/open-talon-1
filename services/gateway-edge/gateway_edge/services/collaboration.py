@@ -30,28 +30,35 @@ from gateway_edge.config import settings
 from gateway_edge.models import (
     AssumeParticipantRoleRequest,
     AgentDefinition,
+    AttachWorkspaceToolRequest,
     CreateAgentParticipantRequest,
     CreateSystemAgentRequest,
+    CreateSystemToolRequest,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
     DeleteParticipantRequest,
+    DeleteWorkspaceToolRequest,
     DeleteWorkspaceRequest,
     EventEnvelope,
     MemoryEntry,
     ParticipantInput,
     RoleDefinition,
+    SystemToolDefinition,
     Thread,
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
     UpdateSystemAgentRequest,
     UpsertRoleDefinitionRequest,
+    UpdateSystemToolRequest,
     UpdateAgentParticipantRequest,
     UpdateMemoryEntryRequest,
+    UpdateWorkspaceToolRequest,
     Workspace,
     WorkspaceDetail,
+    WorkspaceTool,
 )
 from gateway_edge.services.events import event_service
 from gateway_edge.services.session import (
@@ -155,6 +162,23 @@ class CollaborationService:
     async def list_system_agents(self) -> list[AgentDefinition]:
         return await self._require_kernel().list_system_agents()
 
+    async def create_system_tool(
+        self, payload: CreateSystemToolRequest
+    ) -> SystemToolDefinition:
+        result = await self._require_kernel().create_system_tool(payload)
+        assert result.tool is not None
+        return result.tool
+
+    async def list_system_tools(self) -> list[SystemToolDefinition]:
+        return await self._require_kernel().list_system_tools()
+
+    async def update_system_tool(
+        self, tool_id: UUID, payload: UpdateSystemToolRequest
+    ) -> SystemToolDefinition:
+        result = await self._require_kernel().update_system_tool(tool_id, payload)
+        assert result.tool is not None
+        return result.tool
+
     async def update_system_agent(
         self, agent_id: UUID, payload: UpdateSystemAgentRequest
     ) -> AgentDefinition:
@@ -177,6 +201,65 @@ class CollaborationService:
         await self._publish_events(result.events)
         assert result.role_definition is not None
         return result.role_definition
+
+    async def list_workspace_tools(self, workspace_id: UUID) -> list[WorkspaceTool]:
+        logger.debug("Service list_workspace_tools workspace_id=%s", workspace_id)
+        return await self._require_kernel().list_workspace_tools(workspace_id)
+
+    async def attach_workspace_tool(
+        self,
+        workspace_id: UUID,
+        payload: AttachWorkspaceToolRequest,
+    ) -> WorkspaceTool:
+        logger.debug(
+            "Service attach_workspace_tool workspace_id=%s actor_id=%s tool_id=%s",
+            workspace_id,
+            payload.actor.participant_id,
+            payload.tool_id,
+        )
+        result = await self._require_kernel().attach_workspace_tool(workspace_id, payload)
+        await self._publish_events(result.events)
+        assert result.tool is not None
+        return result.tool
+
+    async def update_workspace_tool(
+        self,
+        workspace_id: UUID,
+        tool_id: UUID,
+        payload: UpdateWorkspaceToolRequest,
+    ) -> WorkspaceTool:
+        logger.debug(
+            "Service update_workspace_tool workspace_id=%s actor_id=%s tool_id=%s",
+            workspace_id,
+            payload.actor.participant_id,
+            tool_id,
+        )
+        result = await self._require_kernel().update_workspace_tool(
+            workspace_id,
+            tool_id,
+            payload,
+        )
+        await self._publish_events(result.events)
+        assert result.tool is not None
+        return result.tool
+
+    async def delete_workspace_tool(
+        self,
+        workspace_id: UUID,
+        tool_id: UUID,
+        payload: DeleteWorkspaceToolRequest,
+    ) -> dict[str, bool | str]:
+        logger.debug(
+            "Service delete_workspace_tool workspace_id=%s actor_id=%s tool_id=%s",
+            workspace_id,
+            payload.actor.participant_id,
+            tool_id,
+        )
+        return await self._require_kernel().delete_workspace_tool(
+            workspace_id,
+            tool_id,
+            payload,
+        )
 
     async def assume_participant_role(
         self,

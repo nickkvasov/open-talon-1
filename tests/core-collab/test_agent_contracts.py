@@ -28,12 +28,14 @@ from open_talon_contracts.models import (  # noqa: E402
     MemoryEntry,
     ParticipantProfile,
     Run,
+    SystemToolDefinition,
     CreateSystemAgentRequest,
     ParticipantInput,
     Task,
     Thread,
     TimelineMessage,
     Workspace,
+    WorkspaceTool,
 )
 from core_collab.kernel import CollaborationKernel  # noqa: E402
 
@@ -77,6 +79,8 @@ class FakeRepository:
         self._participants = {}
         self._memory_entries = {}
         self._messages = {}
+        self._system_tools = {}
+        self._workspace_tools = {}
 
     async def setup_schema(self) -> None:
         self.setup_schema_calls += 1
@@ -125,6 +129,21 @@ class FakeRepository:
 
     async def list_memory_entries(self, workspace_id):
         return list(self._memory_entries.get(workspace_id, []))
+
+    async def list_system_tools(self):
+        return list(self._system_tools.values())
+
+    async def fetch_system_tool(self, tool_id):
+        return self._system_tools.get(tool_id)
+
+    async def list_workspace_tools(self, workspace_id):
+        return list(self._workspace_tools.get(workspace_id, []))
+
+    async def fetch_workspace_tool(self, workspace_id, tool_id):
+        for tool in self._workspace_tools.get(workspace_id, []):
+            if tool.tool_id == tool_id:
+                return tool
+        return None
 
     async def list_timeline_messages(self, thread_id):
         return list(self._messages.get(thread_id, []))
@@ -281,7 +300,7 @@ async def test_build_agent_execution_context_filters_messages_and_memory_by_view
                     "updated_by": str(actor_id),
                     "updated_at": now.isoformat(),
                 }
-            ]
+            ],
         },
     )
     repository._threads[thread_id] = Thread(
@@ -320,6 +339,51 @@ async def test_build_agent_execution_context_filters_messages_and_memory_by_view
     )
     repository._participants[(workspace_id, participant_id)] = agent_participant
     repository._participants[(workspace_id, actor_id)] = user_participant
+    tool_id = uuid4()
+    repository._system_tools[tool_id] = SystemToolDefinition(
+        tool_id=tool_id,
+        name="repo_search",
+        description="Search the current workspace source tree.",
+        parameter_contract={
+            "parameters": [
+                {
+                    "name": "query",
+                    "type": "string",
+                    "description": "Search text to look up in the repository.",
+                    "required": True,
+                }
+            ],
+            "additional_properties": False,
+        },
+        input_schema={"type": "object"},
+        created_by=actor_id,
+        created_at=now,
+        updated_by=actor_id,
+        updated_at=now,
+    )
+    repository._workspace_tools[workspace_id] = [
+        WorkspaceTool(
+            tool_id=tool_id,
+            name="repo_search",
+            description="Search the current workspace source tree.",
+            parameter_contract={
+                "parameters": [
+                    {
+                        "name": "query",
+                        "type": "string",
+                        "description": "Search text to look up in the repository.",
+                        "required": True,
+                    }
+                ],
+                "additional_properties": False,
+            },
+            input_schema={"type": "object"},
+            enabled=True,
+            attached_by=actor_id,
+            attached_at=now,
+            updated_at=now,
+        )
+    ]
     repository._tasks[task_id] = Task(
         task_id=task_id,
         workspace_id=workspace_id,
@@ -470,3 +534,119 @@ async def test_build_agent_execution_context_filters_messages_and_memory_by_view
     assert context.trigger_message.content == "Validate the rollout carefully"
     assert context.thread_reply_contract == agent.interaction_contract
     assert context.role_definitions[0].name == "testing agent"
+    assert context.workspace_tools[0].name == "repo_search"
+    assert context.workspace_tools[0].parameter_contract.parameters[0].name == "query"
+    assert "tool:repo_search" in context.participant.capabilities
+    assert "tool:repo_search" in context.participants[0].capabilities
+
+
+@pytest.mark.asyncio
+async def test_build_agent_execution_context_does_not_advertise_disabled_workspace_tools():
+    actor_id = uuid4()
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    system_agent_id = uuid4()
+    participant_id = uuid4()
+    task_id = uuid4()
+    run_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    agent = AgentDefinition(
+        agent_id=system_agent_id,
+        display_name="Testing Agent",
+        description="Validates changes with only the allowed workspace context.",
+        role="testing agent",
+        capabilities=["tests", "validation"],
+        endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+        system_prompt="You are a careful testing agent.",
+        interaction_contract=build_default_interaction_contract(
+            display_name="Testing Agent",
+            role="testing agent",
+            description="Validates changes with only the allowed workspace context.",
+            capabilities=["tests", "validation"],
+        ),
+        created_by=actor_id,
+        created_at=now,
+        updated_at=now,
+    )
+    repository = FakeRepository([agent])
+    repository._workspaces[workspace_id] = Workspace(
+        workspace_id=workspace_id,
+        name="Kernel",
+        description="Collaboration kernel",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._threads[thread_id] = Thread(
+        thread_id=thread_id,
+        workspace_id=workspace_id,
+        title="Visibility",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, participant_id)] = ParticipantProfile(
+        participant_id=participant_id,
+        workspace_id=workspace_id,
+        participant_type="agent",
+        system_agent_id=system_agent_id,
+        display_name="Testing Agent",
+        description="Validates changes with only the allowed workspace context.",
+        roles=["testing agent"],
+        capabilities=["tests", "validation"],
+        status="active",
+        visibility_scope="workspace",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._tasks[task_id] = Task(
+        task_id=task_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        title="Validate rollout",
+        requested_by=actor_id,
+        correlation_id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        metadata={"target_system_agent_id": str(system_agent_id)},
+    )
+    repository._runs[run_id] = Run(
+        run_id=run_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        task_id=task_id,
+        participant_id=participant_id,
+        status="started",
+        correlation_id=repository._tasks[task_id].correlation_id,
+        causation_id=task_id,
+        created_at=now,
+        updated_at=now,
+    )
+    repository._workspace_tools[workspace_id] = [
+        WorkspaceTool(
+            tool_id=uuid4(),
+            name="repo_search",
+            description="Search the current workspace source tree.",
+            parameter_contract={
+                "parameters": [
+                    {
+                        "name": "query",
+                        "type": "string",
+                        "description": "Search text to look up in the repository.",
+                        "required": True,
+                    }
+                ],
+                "additional_properties": False,
+            },
+            input_schema={"type": "object"},
+            enabled=False,
+            attached_by=actor_id,
+            attached_at=now,
+            updated_at=now,
+        )
+    ]
+
+    kernel = CollaborationKernel(repository)
+    context = await kernel.build_agent_execution_context(task_id, system_agent_id, run_id)
+
+    assert context.workspace_tools[0].enabled is False
+    assert "tool:repo_search" not in context.participant.capabilities

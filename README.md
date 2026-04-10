@@ -25,6 +25,33 @@ The typical flow is:
 4. The gateway streams results back to clients over HTTP, SSE, or WebSocket.
 5. Langfuse captures observability data for prompts, traces, and evaluations.
 
+## Tools Model
+
+Open Talon models tools in two layers:
+
+- `system_tools`: global tool definitions available across the installation
+- `workspace_tools`: workspace-scoped attachments that enable a system tool for a specific workspace
+
+This means a tool is defined once, then added to any workspace that wants to advertise it to attached agents.
+
+Each system tool includes:
+
+- a human-readable name and description
+- a `parameter_contract` describing accepted parameters
+- an `input_schema` for structured validation/integration use
+
+When a tool is attached to a workspace, attached agent participants advertise it as a capability using the `tool:<name>` form, and the runtime includes the attached tool definitions in the agent execution context.
+
+Common tool endpoints:
+
+- `POST /v1/tools`: create a system-wide tool definition
+- `GET /v1/tools`: list system-wide tool definitions
+- `PATCH /v1/tools/{tool_id}`: update a system-wide tool definition
+- `GET /v1/workspaces/{workspace_id}/tools`: list tools attached to a workspace
+- `PUT /v1/workspaces/{workspace_id}/tools/{tool_id}`: attach a system tool to a workspace
+- `PATCH /v1/workspaces/{workspace_id}/tools/{tool_id}`: update workspace attachment state
+- `DELETE /v1/workspaces/{workspace_id}/tools/{tool_id}`: detach a tool from a workspace
+
 ## Architecture Stack
 
 - **PostgreSQL**: Deployed via `pgvector/pgvector:pg16` directly supporting native `JSONB` properties alongside algorithmic embeddings operations for Vector Similarity Searching natively in the engine.
@@ -141,6 +168,10 @@ That root environment installs:
 - repo-level test dependencies for gateway and infrastructure suites
 
 `services/gateway-edge` is the only supported local gateway path for day-to-day development.
+
+## TUI
+
+For TUI setup, usage, and slash command documentation, see [`apps/tui/README.md`](/Users/nikolay.kvasov/Development/open-talon-1/apps/tui/README.md).
 
 ## Database Migrations
 
