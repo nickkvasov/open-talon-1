@@ -2,6 +2,8 @@
 
 This repository contains the local infrastructure, Python services, and client apps for Open Talon. The canonical developer Python environment is the repository-root `.venv`.
 
+For coding-agent-specific project guidance, see [`AGENTS.md`](/Users/nikolay.kvasov/Development/open-talon-1/AGENTS.md).
+
 ## System Overview
 
 Open Talon is a local-first collaboration system where users and agents are first-class participants.
