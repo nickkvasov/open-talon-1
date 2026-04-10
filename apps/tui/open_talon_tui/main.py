@@ -98,28 +98,34 @@ class WorkspaceCommandSuggester(Suggester):
             return suggestion
 
         stripped = value.strip()
-        if not stripped.startswith("/workspace ") and not stripped.startswith("/ws "):
-            return None
-
-        normalized = stripped.replace("/ws ", "/workspace ", 1)
         workspace_targets = self.app.workspace_suggestion_targets
-
-        for prefix in ("/workspace switch ", "/workspace delete "):
-            if normalized.startswith(prefix):
-                typed_target = normalized[len(prefix) :].strip().casefold()
-                if not typed_target:
-                    return prefix + (workspace_targets[0] if workspace_targets else "")
-                for target in workspace_targets:
-                    if target.casefold().startswith(typed_target):
-                        return prefix + target
+        if stripped.startswith("/workspace "):
+            for prefix in ("/workspace use ", "/workspace delete "):
+                if stripped.startswith(prefix):
+                    typed_target = stripped[len(prefix) :].strip().casefold()
+                    if not typed_target:
+                        return prefix + (workspace_targets[0] if workspace_targets else "")
+                    for target in workspace_targets:
+                        if target.casefold().startswith(typed_target):
+                            return prefix + target
         if stripped.startswith("/role "):
             role_targets = self.app.role_suggestion_targets
-            for prefix in ("/role assume ", "/role create "):
+            for prefix in ("/role use ", "/role create "):
                 if stripped.startswith(prefix):
                     typed_target = stripped[len(prefix) :].strip().casefold()
                     if not typed_target:
                         return prefix + (role_targets[0] if role_targets else "")
                     for target in role_targets:
+                        if target.casefold().startswith(typed_target):
+                            return prefix + target
+        if stripped.startswith("/thread "):
+            thread_targets = self.app.thread_suggestion_targets
+            for prefix in ("/thread use ",):
+                if stripped.startswith(prefix):
+                    typed_target = stripped[len(prefix) :].strip().casefold()
+                    if not typed_target:
+                        return prefix + (thread_targets[0] if thread_targets else "")
+                    for target in thread_targets:
                         if target.casefold().startswith(typed_target):
                             return prefix + target
         return None
@@ -219,20 +225,22 @@ class CollaborationApp(App):
         self._seen_message_ids: set[str] = set()
         self._http_client: httpx.AsyncClient | None = None
         self._slash_commands = [
-            "/workspaces",
             "/workspace list",
+            "/workspace show",
             "/workspace create ",
-            "/workspace switch ",
+            "/workspace use ",
             "/workspace delete ",
+            "/thread create ",
+            "/thread list",
+            "/thread show",
+            "/thread use ",
+            "/role list",
             "/role create ",
             "/role show",
-            "/role assume ",
-            "/ws list",
-            "/ws create ",
-            "/ws switch ",
-            "/ws delete ",
+            "/role use ",
         ]
         self._workspace_suggestions: list[dict[str, str]] = []
+        self._thread_suggestions: list[dict[str, str]] = []
         self._role_suggestions: list[str] = []
 
     @property
@@ -267,6 +275,17 @@ class CollaborationApp(App):
     def role_suggestion_targets(self) -> list[str]:
         return list(self._role_suggestions)
 
+    @property
+    def thread_suggestion_targets(self) -> list[str]:
+        targets: list[str] = []
+        for thread in self._thread_suggestions:
+            title = thread["title"]
+            thread_id = thread["thread_id"]
+            for candidate in (title, thread_id[:8], thread_id):
+                if candidate not in targets:
+                    targets.append(candidate)
+        return targets
+
     async def _list_workspaces(self) -> list[dict]:
         assert self._http_client is not None
         response = await self._http_client.get(f"{self.gateway}/v1/workspaces")
@@ -284,7 +303,12 @@ class CollaborationApp(App):
             f"{self.gateway}/v1/workspaces/{workspace_id}/threads"
         )
         response.raise_for_status()
-        return response.json()
+        threads = response.json()
+        self._thread_suggestions = [
+            {"thread_id": item["thread_id"], "title": item["title"]}
+            for item in threads
+        ]
+        return threads
 
     async def _get_workspace_detail(self, workspace_id: str) -> dict:
         assert self._http_client is not None
@@ -443,6 +467,18 @@ class CollaborationApp(App):
         await self._load_timeline()
         self._connect_ws()
 
+    async def _switch_thread(self, thread_id: str) -> None:
+        logger.debug("TUI switching thread thread_id=%s", thread_id)
+        if self._ws:
+            await self._ws.close()
+        self.state.thread_id = thread_id
+        self.state.last_sequence = 0
+        self._seen_message_ids.clear()
+        save_state(self.state)
+        self._update_context_info()
+        await self._load_timeline()
+        self._connect_ws()
+
     async def _create_workspace_and_switch(self, name: str) -> None:
         assert self._http_client is not None
         response = await self._http_client.post(
@@ -502,7 +538,7 @@ class CollaborationApp(App):
         parts = command.strip().split(maxsplit=2)
         if len(parts) < 2:
             self._write_system(
-                "workspace commands: /workspace list|create <name>|switch <id|name>|delete <id|name|current>",
+                "workspace commands: /workspace list | /workspace show | /workspace create <name> | /workspace use <id|name> | /workspace delete <id|name|current>",
                 style="yellow",
             )
             return
@@ -524,6 +560,17 @@ class CollaborationApp(App):
                 )
             return
 
+        if action == "show":
+            workspaces = await self._list_workspaces()
+            current = self._resolve_workspace_target(workspaces, "current")
+            if current is None:
+                self._write_system("current workspace not found", style="red")
+                return
+            self._write_system("Current Workspace")
+            self._write_system(f"name: {current['name']}", style="cyan")
+            self._write_system(f"id: {current['workspace_id']}", style="dim")
+            return
+
         if action == "create":
             if not target:
                 self._write_system("usage: /workspace create <name>", style="yellow")
@@ -537,7 +584,7 @@ class CollaborationApp(App):
             self._write_system(f"workspace not found: {target or 'current'}", style="red")
             return
 
-        if action == "switch":
+        if action == "use":
             await self._switch_workspace(workspace["workspace_id"])
             self._write_system(
                 f"switched workspace: {workspace['name']} ({workspace['workspace_id'][:8]})"
@@ -575,7 +622,7 @@ class CollaborationApp(App):
             return
 
         parts = command.strip().split(maxsplit=2)
-        if len(parts) < 2 or parts[1] == "show":
+        if len(parts) < 2 or parts[1] in {"show", "list"}:
             detail = await self._get_workspace_detail(self.state.workspace_id)
             participants = detail.get("participants", [])
             role_definitions = detail.get("role_definitions", [])
@@ -634,9 +681,9 @@ class CollaborationApp(App):
             self._write_system(role_definition["definition"], style="dim")
             return
 
-        if parts[1] != "assume" or len(parts) < 3:
+        if parts[1] != "use" or len(parts) < 3:
             self._write_system(
-                "role commands: /role show | /role create <name> :: <definition> | /role assume <role> [:: <description> :: <cap1, cap2>]",
+                "role commands: /role list | /role show | /role create <name> :: <definition> | /role use <role> [:: <description> :: <cap1, cap2>]",
                 style="yellow",
             )
             return
@@ -651,7 +698,7 @@ class CollaborationApp(App):
             capabilities = [item.strip() for item in segments[2].split(",") if item.strip()]
         if not role:
             self._write_system(
-                "usage: /role assume <role> [:: <description> :: <cap1, cap2>]",
+                "usage: /role use <role> [:: <description> :: <cap1, cap2>]",
                 style="yellow",
             )
             return
@@ -660,8 +707,75 @@ class CollaborationApp(App):
             description=description,
             capabilities=capabilities,
         )
-        self._write_system(f"role assumed: {profile['roles'][0]}")
+        self._write_system(f"role in use: {profile['roles'][0]}")
         self._write_system(f"capabilities: {', '.join(profile['capabilities']) or 'none'}", style='dim')
+
+    async def _handle_thread_command(self, command: str) -> None:
+        if not self.state.workspace_id:
+            self._write_system("join or create a workspace first", style="red")
+            return
+
+        parts = command.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            self._write_system(
+                "thread commands: /thread list | /thread show | /thread create <title> | /thread use <id|title>",
+                style="yellow",
+            )
+            return
+
+        action = parts[1].lower()
+        threads = await self._list_threads(self.state.workspace_id)
+
+        if action == "list":
+            if not threads:
+                self._write_system("no threads found", style="yellow")
+                return
+            self._write_system("Threads")
+            for thread in threads:
+                marker = "*" if thread["thread_id"] == self.state.thread_id else "-"
+                self._write_system(
+                    f"{marker} {thread['title']} ({thread['thread_id'][:8]})",
+                    style="dim",
+                )
+            return
+
+        if action == "show":
+            current = self._resolve_thread_target(threads, "current")
+            if current is None:
+                self._write_system("current thread not found", style="red")
+                return
+            self._write_system("Current Thread")
+            self._write_system(f"title: {current['title']}", style="cyan")
+            self._write_system(f"id: {current['thread_id']}", style="dim")
+            self._write_system(f"state: {current.get('state', 'active')}", style="dim")
+            return
+
+        if action == "create":
+            target = parts[2].strip() if len(parts) > 2 else ""
+            if not target:
+                self._write_system("usage: /thread create <title>", style="yellow")
+                return
+            await self._create_thread(target)
+            await self._load_timeline()
+            self._connect_ws()
+            self._write_system(
+                f"created thread: {target} ({self.state.thread_id[:8]})"
+            )
+            return
+
+        if action == "use":
+            target = parts[2].strip() if len(parts) > 2 else ""
+            thread = self._resolve_thread_target(threads, target)
+            if thread is None:
+                self._write_system(f"thread not found: {target or 'current'}", style="red")
+                return
+            await self._switch_thread(thread["thread_id"])
+            self._write_system(
+                f"switched thread: {thread['title']} ({thread['thread_id'][:8]})"
+            )
+            return
+
+        self._write_system(f"unknown thread action: {action}", style="yellow")
 
     def _resolve_workspace_target(self, workspaces: list[dict], target: str) -> dict | None:
         normalized = target.strip()
@@ -683,10 +797,30 @@ class CollaborationApp(App):
                 return workspace
         return None
 
+    def _resolve_thread_target(self, threads: list[dict], target: str) -> dict | None:
+        normalized = target.strip()
+        if not normalized or normalized == "current":
+            for thread in threads:
+                if thread["thread_id"] == self.state.thread_id:
+                    return thread
+            return None
+
+        for thread in threads:
+            if thread["thread_id"] == normalized:
+                return thread
+        for thread in threads:
+            if thread["thread_id"].startswith(normalized):
+                return thread
+        lowered = normalized.lower()
+        for thread in threads:
+            if thread["title"].lower() == lowered:
+                return thread
+        return None
+
     def _suggestions_for_text(self, text: str) -> str:
         stripped = text.strip()
         if not stripped:
-            return " Commands: /workspaces, /workspace create <name>, /workspace switch <id|name>"
+            return " Commands: /workspace list, /workspace create <name>, /workspace use <id|name>"
 
         if stripped.startswith("/"):
             matches = [
@@ -694,22 +828,22 @@ class CollaborationApp(App):
             ]
             if matches:
                 return " Suggestions: " + " | ".join(matches[:3])
-            return " Slash commands: /workspaces | /workspace list | /workspace create <name>"
+            return " Slash commands: /workspace list | /thread list | /role list"
 
         lowered = stripped.lower()
         if "workspace" in lowered:
-            return " Tip: use /workspaces or /workspace switch <id|name>"
+            return " Tip: /workspace list | /workspace show | /workspace use <id|name>"
+        if "thread" in lowered:
+            return " Tip: /thread list | /thread show | /thread use <id|title>"
         if "role" in lowered:
-            return " Tip: /role show | /role create <name> :: <definition> | /role assume <role>"
+            return " Tip: /role list | /role show | /role create <name> :: <definition> | /role use <role>"
         if lowered in {"list", "show", "where"}:
-            return " Tip: /workspaces lists available workspaces"
-        if lowered.startswith("switch"):
-            return " Tip: /workspace switch <id|name>"
+            return " Tip: /workspace list shows available workspaces"
         if lowered.startswith("create"):
             return " Tip: /workspace create <name>"
         if lowered.startswith("delete") or lowered.startswith("remove"):
             return " Tip: /workspace delete <id|name|current>"
-        return " Enter sends a message. Use /workspace or /role commands for collaboration context."
+        return " Enter sends a message. Use /workspace, /thread, or /role commands with list/show/create/use."
 
     async def _load_timeline(self) -> None:
         assert self._http_client is not None
@@ -869,25 +1003,23 @@ class CollaborationApp(App):
         if not text:
             return
         event.input.clear()
-        if (
-            text == "/workspaces"
-            or text.startswith("/workspace ")
-            or text == "/workspace"
-            or text.startswith("/ws ")
-        ):
-            if text == "/workspaces":
-                command = "/workspace list"
-            elif text.startswith("/ws"):
-                command = text.replace("/ws", "/workspace", 1)
-            else:
-                command = text
+        if text.startswith("/workspace ") or text == "/workspace":
             try:
-                await self._handle_workspace_command(command)
+                await self._handle_workspace_command(text)
                 self._update_status("ok", "Connected")
             except Exception as exc:
                 logger.exception("TUI workspace command failed")
                 self._write_system(f"workspace command failed: {exc}", style="red")
                 self._update_status("err", "Workspace failed")
+            return
+        if text == "/thread" or text.startswith("/thread "):
+            try:
+                await self._handle_thread_command(text)
+                self._update_status("ok", "Connected")
+            except Exception as exc:
+                logger.exception("TUI thread command failed")
+                self._write_system(f"thread command failed: {exc}", style="red")
+                self._update_status("err", "Thread failed")
             return
         if text == "/role" or text.startswith("/role "):
             try:
