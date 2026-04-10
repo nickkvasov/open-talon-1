@@ -18,6 +18,7 @@ from gateway_edge.models import (
     CreateMessageRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
+    DeleteParticipantRequest,
     DeleteWorkspaceRequest,
     MemoryEntry,
     ParticipantInput,
@@ -156,6 +157,32 @@ async def list_workspace_participants(workspace_id: UUID) -> list[ParticipantPro
     try:
         return await collab_svc.collaboration_service.list_workspace_participants(
             workspace_id
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/workspaces/{workspace_id}/participants/{participant_id}",
+    response_model=dict,
+    summary="Remove a participant from a workspace",
+)
+async def delete_participant(
+    workspace_id: UUID,
+    participant_id: UUID,
+    payload: DeleteParticipantRequest = Body(...),
+) -> dict[str, bool | str]:
+    logger.debug(
+        "HTTP delete_participant workspace_id=%s participant_id=%s actor=%s",
+        workspace_id,
+        participant_id,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.delete_participant(
+            workspace_id,
+            participant_id,
+            payload,
         )
     except Exception as exc:
         raise _http_error(exc) from exc

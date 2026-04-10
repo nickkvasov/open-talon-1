@@ -24,6 +24,23 @@ from .contracts import (
     TimelineMessage,
     Workspace,
 )
+
+
+class UserRecord:
+    def __init__(
+        self,
+        *,
+        user_id: UUID,
+        display_name: str,
+        created_at,
+        updated_at,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.user_id = user_id
+        self.display_name = display_name
+        self.created_at = created_at
+        self.updated_at = updated_at
+        self.metadata = metadata or {}
 from .schema import MIGRATIONS
 
 
@@ -136,6 +153,25 @@ class CollaborationRepository:
             self._json_dumps(workspace.metadata),
         )
 
+    async def upsert_user(
+        self, conn: asyncpg.Connection, user: UserRecord
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO users (user_id, display_name, metadata, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (user_id) DO UPDATE
+                SET display_name = EXCLUDED.display_name,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = EXCLUDED.updated_at
+            """,
+            user.user_id,
+            user.display_name,
+            self._json_dumps(user.metadata),
+            user.created_at,
+            user.updated_at,
+        )
+
     async def upsert_system_agent(
         self, conn: asyncpg.Connection, agent: AgentDefinition
     ) -> None:
@@ -182,6 +218,35 @@ class CollaborationRepository:
         )
         return result.endswith("1")
 
+    async def delete_participant(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        workspace_id: UUID,
+        participant_id: UUID,
+    ) -> bool:
+        await conn.execute(
+            """
+            UPDATE memberships
+            SET left_at = NOW()
+            WHERE workspace_id = $1
+              AND participant_id = $2
+              AND left_at IS NULL
+            """,
+            workspace_id,
+            participant_id,
+        )
+        result = await conn.execute(
+            """
+            DELETE FROM participants
+            WHERE workspace_id = $1
+              AND participant_id = $2
+            """,
+            workspace_id,
+            participant_id,
+        )
+        return result.endswith("1")
+
     async def upsert_thread(self, conn: asyncpg.Connection, thread: Thread) -> None:
         await conn.execute(
             """
@@ -217,14 +282,15 @@ class CollaborationRepository:
         await conn.execute(
             """
             INSERT INTO participants (
-                participant_id, workspace_id, participant_type, display_name, description,
-                roles, capabilities, status, visibility_scope, created_at, updated_at, metadata
+                participant_id, workspace_id, participant_type, user_id, system_agent_id,
+                description, roles, capabilities, status, visibility_scope, created_at, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (participant_id) DO UPDATE
                 SET workspace_id = EXCLUDED.workspace_id,
                     participant_type = EXCLUDED.participant_type,
-                    display_name = EXCLUDED.display_name,
+                    user_id = EXCLUDED.user_id,
+                    system_agent_id = EXCLUDED.system_agent_id,
                     description = EXCLUDED.description,
                     roles = EXCLUDED.roles,
                     capabilities = EXCLUDED.capabilities,
@@ -236,7 +302,8 @@ class CollaborationRepository:
             participant.participant_id,
             participant.workspace_id,
             participant.participant_type,
-            participant.display_name,
+            participant.user_id,
+            participant.system_agent_id,
             participant.description,
             self._json_dumps(participant.roles),
             self._json_dumps(participant.capabilities),
@@ -507,7 +574,7 @@ class CollaborationRepository:
             """
             SELECT workspace_id, name, description, created_at, updated_at, metadata
             FROM workspaces
-            ORDER BY created_at ASC
+            ORDER BY p.created_at ASC
             """
         )
         return [self._workspace_from_row(row) for row in rows]
@@ -540,28 +607,52 @@ class CollaborationRepository:
     ) -> ParticipantProfile | None:
         row = await self._pool.fetchrow(
             """
-            SELECT participant_id, workspace_id, participant_type, display_name, description,
-                   roles, capabilities, status, visibility_scope, created_at, updated_at, metadata
-            FROM participants
-            WHERE workspace_id = $1
-              AND participant_type = 'agent'
-              AND metadata->>'system_agent_id' = $2
+            SELECT p.participant_id, p.workspace_id, p.participant_type, p.user_id, p.system_agent_id,
+                   p.display_name AS legacy_display_name,
+                   p.description, p.roles, p.capabilities, p.status, p.visibility_scope,
+                   p.created_at, p.updated_at, p.metadata,
+                   u.display_name AS user_display_name,
+                   sa.display_name AS agent_display_name,
+                   sa.description AS agent_description,
+                   sa.role AS agent_role,
+                   sa.capabilities AS agent_capabilities,
+                   sa.endpoint AS agent_endpoint,
+                   sa.system_prompt AS agent_system_prompt,
+                   sa.definition AS agent_definition
+            FROM participants p
+            LEFT JOIN users u ON p.user_id = u.user_id
+            LEFT JOIN system_agents sa ON p.system_agent_id = sa.agent_id
+            WHERE p.workspace_id = $1
+              AND p.participant_type = 'agent'
+              AND p.system_agent_id = $2
             ORDER BY created_at ASC
             LIMIT 1
             """,
             workspace_id,
-            str(system_agent_id),
+            system_agent_id,
         )
         return self._participant_from_row(row) if row else None
 
     async def list_participants(self, workspace_id: UUID) -> list[ParticipantProfile]:
         rows = await self._pool.fetch(
             """
-            SELECT participant_id, workspace_id, participant_type, display_name, description,
-                   roles, capabilities, status, visibility_scope, created_at, updated_at, metadata
-            FROM participants
-            WHERE workspace_id = $1
-            ORDER BY display_name ASC
+            SELECT p.participant_id, p.workspace_id, p.participant_type, p.user_id, p.system_agent_id,
+                   p.display_name AS legacy_display_name,
+                   p.description, p.roles, p.capabilities, p.status, p.visibility_scope,
+                   p.created_at, p.updated_at, p.metadata,
+                   u.display_name AS user_display_name,
+                   sa.display_name AS agent_display_name,
+                   sa.description AS agent_description,
+                   sa.role AS agent_role,
+                   sa.capabilities AS agent_capabilities,
+                   sa.endpoint AS agent_endpoint,
+                   sa.system_prompt AS agent_system_prompt,
+                   sa.definition AS agent_definition
+            FROM participants p
+            LEFT JOIN users u ON p.user_id = u.user_id
+            LEFT JOIN system_agents sa ON p.system_agent_id = sa.agent_id
+            WHERE p.workspace_id = $1
+            ORDER BY COALESCE(u.display_name, sa.display_name, p.participant_id::text) ASC
             """,
             workspace_id,
         )
@@ -572,11 +663,23 @@ class CollaborationRepository:
     ) -> ParticipantProfile | None:
         row = await self._pool.fetchrow(
             """
-            SELECT participant_id, workspace_id, participant_type, display_name, description,
-                   roles, capabilities, status, visibility_scope, created_at, updated_at, metadata
-            FROM participants
-            WHERE workspace_id = $1
-              AND participant_id = $2
+            SELECT p.participant_id, p.workspace_id, p.participant_type, p.user_id, p.system_agent_id,
+                   p.display_name AS legacy_display_name,
+                   p.description, p.roles, p.capabilities, p.status, p.visibility_scope,
+                   p.created_at, p.updated_at, p.metadata,
+                   u.display_name AS user_display_name,
+                   sa.display_name AS agent_display_name,
+                   sa.description AS agent_description,
+                   sa.role AS agent_role,
+                   sa.capabilities AS agent_capabilities,
+                   sa.endpoint AS agent_endpoint,
+                   sa.system_prompt AS agent_system_prompt,
+                   sa.definition AS agent_definition
+            FROM participants p
+            LEFT JOIN users u ON p.user_id = u.user_id
+            LEFT JOIN system_agents sa ON p.system_agent_id = sa.agent_id
+            WHERE p.workspace_id = $1
+              AND p.participant_id = $2
             """,
             workspace_id,
             participant_id,
@@ -832,22 +935,49 @@ class CollaborationRepository:
     @staticmethod
     def _participant_from_row(row: asyncpg.Record) -> ParticipantProfile:
         metadata = CollaborationRepository._json_value(row["metadata"], default={})
+        participant_type = row["participant_type"]
+        display_name = (
+            row["agent_display_name"]
+            if participant_type == "agent"
+            else row["user_display_name"]
+        ) or row["legacy_display_name"]
+        description = (
+            row["agent_description"]
+            if participant_type == "agent"
+            else row["description"]
+        )
+        roles = (
+            [row["agent_role"]] if participant_type == "agent" and row["agent_role"] else
+            list(CollaborationRepository._json_value(row["roles"], default=[]))
+        )
+        capabilities = (
+            list(CollaborationRepository._json_value(row["agent_capabilities"], default=[]))
+            if participant_type == "agent"
+            else list(CollaborationRepository._json_value(row["capabilities"], default=[]))
+        )
         return ParticipantProfile(
             participant_id=row["participant_id"],
             workspace_id=row["workspace_id"],
-            participant_type=row["participant_type"],
-            system_agent_id=metadata.get("system_agent_id"),
-            display_name=row["display_name"],
-            description=row["description"],
-            roles=list(CollaborationRepository._json_value(row["roles"], default=[])),
-            capabilities=list(
-                CollaborationRepository._json_value(row["capabilities"], default=[])
-            ),
+            participant_type=participant_type,
+            user_id=row["user_id"],
+            system_agent_id=row["system_agent_id"],
+            display_name=display_name,
+            description=description,
+            roles=roles,
+            capabilities=capabilities,
             status=row["status"],
             visibility_scope=row["visibility_scope"],
             agent_config=(
-                AgentConfiguration.model_validate(metadata["agent_config"])
-                if metadata.get("agent_config") is not None
+                AgentConfiguration(
+                    endpoint=AgentEndpoint.model_validate(
+                        CollaborationRepository._json_value(row["agent_endpoint"], default={})
+                    ),
+                    system_prompt=row["agent_system_prompt"],
+                    definition=CollaborationRepository._json_value(
+                        row["agent_definition"], default={}
+                    ),
+                )
+                if participant_type == "agent" and row["agent_system_prompt"] is not None
                 else None
             ),
             created_at=row["created_at"],

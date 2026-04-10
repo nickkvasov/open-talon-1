@@ -23,6 +23,7 @@ from .contracts import (
     CreateMessageRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
+    DeleteParticipantRequest,
     DeleteWorkspaceRequest,
     EventEnvelope,
     Membership,
@@ -48,7 +49,7 @@ from .contracts import (
     Workspace,
     WorkspaceDetail,
 )
-from .repository import CollaborationRepository
+from .repository import CollaborationRepository, UserRecord
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,7 @@ class CollaborationKernel:
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 await self._repository.upsert_workspace(conn, workspace)
+                await self._ensure_participant_identity(conn, participant)
                 await self._repository.upsert_participant(conn, participant)
 
                 events = [
@@ -227,6 +229,52 @@ class CollaborationKernel:
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
         return await self._repository.list_participants(workspace_id)
+
+    async def delete_participant(
+        self,
+        workspace_id: UUID,
+        participant_id: UUID,
+        payload: DeleteParticipantRequest,
+    ) -> dict[str, bool | str]:
+        logger.debug(
+            "Kernel delete_participant workspace_id=%s participant_id=%s actor_id=%s",
+            workspace_id,
+            participant_id,
+            payload.actor.participant_id,
+        )
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        participant = await self._repository.fetch_participant(workspace_id, participant_id)
+        if participant is None:
+            raise KeyError(f"Participant {participant_id} not found")
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                deleted = await self._repository.delete_participant(
+                    conn,
+                    workspace_id=workspace_id,
+                    participant_id=participant_id,
+                )
+                if not deleted:
+                    raise KeyError(f"Participant {participant_id} not found")
+                event = await self._build_workspace_event(
+                    conn,
+                    workspace_id,
+                    "participant.removed",
+                    actor=actor,
+                    target=TargetRef(type="participant", id=participant_id),
+                    payload=participant.model_dump(mode="json"),
+                    visibility="workspace",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        return {
+            "deleted": True,
+            "workspace_id": str(workspace_id),
+            "participant_id": str(participant_id),
+        }
 
     async def create_system_agent(
         self, payload: CreateSystemAgentRequest
@@ -423,6 +471,7 @@ class CollaborationKernel:
             participant_id=participant_id,
             workspace_id=workspace_id,
             participant_type=payload.actor.participant_type,
+            user_id=participant_id if payload.actor.participant_type == "user" else None,
             display_name=payload.actor.display_name,
             description=description,
             roles=[payload.role],
@@ -434,9 +483,9 @@ class CollaborationKernel:
             updated_at=now,
             metadata=(existing.metadata if existing is not None else {}),
         )
-        participant = self._with_agent_metadata(participant)
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
+                await self._ensure_participant_identity(conn, participant)
                 await self._repository.upsert_participant(conn, participant)
                 event = await self._build_workspace_event(
                     conn,
@@ -494,11 +543,11 @@ class CollaborationKernel:
             ),
             created_at=now,
             updated_at=now,
-            metadata={"system_agent_id": str(system_agent.agent_id)},
+            metadata={},
         )
-        participant = self._with_agent_metadata(participant)
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
+                await self._ensure_participant_identity(conn, participant)
                 await self._repository.upsert_participant(conn, participant)
                 event = await self._build_workspace_event(
                     conn,
@@ -549,7 +598,6 @@ class CollaborationKernel:
                 ),
             }
         )
-        updated = self._with_agent_metadata(updated)
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 await self._repository.upsert_participant(conn, updated)
@@ -608,6 +656,7 @@ class CollaborationKernel:
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
+                await self._ensure_participant_identity(conn, participant)
                 await self._repository.upsert_participant(conn, participant)
                 await self._repository.upsert_thread(conn, thread)
                 await self._repository.upsert_membership(conn, membership)
@@ -1222,6 +1271,7 @@ class CollaborationKernel:
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
+                await self._ensure_participant_identity(conn, participant)
                 await self._repository.upsert_participant(conn, participant)
                 membership = await self._repository.fetch_active_membership(
                     conn,
@@ -1342,6 +1392,7 @@ class CollaborationKernel:
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
+                await self._ensure_participant_identity(conn, participant)
                 await self._repository.upsert_participant(conn, participant)
                 await self._repository.upsert_memory_entry(conn, entry)
                 event = await self._build_workspace_event(
@@ -1389,6 +1440,7 @@ class CollaborationKernel:
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
+                await self._ensure_participant_identity(conn, participant)
                 await self._repository.upsert_participant(conn, participant)
                 await self._repository.upsert_memory_entry(conn, updated)
                 event = await self._build_workspace_event(
@@ -1422,6 +1474,7 @@ class CollaborationKernel:
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
+                await self._ensure_participant_identity(conn, participant)
                 await self._repository.upsert_participant(conn, participant)
                 await self._repository.delete_memory_entry(conn, memory_entry_id)
                 event = await self._build_workspace_event(
@@ -1473,6 +1526,7 @@ class CollaborationKernel:
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
+                await self._ensure_participant_identity(conn, participant)
                 await self._repository.upsert_participant(conn, participant)
                 if status == "offline":
                     await self._repository.close_active_membership(
@@ -1875,6 +1929,7 @@ class CollaborationKernel:
             participant_id=actor.participant_id,
             workspace_id=workspace_id,
             participant_type=actor.participant_type,
+            user_id=actor.participant_id if actor.participant_type == "user" else None,
             display_name=actor.display_name,
             description=actor.description,
             roles=actor.roles,
@@ -1887,12 +1942,25 @@ class CollaborationKernel:
 
     @staticmethod
     def _with_agent_metadata(participant: ParticipantProfile) -> ParticipantProfile:
-        metadata = dict(participant.metadata)
-        if participant.agent_config is None:
-            metadata.pop("agent_config", None)
-        else:
-            metadata["agent_config"] = participant.agent_config.model_dump(mode="json")
-        return participant.model_copy(update={"metadata": metadata})
+        return participant
+
+    async def _ensure_participant_identity(
+        self,
+        conn: asyncpg.Connection,
+        participant: ParticipantProfile,
+    ) -> None:
+        if participant.participant_type != "user" or participant.user_id is None:
+            return
+        await self._repository.upsert_user(
+            conn,
+            UserRecord(
+                user_id=participant.user_id,
+                display_name=participant.display_name,
+                created_at=participant.created_at,
+                updated_at=participant.updated_at,
+                metadata={},
+            ),
+        )
 
     @staticmethod
     def _role_definitions_from_workspace(workspace: Workspace) -> list[RoleDefinition]:

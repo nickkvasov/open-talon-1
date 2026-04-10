@@ -137,6 +137,23 @@ class MockCollaborationService:
             raise KeyError(f"Workspace {workspace_id} not found")
         return list(self.participants.get(str(workspace_id), {}).values())
 
+    async def delete_participant(self, workspace_id: UUID, participant_id: UUID, payload):
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        removed = self.participants.get(str(workspace_id), {}).pop(str(participant_id), None)
+        if removed is None:
+            raise KeyError(f"Participant {participant_id} not found")
+        for memberships in self.memberships.values():
+            for membership in memberships:
+                if membership.participant_id == participant_id and membership.left_at is None:
+                    membership.left_at = datetime.now(timezone.utc)
+        return {
+            "deleted": True,
+            "workspace_id": str(workspace_id),
+            "participant_id": str(participant_id),
+        }
+
     async def create_system_agent(self, payload):
         from gateway_edge.models import AgentDefinition
 

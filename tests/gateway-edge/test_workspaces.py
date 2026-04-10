@@ -134,6 +134,39 @@ async def test_workspace_participants_can_see_each_others_roles(client, actor_pa
     assert participants[second_actor["participant_id"]]["roles"] == ["ml engineer"]
 
 
+async def test_delete_participant_removes_them_from_workspace_listing(client, actor_payload):
+    second_actor = {
+        "participant_id": str(uuid4()),
+        "participant_type": "user",
+        "display_name": "Marta",
+    }
+    workspace_resp = await client.post(
+        "/v1/workspaces",
+        json={"name": "Participant Removal", "actor": actor_payload},
+    )
+    workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+    await client.post(
+        f"/v1/workspaces/{workspace_id}/threads",
+        json={"title": "General", "actor": second_actor},
+    )
+
+    delete_resp = await client.request(
+        "DELETE",
+        f"/v1/workspaces/{workspace_id}/participants/{second_actor['participant_id']}",
+        json={"actor": actor_payload},
+    )
+
+    assert delete_resp.status_code == 200
+    assert delete_resp.json()["deleted"] is True
+
+    participants_resp = await client.get(f"/v1/workspaces/{workspace_id}/participants")
+    assert participants_resp.status_code == 200
+    participant_ids = {
+        participant["participant_id"] for participant in participants_resp.json()
+    }
+    assert second_actor["participant_id"] not in participant_ids
+
+
 async def test_create_or_update_named_role_definition_in_workspace(client, actor_payload):
     workspace_resp = await client.post(
         "/v1/workspaces",

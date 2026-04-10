@@ -36,6 +36,7 @@ from gateway_edge.models import (
     CreateMessageRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
+    DeleteParticipantRequest,
     DeleteWorkspaceRequest,
     EventEnvelope,
     MemoryEntry,
@@ -125,6 +126,24 @@ class CollaborationService:
     async def list_workspace_participants(self, workspace_id: UUID):
         logger.debug("Service list_workspace_participants workspace_id=%s", workspace_id)
         return await self._require_kernel().list_workspace_participants(workspace_id)
+
+    async def delete_participant(
+        self,
+        workspace_id: UUID,
+        participant_id: UUID,
+        payload: DeleteParticipantRequest,
+    ) -> dict[str, bool | str]:
+        logger.debug(
+            "Service delete_participant workspace_id=%s participant_id=%s actor_id=%s",
+            workspace_id,
+            participant_id,
+            payload.actor.participant_id,
+        )
+        return await self._require_kernel().delete_participant(
+            workspace_id,
+            participant_id,
+            payload,
+        )
 
     async def create_system_agent(
         self, payload: CreateSystemAgentRequest

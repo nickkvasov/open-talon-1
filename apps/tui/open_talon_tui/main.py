@@ -131,7 +131,7 @@ class WorkspaceCommandSuggester(Suggester):
                             return prefix + target
         if stripped.startswith("/participant "):
             participant_targets = self.app.participant_suggestion_targets
-            for prefix in ("/participant show ",):
+            for prefix in ("/participant show ", "/participant remove "):
                 if stripped.startswith(prefix):
                     typed_target = stripped[len(prefix) :].strip().casefold()
                     if not typed_target:
@@ -246,6 +246,7 @@ class CollaborationApp(App):
             "/workspace delete ",
             "/participant list",
             "/participant show ",
+            "/participant remove ",
             "/thread create ",
             "/thread list",
             "/thread show",
@@ -364,6 +365,15 @@ class CollaborationApp(App):
             for item in participants
         ]
         return participants
+
+    async def _delete_participant(self, workspace_id: str, participant_id: str) -> None:
+        assert self._http_client is not None
+        response = await self._http_client.request(
+            "DELETE",
+            f"{self.gateway}/v1/workspaces/{workspace_id}/participants/{participant_id}",
+            json={"actor": self.actor_payload},
+        )
+        response.raise_for_status()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -789,7 +799,7 @@ class CollaborationApp(App):
         parts = command.strip().split(maxsplit=2)
         if len(parts) < 2:
             self._write_system(
-                "participant commands: /participant list | /participant show <id|name|current>",
+                "participant commands: /participant list | /participant show <id|name|current> | /participant remove <id|name>",
                 style="yellow",
             )
             return
@@ -852,6 +862,36 @@ class CollaborationApp(App):
                         f"  definition keys: {', '.join(sorted(agent_config['definition'].keys()))}",
                         style="dim",
                     )
+            return
+
+        if action == "remove":
+            target = parts[2].strip() if len(parts) > 2 else ""
+            if not target:
+                self._write_system("usage: /participant remove <id|name>", style="yellow")
+                return
+            participant = self._resolve_participant_target(participants, target)
+            if participant is None:
+                self._write_system(f"participant not found: {target}", style="red")
+                return
+            if participant["participant_id"] == self.state.participant_id:
+                self._write_system(
+                    "cannot remove the current TUI participant",
+                    style="yellow",
+                )
+                return
+            await self._delete_participant(
+                self.state.workspace_id,
+                participant["participant_id"],
+            )
+            self._participant_suggestions = [
+                item
+                for item in self._participant_suggestions
+                if item["participant_id"] != participant["participant_id"]
+            ]
+            self._write_system(
+                f"removed participant: {participant['display_name']} ({participant['participant_id'][:8]})",
+                style="green",
+            )
             return
 
         self._write_system(f"unknown participant action: {action}", style="yellow")
@@ -1098,7 +1138,7 @@ class CollaborationApp(App):
         if "agent" in lowered:
             return " Tip: /agent create local <name> :: <role> :: <description> :: <model>"
         if "participant" in lowered or "people" in lowered or "team" in lowered:
-            return " Tip: /participant list | /participant show <id|name|current>"
+            return " Tip: /participant list | /participant show <id|name|current> | /participant remove <id|name>"
         if "thread" in lowered:
             return " Tip: /thread list | /thread show | /thread use <id|title>"
         if "role" in lowered:

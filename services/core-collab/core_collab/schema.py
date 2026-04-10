@@ -52,6 +52,17 @@ MIGRATIONS = textwrap.dedent(
         metadata JSONB NOT NULL DEFAULT '{}'::jsonb
     );
 
+    CREATE TABLE IF NOT EXISTS users (
+        user_id UUID PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_users_display_name
+        ON users(display_name);
+
     CREATE TABLE IF NOT EXISTS system_agents (
         agent_id UUID PRIMARY KEY,
         display_name TEXT NOT NULL,
@@ -94,7 +105,8 @@ MIGRATIONS = textwrap.dedent(
         participant_id UUID PRIMARY KEY,
         workspace_id UUID NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
         participant_type TEXT NOT NULL,
-        display_name TEXT NOT NULL,
+        user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
+        system_agent_id UUID REFERENCES system_agents(agent_id) ON DELETE SET NULL,
         description TEXT,
         roles JSONB NOT NULL DEFAULT '[]'::jsonb,
         capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -106,7 +118,40 @@ MIGRATIONS = textwrap.dedent(
     );
 
     CREATE INDEX IF NOT EXISTS idx_participants_workspace
-        ON participants(workspace_id, display_name);
+        ON participants(workspace_id, participant_type);
+
+    CREATE INDEX IF NOT EXISTS idx_participants_workspace_user
+        ON participants(workspace_id, user_id);
+
+    CREATE INDEX IF NOT EXISTS idx_participants_workspace_system_agent
+        ON participants(workspace_id, system_agent_id);
+
+    ALTER TABLE participants
+        ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(user_id) ON DELETE SET NULL;
+
+    ALTER TABLE participants
+        ADD COLUMN IF NOT EXISTS system_agent_id UUID REFERENCES system_agents(agent_id) ON DELETE SET NULL;
+
+    ALTER TABLE participants
+        ALTER COLUMN display_name DROP NOT NULL;
+
+    INSERT INTO users (user_id, display_name, metadata, created_at, updated_at)
+    SELECT participant_id, display_name, '{}'::jsonb, created_at, updated_at
+    FROM participants
+    WHERE participant_type = 'user'
+      AND display_name IS NOT NULL
+    ON CONFLICT (user_id) DO NOTHING;
+
+    UPDATE participants
+    SET user_id = participant_id
+    WHERE participant_type = 'user'
+      AND user_id IS NULL;
+
+    UPDATE participants
+    SET system_agent_id = NULLIF(metadata->>'system_agent_id', '')::uuid
+    WHERE participant_type = 'agent'
+      AND system_agent_id IS NULL
+      AND metadata ? 'system_agent_id';
 
     CREATE TABLE IF NOT EXISTS memberships (
         membership_id UUID PRIMARY KEY,
@@ -223,7 +268,5 @@ MIGRATIONS = textwrap.dedent(
     CREATE INDEX IF NOT EXISTS idx_artifacts_thread_created_at
         ON artifacts(thread_id, created_at DESC);
 
-    CREATE INDEX IF NOT EXISTS idx_participants_workspace_system_agent
-        ON participants(workspace_id, (metadata->>'system_agent_id'));
     """
 )

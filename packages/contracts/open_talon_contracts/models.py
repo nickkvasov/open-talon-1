@@ -123,6 +123,7 @@ class ParticipantProfile(BaseModel):
     participant_id: UUID
     workspace_id: UUID
     participant_type: ParticipantType
+    user_id: UUID | None = None
     system_agent_id: UUID | None = None
     display_name: str
     description: str | None = None
@@ -309,6 +310,10 @@ class CreateWorkspaceRequest(BaseModel):
 
 
 class DeleteWorkspaceRequest(BaseModel):
+    actor: ParticipantInput
+
+
+class DeleteParticipantRequest(BaseModel):
     actor: ParticipantInput
 
 
