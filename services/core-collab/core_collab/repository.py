@@ -9,6 +9,9 @@ import asyncpg
 
 from .contracts import (
     ActorRef,
+    AgentConfiguration,
+    AgentDefinition,
+    AgentEndpoint,
     EventEnvelope,
     Membership,
     MemoryEntry,
@@ -128,6 +131,41 @@ class CollaborationRepository:
             workspace.created_at,
             workspace.updated_at,
             self._json_dumps(workspace.metadata),
+        )
+
+    async def upsert_system_agent(
+        self, conn: asyncpg.Connection, agent: AgentDefinition
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO system_agents (
+                agent_id, display_name, description, role, capabilities, endpoint,
+                system_prompt, definition, created_by, created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (agent_id) DO UPDATE
+                SET display_name = EXCLUDED.display_name,
+                    description = EXCLUDED.description,
+                    role = EXCLUDED.role,
+                    capabilities = EXCLUDED.capabilities,
+                    endpoint = EXCLUDED.endpoint,
+                    system_prompt = EXCLUDED.system_prompt,
+                    definition = EXCLUDED.definition,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            agent.agent_id,
+            agent.display_name,
+            agent.description,
+            agent.role,
+            self._json_dumps(agent.capabilities),
+            self._json_dumps(agent.endpoint.model_dump(mode="json")),
+            agent.system_prompt,
+            self._json_dumps(agent.definition),
+            agent.created_by,
+            agent.created_at,
+            agent.updated_at,
+            self._json_dumps(agent.metadata),
         )
 
     async def delete_workspace(
@@ -407,6 +445,29 @@ class CollaborationRepository:
         )
         return [self._workspace_from_row(row) for row in rows]
 
+    async def list_system_agents(self) -> list[AgentDefinition]:
+        rows = await self._pool.fetch(
+            """
+            SELECT agent_id, display_name, description, role, capabilities, endpoint,
+                   system_prompt, definition, created_by, created_at, updated_at, metadata
+            FROM system_agents
+            ORDER BY created_at ASC
+            """
+        )
+        return [self._system_agent_from_row(row) for row in rows]
+
+    async def fetch_system_agent(self, agent_id: UUID) -> AgentDefinition | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT agent_id, display_name, description, role, capabilities, endpoint,
+                   system_prompt, definition, created_by, created_at, updated_at, metadata
+            FROM system_agents
+            WHERE agent_id = $1
+            """,
+            agent_id,
+        )
+        return self._system_agent_from_row(row) if row else None
+
     async def list_participants(self, workspace_id: UUID) -> list[ParticipantProfile]:
         rows = await self._pool.fetch(
             """
@@ -563,10 +624,12 @@ class CollaborationRepository:
 
     @staticmethod
     def _participant_from_row(row: asyncpg.Record) -> ParticipantProfile:
+        metadata = CollaborationRepository._json_value(row["metadata"], default={})
         return ParticipantProfile(
             participant_id=row["participant_id"],
             workspace_id=row["workspace_id"],
             participant_type=row["participant_type"],
+            system_agent_id=metadata.get("system_agent_id"),
             display_name=row["display_name"],
             description=row["description"],
             roles=list(CollaborationRepository._json_value(row["roles"], default=[])),
@@ -575,6 +638,32 @@ class CollaborationRepository:
             ),
             status=row["status"],
             visibility_scope=row["visibility_scope"],
+            agent_config=(
+                AgentConfiguration.model_validate(metadata["agent_config"])
+                if metadata.get("agent_config") is not None
+                else None
+            ),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _system_agent_from_row(row: asyncpg.Record) -> AgentDefinition:
+        return AgentDefinition(
+            agent_id=row["agent_id"],
+            display_name=row["display_name"],
+            description=row["description"],
+            role=row["role"],
+            capabilities=list(
+                CollaborationRepository._json_value(row["capabilities"], default=[])
+            ),
+            endpoint=AgentEndpoint.model_validate(
+                CollaborationRepository._json_value(row["endpoint"], default={})
+            ),
+            system_prompt=row["system_prompt"],
+            definition=CollaborationRepository._json_value(row["definition"], default={}),
+            created_by=row["created_by"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),

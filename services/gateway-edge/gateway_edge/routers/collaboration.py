@@ -11,6 +11,9 @@ from gateway_edge.auth.openbao import validate_openbao_token
 from gateway_edge.config import settings
 from gateway_edge.models import (
     AssumeParticipantRoleRequest,
+    AgentDefinition,
+    CreateAgentParticipantRequest,
+    CreateSystemAgentRequest,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
     CreateThreadRequest,
@@ -24,7 +27,9 @@ from gateway_edge.models import (
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    UpdateSystemAgentRequest,
     UpsertRoleDefinitionRequest,
+    UpdateAgentParticipantRequest,
     UpdateMemoryEntryRequest,
     Workspace,
     WorkspaceDetail,
@@ -141,6 +146,21 @@ async def get_workspace(workspace_id: UUID) -> WorkspaceDetail:
         raise _http_error(exc) from exc
 
 
+@router.get(
+    "/workspaces/{workspace_id}/participants",
+    response_model=list[ParticipantProfile],
+    summary="List participant advertisements in a workspace",
+)
+async def list_workspace_participants(workspace_id: UUID) -> list[ParticipantProfile]:
+    logger.debug("HTTP list_workspace_participants workspace_id=%s", workspace_id)
+    try:
+        return await collab_svc.collaboration_service.list_workspace_participants(
+            workspace_id
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.patch(
     "/workspaces/{workspace_id}/participants/{participant_id}/role",
     response_model=ParticipantProfile,
@@ -161,6 +181,110 @@ async def assume_participant_role(
     )
     try:
         return await collab_svc.collaboration_service.assume_participant_role(
+            workspace_id,
+            participant_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/agents",
+    response_model=AgentDefinition,
+    summary="Create a system-level agent definition",
+)
+async def create_system_agent(payload: CreateSystemAgentRequest) -> AgentDefinition:
+    logger.debug(
+        "HTTP create_system_agent actor=%s display_name=%r endpoint_kind=%s",
+        _actor_log(payload.actor),
+        payload.display_name,
+        payload.endpoint.kind,
+    )
+    try:
+        return await collab_svc.collaboration_service.create_system_agent(payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/agents",
+    response_model=list[AgentDefinition],
+    summary="List system-level agent definitions",
+)
+async def list_system_agents() -> list[AgentDefinition]:
+    logger.debug("HTTP list_system_agents")
+    try:
+        return await collab_svc.collaboration_service.list_system_agents()
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch(
+    "/agents/{agent_id}",
+    response_model=AgentDefinition,
+    summary="Update a system-level agent definition",
+)
+async def update_system_agent(
+    agent_id: UUID,
+    payload: UpdateSystemAgentRequest,
+) -> AgentDefinition:
+    logger.debug(
+        "HTTP update_system_agent agent_id=%s actor=%s",
+        agent_id,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.update_system_agent(
+            agent_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/workspaces/{workspace_id}/agents",
+    response_model=ParticipantProfile,
+    summary="Attach a system-level agent to a workspace",
+)
+async def create_agent_participant(
+    workspace_id: UUID,
+    payload: CreateAgentParticipantRequest,
+) -> ParticipantProfile:
+    logger.debug(
+        "HTTP attach_agent_to_workspace workspace_id=%s actor=%s agent_id=%s",
+        workspace_id,
+        _actor_log(payload.actor),
+        payload.agent_id,
+    )
+    try:
+        return await collab_svc.collaboration_service.create_agent_participant(
+            workspace_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch(
+    "/workspaces/{workspace_id}/agents/{participant_id}",
+    response_model=ParticipantProfile,
+    summary="Update an existing agent participant in a workspace",
+)
+async def update_agent_participant(
+    workspace_id: UUID,
+    participant_id: UUID,
+    payload: UpdateAgentParticipantRequest,
+) -> ParticipantProfile:
+    logger.debug(
+        "HTTP update_agent_participant workspace_id=%s participant_id=%s actor=%s",
+        workspace_id,
+        participant_id,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.update_agent_participant(
             workspace_id,
             participant_id,
             payload,

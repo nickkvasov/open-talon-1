@@ -9,7 +9,11 @@ import asyncpg
 
 from .contracts import (
     ActorRef,
+    AgentConfiguration,
+    AgentDefinition,
     AssumeParticipantRoleRequest,
+    CreateAgentParticipantRequest,
+    CreateSystemAgentRequest,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
     CreateThreadRequest,
@@ -28,7 +32,9 @@ from .contracts import (
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    UpdateSystemAgentRequest,
     UpsertRoleDefinitionRequest,
+    UpdateAgentParticipantRequest,
     UpdateMemoryEntryRequest,
     Workspace,
     WorkspaceDetail,
@@ -73,6 +79,11 @@ class ParticipantCommandResult(CommandResult):
 @dataclass
 class RoleDefinitionCommandResult(CommandResult):
     role_definition: RoleDefinition | None = None
+
+
+@dataclass
+class AgentDefinitionCommandResult(CommandResult):
+    agent: AgentDefinition | None = None
 
 
 class CollaborationKernel:
@@ -183,6 +194,65 @@ class CollaborationKernel:
             role_definitions=self._role_definitions_from_workspace(workspace),
         )
 
+    async def list_workspace_participants(
+        self, workspace_id: UUID
+    ) -> list[ParticipantProfile]:
+        logger.debug("Kernel list_workspace_participants workspace_id=%s", workspace_id)
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        return await self._repository.list_participants(workspace_id)
+
+    async def create_system_agent(
+        self, payload: CreateSystemAgentRequest
+    ) -> AgentDefinitionCommandResult:
+        now = self._now()
+        agent = AgentDefinition(
+            agent_id=uuid4(),
+            display_name=payload.display_name,
+            description=payload.description,
+            role=payload.role,
+            capabilities=payload.capabilities,
+            endpoint=payload.endpoint,
+            system_prompt=payload.system_prompt,
+            definition=payload.definition,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_system_agent(conn, agent)
+        return AgentDefinitionCommandResult(agent=agent)
+
+    async def list_system_agents(self) -> list[AgentDefinition]:
+        return await self._repository.list_system_agents()
+
+    async def update_system_agent(
+        self, agent_id: UUID, payload: UpdateSystemAgentRequest
+    ) -> AgentDefinitionCommandResult:
+        existing = await self._repository.fetch_system_agent(agent_id)
+        if existing is None:
+            raise KeyError(f"System agent {agent_id} not found")
+        updated = existing.model_copy(
+            update={
+                "display_name": payload.display_name or existing.display_name,
+                "description": payload.description or existing.description,
+                "role": payload.role or existing.role,
+                "capabilities": payload.capabilities or existing.capabilities,
+                "endpoint": payload.endpoint or existing.endpoint,
+                "system_prompt": payload.system_prompt or existing.system_prompt,
+                "definition": payload.definition if payload.definition is not None else existing.definition,
+                "updated_at": self._now(),
+                "metadata": {**existing.metadata, **payload.metadata} if payload.metadata is not None else existing.metadata,
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_system_agent(conn, updated)
+        return AgentDefinitionCommandResult(agent=updated)
+
     async def upsert_role_definition(
         self,
         workspace_id: UUID,
@@ -277,10 +347,12 @@ class CollaborationKernel:
             capabilities=payload.capabilities,
             status=existing.status if existing is not None else "active",
             visibility_scope=payload.actor.visibility_scope,
+            agent_config=existing.agent_config if existing is not None else None,
             created_at=existing.created_at if existing is not None else now,
             updated_at=now,
             metadata=(existing.metadata if existing is not None else {}),
         )
+        participant = self._with_agent_metadata(participant)
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 await self._repository.upsert_participant(conn, participant)
@@ -302,6 +374,115 @@ class CollaborationKernel:
             event.sequence,
         )
         return ParticipantCommandResult(participant=participant, events=[event])
+
+    async def create_agent_participant(
+        self,
+        workspace_id: UUID,
+        payload: CreateAgentParticipantRequest,
+    ) -> ParticipantCommandResult:
+        logger.debug(
+            "Kernel create_agent_participant workspace_id=%s actor_id=%s agent_id=%s",
+            workspace_id,
+            payload.actor.participant_id,
+            payload.agent_id,
+        )
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        system_agent = await self._repository.fetch_system_agent(payload.agent_id)
+        if system_agent is None:
+            raise KeyError(f"System agent {payload.agent_id} not found")
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+        participant = ParticipantProfile(
+            participant_id=uuid4(),
+            workspace_id=workspace_id,
+            participant_type="agent",
+            system_agent_id=system_agent.agent_id,
+            display_name=system_agent.display_name,
+            description=system_agent.description,
+            roles=[system_agent.role],
+            capabilities=system_agent.capabilities,
+            status="active",
+            visibility_scope="workspace",
+            agent_config=AgentConfiguration(
+                endpoint=system_agent.endpoint,
+                system_prompt=system_agent.system_prompt,
+                definition=system_agent.definition,
+            ),
+            created_at=now,
+            updated_at=now,
+            metadata={"system_agent_id": str(system_agent.agent_id)},
+        )
+        participant = self._with_agent_metadata(participant)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_participant(conn, participant)
+                event = await self._build_workspace_event(
+                    conn,
+                    workspace_id,
+                    "participant.agent_registered",
+                    actor=actor,
+                    target=TargetRef(type="participant", id=participant.participant_id),
+                    payload=participant.model_dump(mode="json"),
+                    visibility="workspace",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        return ParticipantCommandResult(participant=participant, events=[event])
+
+    async def update_agent_participant(
+        self,
+        workspace_id: UUID,
+        participant_id: UUID,
+        payload: UpdateAgentParticipantRequest,
+    ) -> ParticipantCommandResult:
+        logger.debug(
+            "Kernel update_agent_participant workspace_id=%s participant_id=%s actor_id=%s",
+            workspace_id,
+            participant_id,
+            payload.actor.participant_id,
+        )
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        existing = await self._repository.fetch_participant(workspace_id, participant_id)
+        if existing is None:
+            raise KeyError(f"Participant {participant_id} not found")
+        if existing.participant_type != "agent":
+            raise ValueError("Only agent participants can be updated via the agent API")
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+        updated = existing.model_copy(
+            update={
+                "visibility_scope": (
+                    payload.visibility_scope or existing.visibility_scope
+                ),
+                "status": payload.status or existing.status,
+                "updated_at": now,
+                "metadata": (
+                    {**existing.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else existing.metadata
+                ),
+            }
+        )
+        updated = self._with_agent_metadata(updated)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_participant(conn, updated)
+                event = await self._build_workspace_event(
+                    conn,
+                    workspace_id,
+                    "participant.agent_updated",
+                    actor=actor,
+                    target=TargetRef(type="participant", id=participant_id),
+                    payload=updated.model_dump(mode="json"),
+                    visibility="workspace",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        return ParticipantCommandResult(participant=updated, events=[event])
 
     async def create_thread(
         self, workspace_id: UUID, payload: CreateThreadRequest
@@ -841,6 +1022,15 @@ class CollaborationKernel:
             created_at=now,
             updated_at=now,
         )
+
+    @staticmethod
+    def _with_agent_metadata(participant: ParticipantProfile) -> ParticipantProfile:
+        metadata = dict(participant.metadata)
+        if participant.agent_config is None:
+            metadata.pop("agent_config", None)
+        else:
+            metadata["agent_config"] = participant.agent_config.model_dump(mode="json")
+        return participant.model_copy(update={"metadata": metadata})
 
     @staticmethod
     def _role_definitions_from_workspace(workspace: Workspace) -> list[RoleDefinition]:

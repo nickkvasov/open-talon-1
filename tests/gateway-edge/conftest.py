@@ -35,9 +35,8 @@ async def _null_lifespan(app: FastAPI):  # type: ignore[type-arg]
 
 class MockCollaborationService:
     def __init__(self) -> None:
-        from gateway_edge.models import Workspace
-
         self.workspaces = {}
+        self.system_agents = {}
         self.participants = {}
         self.role_definitions = {}
         self.threads = {}
@@ -127,6 +126,55 @@ class MockCollaborationService:
             role_definitions=role_definitions,
         )
 
+    async def list_workspace_participants(self, workspace_id: UUID):
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        return list(self.participants.get(str(workspace_id), {}).values())
+
+    async def create_system_agent(self, payload):
+        from gateway_edge.models import AgentDefinition
+
+        agent = AgentDefinition(
+            agent_id=uuid4(),
+            display_name=payload.display_name,
+            description=payload.description,
+            role=payload.role,
+            capabilities=payload.capabilities,
+            endpoint=payload.endpoint,
+            system_prompt=payload.system_prompt,
+            definition=payload.definition,
+            created_by=payload.actor.participant_id,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            metadata=payload.metadata,
+        )
+        self.system_agents[str(agent.agent_id)] = agent
+        return agent
+
+    async def list_system_agents(self):
+        return list(self.system_agents.values())
+
+    async def update_system_agent(self, agent_id: UUID, payload):
+        agent = self.system_agents.get(str(agent_id))
+        if agent is None:
+            raise KeyError(f"System agent {agent_id} not found")
+        updated = agent.model_copy(
+            update={
+                "display_name": payload.display_name or agent.display_name,
+                "description": payload.description or agent.description,
+                "role": payload.role or agent.role,
+                "capabilities": payload.capabilities or agent.capabilities,
+                "endpoint": payload.endpoint or agent.endpoint,
+                "system_prompt": payload.system_prompt or agent.system_prompt,
+                "definition": payload.definition if payload.definition is not None else agent.definition,
+                "updated_at": datetime.now(timezone.utc),
+                "metadata": {**agent.metadata, **payload.metadata} if payload.metadata is not None else agent.metadata,
+            }
+        )
+        self.system_agents[str(agent_id)] = updated
+        return updated
+
     async def upsert_role_definition(self, workspace_id: UUID, payload):
         from gateway_edge.models import RoleDefinition
 
@@ -177,6 +225,73 @@ class MockCollaborationService:
         )
         workspace_participants[str(participant_id)] = participant
         return participant
+
+    async def create_agent_participant(self, workspace_id: UUID, payload):
+        from gateway_edge.models import AgentConfiguration, ParticipantProfile
+
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        system_agent = self.system_agents.get(str(payload.agent_id))
+        if system_agent is None:
+            raise KeyError(f"System agent {payload.agent_id} not found")
+        now = datetime.now(timezone.utc)
+        participant = ParticipantProfile(
+            participant_id=uuid4(),
+            workspace_id=workspace_id,
+            participant_type="agent",
+            system_agent_id=system_agent.agent_id,
+            display_name=system_agent.display_name,
+            description=system_agent.description,
+            roles=[system_agent.role],
+            capabilities=system_agent.capabilities,
+            visibility_scope="workspace",
+            agent_config=AgentConfiguration(
+                endpoint=system_agent.endpoint,
+                system_prompt=system_agent.system_prompt,
+                definition=system_agent.definition,
+            ),
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "system_agent_id": str(system_agent.agent_id),
+                "agent_config": {
+                    "endpoint": system_agent.endpoint.model_dump(mode="json"),
+                    "system_prompt": system_agent.system_prompt,
+                    "definition": system_agent.definition,
+                },
+            },
+        )
+        self.participants.setdefault(str(workspace_id), {})[
+            str(participant.participant_id)
+        ] = participant
+        return participant
+
+    async def update_agent_participant(self, workspace_id: UUID, participant_id: UUID, payload):
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        participants = self.participants.setdefault(str(workspace_id), {})
+        participant = participants.get(str(participant_id))
+        if participant is None:
+            raise KeyError(f"Participant {participant_id} not found")
+        if participant.participant_type != "agent":
+            raise ValueError("Only agent participants can be updated via the agent API")
+        metadata = dict(participant.metadata)
+        if payload.metadata is not None:
+            metadata.update(payload.metadata)
+        if participant.agent_config is not None:
+            metadata["agent_config"] = participant.agent_config.model_dump(mode="json")
+        updated = participant.model_copy(
+            update={
+                "visibility_scope": payload.visibility_scope or participant.visibility_scope,
+                "status": payload.status or participant.status,
+                "updated_at": datetime.now(timezone.utc),
+                "metadata": metadata,
+            }
+        )
+        participants[str(participant_id)] = updated
+        return updated
 
     async def create_thread(self, workspace_id: UUID, payload):
         from gateway_edge.models import Membership, ParticipantProfile, Thread, ThreadDetail

@@ -204,3 +204,283 @@ async def test_assume_precreated_role_uses_workspace_role_definition(client, act
     assert body["roles"] == ["reviewer"]
     assert body["description"] == "Reviews code and risk before changes go live."
     assert body["capabilities"] == ["regressions", "qa"]
+
+
+async def test_create_agent_participant_advertises_capabilities_and_llm_config(client, actor_payload):
+    workspace_resp = await client.post(
+        "/v1/workspaces",
+        json={"name": "Agent Directory", "actor": actor_payload},
+    )
+    workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+
+    create_resp = await client.post(
+        "/v1/agents",
+        json={
+            "actor": actor_payload,
+            "display_name": "Research Analyst",
+            "description": "Investigates product questions and synthesizes findings.",
+            "role": "research analyst",
+            "capabilities": ["research", "synthesis", "briefs"],
+            "endpoint": {
+                "kind": "remote",
+                "url": "https://api.example.com/v1/responses",
+                "model": "gpt-5.4",
+            },
+            "system_prompt": "You are a research-focused agent who produces concise evidence-backed summaries.",
+            "definition": {
+                "instructions": "Produce concise evidence-backed summaries.",
+                "specialty": "research",
+            },
+        },
+    )
+    agent_id = create_resp.json()["agent_id"]
+
+    attach_resp = await client.post(
+        f"/v1/workspaces/{workspace_id}/agents",
+        json={"actor": actor_payload, "agent_id": agent_id},
+    )
+
+    assert create_resp.status_code == 200
+    assert attach_resp.status_code == 200
+    body = attach_resp.json()
+    assert body["participant_type"] == "agent"
+    assert body["system_agent_id"] == agent_id
+    assert body["roles"] == ["research analyst"]
+    assert body["capabilities"] == ["research", "synthesis", "briefs"]
+    assert body["agent_config"]["endpoint"]["kind"] == "remote"
+    assert body["agent_config"]["endpoint"]["url"] == "https://api.example.com/v1/responses"
+    assert body["agent_config"]["endpoint"]["model"] == "gpt-5.4"
+    assert body["agent_config"]["system_prompt"].startswith("You are a research-focused agent")
+    assert body["agent_config"]["definition"]["specialty"] == "research"
+
+    workspace_detail = await client.get(f"/v1/workspaces/{workspace_id}")
+    assert workspace_detail.status_code == 200
+    agents = [
+        participant
+        for participant in workspace_detail.json()["participants"]
+        if participant["participant_type"] == "agent"
+    ]
+    assert len(agents) == 1
+    assert agents[0]["display_name"] == "Research Analyst"
+    assert agents[0]["agent_config"]["endpoint"]["kind"] == "remote"
+
+
+async def test_update_agent_participant_changes_endpoint_prompt_and_role(client, actor_payload):
+    workspace_resp = await client.post(
+        "/v1/workspaces",
+        json={"name": "Agent Updates", "actor": actor_payload},
+    )
+    workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+
+    create_resp = await client.post(
+        "/v1/agents",
+        json={
+            "actor": actor_payload,
+            "display_name": "Local Builder",
+            "description": "Builds patches against the local codebase.",
+            "role": "implementation agent",
+            "capabilities": ["coding", "debugging"],
+            "endpoint": {
+                "kind": "local",
+                "url": "http://127.0.0.1:11434/api/generate",
+                "model": "qwen-coder",
+            },
+            "system_prompt": "You write careful, testable code changes.",
+            "definition": {
+                "runtime": "ollama",
+                "temperature": 0.1,
+            },
+        },
+    )
+    agent_id = create_resp.json()["agent_id"]
+
+    attach_resp = await client.post(
+        f"/v1/workspaces/{workspace_id}/agents",
+        json={"actor": actor_payload, "agent_id": agent_id},
+    )
+    participant_id = attach_resp.json()["participant_id"]
+
+    update_resp = await client.patch(
+        f"/v1/agents/{agent_id}",
+        json={
+            "actor": actor_payload,
+            "description": "Builds patches and verifies them with focused tests.",
+            "role": "senior implementation agent",
+            "capabilities": ["coding", "debugging", "testing"],
+            "endpoint": {
+                "kind": "remote",
+                "url": "https://api.example.com/v1/responses",
+                "model": "gpt-5.4-mini",
+            },
+            "system_prompt": "You implement changes, run targeted validation, and report residual risk.",
+            "definition": {
+                "runtime": "responses-api",
+                "max_output_tokens": 4000,
+            },
+        },
+    )
+
+    attach_update_resp = await client.patch(
+        f"/v1/workspaces/{workspace_id}/agents/{participant_id}",
+        json={"actor": actor_payload, "status": "busy"},
+    )
+
+    assert update_resp.status_code == 200
+    body = update_resp.json()
+    assert body["role"] == "senior implementation agent"
+    assert body["capabilities"] == ["coding", "debugging", "testing"]
+    assert body["endpoint"]["kind"] == "remote"
+    assert body["endpoint"]["model"] == "gpt-5.4-mini"
+    assert body["system_prompt"].startswith("You implement changes")
+    assert body["definition"]["runtime"] == "responses-api"
+    assert attach_update_resp.status_code == 200
+    assert attach_update_resp.json()["status"] == "busy"
+
+
+async def test_create_system_agent_participant_uses_system_scope(client, actor_payload):
+    workspace_resp = await client.post(
+        "/v1/workspaces",
+        json={"name": "System Agents", "actor": actor_payload},
+    )
+    workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+
+    create_resp = await client.post(
+        "/v1/agents",
+        json={
+            "actor": actor_payload,
+            "display_name": "Ops Agent",
+            "description": "Handles system-wide operational tasks.",
+            "role": "operations agent",
+            "capabilities": ["deployments", "observability"],
+            "endpoint": {
+                "kind": "system",
+                "model": "ops-router",
+            },
+            "system_prompt": "You coordinate system-wide operational workflows safely.",
+            "definition": {
+                "routing_group": "ops",
+                "approval_policy": "manual",
+            },
+        },
+    )
+
+    assert create_resp.status_code == 200
+    body = create_resp.json()
+    assert body["endpoint"]["kind"] == "system"
+    assert body["endpoint"]["url"] is None
+    assert body["definition"]["routing_group"] == "ops"
+
+
+async def test_agents_can_access_workspace_participant_advertisements(client, actor_payload):
+    second_actor = {
+        "participant_id": str(uuid4()),
+        "participant_type": "user",
+        "display_name": "Marta",
+    }
+    workspace_resp = await client.post(
+        "/v1/workspaces",
+        json={"name": "Shared Directory", "actor": actor_payload},
+    )
+    workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+
+    await client.patch(
+        f"/v1/workspaces/{workspace_id}/participants/{actor_payload['participant_id']}/role",
+        json={
+            "actor": actor_payload,
+            "role": "product strategist",
+            "description": "Turns product goals into execution plans.",
+            "capabilities": ["planning", "prioritization"],
+        },
+    )
+    await client.patch(
+        f"/v1/workspaces/{workspace_id}/participants/{second_actor['participant_id']}/role",
+        json={
+            "actor": second_actor,
+            "role": "ml engineer",
+            "description": "Builds and evaluates agent behavior.",
+            "capabilities": ["evaluation", "prompting"],
+        },
+    )
+    create_agent_resp = await client.post(
+        "/v1/agents",
+        json={
+            "actor": actor_payload,
+            "display_name": "Planner Agent",
+            "description": "Helps route work to the right people.",
+            "role": "coordination agent",
+            "capabilities": ["routing", "triage"],
+            "endpoint": {
+                "kind": "remote",
+                "url": "https://api.example.com/v1/responses",
+                "model": "gpt-5.4-mini",
+            },
+            "system_prompt": "You analyze workspace participants and route requests to the best fit.",
+            "definition": {
+                "routing_strategy": "best-fit",
+            },
+        },
+    )
+    assert create_agent_resp.status_code == 200
+    agent_id = create_agent_resp.json()["agent_id"]
+    agent_resp = await client.post(
+        f"/v1/workspaces/{workspace_id}/agents",
+        json={"actor": actor_payload, "agent_id": agent_id},
+    )
+    assert agent_resp.status_code == 200
+
+    directory_resp = await client.get(f"/v1/workspaces/{workspace_id}/participants")
+    assert directory_resp.status_code == 200
+    participants = {
+        participant["display_name"]: participant
+        for participant in directory_resp.json()
+    }
+    assert participants["Nikolay"]["roles"] == ["product strategist"]
+    assert participants["Nikolay"]["capabilities"] == ["planning", "prioritization"]
+    assert participants["Marta"]["roles"] == ["ml engineer"]
+    assert participants["Marta"]["description"] == "Builds and evaluates agent behavior."
+    assert participants["Planner Agent"]["participant_type"] == "agent"
+    assert participants["Planner Agent"]["agent_config"]["system_prompt"].startswith(
+        "You analyze workspace participants"
+    )
+
+
+async def test_all_workspace_participants_can_access_participant_advertisements(client, actor_payload):
+    second_actor = {
+        "participant_id": str(uuid4()),
+        "participant_type": "user",
+        "display_name": "Marta",
+    }
+    workspace_resp = await client.post(
+        "/v1/workspaces",
+        json={"name": "Open Directory", "actor": actor_payload},
+    )
+    workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+
+    await client.patch(
+        f"/v1/workspaces/{workspace_id}/participants/{actor_payload['participant_id']}/role",
+        json={
+            "actor": actor_payload,
+            "role": "product strategist",
+            "description": "Turns product goals into execution plans.",
+            "capabilities": ["planning", "prioritization"],
+        },
+    )
+    await client.patch(
+        f"/v1/workspaces/{workspace_id}/participants/{second_actor['participant_id']}/role",
+        json={
+            "actor": second_actor,
+            "role": "ml engineer",
+            "description": "Builds and evaluates agent behavior.",
+            "capabilities": ["evaluation", "prompting"],
+        },
+    )
+
+    directory_resp = await client.get(f"/v1/workspaces/{workspace_id}/participants")
+    assert directory_resp.status_code == 200
+    participants = {
+        participant["display_name"]: participant
+        for participant in directory_resp.json()
+    }
+    assert participants["Nikolay"]["roles"] == ["product strategist"]
+    assert participants["Marta"]["roles"] == ["ml engineer"]
+    assert participants["Marta"]["capabilities"] == ["evaluation", "prompting"]

@@ -19,6 +19,9 @@ from core_collab import CollaborationKernel, CollaborationRepository  # noqa: E4
 from gateway_edge.db.postgres import get_pool
 from gateway_edge.models import (
     AssumeParticipantRoleRequest,
+    AgentDefinition,
+    CreateAgentParticipantRequest,
+    CreateSystemAgentRequest,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
     CreateThreadRequest,
@@ -32,7 +35,9 @@ from gateway_edge.models import (
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    UpdateSystemAgentRequest,
     UpsertRoleDefinitionRequest,
+    UpdateAgentParticipantRequest,
     UpdateMemoryEntryRequest,
     Workspace,
     WorkspaceDetail,
@@ -93,6 +98,27 @@ class CollaborationService:
         logger.debug("Service get_workspace workspace_id=%s", workspace_id)
         return await self._require_kernel().get_workspace_detail(workspace_id)
 
+    async def list_workspace_participants(self, workspace_id: UUID):
+        logger.debug("Service list_workspace_participants workspace_id=%s", workspace_id)
+        return await self._require_kernel().list_workspace_participants(workspace_id)
+
+    async def create_system_agent(
+        self, payload: CreateSystemAgentRequest
+    ) -> AgentDefinition:
+        result = await self._require_kernel().create_system_agent(payload)
+        assert result.agent is not None
+        return result.agent
+
+    async def list_system_agents(self) -> list[AgentDefinition]:
+        return await self._require_kernel().list_system_agents()
+
+    async def update_system_agent(
+        self, agent_id: UUID, payload: UpdateSystemAgentRequest
+    ) -> AgentDefinition:
+        result = await self._require_kernel().update_system_agent(agent_id, payload)
+        assert result.agent is not None
+        return result.agent
+
     async def upsert_role_definition(
         self,
         workspace_id: UUID,
@@ -123,6 +149,43 @@ class CollaborationService:
             payload.role,
         )
         result = await self._require_kernel().assume_participant_role(
+            workspace_id,
+            participant_id,
+            payload,
+        )
+        await self._publish_events(result.events)
+        assert result.participant is not None
+        return result.participant
+
+    async def create_agent_participant(
+        self,
+        workspace_id: UUID,
+        payload: CreateAgentParticipantRequest,
+    ):
+        logger.debug(
+            "Service attach_agent_to_workspace workspace_id=%s actor_id=%s agent_id=%s",
+            workspace_id,
+            payload.actor.participant_id,
+            payload.agent_id,
+        )
+        result = await self._require_kernel().create_agent_participant(workspace_id, payload)
+        await self._publish_events(result.events)
+        assert result.participant is not None
+        return result.participant
+
+    async def update_agent_participant(
+        self,
+        workspace_id: UUID,
+        participant_id: UUID,
+        payload: UpdateAgentParticipantRequest,
+    ):
+        logger.debug(
+            "Service update_agent_participant workspace_id=%s participant_id=%s actor_id=%s",
+            workspace_id,
+            participant_id,
+            payload.actor.participant_id,
+        )
+        result = await self._require_kernel().update_agent_participant(
             workspace_id,
             participant_id,
             payload,

@@ -128,6 +128,18 @@ class WorkspaceCommandSuggester(Suggester):
                     for target in thread_targets:
                         if target.casefold().startswith(typed_target):
                             return prefix + target
+        if stripped.startswith("/participant "):
+            participant_targets = self.app.participant_suggestion_targets
+            for prefix in ("/participant show ",):
+                if stripped.startswith(prefix):
+                    typed_target = stripped[len(prefix) :].strip().casefold()
+                    if not typed_target:
+                        return prefix + (
+                            participant_targets[0] if participant_targets else ""
+                        )
+                    for target in participant_targets:
+                        if target.casefold().startswith(typed_target):
+                            return prefix + target
         return None
 
 
@@ -225,11 +237,14 @@ class CollaborationApp(App):
         self._seen_message_ids: set[str] = set()
         self._http_client: httpx.AsyncClient | None = None
         self._slash_commands = [
+            "/agent create local ",
             "/workspace list",
             "/workspace show",
             "/workspace create ",
             "/workspace use ",
             "/workspace delete ",
+            "/participant list",
+            "/participant show ",
             "/thread create ",
             "/thread list",
             "/thread show",
@@ -240,6 +255,7 @@ class CollaborationApp(App):
             "/role use ",
         ]
         self._workspace_suggestions: list[dict[str, str]] = []
+        self._participant_suggestions: list[dict[str, str]] = []
         self._thread_suggestions: list[dict[str, str]] = []
         self._role_suggestions: list[str] = []
 
@@ -286,6 +302,17 @@ class CollaborationApp(App):
                     targets.append(candidate)
         return targets
 
+    @property
+    def participant_suggestion_targets(self) -> list[str]:
+        targets: list[str] = []
+        for participant in self._participant_suggestions:
+            display_name = participant["display_name"]
+            participant_id = participant["participant_id"]
+            for candidate in (display_name, participant_id[:8], participant_id):
+                if candidate not in targets:
+                    targets.append(candidate)
+        return targets
+
     async def _list_workspaces(self) -> list[dict]:
         assert self._http_client is not None
         response = await self._http_client.get(f"{self.gateway}/v1/workspaces")
@@ -321,13 +348,29 @@ class CollaborationApp(App):
         ]
         return detail
 
+    async def _list_participants(self, workspace_id: str) -> list[dict]:
+        assert self._http_client is not None
+        response = await self._http_client.get(
+            f"{self.gateway}/v1/workspaces/{workspace_id}/participants"
+        )
+        response.raise_for_status()
+        participants = response.json()
+        self._participant_suggestions = [
+            {
+                "participant_id": item["participant_id"],
+                "display_name": item["display_name"],
+            }
+            for item in participants
+        ]
+        return participants
+
     def compose(self) -> ComposeResult:
         yield Header()
         with Vertical(id="body"):
             yield Static("", id="context-info")
             yield RichLog(id="timeline", markup=True, highlight=False, wrap=True)
             yield Static(" Connecting...", id="status-bar")
-            yield Static(" Commands: /workspaces, /workspace create <name>", id="suggestion-bar")
+            yield Static(" Commands: /workspace list, /participant list, /thread list", id="suggestion-bar")
             with Horizontal(id="composer"):
                 yield Input(
                     placeholder="Type a message to the thread... (Enter to send)",
@@ -534,6 +577,120 @@ class CollaborationApp(App):
         response.raise_for_status()
         return response.json()
 
+    async def _create_system_agent(
+        self,
+        *,
+        display_name: str,
+        description: str,
+        role: str,
+        model: str,
+        capabilities: list[str],
+        system_prompt: str,
+    ) -> dict:
+        assert self._http_client is not None
+        definition = {
+            "display_name": display_name,
+            "role": role,
+            "description": description,
+            "capabilities": capabilities,
+            "runtime": {
+                "kind": "ollama",
+                "url": "http://127.0.0.1:11434/api/generate",
+                "model": model,
+            },
+        }
+        response = await self._http_client.post(
+            f"{self.gateway}/v1/agents",
+            json={
+                "actor": self.actor_payload,
+                "display_name": display_name,
+                "description": description,
+                "role": role,
+                "capabilities": capabilities,
+                "endpoint": {
+                    "kind": "local",
+                    "url": "http://127.0.0.1:11434/api/generate",
+                    "model": model,
+                },
+                "system_prompt": system_prompt,
+                "definition": definition,
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def _attach_system_agent(self, agent_id: str) -> dict:
+        assert self._http_client is not None
+        assert self.state.workspace_id is not None
+        response = await self._http_client.post(
+            f"{self.gateway}/v1/workspaces/{self.state.workspace_id}/agents",
+            json={"actor": self.actor_payload, "agent_id": agent_id},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def _handle_agent_command(self, command: str) -> None:
+        if not self.state.workspace_id:
+            self._write_system("join or create a workspace first", style="red")
+            return
+
+        parts = command.strip().split(maxsplit=3)
+        if len(parts) < 3 or parts[1] != "create" or parts[2] != "local":
+            self._write_system(
+                "agent commands: /agent create local <name> :: <role> :: <description> :: <model> [:: <cap1, cap2>] [:: <system prompt>]",
+                style="yellow",
+            )
+            return
+        if len(parts) < 4:
+            self._write_system(
+                "usage: /agent create local <name> :: <role> :: <description> :: <model> [:: <cap1, cap2>] [:: <system prompt>]",
+                style="yellow",
+            )
+            return
+
+        segments = [segment.strip() for segment in parts[3].split("::")]
+        if len(segments) < 4:
+            self._write_system(
+                "usage: /agent create local <name> :: <role> :: <description> :: <model> [:: <cap1, cap2>] [:: <system prompt>]",
+                style="yellow",
+            )
+            return
+        display_name, role, description, model = segments[:4]
+        capabilities: list[str] = []
+        if len(segments) >= 5 and segments[4]:
+            capabilities = [item.strip() for item in segments[4].split(",") if item.strip()]
+        system_prompt = (
+            segments[5]
+            if len(segments) >= 6 and segments[5]
+            else (
+                f"You are {display_name}, a local workspace agent using the {model} model via Ollama. "
+                f"Focus on {role} responsibilities and help with: {', '.join(capabilities) or 'general collaboration'}."
+            )
+        )
+        if not all((display_name, role, description, model)):
+            self._write_system(
+                "usage: /agent create local <name> :: <role> :: <description> :: <model> [:: <cap1, cap2>] [:: <system prompt>]",
+                style="yellow",
+            )
+            return
+
+        system_agent = await self._create_system_agent(
+            display_name=display_name,
+            description=description,
+            role=role,
+            model=model,
+            capabilities=capabilities,
+            system_prompt=system_prompt,
+        )
+        participant = await self._attach_system_agent(system_agent["agent_id"])
+        self._write_system(
+            f"local agent created: {participant['display_name']} ({participant['participant_id'][:8]})",
+            style="green",
+        )
+        self._write_system(f"system agent id: {system_agent['agent_id'][:8]}", style="dim")
+        self._write_system(f"model: {model}", style="dim")
+        self._write_system("endpoint: local Ollama", style="dim")
+
     async def _handle_workspace_command(self, command: str) -> None:
         parts = command.strip().split(maxsplit=2)
         if len(parts) < 2:
@@ -615,6 +772,81 @@ class CollaborationApp(App):
             return
 
         self._write_system(f"unknown workspace action: {action}", style="yellow")
+
+    async def _handle_participant_command(self, command: str) -> None:
+        if not self.state.workspace_id:
+            self._write_system("join or create a workspace first", style="red")
+            return
+
+        parts = command.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            self._write_system(
+                "participant commands: /participant list | /participant show <id|name|current>",
+                style="yellow",
+            )
+            return
+
+        participants = await self._list_participants(self.state.workspace_id)
+        action = parts[1].lower()
+
+        if action == "list":
+            if not participants:
+                self._write_system("no participants found", style="yellow")
+                return
+            self._write_system("Workspace Participants")
+            for participant in participants:
+                marker = "*" if participant["participant_id"] == self.state.participant_id else "-"
+                roles = ", ".join(participant.get("roles", [])) or "unassigned"
+                capabilities = ", ".join(participant.get("capabilities", [])) or "none"
+                suffix = f" [{participant['participant_type']}]"
+                self._write_system(
+                    f"{marker} {participant['display_name']}{suffix} ({participant['participant_id'][:8]})",
+                    style="cyan" if marker == "*" else "dim",
+                )
+                self._write_system(f"  role: {roles}", style="dim")
+                self._write_system(f"  capabilities: {capabilities}", style="dim")
+            return
+
+        if action == "show":
+            target = parts[2].strip() if len(parts) > 2 else "current"
+            participant = self._resolve_participant_target(participants, target)
+            if participant is None:
+                self._write_system(
+                    f"participant not found: {target or 'current'}",
+                    style="red",
+                )
+                return
+            roles = ", ".join(participant.get("roles", [])) or "unassigned"
+            capabilities = ", ".join(participant.get("capabilities", [])) or "none"
+            description = participant.get("description") or "no description"
+            self._write_system("Participant")
+            self._write_system(f"name: {participant['display_name']}", style="cyan")
+            self._write_system(f"id: {participant['participant_id']}", style="dim")
+            self._write_system(f"type: {participant['participant_type']}", style="dim")
+            self._write_system(f"role: {roles}", style="dim")
+            self._write_system(f"description: {description}", style="dim")
+            self._write_system(f"capabilities: {capabilities}", style="dim")
+            agent_config = participant.get("agent_config")
+            if agent_config:
+                endpoint = agent_config.get("endpoint", {})
+                self._write_system("Agent Config", style="magenta")
+                self._write_system(
+                    f"  endpoint: {endpoint.get('kind', 'unknown')} {endpoint.get('url', '')}".rstrip(),
+                    style="dim",
+                )
+                if endpoint.get("model"):
+                    self._write_system(
+                        f"  model: {endpoint['model']}",
+                        style="dim",
+                    )
+                if agent_config.get("definition"):
+                    self._write_system(
+                        f"  definition keys: {', '.join(sorted(agent_config['definition'].keys()))}",
+                        style="dim",
+                    )
+            return
+
+        self._write_system(f"unknown participant action: {action}", style="yellow")
 
     async def _handle_role_command(self, command: str) -> None:
         if not self.state.workspace_id:
@@ -817,6 +1049,28 @@ class CollaborationApp(App):
                 return thread
         return None
 
+    def _resolve_participant_target(
+        self, participants: list[dict], target: str
+    ) -> dict | None:
+        normalized = target.strip()
+        if not normalized or normalized == "current":
+            for participant in participants:
+                if participant["participant_id"] == self.state.participant_id:
+                    return participant
+            return None
+
+        for participant in participants:
+            if participant["participant_id"] == normalized:
+                return participant
+        for participant in participants:
+            if participant["participant_id"].startswith(normalized):
+                return participant
+        lowered = normalized.lower()
+        for participant in participants:
+            if participant["display_name"].lower() == lowered:
+                return participant
+        return None
+
     def _suggestions_for_text(self, text: str) -> str:
         stripped = text.strip()
         if not stripped:
@@ -828,11 +1082,15 @@ class CollaborationApp(App):
             ]
             if matches:
                 return " Suggestions: " + " | ".join(matches[:3])
-            return " Slash commands: /workspace list | /thread list | /role list"
+            return " Slash commands: /workspace list | /participant list | /thread list"
 
         lowered = stripped.lower()
         if "workspace" in lowered:
             return " Tip: /workspace list | /workspace show | /workspace use <id|name>"
+        if "agent" in lowered:
+            return " Tip: /agent create local <name> :: <role> :: <description> :: <model>"
+        if "participant" in lowered or "people" in lowered or "team" in lowered:
+            return " Tip: /participant list | /participant show <id|name|current>"
         if "thread" in lowered:
             return " Tip: /thread list | /thread show | /thread use <id|title>"
         if "role" in lowered:
@@ -843,7 +1101,7 @@ class CollaborationApp(App):
             return " Tip: /workspace create <name>"
         if lowered.startswith("delete") or lowered.startswith("remove"):
             return " Tip: /workspace delete <id|name|current>"
-        return " Enter sends a message. Use /workspace, /thread, or /role commands with list/show/create/use."
+        return " Enter sends a message. Use /agent, /workspace, /participant, /thread, or /role commands."
 
     async def _load_timeline(self) -> None:
         assert self._http_client is not None
@@ -1011,6 +1269,24 @@ class CollaborationApp(App):
                 logger.exception("TUI workspace command failed")
                 self._write_system(f"workspace command failed: {exc}", style="red")
                 self._update_status("err", "Workspace failed")
+            return
+        if text == "/agent" or text.startswith("/agent "):
+            try:
+                await self._handle_agent_command(text)
+                self._update_status("ok", "Connected")
+            except Exception as exc:
+                logger.exception("TUI agent command failed")
+                self._write_system(f"agent command failed: {exc}", style="red")
+                self._update_status("err", "Agent failed")
+            return
+        if text == "/participant" or text.startswith("/participant "):
+            try:
+                await self._handle_participant_command(text)
+                self._update_status("ok", "Connected")
+            except Exception as exc:
+                logger.exception("TUI participant command failed")
+                self._write_system(f"participant command failed: {exc}", style="red")
+                self._update_status("err", "Participant failed")
             return
         if text == "/thread" or text.startswith("/thread "):
             try:

@@ -52,6 +52,24 @@ MIGRATIONS = textwrap.dedent(
         metadata JSONB NOT NULL DEFAULT '{}'::jsonb
     );
 
+    CREATE TABLE IF NOT EXISTS system_agents (
+        agent_id UUID PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        role TEXT NOT NULL,
+        capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
+        endpoint JSONB NOT NULL DEFAULT '{}'::jsonb,
+        system_prompt TEXT NOT NULL,
+        definition JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_by UUID NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_system_agents_display_name
+        ON system_agents(display_name);
+
     CREATE TABLE IF NOT EXISTS threads (
         thread_id UUID PRIMARY KEY,
         workspace_id UUID NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,

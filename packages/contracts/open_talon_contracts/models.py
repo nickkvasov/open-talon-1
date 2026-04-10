@@ -13,6 +13,7 @@ ThreadState = Literal["active", "paused", "resolved", "archived"]
 MessageStatus = Literal["draft", "streaming", "completed", "failed"]
 TaskStatus = Literal["created", "claimed", "released", "completed", "failed"]
 RunStatus = Literal["started", "progressing", "completed", "failed"]
+AgentEndpointKind = Literal["local", "system", "remote"]
 
 
 def utcnow() -> datetime:
@@ -37,6 +38,33 @@ class ParticipantInput(BaseModel):
     roles: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
     visibility_scope: Visibility = "workspace"
+
+
+class AgentEndpoint(BaseModel):
+    kind: AgentEndpointKind
+    url: str | None = None
+    model: str | None = None
+
+
+class AgentConfiguration(BaseModel):
+    endpoint: AgentEndpoint
+    system_prompt: str
+    definition: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentDefinition(BaseModel):
+    agent_id: UUID
+    display_name: str
+    description: str
+    role: str
+    capabilities: list[str] = Field(default_factory=list)
+    endpoint: AgentEndpoint
+    system_prompt: str
+    definition: dict[str, Any] = Field(default_factory=dict)
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class Workspace(BaseModel):
@@ -65,12 +93,14 @@ class ParticipantProfile(BaseModel):
     participant_id: UUID
     workspace_id: UUID
     participant_type: ParticipantType
+    system_agent_id: UUID | None = None
     display_name: str
     description: str | None = None
     roles: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
     status: ParticipantStatus = "active"
     visibility_scope: Visibility = "workspace"
+    agent_config: AgentConfiguration | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -238,6 +268,42 @@ class UpsertRoleDefinitionRequest(BaseModel):
     actor: ParticipantInput
     name: str
     definition: str
+
+
+class CreateAgentParticipantRequest(BaseModel):
+    actor: ParticipantInput
+    agent_id: UUID
+
+
+class UpdateAgentParticipantRequest(BaseModel):
+    actor: ParticipantInput
+    status: ParticipantStatus | None = None
+    visibility_scope: Visibility | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class CreateSystemAgentRequest(BaseModel):
+    actor: ParticipantInput
+    display_name: str
+    description: str
+    role: str
+    capabilities: list[str] = Field(default_factory=list)
+    endpoint: AgentEndpoint
+    system_prompt: str
+    definition: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateSystemAgentRequest(BaseModel):
+    actor: ParticipantInput
+    display_name: str | None = None
+    description: str | None = None
+    role: str | None = None
+    capabilities: list[str] | None = None
+    endpoint: AgentEndpoint | None = None
+    system_prompt: str | None = None
+    definition: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class CreateThreadRequest(BaseModel):
