@@ -5,13 +5,14 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from uuid import UUID
 
 from aiokafka.admin import AIOKafkaAdminClient, NewTopic
 from aiokafka import AIOKafkaProducer
 from aiokafka.errors import KafkaConnectionError
 
 from gateway_edge.config import settings
-from gateway_edge.models import EventEnvelope
+from gateway_edge.models import EventEnvelope, KafkaChatRequest, KafkaChatResponse, StreamEvent
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,8 @@ class EventService:
     def __init__(self) -> None:
         self._producer: AIOKafkaProducer | None = None
         self._admin: AIOKafkaAdminClient | None = None
+        self._response_futures: dict[UUID, asyncio.Future[KafkaChatResponse]] = {}
+        self._stream_queues: dict[UUID, asyncio.Queue[StreamEvent | None]] = {}
 
     async def start(self) -> None:
         t0 = time.monotonic()
@@ -110,6 +113,74 @@ class EventService:
             key=key,
             value=event.model_dump(mode="json"),
         )
+
+    def register_response_future(self, correlation_id: UUID) -> None:
+        loop = asyncio.get_running_loop()
+        self._response_futures[correlation_id] = loop.create_future()
+
+    async def wait_for_response(self, correlation_id: UUID) -> KafkaChatResponse:
+        future = self._response_futures.get(correlation_id)
+        if future is None:
+            raise TimeoutError(f"No response future registered for {correlation_id}")
+        try:
+            timeout = getattr(settings, "agent_loop_model_timeout_seconds", 60.0)
+            return await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            self._response_futures.pop(correlation_id, None)
+
+    def register_stream_queue(self, correlation_id: UUID) -> None:
+        self._stream_queues[correlation_id] = asyncio.Queue()
+
+    async def stream_response(self, correlation_id: UUID):
+        queue = self._stream_queues.get(correlation_id)
+        if queue is None:
+            return
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield item
+                if item.type in {"done", "error"}:
+                    break
+        finally:
+            self._stream_queues.pop(correlation_id, None)
+
+    async def publish_chat_request(self, request: KafkaChatRequest) -> None:
+        if settings.echo_agent_enabled:
+            asyncio.create_task(self._emit_echo_response(request))
+
+    async def _emit_echo_response(self, request: KafkaChatRequest) -> None:
+        content = f"Echo: {request.message}"
+        response = KafkaChatResponse(
+            correlation_id=request.correlation_id,
+            session_id=request.session_id,
+            type="response",
+            content=content,
+        )
+        future = self._response_futures.get(request.correlation_id)
+        if future is not None and not future.done():
+            future.set_result(response)
+
+        queue = self._stream_queues.get(request.correlation_id)
+        if queue is not None:
+            await queue.put(
+                StreamEvent(
+                    type="token",
+                    session_id=request.session_id,
+                    correlation_id=request.correlation_id,
+                    content=content,
+                )
+            )
+            await queue.put(
+                StreamEvent(
+                    type="done",
+                    session_id=request.session_id,
+                    correlation_id=request.correlation_id,
+                    content="",
+                )
+            )
+            await queue.put(None)
 
     @staticmethod
     def _topic_for_event(event: EventEnvelope) -> str:

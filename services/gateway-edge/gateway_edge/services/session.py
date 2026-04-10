@@ -11,6 +11,8 @@ import redis.asyncio as aioredis
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from gateway_edge.config import settings
+from gateway_edge.db.postgres import get_pool
+from gateway_edge.models import SessionInfo
 
 logger = logging.getLogger(__name__)
 
@@ -108,10 +110,20 @@ async def unregister_thread_connection(
     thread_id: UUID,
     participant_id: UUID,
     connection_id: str,
-) -> None:
+) -> dict[str, str] | None:
     redis = await get_redis()
     await redis.delete(_connection_key(thread_id, connection_id))
+    remaining_connections = await _list_participant_connections(redis, thread_id, participant_id)
+    if remaining_connections:
+        replacement = remaining_connections[0]
+        await redis.set(
+            _presence_key(thread_id, participant_id),
+            json.dumps(replacement),
+            ex=settings.session_ttl_seconds,
+        )
+        return replacement
     await redis.delete(_presence_key(thread_id, participant_id))
+    return None
 
 
 async def touch_thread_presence(
@@ -141,3 +153,94 @@ async def touch_thread_presence(
             json.dumps(payload),
             ex=settings.session_ttl_seconds,
         )
+
+
+async def create_session(session_id: UUID) -> SessionInfo:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO chat_sessions (session_id)
+            VALUES ($1)
+            ON CONFLICT (session_id) DO UPDATE
+                SET last_active = NOW()
+            RETURNING session_id, created_at, last_active, message_count
+            """,
+            session_id,
+        )
+    assert row is not None
+    return SessionInfo(**dict(row))
+
+
+async def get_session(session_id: UUID) -> SessionInfo | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT session_id, created_at, last_active, message_count
+            FROM chat_sessions
+            WHERE session_id = $1
+            """,
+            session_id,
+        )
+    if row is None:
+        return None
+    return SessionInfo(**dict(row))
+
+
+async def touch_session(session_id: UUID, *, increment_count: bool = False) -> SessionInfo | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE chat_sessions
+            SET last_active = NOW(),
+                message_count = message_count + $2::int
+            WHERE session_id = $1
+            RETURNING session_id, created_at, last_active, message_count
+            """,
+            session_id,
+            1 if increment_count else 0,
+        )
+    if row is None:
+        return None
+    return SessionInfo(**dict(row))
+
+
+async def delete_session(session_id: UUID) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM chat_sessions WHERE session_id = $1",
+            session_id,
+        )
+    return result.endswith("1")
+
+
+async def _list_participant_connections(
+    redis: aioredis.Redis,
+    thread_id: UUID,
+    participant_id: UUID,
+) -> list[dict[str, str]]:
+    pattern = _connection_key(thread_id, "*")
+    payloads: list[dict[str, str]] = []
+
+    if hasattr(redis, "scan_iter"):
+        async for key in redis.scan_iter(match=pattern):
+            raw = await redis.get(key)
+            if raw is None:
+                continue
+            payload = json.loads(raw)
+            if payload.get("participant_id") == str(participant_id):
+                payloads.append(payload)
+        return payloads
+
+    values = getattr(redis, "values", None)
+    if isinstance(values, dict):
+        for key, raw in values.items():
+            if not key.startswith(_connection_key(thread_id, "")):
+                continue
+            payload = json.loads(raw)
+            if payload.get("participant_id") == str(participant_id):
+                payloads.append(payload)
+    return payloads

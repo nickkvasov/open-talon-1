@@ -376,16 +376,22 @@ class CollaborationService:
             actor.participant_id,
             connection_id,
         )
-        await unregister_thread_connection(
+        remaining_connection = await unregister_thread_connection(
             thread_id=thread_id,
             participant_id=actor.participant_id,
             connection_id=connection_id,
         )
+        status = "active" if remaining_connection is not None else "offline"
+        publish_connection_id = (
+            remaining_connection.get("connection_id")
+            if remaining_connection is not None
+            else connection_id
+        )
         return await self.publish_presence(
             thread_id=thread_id,
             actor=actor,
-            status="offline",
-            connection_id=connection_id,
+            status=status,
+            connection_id=publish_connection_id,
         )
 
     async def stream_thread_events(

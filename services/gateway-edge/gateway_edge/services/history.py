@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from uuid import UUID
+from uuid import uuid4
 
 from gateway_edge.db.postgres import get_pool
 from gateway_edge.models import Message
@@ -30,9 +31,10 @@ async def save_message(
         await conn.execute(
             """
             INSERT INTO chat_messages
-                (session_id, correlation_id, role, content, created_at)
-            VALUES ($1, $2, $3, $4, $5)
+                (message_id, session_id, correlation_id, role, content, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
             """,
+            uuid4(),
             session_id,
             correlation_id,
             message.role,
@@ -49,10 +51,14 @@ async def get_history(session_id: UUID, limit: int = 50) -> list[Message]:
         rows = await conn.fetch(
             """
             SELECT role, content, created_at
-            FROM chat_messages
-            WHERE session_id = $1
+            FROM (
+                SELECT role, content, created_at
+                FROM chat_messages
+                WHERE session_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+            ) recent_messages
             ORDER BY created_at ASC
-            LIMIT $2
             """,
             session_id,
             limit,
