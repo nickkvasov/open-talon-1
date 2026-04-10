@@ -41,6 +41,7 @@ Local services:
 
 - `gateway-edge`: primary local API gateway for REST, SSE, WebSocket, collaboration, and admin APIs
 - `postgres`: application database with `pgvector` enabled
+- `pgadmin`: pgAdmin 4 web UI for inspecting and querying the local Postgres instance
 - `kafka`: event bus for chat, collaboration, and agent-runtime traffic
 - `openbao`: local secret store and token-validation backend
 - `valkey`: session store, API-key cache, and short-lived gateway state
@@ -59,6 +60,7 @@ Common local endpoints:
 - `gateway-edge readiness`: [http://127.0.0.1:8000/ready](http://127.0.0.1:8000/ready)
 - `gateway-edge docs`: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - `langfuse-web`: [http://localhost:3000](http://localhost:3000)
+- `pgadmin`: [http://localhost:5050](http://localhost:5050)
 - `openbao`: [http://localhost:8200](http://localhost:8200)
 - `ollama`: [http://localhost:11434](http://localhost:11434)
 - `clickhouse HTTP`: [http://localhost:8123](http://localhost:8123)
@@ -81,6 +83,12 @@ Default local development credentials:
   username: `admin`
   password: `password`
   database: `app_db`
+- `pgAdmin`
+  URL: [http://localhost:5050](http://localhost:5050)
+  email: `admin@local.dev`
+  password: `admin`
+  preconfigured server: `Open Talon Postgres`
+  uses default Postgres settings: database `app_db`, user `admin`
 - `Langfuse Postgres database`
   database: `langfuse_db`
 - `Valkey`
@@ -100,6 +108,10 @@ Default local development credentials:
   password: `langfuse`
 
 These are local dev defaults from `infrastructure/.env.example`. Override them in your local env before starting the stack if you need different values.
+
+The bundled pgAdmin server import is also pinned to the default local Postgres connection (`postgres:5432`, database `app_db`, user `admin`). If you change those Postgres values in `infrastructure/.env`, update `infrastructure/pgadmin/servers.json` and `infrastructure/pgadmin/pgpass` to keep the preconfigured connection working.
+
+The compose stack currently pins pgAdmin to `dpage/pgadmin4:9.13.0` in [`infrastructure/docker-compose.yaml`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/docker-compose.yaml#L17) for reproducible local setup.
 
 ## Persistence Design
 
@@ -154,13 +166,17 @@ Automations operate sequentially leveraging `pytest` through explicit Python net
 # Enable the repository virtual environment
 source .venv/bin/activate
 
-# Default maintained unit suite
+# Default maintained suite (excludes integration tests via pytest.ini)
 pytest -q
 
 # Gateway tests only
 pytest tests/gateway-edge -q
 
 # Infrastructure integration tests
+pytest -m integration test/infrastructure/test_infrastructure.py -v -s
+
+# Full test coverage: default suite plus integration suite
+pytest -q
 pytest -m integration test/infrastructure/test_infrastructure.py -v -s
 ```
 

@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Open Talon Postgres",
+      "Group": "Servers",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "app_db",
+      "Username": "admin",
+      "SSLMode": "prefer",
+      "PassFile": "/pgpass"
+    }
+  }
+}

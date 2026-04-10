@@ -87,6 +87,7 @@ start_cmd() {
     cd "${ROOT_DIR}/infrastructure"
     docker compose up -d \
       postgres \
+      pgadmin \
       kafka \
       valkey \
       openbao \
