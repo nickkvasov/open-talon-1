@@ -12,6 +12,74 @@ This repository contains the local infrastructure, Python services, and client a
 - **Ollama AI**: Serves dynamic generative model orchestration natively mapped across standard REST.
     - Operates natively against Google's modern **Gemma 4** models, with the default test setup pulling the lightweight `gemma4:latest` model.
 
+## Infrastructure
+
+`./open-talon start` brings up the full local infrastructure stack and then starts the supported local gateway from [`services/gateway-edge`](/Users/nikolay.kvasov/Development/open-talon-1/services/gateway-edge).
+
+Local services:
+
+- `gateway-edge`: primary local API gateway for REST, SSE, WebSocket, collaboration, and admin APIs
+- `postgres`: application database with `pgvector` enabled
+- `kafka`: event bus for chat, collaboration, and agent-runtime traffic
+- `openbao`: local secret store and token-validation backend
+- `valkey`: session store, API-key cache, and short-lived gateway state
+- `langfuse-web`: Langfuse UI and API surface
+- `langfuse-worker`: Langfuse background processing
+- `clickhouse`: Langfuse analytics/event store
+- `minio`: Langfuse object storage for uploads and media
+- `ollama`: local model serving endpoint
+
+## Endpoints
+
+Common local endpoints:
+
+- `gateway-edge`: [http://127.0.0.1:8000](http://127.0.0.1:8000)
+- `gateway-edge health`: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+- `gateway-edge readiness`: [http://127.0.0.1:8000/ready](http://127.0.0.1:8000/ready)
+- `gateway-edge docs`: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- `langfuse-web`: [http://localhost:3000](http://localhost:3000)
+- `openbao`: [http://localhost:8200](http://localhost:8200)
+- `ollama`: [http://localhost:11434](http://localhost:11434)
+- `clickhouse HTTP`: [http://localhost:8123](http://localhost:8123)
+- `minio API`: [http://localhost:9090](http://localhost:9090)
+- `minio console`: [http://localhost:9091](http://localhost:9091)
+
+Ports and protocols:
+
+- `postgres`: `localhost:5432`
+- `kafka`: `localhost:9092`
+- `valkey`: `localhost:6379`
+- `clickhouse native`: `localhost:9000`
+- `langfuse-worker`: `localhost:3030`
+
+## Credentials
+
+Default local development credentials:
+
+- `Postgres`
+  username: `admin`
+  password: `password`
+  database: `app_db`
+- `Langfuse Postgres database`
+  database: `langfuse_db`
+- `Valkey`
+  password: `langfuse-dev-secret`
+- `OpenBao`
+  root token: `root`
+- `Langfuse UI`
+  URL: [http://localhost:3000](http://localhost:3000)
+  email: `admin@example.com`
+  password: `admin123456`
+- `MinIO`
+  console: [http://localhost:9091](http://localhost:9091)
+  username: `minio`
+  password: `miniosecret`
+- `ClickHouse`
+  username: `langfuse`
+  password: `langfuse`
+
+These are local dev defaults from [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example). Override them in your local env before starting the stack if you need different values.
+
 ## Persistence Design
 
 Data persistence relies purely on strictly scoped host bind-mounts mapped recursively into `infrastructure/data/...`
@@ -49,6 +117,13 @@ The local compose stack now includes a self-hosted Langfuse deployment:
 - `minio` on ports `9090` and `9091`
 
 This setup reuses the repository Postgres server and Valkey container, but Langfuse now uses its own Postgres database (`LANGFUSE_POSTGRES_DB`) so Prisma migrations do not collide with the application schema. Defaults live in [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example) and mirrored deploy settings live in [`deploy/infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/deploy/infrastructure/.env.example).
+
+Infra defaults are defined in [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example), including:
+
+- core ports for Postgres, Kafka, OpenBao, Valkey, Ollama, and Langfuse
+- Langfuse database name and bootstrap credentials
+- ClickHouse, MinIO, and Valkey credentials used by Langfuse
+- the required Ollama model list for local startup
 
 ## Pytest Orchestration
 
