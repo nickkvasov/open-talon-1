@@ -48,6 +48,7 @@ from open_talon_contracts.models import (
     Thread,
     TimelineMessage,
     Workspace,
+    WorkspaceTool,
 )
 
 
@@ -278,6 +279,27 @@ def _build_fixture_context(*, endpoint_kind: str = "system"):
                 name="testing agent",
                 definition="Validates changes and reports regressions.",
                 updated_by=user_id,
+                updated_at=now,
+            )
+        ],
+        workspace_tools=[
+            WorkspaceTool(
+                tool_id=uuid4(),
+                name="repo_search",
+                description="Searches the current workspace source tree.",
+                parameter_contract={
+                    "parameters": [
+                        {
+                            "name": "query",
+                            "type": "string",
+                            "description": "Search text to look up in the repository.",
+                            "required": True,
+                        }
+                    ],
+                    "additional_properties": False,
+                },
+                attached_by=user_id,
+                attached_at=now,
                 updated_at=now,
             )
         ],
@@ -562,6 +584,8 @@ def test_render_prompt_includes_participants_memory_and_thread_context():
     assert "Nikolay (user)" in prompt
     assert "Workspace memory:" in prompt
     assert "Release checklist" in prompt
+    assert "Workspace tools:" in prompt
+    assert "repo_search | enabled: yes | Searches the current workspace source tree." in prompt
     assert "Visible thread messages:" in prompt
     assert "Focus on migrations and regression risk." in prompt
     assert "Response contract:" in prompt

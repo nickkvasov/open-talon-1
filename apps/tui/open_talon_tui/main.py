@@ -141,6 +141,16 @@ class WorkspaceCommandSuggester(Suggester):
                     for target in participant_targets:
                         if target.casefold().startswith(typed_target):
                             return prefix + target
+        if stripped.startswith("/tool "):
+            tool_targets = self.app.tool_suggestion_targets
+            for prefix in ("/tool show ", "/tool attach ", "/tool detach "):
+                if stripped.startswith(prefix):
+                    typed_target = stripped[len(prefix) :].strip().casefold()
+                    if not typed_target:
+                        return prefix + (tool_targets[0] if tool_targets else "")
+                    for target in tool_targets:
+                        if target.casefold().startswith(typed_target):
+                            return prefix + target
         return None
 
 
@@ -239,6 +249,11 @@ class CollaborationApp(App):
         self._http_client: httpx.AsyncClient | None = None
         self._slash_commands = [
             "/agent create local ",
+            "/tool attached",
+            "/tool detach ",
+            "/tool list",
+            "/tool show ",
+            "/tool attach ",
             "/workspace list",
             "/workspace show",
             "/workspace create ",
@@ -260,6 +275,7 @@ class CollaborationApp(App):
         self._participant_suggestions: list[dict[str, str]] = []
         self._thread_suggestions: list[dict[str, str]] = []
         self._role_suggestions: list[str] = []
+        self._tool_suggestions: list[dict[str, str]] = []
 
     @property
     def _auth_headers(self) -> dict[str, str]:
@@ -311,6 +327,17 @@ class CollaborationApp(App):
             display_name = participant["display_name"]
             participant_id = participant["participant_id"]
             for candidate in (display_name, participant_id[:8], participant_id):
+                if candidate not in targets:
+                    targets.append(candidate)
+        return targets
+
+    @property
+    def tool_suggestion_targets(self) -> list[str]:
+        targets: list[str] = []
+        for tool in self._tool_suggestions:
+            name = tool["name"]
+            tool_id = tool["tool_id"]
+            for candidate in (name, tool_id[:8], tool_id):
                 if candidate not in targets:
                     targets.append(candidate)
         return targets
@@ -371,6 +398,39 @@ class CollaborationApp(App):
         response = await self._http_client.request(
             "DELETE",
             f"{self.gateway}/v1/workspaces/{workspace_id}/participants/{participant_id}",
+            json={"actor": self.actor_payload},
+        )
+        response.raise_for_status()
+
+    async def _list_system_tools(self) -> list[dict]:
+        assert self._http_client is not None
+        response = await self._http_client.get(f"{self.gateway}/v1/tools")
+        response.raise_for_status()
+        tools = response.json()
+        self._tool_suggestions = [
+            {"tool_id": item["tool_id"], "name": item["name"]}
+            for item in tools
+        ]
+        return tools
+
+    async def _attach_workspace_tool(self, workspace_id: str, tool_id: str) -> dict:
+        assert self._http_client is not None
+        response = await self._http_client.put(
+            f"{self.gateway}/v1/workspaces/{workspace_id}/tools/{tool_id}",
+            json={
+                "actor": self.actor_payload,
+                "tool_id": tool_id,
+                "enabled": True,
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def _delete_workspace_tool(self, workspace_id: str, tool_id: str) -> None:
+        assert self._http_client is not None
+        response = await self._http_client.request(
+            "DELETE",
+            f"{self.gateway}/v1/workspaces/{workspace_id}/tools/{tool_id}",
             json={"actor": self.actor_payload},
         )
         response.raise_for_status()
@@ -896,6 +956,119 @@ class CollaborationApp(App):
 
         self._write_system(f"unknown participant action: {action}", style="yellow")
 
+    async def _handle_tool_command(self, command: str) -> None:
+        if not self.state.workspace_id:
+            self._write_system("join or create a workspace first", style="red")
+            return
+
+        parts = command.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            self._write_system(
+                "tool commands: /tool list | /tool attached | /tool show <id|name> | /tool attach <id|name> | /tool detach <id|name>",
+                style="yellow",
+            )
+            return
+
+        action = parts[1].lower()
+
+        if action == "list":
+            tools = await self._list_system_tools()
+            if not tools:
+                self._write_system("no system tools found", style="yellow")
+                return
+            self._write_system("System Tools")
+            for tool in tools:
+                self._write_system(
+                    f"- {tool['name']} ({tool['tool_id'][:8]})",
+                    style="cyan",
+                )
+                contract = tool.get("parameter_contract", {})
+                params = contract.get("parameters", [])
+                param_names = ", ".join(param["name"] for param in params) or "none"
+                self._write_system(f"  parameters: {param_names}", style="dim")
+            return
+
+        if action == "attached":
+            detail = await self._get_workspace_detail(self.state.workspace_id)
+            attached_tools = detail.get("tools", [])
+            self._tool_suggestions = [
+                {"tool_id": item["tool_id"], "name": item["name"]}
+                for item in attached_tools
+            ]
+            if not attached_tools:
+                self._write_system("no tools attached to this workspace", style="yellow")
+                return
+            self._write_system("Attached Workspace Tools")
+            for tool in attached_tools:
+                status = "enabled" if tool.get("enabled", True) else "disabled"
+                self._write_system(
+                    f"- {tool['name']} ({tool['tool_id'][:8]})",
+                    style="cyan",
+                )
+                self._write_system(f"  status: {status}", style="dim")
+            return
+
+        tools = await self._list_system_tools()
+
+        target = parts[2].strip() if len(parts) > 2 else ""
+        if not target:
+            self._write_system(f"usage: /tool {action} <id|name>", style="yellow")
+            return
+
+        tool = self._resolve_tool_target(tools, target)
+        if tool is None:
+            self._write_system(f"tool not found: {target}", style="red")
+            return
+
+        if action == "show":
+            self._write_system("System Tool")
+            self._write_system(f"name: {tool['name']}", style="cyan")
+            self._write_system(f"id: {tool['tool_id']}", style="dim")
+            self._write_system(
+                f"description: {tool.get('description') or 'no description'}",
+                style="dim",
+            )
+            contract = tool.get("parameter_contract", {})
+            params = contract.get("parameters", [])
+            if params:
+                self._write_system("parameter contract:", style="magenta")
+                for param in params:
+                    required = "required" if param.get("required", True) else "optional"
+                    self._write_system(
+                        f"  - {param['name']} ({param.get('type', 'any')}, {required})",
+                        style="dim",
+                    )
+            else:
+                self._write_system("parameter contract: none", style="dim")
+            return
+
+        if action == "attach":
+            attached = await self._attach_workspace_tool(
+                self.state.workspace_id,
+                tool["tool_id"],
+            )
+            self._write_system(
+                f"attached tool: {attached['name']} ({attached['tool_id'][:8]})",
+                style="green",
+            )
+            return
+
+        if action == "detach":
+            detail = await self._get_workspace_detail(self.state.workspace_id)
+            attached_tools = detail.get("tools", [])
+            tool = self._resolve_tool_target(attached_tools, target)
+            if tool is None:
+                self._write_system(f"attached tool not found: {target}", style="red")
+                return
+            await self._delete_workspace_tool(self.state.workspace_id, tool["tool_id"])
+            self._write_system(
+                f"detached tool: {tool['name']} ({tool['tool_id'][:8]})",
+                style="green",
+            )
+            return
+
+        self._write_system(f"unknown tool action: {action}", style="yellow")
+
     async def _handle_role_command(self, command: str) -> None:
         if not self.state.workspace_id:
             self._write_system("join or create a workspace first", style="red")
@@ -1119,6 +1292,22 @@ class CollaborationApp(App):
                 return participant
         return None
 
+    def _resolve_tool_target(self, tools: list[dict], target: str) -> dict | None:
+        normalized = target.strip()
+        if not normalized:
+            return None
+        lowered = normalized.lower()
+        for tool in tools:
+            if tool["tool_id"] == normalized:
+                return tool
+        for tool in tools:
+            if tool["tool_id"].startswith(normalized):
+                return tool
+        for tool in tools:
+            if tool["name"].lower() == lowered:
+                return tool
+        return None
+
     def _suggestions_for_text(self, text: str) -> str:
         stripped = text.strip()
         if not stripped:
@@ -1130,7 +1319,7 @@ class CollaborationApp(App):
             ]
             if matches:
                 return " Suggestions: " + " | ".join(matches[:3])
-            return " Slash commands: /workspace list | /participant list | /thread list"
+            return " Slash commands: /workspace list | /participant list | /thread list | /tool list"
 
         lowered = stripped.lower()
         if "workspace" in lowered:
@@ -1139,6 +1328,8 @@ class CollaborationApp(App):
             return " Tip: /agent create local <name> :: <role> :: <description> :: <model>"
         if "participant" in lowered or "people" in lowered or "team" in lowered:
             return " Tip: /participant list | /participant show <id|name|current> | /participant remove <id|name>"
+        if "tool" in lowered:
+            return " Tip: /tool list | /tool attached | /tool show <id|name> | /tool attach <id|name> | /tool detach <id|name>"
         if "thread" in lowered:
             return " Tip: /thread list | /thread show | /thread use <id|title>"
         if "role" in lowered:
@@ -1149,7 +1340,7 @@ class CollaborationApp(App):
             return " Tip: /workspace create <name>"
         if lowered.startswith("delete") or lowered.startswith("remove"):
             return " Tip: /workspace delete <id|name|current>"
-        return " Enter sends a message. Use /agent, /workspace, /participant, /thread, or /role commands."
+        return " Enter sends a message. Use /agent, /workspace, /participant, /thread, /role, or /tool commands."
 
     async def _load_timeline(self) -> None:
         assert self._http_client is not None
@@ -1335,6 +1526,15 @@ class CollaborationApp(App):
                 logger.exception("TUI participant command failed")
                 self._write_system(f"participant command failed: {exc}", style="red")
                 self._update_status("err", "Participant failed")
+            return
+        if text == "/tool" or text.startswith("/tool "):
+            try:
+                await self._handle_tool_command(text)
+                self._update_status("ok", "Connected")
+            except Exception as exc:
+                logger.exception("TUI tool command failed")
+                self._write_system(f"tool command failed: {exc}", style="red")
+                self._update_status("err", "Tool failed")
             return
         if text == "/thread" or text.startswith("/thread "):
             try:

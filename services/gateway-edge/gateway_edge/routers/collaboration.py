@@ -12,28 +12,35 @@ from gateway_edge.config import settings
 from gateway_edge.models import (
     AssumeParticipantRoleRequest,
     AgentDefinition,
+    AttachWorkspaceToolRequest,
     CreateAgentParticipantRequest,
     CreateSystemAgentRequest,
+    CreateSystemToolRequest,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
     DeleteParticipantRequest,
+    DeleteWorkspaceToolRequest,
     DeleteWorkspaceRequest,
     MemoryEntry,
     ParticipantInput,
     ParticipantProfile,
     RoleDefinition,
+    SystemToolDefinition,
     Thread,
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
     UpdateSystemAgentRequest,
     UpsertRoleDefinitionRequest,
+    UpdateSystemToolRequest,
     UpdateAgentParticipantRequest,
     UpdateMemoryEntryRequest,
+    UpdateWorkspaceToolRequest,
     Workspace,
     WorkspaceDetail,
+    WorkspaceTool,
 )
 from gateway_edge.services import collaboration as collab_svc
 
@@ -247,6 +254,59 @@ async def list_system_agents() -> list[AgentDefinition]:
         raise _http_error(exc) from exc
 
 
+@router.post(
+    "/tools",
+    response_model=SystemToolDefinition,
+    summary="Create a system-wide tool definition",
+)
+async def create_system_tool(payload: CreateSystemToolRequest) -> SystemToolDefinition:
+    logger.debug(
+        "HTTP create_system_tool actor=%s name=%r",
+        _actor_log(payload.actor),
+        payload.name,
+    )
+    try:
+        return await collab_svc.collaboration_service.create_system_tool(payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/tools",
+    response_model=list[SystemToolDefinition],
+    summary="List system-wide tool definitions",
+)
+async def list_system_tools() -> list[SystemToolDefinition]:
+    logger.debug("HTTP list_system_tools")
+    try:
+        return await collab_svc.collaboration_service.list_system_tools()
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch(
+    "/tools/{tool_id}",
+    response_model=SystemToolDefinition,
+    summary="Update a system-wide tool definition",
+)
+async def update_system_tool(
+    tool_id: UUID,
+    payload: UpdateSystemToolRequest,
+) -> SystemToolDefinition:
+    logger.debug(
+        "HTTP update_system_tool tool_id=%s actor=%s",
+        tool_id,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.update_system_tool(
+            tool_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.patch(
     "/agents/{agent_id}",
     response_model=AgentDefinition,
@@ -340,6 +400,98 @@ async def upsert_role_definition(
     try:
         return await collab_svc.collaboration_service.upsert_role_definition(
             workspace_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/workspaces/{workspace_id}/tools",
+    response_model=list[WorkspaceTool],
+    summary="List tools registered for a workspace",
+)
+async def list_workspace_tools(workspace_id: UUID) -> list[WorkspaceTool]:
+    logger.debug("HTTP list_workspace_tools workspace_id=%s", workspace_id)
+    try:
+        return await collab_svc.collaboration_service.list_workspace_tools(workspace_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.put(
+    "/workspaces/{workspace_id}/tools/{tool_id}",
+    response_model=WorkspaceTool,
+    summary="Attach a system-wide tool to a workspace",
+)
+async def attach_workspace_tool(
+    workspace_id: UUID,
+    tool_id: UUID,
+    payload: AttachWorkspaceToolRequest,
+) -> WorkspaceTool:
+    logger.debug(
+        "HTTP attach_workspace_tool workspace_id=%s tool_id=%s actor=%s enabled=%s",
+        workspace_id,
+        tool_id,
+        _actor_log(payload.actor),
+        payload.enabled,
+    )
+    payload = payload.model_copy(update={"tool_id": tool_id})
+    try:
+        return await collab_svc.collaboration_service.attach_workspace_tool(
+            workspace_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch(
+    "/workspaces/{workspace_id}/tools/{tool_id}",
+    response_model=WorkspaceTool,
+    summary="Update a workspace tool attachment",
+)
+async def update_workspace_tool(
+    workspace_id: UUID,
+    tool_id: UUID,
+    payload: UpdateWorkspaceToolRequest,
+) -> WorkspaceTool:
+    logger.debug(
+        "HTTP update_workspace_tool workspace_id=%s tool_id=%s actor=%s",
+        workspace_id,
+        tool_id,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.update_workspace_tool(
+            workspace_id,
+            tool_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/workspaces/{workspace_id}/tools/{tool_id}",
+    response_model=dict,
+    summary="Detach a tool from a workspace",
+)
+async def delete_workspace_tool(
+    workspace_id: UUID,
+    tool_id: UUID,
+    payload: DeleteWorkspaceToolRequest = Body(...),
+) -> dict[str, bool | str]:
+    logger.debug(
+        "HTTP delete_workspace_tool workspace_id=%s tool_id=%s actor=%s",
+        workspace_id,
+        tool_id,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.delete_workspace_tool(
+            workspace_id,
+            tool_id,
             payload,
         )
     except Exception as exc:

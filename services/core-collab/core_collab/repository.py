@@ -19,10 +19,13 @@ from .contracts import (
     MemoryEntry,
     ParticipantProfile,
     Run,
+    SystemToolDefinition,
     Task,
+    ToolParameterContract,
     Thread,
     TimelineMessage,
     Workspace,
+    WorkspaceTool,
 )
 from .migrations import apply_pending_migrations
 
@@ -205,6 +208,82 @@ class CollaborationRepository:
             agent.updated_at,
             self._json_dumps(agent.metadata),
         )
+
+    async def upsert_system_tool(
+        self, conn: asyncpg.Connection, tool: SystemToolDefinition
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO system_tools (
+                tool_id, name, description, parameter_contract, input_schema, created_by, created_at,
+                updated_by, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (tool_id) DO UPDATE
+                SET name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    parameter_contract = EXCLUDED.parameter_contract,
+                    input_schema = EXCLUDED.input_schema,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            tool.tool_id,
+            tool.name,
+            tool.description,
+            self._json_dumps(tool.parameter_contract.model_dump(mode="json")),
+            self._json_dumps(tool.input_schema),
+            tool.created_by,
+            tool.created_at,
+            tool.updated_by,
+            tool.updated_at,
+            self._json_dumps(tool.metadata),
+        )
+
+    async def upsert_workspace_tool(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        workspace_id: UUID,
+        tool: WorkspaceTool,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO workspace_tools (
+                workspace_id, tool_id, enabled, attached_by, attached_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (workspace_id, tool_id) DO UPDATE
+                SET enabled = EXCLUDED.enabled,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            workspace_id,
+            tool.tool_id,
+            tool.enabled,
+            tool.attached_by,
+            tool.attached_at,
+            tool.updated_at,
+            self._json_dumps(tool.metadata),
+        )
+
+    async def delete_workspace_tool(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        workspace_id: UUID,
+        tool_id: UUID,
+    ) -> bool:
+        result = await conn.execute(
+            """
+            DELETE FROM workspace_tools
+            WHERE workspace_id = $1
+              AND tool_id = $2
+            """,
+            workspace_id,
+            tool_id,
+        )
+        return result.endswith("1")
 
     async def delete_workspace(
         self, conn: asyncpg.Connection, workspace_id: UUID
@@ -587,6 +666,17 @@ class CollaborationRepository:
         )
         return [self._system_agent_from_row(row) for row in rows]
 
+    async def list_system_tools(self) -> list[SystemToolDefinition]:
+        rows = await self._pool.fetch(
+            """
+            SELECT tool_id, name, description, parameter_contract, input_schema, created_by, created_at,
+                   updated_by, updated_at, metadata
+            FROM system_tools
+            ORDER BY created_at ASC
+            """
+        )
+        return [self._system_tool_from_row(row) for row in rows]
+
     async def fetch_system_agent(self, agent_id: UUID) -> AgentDefinition | None:
         row = await self._pool.fetchrow(
             """
@@ -598,6 +688,51 @@ class CollaborationRepository:
             agent_id,
         )
         return self._system_agent_from_row(row) if row else None
+
+    async def fetch_system_tool(self, tool_id: UUID) -> SystemToolDefinition | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT tool_id, name, description, parameter_contract, input_schema, created_by, created_at,
+                   updated_by, updated_at, metadata
+            FROM system_tools
+            WHERE tool_id = $1
+            """,
+            tool_id,
+        )
+        return self._system_tool_from_row(row) if row else None
+
+    async def list_workspace_tools(self, workspace_id: UUID) -> list[WorkspaceTool]:
+        rows = await self._pool.fetch(
+            """
+            SELECT wt.workspace_id, wt.tool_id, st.name, st.description, st.parameter_contract, st.input_schema,
+                   wt.enabled, wt.attached_by, wt.attached_at, wt.updated_at, wt.metadata
+            FROM workspace_tools wt
+            JOIN system_tools st ON wt.tool_id = st.tool_id
+            WHERE wt.workspace_id = $1
+            ORDER BY wt.attached_at ASC
+            """,
+            workspace_id,
+        )
+        return [self._workspace_tool_from_row(row) for row in rows]
+
+    async def fetch_workspace_tool(
+        self,
+        workspace_id: UUID,
+        tool_id: UUID,
+    ) -> WorkspaceTool | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT wt.workspace_id, wt.tool_id, st.name, st.description, st.parameter_contract, st.input_schema,
+                   wt.enabled, wt.attached_by, wt.attached_at, wt.updated_at, wt.metadata
+            FROM workspace_tools wt
+            JOIN system_tools st ON wt.tool_id = st.tool_id
+            WHERE wt.workspace_id = $1
+              AND wt.tool_id = $2
+            """,
+            workspace_id,
+            tool_id,
+        )
+        return self._workspace_tool_from_row(row) if row else None
 
     async def fetch_agent_participant(
         self, workspace_id: UUID, system_agent_id: UUID
@@ -1002,6 +1137,48 @@ class CollaborationRepository:
             definition=CollaborationRepository._json_value(row["definition"], default={}),
             created_by=row["created_by"],
             created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _system_tool_from_row(row: asyncpg.Record) -> SystemToolDefinition:
+        return SystemToolDefinition(
+            tool_id=row["tool_id"],
+            name=row["name"],
+            description=row["description"],
+            parameter_contract=ToolParameterContract.model_validate(
+                CollaborationRepository._json_value(
+                    row["parameter_contract"], default={}
+                )
+            ),
+            input_schema=CollaborationRepository._json_value(
+                row["input_schema"], default={}
+            ),
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_by=row["updated_by"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _workspace_tool_from_row(row: asyncpg.Record) -> WorkspaceTool:
+        return WorkspaceTool(
+            tool_id=row["tool_id"],
+            name=row["name"],
+            description=row["description"],
+            parameter_contract=ToolParameterContract.model_validate(
+                CollaborationRepository._json_value(
+                    row["parameter_contract"], default={}
+                )
+            ),
+            input_schema=CollaborationRepository._json_value(
+                row["input_schema"], default={}
+            ),
+            enabled=row["enabled"],
+            attached_by=row["attached_by"],
+            attached_at=row["attached_at"],
             updated_at=row["updated_at"],
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),
         )
