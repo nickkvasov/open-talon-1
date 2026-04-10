@@ -72,6 +72,13 @@ class Settings(BaseSettings):
     kafka_startup_timeout_seconds: float = 30.0
     kafka_startup_retry_interval_seconds: float = 1.0
 
+    # ── Agent loop ───────────────────────────────────────────────────────────
+    agent_loop_enabled: bool = True
+    agent_loop_poll_interval_seconds: float = 1.0
+    agent_loop_max_pending_per_agent: int = 4
+    agent_loop_progress_events_enabled: bool = True
+    agent_loop_model_timeout_seconds: float = 60.0
+
     # ── OpenBao ──────────────────────────────────────────────────────────────
     openbao_address: str = "http://localhost:8200"
     # Root / admin token used by the gateway itself (for API-key management)

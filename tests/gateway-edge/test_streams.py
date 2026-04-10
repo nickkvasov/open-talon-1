@@ -172,3 +172,61 @@ def test_two_tui_participants_collaborate_in_single_workspace(sync_client, actor
         "Pairing on the kernel now",
         "I can see your update",
     ]
+
+
+def test_websocket_stream_hides_agents_only_events_from_users(sync_client, actor_payload):
+    agent_actor = {
+        "participant_id": str(uuid4()),
+        "participant_type": "agent",
+        "display_name": "Testing Agent",
+    }
+
+    workspace_resp = sync_client.post(
+        "/v1/workspaces",
+        json={"name": "Filtered Streams", "actor": actor_payload},
+    )
+    workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+    thread_resp = sync_client.post(
+        f"/v1/workspaces/{workspace_id}/threads",
+        json={"title": "Visibility", "actor": actor_payload},
+    )
+    thread_id = thread_resp.json()["thread"]["thread_id"]
+
+    with sync_client.websocket_connect(
+        f"/v1/threads/{thread_id}/ws"
+        f"?participant_id={actor_payload['participant_id']}"
+        f"&display_name={actor_payload['display_name']}"
+        "&participant_type=user"
+        "&after_sequence=0"
+    ) as user_ws:
+        assert user_ws.receive_json()["event_type"] == "presence.updated"
+
+        with sync_client.websocket_connect(
+            f"/v1/threads/{thread_id}/ws"
+            f"?participant_id={agent_actor['participant_id']}"
+            f"&display_name={agent_actor['display_name']}"
+            "&participant_type=agent"
+            "&after_sequence=0"
+        ) as agent_ws:
+            assert agent_ws.receive_json()["event_type"] == "presence.updated"
+            assert agent_ws.receive_json()["event_type"] == "presence.updated"
+            assert user_ws.receive_json()["event_type"] == "presence.updated"
+
+            post_resp = sync_client.post(
+                f"/v1/threads/{thread_id}/messages",
+                json={
+                    "actor": actor_payload,
+                    "content": "Please investigate the failing test",
+                    "visibility": "workspace",
+                    "create_task": True,
+                },
+            )
+            assert post_resp.status_code == 200
+
+            user_event = user_ws.receive_json()
+            agent_first = agent_ws.receive_json()
+            agent_second = agent_ws.receive_json()
+
+    assert user_event["event_type"] == "message.created"
+    assert agent_first["event_type"] == "message.created"
+    assert agent_second["event_type"] == "task.created"

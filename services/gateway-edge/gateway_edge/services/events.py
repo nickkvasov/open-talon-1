@@ -117,8 +117,16 @@ class EventService:
             return settings.kafka_presence_topic
         if event.event_type.startswith("workspace.") or event.thread_id is None:
             return settings.kafka_workspace_events_topic
-        if event.event_type.startswith("task.") and event.visibility == "agents_only":
+        if event.event_type == "task.created" and event.visibility == "agents_only":
             return settings.kafka_agent_tasks_topic
+        if (
+            event.visibility == "agents_only"
+            and (
+                event.event_type.startswith("task.")
+                or event.event_type.startswith("run.")
+            )
+        ):
+            return settings.kafka_agent_events_topic
         return settings.kafka_collab_events_topic
 
 

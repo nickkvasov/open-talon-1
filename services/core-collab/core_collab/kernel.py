@@ -9,9 +9,14 @@ import asyncpg
 
 from .contracts import (
     ActorRef,
+    AgentArtifactDraft,
     AgentConfiguration,
     AgentDefinition,
+    AgentExecutionContext,
+    AgentRunResult,
+    AgentTaskRouting,
     AssumeParticipantRoleRequest,
+    Artifact,
     CreateAgentParticipantRequest,
     CreateSystemAgentRequest,
     CreateMemoryEntryRequest,
@@ -32,8 +37,12 @@ from .contracts import (
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    Run,
+    StopReason,
     UpdateSystemAgentRequest,
     UpsertRoleDefinitionRequest,
+    build_default_interaction_contract,
+    interaction_contract_is_empty,
     UpdateAgentParticipantRequest,
     UpdateMemoryEntryRequest,
     Workspace,
@@ -86,12 +95,28 @@ class AgentDefinitionCommandResult(CommandResult):
     agent: AgentDefinition | None = None
 
 
+@dataclass
+class TaskCommandResult(CommandResult):
+    task: Task | None = None
+    run: Run | None = None
+    context: AgentExecutionContext | None = None
+
+
+@dataclass
+class RunCommandResult(CommandResult):
+    run: Run | None = None
+    task: Task | None = None
+    message: TimelineMessage | None = None
+    artifacts: list[Artifact] = field(default_factory=list)
+
+
 class CollaborationKernel:
     def __init__(self, repository: CollaborationRepository) -> None:
         self._repository = repository
 
     async def setup_schema(self) -> None:
         await self._repository.setup_schema()
+        await self._backfill_system_agent_interaction_contracts()
 
     async def create_workspace(
         self, payload: CreateWorkspaceRequest
@@ -207,6 +232,16 @@ class CollaborationKernel:
         self, payload: CreateSystemAgentRequest
     ) -> AgentDefinitionCommandResult:
         now = self._now()
+        interaction_contract = (
+            build_default_interaction_contract(
+                display_name=payload.display_name,
+                role=payload.role,
+                description=payload.description,
+                capabilities=payload.capabilities,
+            )
+            if interaction_contract_is_empty(payload.interaction_contract)
+            else payload.interaction_contract
+        )
         agent = AgentDefinition(
             agent_id=uuid4(),
             display_name=payload.display_name,
@@ -215,6 +250,7 @@ class CollaborationKernel:
             capabilities=payload.capabilities,
             endpoint=payload.endpoint,
             system_prompt=payload.system_prompt,
+            interaction_contract=interaction_contract,
             definition=payload.definition,
             created_by=payload.actor.participant_id,
             created_at=now,
@@ -235,6 +271,11 @@ class CollaborationKernel:
         existing = await self._repository.fetch_system_agent(agent_id)
         if existing is None:
             raise KeyError(f"System agent {agent_id} not found")
+        interaction_contract = (
+            payload.interaction_contract
+            if payload.interaction_contract is not None
+            else existing.interaction_contract
+        )
         updated = existing.model_copy(
             update={
                 "display_name": payload.display_name or existing.display_name,
@@ -243,15 +284,56 @@ class CollaborationKernel:
                 "capabilities": payload.capabilities or existing.capabilities,
                 "endpoint": payload.endpoint or existing.endpoint,
                 "system_prompt": payload.system_prompt or existing.system_prompt,
+                "interaction_contract": interaction_contract,
                 "definition": payload.definition if payload.definition is not None else existing.definition,
                 "updated_at": self._now(),
                 "metadata": {**existing.metadata, **payload.metadata} if payload.metadata is not None else existing.metadata,
             }
         )
+        if interaction_contract_is_empty(updated.interaction_contract):
+            updated = updated.model_copy(
+                update={
+                    "interaction_contract": build_default_interaction_contract(
+                        display_name=updated.display_name,
+                        role=updated.role,
+                        description=updated.description,
+                        capabilities=updated.capabilities,
+                    )
+                }
+            )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 await self._repository.upsert_system_agent(conn, updated)
         return AgentDefinitionCommandResult(agent=updated)
+
+    async def _backfill_system_agent_interaction_contracts(self) -> None:
+        agents = await self._repository.list_system_agents()
+        missing = [
+            agent
+            for agent in agents
+            if interaction_contract_is_empty(agent.interaction_contract)
+        ]
+        if not missing:
+            return
+        logger.info(
+            "Backfilling interaction contracts for %s system agents",
+            len(missing),
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                for agent in missing:
+                    updated = agent.model_copy(
+                        update={
+                            "interaction_contract": build_default_interaction_contract(
+                                display_name=agent.display_name,
+                                role=agent.role,
+                                description=agent.description,
+                                capabilities=agent.capabilities,
+                            ),
+                            "updated_at": self._now(),
+                        }
+                    )
+                    await self._repository.upsert_system_agent(conn, updated)
 
     async def upsert_role_definition(
         self,
@@ -585,6 +667,523 @@ class CollaborationKernel:
         messages = await self._repository.list_timeline_messages(thread_id)
         return TimelinePage(thread_id=thread_id, messages=messages)
 
+    async def list_pending_tasks_for_system_agent(
+        self, system_agent_id: UUID, *, limit: int = 10
+    ) -> list[Task]:
+        logger.debug(
+            "Kernel list_pending_tasks_for_system_agent system_agent_id=%s limit=%s",
+            system_agent_id,
+            limit,
+        )
+        return await self._repository.list_pending_tasks_for_system_agent(
+            system_agent_id,
+            limit=limit,
+        )
+
+    async def claim_task_for_system_agent(
+        self,
+        task_id: UUID,
+        system_agent_id: UUID,
+    ) -> TaskCommandResult:
+        logger.debug(
+            "Kernel claim_task_for_system_agent task_id=%s system_agent_id=%s",
+            task_id,
+            system_agent_id,
+        )
+        task = await self._repository.fetch_task(task_id)
+        if task is None:
+            raise KeyError(f"Task {task_id} not found")
+        routing = self._task_routing(task)
+        if routing.target_system_agent_id != system_agent_id:
+            raise ValueError(
+                f"Task {task_id} is not targeted to system agent {system_agent_id}"
+            )
+        workspace = await self._repository.fetch_workspace(task.workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {task.workspace_id} not found")
+        thread = await self._repository.fetch_thread(task.thread_id)
+        if thread is None:
+            raise KeyError(f"Thread {task.thread_id} not found")
+        system_agent = await self._repository.fetch_system_agent(system_agent_id)
+        if system_agent is None:
+            raise KeyError(f"System agent {system_agent_id} not found")
+        participant = await self._resolve_agent_participant(
+            workspace_id=task.workspace_id,
+            system_agent_id=system_agent_id,
+            routing=routing,
+        )
+        if participant is None:
+            raise KeyError(
+                f"System agent {system_agent_id} is not attached to workspace {task.workspace_id}"
+            )
+
+        now = self._now()
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                claimed_task = await self._repository.claim_task(
+                    conn,
+                    task_id=task_id,
+                    participant_id=participant.participant_id,
+                    updated_at=now,
+                )
+                if claimed_task is None:
+                    raise ValueError(f"Task {task_id} is no longer claimable")
+                run = Run(
+                    run_id=uuid4(),
+                    workspace_id=claimed_task.workspace_id,
+                    thread_id=claimed_task.thread_id,
+                    task_id=claimed_task.task_id,
+                    participant_id=participant.participant_id,
+                    status="started",
+                    correlation_id=claimed_task.correlation_id,
+                    causation_id=claimed_task.task_id,
+                    created_at=now,
+                    updated_at=now,
+                    metadata={
+                        "system_agent_id": str(system_agent_id),
+                        "participant_id": str(participant.participant_id),
+                        "endpoint_kind": system_agent.endpoint.kind,
+                    },
+                )
+                await self._repository.upsert_run(conn, run)
+                actor = ActorRef(type="agent", id=participant.participant_id)
+                events = [
+                    await self._build_thread_event(
+                        conn,
+                        claimed_task.workspace_id,
+                        claimed_task.thread_id,
+                        "task.claimed",
+                        actor=actor,
+                        target=TargetRef(type="task", id=claimed_task.task_id),
+                        payload={
+                            "task_id": str(claimed_task.task_id),
+                            "claimed_by": str(participant.participant_id),
+                            "system_agent_id": str(system_agent_id),
+                        },
+                        visibility="agents_only",
+                        timestamp=now,
+                        correlation_id=claimed_task.correlation_id,
+                        causation_id=claimed_task.causation_id,
+                    ),
+                    await self._build_thread_event(
+                        conn,
+                        claimed_task.workspace_id,
+                        claimed_task.thread_id,
+                        "run.started",
+                        actor=actor,
+                        target=TargetRef(type="run", id=run.run_id),
+                        payload=run.model_dump(mode="json"),
+                        visibility="agents_only",
+                        timestamp=now,
+                        correlation_id=claimed_task.correlation_id,
+                        causation_id=claimed_task.task_id,
+                    ),
+                ]
+                for event in events:
+                    await self._repository.record_event(conn, event)
+
+        context = await self.build_agent_execution_context(task_id, system_agent_id, run.run_id)
+        return TaskCommandResult(task=claimed_task, run=run, context=context, events=events)
+
+    async def build_agent_execution_context(
+        self,
+        task_id: UUID,
+        system_agent_id: UUID,
+        run_id: UUID | None = None,
+    ) -> AgentExecutionContext:
+        logger.debug(
+            "Kernel build_agent_execution_context task_id=%s system_agent_id=%s run_id=%s",
+            task_id,
+            system_agent_id,
+            run_id,
+        )
+        task = await self._repository.fetch_task(task_id)
+        if task is None:
+            raise KeyError(f"Task {task_id} not found")
+        routing = self._task_routing(task)
+        if routing.target_system_agent_id != system_agent_id:
+            raise ValueError(
+                f"Task {task_id} is not targeted to system agent {system_agent_id}"
+            )
+        system_agent = await self._repository.fetch_system_agent(system_agent_id)
+        if system_agent is None:
+            raise KeyError(f"System agent {system_agent_id} not found")
+        workspace = await self._repository.fetch_workspace(task.workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {task.workspace_id} not found")
+        thread = await self._repository.fetch_thread(task.thread_id)
+        if thread is None:
+            raise KeyError(f"Thread {task.thread_id} not found")
+        participant = await self._resolve_agent_participant(
+            workspace_id=task.workspace_id,
+            system_agent_id=system_agent_id,
+            routing=routing,
+        )
+        if participant is None:
+            raise KeyError(
+                f"System agent {system_agent_id} is not attached to workspace {task.workspace_id}"
+            )
+        run = await self._resolve_run_for_context(task, participant, run_id)
+        participants = await self._repository.list_participants(task.workspace_id)
+        memory_entries = await self._repository.list_memory_entries(task.workspace_id)
+        messages = await self._repository.list_timeline_messages(task.thread_id)
+        trigger_message = (
+            await self._repository.fetch_message(routing.trigger_message_id)
+            if routing.trigger_message_id is not None
+            else None
+        )
+        visible_messages = self._filter_visible_messages(
+            messages,
+            viewer=participant,
+            sequence_ceiling=routing.sequence_ceiling,
+        )
+        visible_memory_entries = self._filter_visible_memory_entries(
+            memory_entries,
+            viewer=participant,
+        )
+        return AgentExecutionContext(
+            workspace=workspace,
+            thread=thread,
+            task=task,
+            run=run,
+            routing=routing,
+            system_agent=system_agent,
+            participant=participant,
+            participants=participants,
+            role_definitions=self._role_definitions_from_workspace(workspace),
+            messages=visible_messages,
+            memory_entries=visible_memory_entries,
+            trigger_message=trigger_message,
+            sequence_ceiling=routing.sequence_ceiling or 0,
+            thread_reply_contract=system_agent.interaction_contract,
+        )
+
+    async def append_run_progress(
+        self,
+        run_id: UUID,
+        system_agent_id: UUID,
+        content: str,
+    ) -> RunCommandResult:
+        logger.debug(
+            "Kernel append_run_progress run_id=%s system_agent_id=%s content_len=%s",
+            run_id,
+            system_agent_id,
+            len(content),
+        )
+        run = await self._repository.fetch_run(run_id)
+        if run is None:
+            raise KeyError(f"Run {run_id} not found")
+        task = await self._repository.fetch_task(run.task_id)
+        if task is None:
+            raise KeyError(f"Task {run.task_id} not found")
+        participant = await self._require_run_participant(
+            run=run,
+            task=task,
+            system_agent_id=system_agent_id,
+        )
+        now = self._now()
+        updated_run = run.model_copy(
+            update={
+                "status": "progressing",
+                "updated_at": now,
+                "metadata": {**run.metadata, "last_progress": content},
+            }
+        )
+        actor = ActorRef(type="agent", id=participant.participant_id)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_run(conn, updated_run)
+                event = await self._build_thread_event(
+                    conn,
+                    updated_run.workspace_id,
+                    updated_run.thread_id,
+                    "run.progressed",
+                    actor=actor,
+                    target=TargetRef(type="run", id=updated_run.run_id),
+                    payload={"run_id": str(updated_run.run_id), "content": content},
+                    visibility="agents_only",
+                    timestamp=now,
+                    correlation_id=updated_run.correlation_id,
+                    causation_id=updated_run.task_id,
+                )
+                await self._repository.record_event(conn, event)
+        return RunCommandResult(run=updated_run, task=task, events=[event])
+
+    async def complete_run(
+        self,
+        run_id: UUID,
+        system_agent_id: UUID,
+        result: AgentRunResult,
+    ) -> RunCommandResult:
+        logger.debug(
+            "Kernel complete_run run_id=%s system_agent_id=%s stop_reason=%s has_message=%s artifact_count=%s",
+            run_id,
+            system_agent_id,
+            result.stop_reason,
+            bool(result.message),
+            len(result.artifacts),
+        )
+        run = await self._repository.fetch_run(run_id)
+        if run is None:
+            raise KeyError(f"Run {run_id} not found")
+        task = await self._repository.fetch_task(run.task_id)
+        if task is None:
+            raise KeyError(f"Task {run.task_id} not found")
+        participant = await self._require_run_participant(
+            run=run,
+            task=task,
+            system_agent_id=system_agent_id,
+        )
+        routing = self._task_routing(task)
+        now = self._now()
+        updated_run = run.model_copy(
+            update={
+                "status": "completed",
+                "output": result.model_dump(mode="json"),
+                "updated_at": now,
+                "metadata": {
+                    **run.metadata,
+                    "stop_reason": result.stop_reason,
+                    **result.metadata,
+                },
+            }
+        )
+        updated_task = task.model_copy(
+            update={
+                "status": "completed",
+                "claimed_by": participant.participant_id,
+                "updated_at": now,
+                "metadata": {
+                    **task.metadata,
+                    "stop_reason": result.stop_reason,
+                    "completed_run_id": str(updated_run.run_id),
+                },
+            }
+        )
+        actor = ActorRef(type="agent", id=participant.participant_id)
+        artifacts = [
+            self._artifact_from_draft(
+                draft,
+                task=updated_task,
+                run=updated_run,
+                timestamp=now,
+            )
+            for draft in result.artifacts
+        ]
+        message = (
+            self._agent_message_from_result(
+                result,
+                task=updated_task,
+                participant=participant,
+                timestamp=now,
+            )
+            if self._stop_reason_returns_to_thread(result.stop_reason)
+            and result.message
+            else None
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_run(conn, updated_run)
+                await self._repository.upsert_task(conn, updated_task)
+                membership = await self._repository.fetch_active_membership(
+                    conn,
+                    thread_id=updated_task.thread_id,
+                    participant_id=participant.participant_id,
+                )
+                if membership is None:
+                    membership = Membership(
+                        membership_id=uuid4(),
+                        workspace_id=updated_task.workspace_id,
+                        thread_id=updated_task.thread_id,
+                        participant_id=participant.participant_id,
+                        role="agent",
+                        permissions=["post_messages"],
+                        joined_at=now,
+                    )
+                    await self._repository.upsert_membership(conn, membership)
+                events = [
+                    await self._build_thread_event(
+                        conn,
+                        updated_run.workspace_id,
+                        updated_run.thread_id,
+                        "run.completed",
+                        actor=actor,
+                        target=TargetRef(type="run", id=updated_run.run_id),
+                        payload={
+                            "run_id": str(updated_run.run_id),
+                            "output": updated_run.output,
+                            "stop_reason": result.stop_reason,
+                        },
+                        visibility="agents_only",
+                        timestamp=now,
+                        correlation_id=updated_run.correlation_id,
+                        causation_id=updated_run.task_id,
+                    ),
+                    await self._build_thread_event(
+                        conn,
+                        updated_task.workspace_id,
+                        updated_task.thread_id,
+                        "task.completed",
+                        actor=actor,
+                        target=TargetRef(type="task", id=updated_task.task_id),
+                        payload={
+                            "task_id": str(updated_task.task_id),
+                            "run_id": str(updated_run.run_id),
+                            "stop_reason": result.stop_reason,
+                        },
+                        visibility="agents_only",
+                        timestamp=now,
+                        correlation_id=updated_task.correlation_id,
+                        causation_id=updated_task.task_id,
+                    ),
+                ]
+                if message is not None:
+                    message.sequence = await self._repository.next_thread_sequence(
+                        conn,
+                        message.thread_id,
+                    )
+                    await self._repository.upsert_message(conn, message)
+                    events.append(
+                        EventEnvelope(
+                            event_type="message.created",
+                            workspace_id=message.workspace_id,
+                            thread_id=message.thread_id,
+                            actor=message.actor,
+                            target=TargetRef(type="message", id=message.message_id),
+                            visibility=message.visibility,
+                            correlation_id=message.correlation_id,
+                            causation_id=message.causation_id,
+                            sequence=message.sequence,
+                            timestamp=now,
+                            payload=message.model_dump(mode="json"),
+                        )
+                    )
+                for artifact in artifacts:
+                    await self._repository.upsert_artifact(conn, artifact)
+                    events.append(
+                        await self._build_thread_event(
+                            conn,
+                            artifact.workspace_id,
+                            artifact.thread_id,
+                            "artifact.created",
+                            actor=actor,
+                            target=TargetRef(type="artifact", id=artifact.artifact_id),
+                            payload=artifact.model_dump(mode="json"),
+                            visibility=artifact.visibility,
+                            timestamp=now,
+                            correlation_id=artifact.correlation_id,
+                            causation_id=updated_task.task_id,
+                        )
+                    )
+                for event in events:
+                    await self._repository.record_event(conn, event)
+        return RunCommandResult(
+            run=updated_run,
+            task=updated_task,
+            message=message,
+            artifacts=artifacts,
+            events=events,
+        )
+
+    async def fail_run(
+        self,
+        run_id: UUID,
+        system_agent_id: UUID,
+        error: str,
+        *,
+        stop_reason: StopReason = "tool_failure",
+    ) -> RunCommandResult:
+        logger.debug(
+            "Kernel fail_run run_id=%s system_agent_id=%s stop_reason=%s error_len=%s",
+            run_id,
+            system_agent_id,
+            stop_reason,
+            len(error),
+        )
+        run = await self._repository.fetch_run(run_id)
+        if run is None:
+            raise KeyError(f"Run {run_id} not found")
+        task = await self._repository.fetch_task(run.task_id)
+        if task is None:
+            raise KeyError(f"Task {run.task_id} not found")
+        participant = await self._require_run_participant(
+            run=run,
+            task=task,
+            system_agent_id=system_agent_id,
+        )
+        now = self._now()
+        updated_run = run.model_copy(
+            update={
+                "status": "failed",
+                "output": {
+                    "error": error,
+                    "stop_reason": stop_reason,
+                },
+                "updated_at": now,
+                "metadata": {
+                    **run.metadata,
+                    "stop_reason": stop_reason,
+                },
+            }
+        )
+        updated_task = task.model_copy(
+            update={
+                "status": "failed",
+                "claimed_by": participant.participant_id,
+                "updated_at": now,
+                "metadata": {
+                    **task.metadata,
+                    "stop_reason": stop_reason,
+                    "failed_run_id": str(updated_run.run_id),
+                },
+            }
+        )
+        actor = ActorRef(type="agent", id=participant.participant_id)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_run(conn, updated_run)
+                await self._repository.upsert_task(conn, updated_task)
+                events = [
+                    await self._build_thread_event(
+                        conn,
+                        updated_run.workspace_id,
+                        updated_run.thread_id,
+                        "run.failed",
+                        actor=actor,
+                        target=TargetRef(type="run", id=updated_run.run_id),
+                        payload={
+                            "run_id": str(updated_run.run_id),
+                            "error": error,
+                            "stop_reason": stop_reason,
+                        },
+                        visibility="agents_only",
+                        timestamp=now,
+                        correlation_id=updated_run.correlation_id,
+                        causation_id=updated_run.task_id,
+                    ),
+                    await self._build_thread_event(
+                        conn,
+                        updated_task.workspace_id,
+                        updated_task.thread_id,
+                        "task.failed",
+                        actor=actor,
+                        target=TargetRef(type="task", id=updated_task.task_id),
+                        payload={
+                            "task_id": str(updated_task.task_id),
+                            "run_id": str(updated_run.run_id),
+                            "error": error,
+                            "stop_reason": stop_reason,
+                        },
+                        visibility="agents_only",
+                        timestamp=now,
+                        correlation_id=updated_task.correlation_id,
+                        causation_id=updated_task.task_id,
+                    ),
+                ]
+                for event in events:
+                    await self._repository.record_event(conn, event)
+        return RunCommandResult(run=updated_run, task=updated_task, events=events)
+
     async def post_message(
         self, thread_id: UUID, payload: CreateMessageRequest
     ) -> MessageCommandResult:
@@ -669,34 +1268,32 @@ class CollaborationKernel:
                     )
                 ]
                 if payload.create_task:
-                    task = Task(
-                        task_id=uuid4(),
-                        workspace_id=thread.workspace_id,
-                        thread_id=thread_id,
-                        title=f"Respond to message {message.message_id}",
-                        description="Agent response requested for posted message.",
-                        requested_by=payload.actor.participant_id,
-                        correlation_id=correlation_id,
-                        causation_id=message.message_id,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                    await self._repository.upsert_task(conn, task)
-                    events.append(
-                        EventEnvelope(
-                            event_type="task.created",
-                            workspace_id=thread.workspace_id,
-                            thread_id=thread_id,
-                            actor=actor,
-                            target=TargetRef(type="task", id=task.task_id),
-                            visibility="agents_only",
-                            correlation_id=correlation_id,
-                            causation_id=message.message_id,
-                            sequence=await self._repository.next_thread_sequence(conn, thread_id),
-                            timestamp=now,
-                            payload=task.model_dump(mode="json"),
+                    for task in await self._build_message_tasks(
+                        thread=thread,
+                        message=message,
+                        actor_input=payload.actor,
+                        visibility=payload.visibility,
+                        timestamp=now,
+                    ):
+                        await self._repository.upsert_task(conn, task)
+                        events.append(
+                            EventEnvelope(
+                                event_type="task.created",
+                                workspace_id=thread.workspace_id,
+                                thread_id=thread_id,
+                                actor=actor,
+                                target=TargetRef(type="task", id=task.task_id),
+                                visibility="agents_only",
+                                correlation_id=correlation_id,
+                                causation_id=message.message_id,
+                                sequence=await self._repository.next_thread_sequence(
+                                    conn,
+                                    thread_id,
+                                ),
+                                timestamp=now,
+                                payload=task.model_dump(mode="json"),
+                            )
                         )
-                    )
 
                 for event in events:
                     await self._repository.record_event(conn, event)
@@ -941,6 +1538,271 @@ class CollaborationKernel:
             raise KeyError(f"Thread {thread_id} not found")
         return await self._repository.list_thread_events(
             thread_id, after_sequence=after_sequence
+        )
+
+    async def _build_message_tasks(
+        self,
+        *,
+        thread: Thread,
+        message: TimelineMessage,
+        actor_input: ParticipantInput,
+        visibility: str,
+        timestamp: datetime,
+    ) -> list[Task]:
+        participants = await self._repository.list_participants(thread.workspace_id)
+        active_agents = [
+            participant
+            for participant in participants
+            if participant.participant_type == "agent"
+            and participant.status in {"active", "idle"}
+            and participant.system_agent_id is not None
+        ]
+        tasks: list[Task] = []
+        if not active_agents:
+            tasks.append(
+                Task(
+                    task_id=uuid4(),
+                    workspace_id=thread.workspace_id,
+                    thread_id=thread.thread_id,
+                    title=f"Respond to message {message.message_id}",
+                    description="Agent response requested for posted message.",
+                    requested_by=actor_input.participant_id,
+                    correlation_id=message.correlation_id,
+                    causation_id=message.message_id,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                    metadata={
+                        "trigger_message_id": str(message.message_id),
+                        "sequence_ceiling": message.sequence,
+                        "response_visibility": self._response_visibility(visibility),
+                        "routing_reason": "no_attached_agents",
+                    },
+                )
+            )
+            return tasks
+
+        for participant in active_agents:
+            tasks.append(
+                Task(
+                    task_id=uuid4(),
+                    workspace_id=thread.workspace_id,
+                    thread_id=thread.thread_id,
+                    title=f"Reply as {participant.display_name}",
+                    description="Agent response requested for posted message.",
+                    requested_by=actor_input.participant_id,
+                    correlation_id=message.correlation_id,
+                    causation_id=message.message_id,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                    metadata={
+                        "target_system_agent_id": str(participant.system_agent_id),
+                        "target_participant_id": str(participant.participant_id),
+                        "trigger_message_id": str(message.message_id),
+                        "sequence_ceiling": message.sequence,
+                        "response_visibility": self._response_visibility(visibility),
+                        "routing_reason": "workspace_attached_agent",
+                    },
+                )
+            )
+        return tasks
+
+    async def _resolve_run_for_context(
+        self,
+        task: Task,
+        participant: ParticipantProfile,
+        run_id: UUID | None,
+    ) -> Run:
+        if run_id is not None:
+            run = await self._repository.fetch_run(run_id)
+            if run is None:
+                raise KeyError(f"Run {run_id} not found")
+            return run
+        raise ValueError(
+            f"A run must exist before building execution context for task {task.task_id}"
+        )
+
+    async def _resolve_agent_participant(
+        self,
+        *,
+        workspace_id: UUID,
+        system_agent_id: UUID,
+        routing: AgentTaskRouting,
+    ) -> ParticipantProfile | None:
+        if routing.target_participant_id is not None:
+            participant = await self._repository.fetch_participant(
+                workspace_id,
+                routing.target_participant_id,
+            )
+            if (
+                participant is not None
+                and participant.participant_type == "agent"
+                and participant.system_agent_id == system_agent_id
+            ):
+                return participant
+        return await self._repository.fetch_agent_participant(
+            workspace_id,
+            system_agent_id,
+        )
+
+    async def _require_run_participant(
+        self,
+        *,
+        run: Run,
+        task: Task,
+        system_agent_id: UUID,
+    ) -> ParticipantProfile:
+        participant = await self._resolve_agent_participant(
+            workspace_id=task.workspace_id,
+            system_agent_id=system_agent_id,
+            routing=self._task_routing(task),
+        )
+        if participant is None:
+            raise KeyError(
+                f"System agent {system_agent_id} is not attached to workspace {task.workspace_id}"
+            )
+        if run.participant_id != participant.participant_id:
+            raise ValueError(
+                f"Run {run.run_id} does not belong to system agent {system_agent_id}"
+            )
+        return participant
+
+    @staticmethod
+    def _task_routing(task: Task) -> AgentTaskRouting:
+        metadata = task.metadata
+        return AgentTaskRouting(
+            target_system_agent_id=(
+                UUID(metadata["target_system_agent_id"])
+                if metadata.get("target_system_agent_id")
+                else None
+            ),
+            target_participant_id=(
+                UUID(metadata["target_participant_id"])
+                if metadata.get("target_participant_id")
+                else None
+            ),
+            trigger_message_id=(
+                UUID(metadata["trigger_message_id"])
+                if metadata.get("trigger_message_id")
+                else None
+            ),
+            response_visibility=metadata.get("response_visibility", "workspace"),
+            sequence_ceiling=metadata.get("sequence_ceiling"),
+            routing_reason=metadata.get("routing_reason"),
+        )
+
+    @staticmethod
+    def _filter_visible_messages(
+        messages: list[TimelineMessage],
+        *,
+        viewer: ParticipantProfile,
+        sequence_ceiling: int | None,
+    ) -> list[TimelineMessage]:
+        visible: list[TimelineMessage] = []
+        for message in messages:
+            if sequence_ceiling is not None and message.sequence > sequence_ceiling:
+                continue
+            if message.visibility in {"public", "workspace"}:
+                visible.append(message)
+                continue
+            if (
+                message.visibility == "agents_only"
+                and viewer.participant_type == "agent"
+            ):
+                visible.append(message)
+                continue
+            if message.visibility == "private" and message.actor.id == viewer.participant_id:
+                visible.append(message)
+        return visible
+
+    @staticmethod
+    def _filter_visible_memory_entries(
+        entries: list[MemoryEntry],
+        *,
+        viewer: ParticipantProfile,
+    ) -> list[MemoryEntry]:
+        visible: list[MemoryEntry] = []
+        for entry in entries:
+            if entry.visibility in {"public", "workspace"}:
+                visible.append(entry)
+                continue
+            if entry.visibility == "agents_only" and viewer.participant_type == "agent":
+                visible.append(entry)
+                continue
+            if entry.visibility == "private" and entry.created_by == viewer.participant_id:
+                visible.append(entry)
+        return visible
+
+    @staticmethod
+    def _response_visibility(message_visibility: str) -> str:
+        if message_visibility in {"public", "workspace"}:
+            return message_visibility
+        return "workspace"
+
+    @staticmethod
+    def _stop_reason_returns_to_thread(stop_reason: StopReason) -> bool:
+        return stop_reason in {
+            "completed",
+            "needs_user_input",
+            "blocked_dependency",
+            "handoff_required",
+            "budget_exhausted",
+            "tool_failure",
+        }
+
+    @staticmethod
+    def _artifact_from_draft(
+        draft: AgentArtifactDraft,
+        *,
+        task: Task,
+        run: Run,
+        timestamp: datetime,
+    ) -> Artifact:
+        return Artifact(
+            artifact_id=uuid4(),
+            workspace_id=task.workspace_id,
+            thread_id=task.thread_id,
+            task_id=task.task_id,
+            run_id=run.run_id,
+            kind=draft.kind,
+            title=draft.title,
+            content=draft.content,
+            visibility=draft.visibility,
+            correlation_id=task.correlation_id,
+            created_at=timestamp,
+            updated_at=timestamp,
+            metadata=draft.metadata,
+        )
+
+    @staticmethod
+    def _agent_message_from_result(
+        result: AgentRunResult,
+        *,
+        task: Task,
+        participant: ParticipantProfile,
+        timestamp: datetime,
+    ) -> TimelineMessage:
+        routing = CollaborationKernel._task_routing(task)
+        return TimelineMessage(
+            message_id=uuid4(),
+            workspace_id=task.workspace_id,
+            thread_id=task.thread_id,
+            actor=ActorRef(type="agent", id=participant.participant_id),
+            visibility=routing.response_visibility,
+            content=result.message or "",
+            status="completed",
+            correlation_id=task.correlation_id,
+            causation_id=task.task_id,
+            sequence=0,
+            created_at=timestamp,
+            updated_at=timestamp,
+            metadata={
+                "system_agent_id": str(participant.system_agent_id)
+                if participant.system_agent_id is not None
+                else None,
+                "stop_reason": result.stop_reason,
+                "summary": result.summary,
+                **result.metadata,
+            },
         )
 
     async def _build_workspace_event(

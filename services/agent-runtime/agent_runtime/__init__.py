@@ -1,3 +1,3 @@
-from .runtime import AgentTaskRuntime
+from .runtime import AgentTaskRuntime, render_prompt
 
-__all__ = ["AgentTaskRuntime"]
+__all__ = ["AgentTaskRuntime", "render_prompt"]

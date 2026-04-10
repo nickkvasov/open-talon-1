@@ -12,10 +12,13 @@ from .contracts import (
     AgentConfiguration,
     AgentDefinition,
     AgentEndpoint,
+    AgentInteractionContract,
+    Artifact,
     EventEnvelope,
     Membership,
     MemoryEntry,
     ParticipantProfile,
+    Run,
     Task,
     Thread,
     TimelineMessage,
@@ -140,9 +143,9 @@ class CollaborationRepository:
             """
             INSERT INTO system_agents (
                 agent_id, display_name, description, role, capabilities, endpoint,
-                system_prompt, definition, created_by, created_at, updated_at, metadata
+                system_prompt, interaction_contract, definition, created_by, created_at, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (agent_id) DO UPDATE
                 SET display_name = EXCLUDED.display_name,
                     description = EXCLUDED.description,
@@ -150,6 +153,7 @@ class CollaborationRepository:
                     capabilities = EXCLUDED.capabilities,
                     endpoint = EXCLUDED.endpoint,
                     system_prompt = EXCLUDED.system_prompt,
+                    interaction_contract = EXCLUDED.interaction_contract,
                     definition = EXCLUDED.definition,
                     updated_at = EXCLUDED.updated_at,
                     metadata = EXCLUDED.metadata
@@ -161,6 +165,7 @@ class CollaborationRepository:
             self._json_dumps(agent.capabilities),
             self._json_dumps(agent.endpoint.model_dump(mode="json")),
             agent.system_prompt,
+            self._json_dumps(agent.interaction_contract.model_dump(mode="json")),
             self._json_dumps(agent.definition),
             agent.created_by,
             agent.created_at,
@@ -424,6 +429,68 @@ class CollaborationRepository:
             self._json_dumps(task.metadata),
         )
 
+    async def upsert_run(self, conn: asyncpg.Connection, run: Run) -> None:
+        await conn.execute(
+            """
+            INSERT INTO runs (
+                run_id, workspace_id, thread_id, task_id, participant_id, status,
+                output, correlation_id, causation_id, created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (run_id) DO UPDATE
+                SET participant_id = EXCLUDED.participant_id,
+                    status = EXCLUDED.status,
+                    output = EXCLUDED.output,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            run.run_id,
+            run.workspace_id,
+            run.thread_id,
+            run.task_id,
+            run.participant_id,
+            run.status,
+            self._json_dumps(run.output),
+            run.correlation_id,
+            run.causation_id,
+            run.created_at,
+            run.updated_at,
+            self._json_dumps(run.metadata),
+        )
+
+    async def upsert_artifact(
+        self, conn: asyncpg.Connection, artifact: Artifact
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO artifacts (
+                artifact_id, workspace_id, thread_id, task_id, run_id, kind, title,
+                content, visibility, correlation_id, created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ON CONFLICT (artifact_id) DO UPDATE
+                SET kind = EXCLUDED.kind,
+                    title = EXCLUDED.title,
+                    content = EXCLUDED.content,
+                    visibility = EXCLUDED.visibility,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            artifact.artifact_id,
+            artifact.workspace_id,
+            artifact.thread_id,
+            artifact.task_id,
+            artifact.run_id,
+            artifact.kind,
+            artifact.title,
+            self._json_dumps(artifact.content),
+            artifact.visibility,
+            artifact.correlation_id,
+            artifact.created_at,
+            artifact.updated_at,
+            self._json_dumps(artifact.metadata),
+        )
+
     async def fetch_workspace(self, workspace_id: UUID) -> Workspace | None:
         row = await self._pool.fetchrow(
             """
@@ -449,7 +516,7 @@ class CollaborationRepository:
         rows = await self._pool.fetch(
             """
             SELECT agent_id, display_name, description, role, capabilities, endpoint,
-                   system_prompt, definition, created_by, created_at, updated_at, metadata
+                   system_prompt, interaction_contract, definition, created_by, created_at, updated_at, metadata
             FROM system_agents
             ORDER BY created_at ASC
             """
@@ -460,13 +527,32 @@ class CollaborationRepository:
         row = await self._pool.fetchrow(
             """
             SELECT agent_id, display_name, description, role, capabilities, endpoint,
-                   system_prompt, definition, created_by, created_at, updated_at, metadata
+                   system_prompt, interaction_contract, definition, created_by, created_at, updated_at, metadata
             FROM system_agents
             WHERE agent_id = $1
             """,
             agent_id,
         )
         return self._system_agent_from_row(row) if row else None
+
+    async def fetch_agent_participant(
+        self, workspace_id: UUID, system_agent_id: UUID
+    ) -> ParticipantProfile | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT participant_id, workspace_id, participant_type, display_name, description,
+                   roles, capabilities, status, visibility_scope, created_at, updated_at, metadata
+            FROM participants
+            WHERE workspace_id = $1
+              AND participant_type = 'agent'
+              AND metadata->>'system_agent_id' = $2
+            ORDER BY created_at ASC
+            LIMIT 1
+            """,
+            workspace_id,
+            str(system_agent_id),
+        )
+        return self._participant_from_row(row) if row else None
 
     async def list_participants(self, workspace_id: UUID) -> list[ParticipantProfile]:
         rows = await self._pool.fetch(
@@ -496,6 +582,91 @@ class CollaborationRepository:
             participant_id,
         )
         return self._participant_from_row(row) if row else None
+
+    async def fetch_task(self, task_id: UUID) -> Task | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT task_id, workspace_id, thread_id, title, description, status,
+                   requested_by, claimed_by, visibility, correlation_id, causation_id,
+                   created_at, updated_at, metadata
+            FROM tasks
+            WHERE task_id = $1
+            """,
+            task_id,
+        )
+        return self._task_from_row(row) if row else None
+
+    async def list_pending_tasks_for_system_agent(
+        self,
+        system_agent_id: UUID,
+        *,
+        limit: int = 10,
+    ) -> list[Task]:
+        rows = await self._pool.fetch(
+            """
+            SELECT task_id, workspace_id, thread_id, title, description, status,
+                   requested_by, claimed_by, visibility, correlation_id, causation_id,
+                   created_at, updated_at, metadata
+            FROM tasks
+            WHERE status IN ('created', 'released')
+              AND metadata->>'target_system_agent_id' = $1
+            ORDER BY created_at ASC
+            LIMIT $2
+            """,
+            str(system_agent_id),
+            limit,
+        )
+        return [self._task_from_row(row) for row in rows]
+
+    async def claim_task(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        task_id: UUID,
+        participant_id: UUID,
+        updated_at,
+    ) -> Task | None:
+        row = await conn.fetchrow(
+            """
+            UPDATE tasks
+            SET status = 'claimed',
+                claimed_by = $2,
+                updated_at = $3
+            WHERE task_id = $1
+              AND status IN ('created', 'released')
+            RETURNING task_id, workspace_id, thread_id, title, description, status,
+                      requested_by, claimed_by, visibility, correlation_id, causation_id,
+                      created_at, updated_at, metadata
+            """,
+            task_id,
+            participant_id,
+            updated_at,
+        )
+        return self._task_from_row(row) if row else None
+
+    async def fetch_run(self, run_id: UUID) -> Run | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT run_id, workspace_id, thread_id, task_id, participant_id, status,
+                   output, correlation_id, causation_id, created_at, updated_at, metadata
+            FROM runs
+            WHERE run_id = $1
+            """,
+            run_id,
+        )
+        return self._run_from_row(row) if row else None
+
+    async def fetch_message(self, message_id: UUID) -> TimelineMessage | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT message_id, workspace_id, thread_id, actor_type, actor_id, visibility,
+                   content, status, correlation_id, causation_id, sequence, created_at, updated_at, metadata
+            FROM timeline_messages
+            WHERE message_id = $1
+            """,
+            message_id,
+        )
+        return self._timeline_message_from_row(row) if row else None
 
     async def fetch_thread(self, thread_id: UUID) -> Thread | None:
         row = await self._pool.fetchrow(
@@ -593,6 +764,42 @@ class CollaborationRepository:
         return [self._event_from_row(row) for row in rows]
 
     @staticmethod
+    def _task_from_row(row: asyncpg.Record) -> Task:
+        return Task(
+            task_id=row["task_id"],
+            workspace_id=row["workspace_id"],
+            thread_id=row["thread_id"],
+            title=row["title"],
+            description=row["description"],
+            status=row["status"],
+            requested_by=row["requested_by"],
+            claimed_by=row["claimed_by"],
+            visibility=row["visibility"],
+            correlation_id=row["correlation_id"],
+            causation_id=row["causation_id"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _run_from_row(row: asyncpg.Record) -> Run:
+        return Run(
+            run_id=row["run_id"],
+            workspace_id=row["workspace_id"],
+            thread_id=row["thread_id"],
+            task_id=row["task_id"],
+            participant_id=row["participant_id"],
+            status=row["status"],
+            output=CollaborationRepository._json_value(row["output"], default={}),
+            correlation_id=row["correlation_id"],
+            causation_id=row["causation_id"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
     def _workspace_from_row(row: asyncpg.Record) -> Workspace:
         return Workspace(
             workspace_id=row["workspace_id"],
@@ -662,6 +869,12 @@ class CollaborationRepository:
                 CollaborationRepository._json_value(row["endpoint"], default={})
             ),
             system_prompt=row["system_prompt"],
+            interaction_contract=AgentInteractionContract.model_validate(
+                CollaborationRepository._json_value(
+                    row["interaction_contract"],
+                    default={},
+                )
+            ),
             definition=CollaborationRepository._json_value(row["definition"], default={}),
             created_by=row["created_by"],
             created_at=row["created_at"],

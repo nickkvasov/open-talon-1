@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 import sys
-from datetime import datetime, timezone
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from uuid import UUID, uuid4
+from typing import Any, Protocol
+from uuid import UUID
+
+import httpx
 
 _CONTRACTS_DIR = Path(__file__).resolve().parents[3] / "packages" / "contracts"
 if _CONTRACTS_DIR.is_dir():
@@ -11,106 +17,491 @@ if _CONTRACTS_DIR.is_dir():
     if contracts_path not in sys.path:
         sys.path.insert(0, contracts_path)
 
-from open_talon_contracts.models import ActorRef, EventEnvelope, Run, TargetRef, Task
+from open_talon_contracts.models import (  # noqa: E402
+    AgentDefinition,
+    AgentExecutionContext,
+    AgentInteractionContract,
+    AgentRunResult,
+    EventEnvelope,
+)
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 
 
-class AgentTaskRuntime:
-    """Helper for agents that consume Open Talon task events and emit run progress."""
+class RuntimeKernel(Protocol):
+    async def list_system_agents(self) -> list[AgentDefinition]: ...
 
-    def __init__(self, agent_id: UUID, display_name: str) -> None:
-        self.agent_id = agent_id
-        self.display_name = display_name
+    async def list_pending_tasks_for_system_agent(
+        self,
+        system_agent_id: UUID,
+        *,
+        limit: int = 10,
+    ) -> list[Any]: ...
 
-    def claim_task(self, task: Task) -> EventEnvelope:
-        now = datetime.now(timezone.utc)
-        return EventEnvelope(
-            event_type="task.claimed",
-            workspace_id=task.workspace_id,
-            thread_id=task.thread_id,
-            actor=ActorRef(type="agent", id=self.agent_id),
-            target=TargetRef(type="task", id=task.task_id),
-            visibility="agents_only",
-            correlation_id=task.correlation_id,
-            sequence=None,
-            timestamp=now,
-            payload={
-                "task_id": str(task.task_id),
-                "claimed_by": str(self.agent_id),
-                "display_name": self.display_name,
+    async def claim_task_for_system_agent(self, task_id: UUID, system_agent_id: UUID) -> Any: ...
+
+    async def append_run_progress(
+        self,
+        run_id: UUID,
+        system_agent_id: UUID,
+        content: str,
+    ) -> Any: ...
+
+    async def complete_run(
+        self,
+        run_id: UUID,
+        system_agent_id: UUID,
+        result: AgentRunResult,
+    ) -> Any: ...
+
+    async def fail_run(
+        self,
+        run_id: UUID,
+        system_agent_id: UUID,
+        error: str,
+        *,
+        stop_reason: str = "tool_failure",
+    ) -> Any: ...
+
+
+class AgentExecutor(Protocol):
+    async def execute(self, context: AgentExecutionContext) -> AgentRunResult: ...
+
+
+class LocalOllamaExecutor:
+    def __init__(self, *, timeout_seconds: float = 60.0) -> None:
+        self._timeout_seconds = timeout_seconds
+
+    async def execute(self, context: AgentExecutionContext) -> AgentRunResult:
+        endpoint = context.system_agent.endpoint
+        url = endpoint.url or DEFAULT_OLLAMA_URL
+        model = (
+            endpoint.model
+            or _definition_runtime_value(context, "model")
+            or "gemma4:latest"
+        )
+        prompt = render_prompt(context)
+        logger.debug(
+            "LocalOllamaExecutor execute agent_id=%s model=%s thread_id=%s",
+            context.system_agent.agent_id,
+            model,
+            context.thread.thread_id,
+        )
+        async with httpx.AsyncClient(
+            timeout=self._timeout_seconds,
+            trust_env=False,
+        ) as client:
+            response = await client.post(
+                url,
+                json={
+                    "model": model,
+                    "system": context.system_agent.system_prompt,
+                    "prompt": prompt,
+                    "stream": False,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+        message = _format_thread_message(
+            context,
+            _extract_text_response(payload),
+        )
+        return AgentRunResult(
+            stop_reason="completed",
+            message=message,
+            summary="Completed with local Ollama",
+            metadata={
+                "provider": "ollama",
+                "model": model,
+                "endpoint_kind": endpoint.kind,
             },
         )
 
-    def start_run(self, task: Task) -> tuple[Run, EventEnvelope]:
-        now = datetime.now(timezone.utc)
-        run = Run(
-            run_id=uuid4(),
-            workspace_id=task.workspace_id,
-            thread_id=task.thread_id,
-            task_id=task.task_id,
-            participant_id=self.agent_id,
-            status="started",
-            correlation_id=task.correlation_id,
-            causation_id=task.task_id,
-            created_at=now,
-            updated_at=now,
-            metadata={"agent_display_name": self.display_name},
-        )
-        event = EventEnvelope(
-            event_type="run.started",
-            workspace_id=task.workspace_id,
-            thread_id=task.thread_id,
-            actor=ActorRef(type="agent", id=self.agent_id),
-            target=TargetRef(type="run", id=run.run_id),
-            visibility="agents_only",
-            correlation_id=task.correlation_id,
-            causation_id=task.task_id,
-            sequence=None,
-            timestamp=now,
-            payload=run.model_dump(mode="json"),
-        )
-        return run, event
 
-    def progress_event(self, run: Run, content: str) -> EventEnvelope:
-        return EventEnvelope(
-            event_type="run.progressed",
-            workspace_id=run.workspace_id,
-            thread_id=run.thread_id,
-            actor=ActorRef(type="agent", id=self.agent_id),
-            target=TargetRef(type="run", id=run.run_id),
-            visibility="agents_only",
-            correlation_id=run.correlation_id,
-            causation_id=run.task_id,
-            sequence=None,
-            timestamp=datetime.now(timezone.utc),
-            payload={"run_id": str(run.run_id), "content": content},
+class HttpEndpointExecutor:
+    def __init__(self, *, timeout_seconds: float = 60.0, endpoint_scope: str = "remote") -> None:
+        self._timeout_seconds = timeout_seconds
+        self._endpoint_scope = endpoint_scope
+
+    async def execute(self, context: AgentExecutionContext) -> AgentRunResult:
+        endpoint = context.system_agent.endpoint
+        if not endpoint.url:
+            raise ValueError(
+                f"{self._endpoint_scope.capitalize()} agent {context.system_agent.agent_id} is missing an endpoint URL"
+            )
+        logger.debug(
+            "HttpEndpointExecutor execute scope=%s agent_id=%s url=%s thread_id=%s",
+            self._endpoint_scope,
+            context.system_agent.agent_id,
+            endpoint.url,
+            context.thread.thread_id,
+        )
+        async with httpx.AsyncClient(
+            timeout=self._timeout_seconds,
+            trust_env=False,
+        ) as client:
+            response = await client.post(
+                endpoint.url,
+                json={
+                    "agent": context.system_agent.model_dump(mode="json"),
+                    "participant": context.participant.model_dump(mode="json"),
+                    "context": context.model_dump(mode="json"),
+                    "system_prompt": context.system_agent.system_prompt,
+                    "interaction_contract": _interaction_contract(
+                        context
+                    ).model_dump(mode="json"),
+                    "prompt": render_prompt(context),
+                },
+            )
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "")
+            if "application/json" in content_type:
+                payload = response.json()
+            else:
+                payload = {"message": response.text}
+        return _coerce_run_result(payload, context=context)
+
+
+class AgentTaskRuntime:
+    def __init__(
+        self,
+        *,
+        kernel: RuntimeKernel,
+        publish_events: Callable[[list[EventEnvelope]], Awaitable[None]],
+        poll_interval_seconds: float = 1.0,
+        max_pending_tasks_per_agent: int = 4,
+        progress_events_enabled: bool = True,
+        model_timeout_seconds: float = 60.0,
+        executors: dict[str, AgentExecutor] | None = None,
+    ) -> None:
+        self._kernel = kernel
+        self._publish_events = publish_events
+        self._poll_interval_seconds = poll_interval_seconds
+        self._max_pending_tasks_per_agent = max_pending_tasks_per_agent
+        self._progress_events_enabled = progress_events_enabled
+        self._loop_task: asyncio.Task[None] | None = None
+        self._processing_tasks: dict[UUID, asyncio.Task[None]] = {}
+        self._executors = executors or {
+            "local": LocalOllamaExecutor(timeout_seconds=model_timeout_seconds),
+            "remote": HttpEndpointExecutor(
+                timeout_seconds=model_timeout_seconds,
+                endpoint_scope="remote",
+            ),
+            "system": HttpEndpointExecutor(
+                timeout_seconds=model_timeout_seconds,
+                endpoint_scope="system",
+            ),
+        }
+
+    async def start(self) -> None:
+        if self._loop_task is not None and not self._loop_task.done():
+            return
+        logger.info("Agent task runtime started")
+        self._loop_task = asyncio.create_task(self._run_loop())
+
+    async def stop(self) -> None:
+        if self._loop_task is not None:
+            self._loop_task.cancel()
+            await asyncio.gather(self._loop_task, return_exceptions=True)
+            self._loop_task = None
+        pending = list(self._processing_tasks.values())
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._processing_tasks.clear()
+        logger.info("Agent task runtime stopped")
+
+    async def _run_loop(self) -> None:
+        try:
+            while True:
+                await self._run_iteration()
+                await asyncio.sleep(self._poll_interval_seconds)
+        except asyncio.CancelledError:  # pragma: no cover - shutdown path
+            logger.debug("Agent task runtime loop cancelled")
+            raise
+
+    async def _run_iteration(self) -> None:
+        agents = await self._kernel.list_system_agents()
+        logger.debug("Agent task runtime poll agents=%s", len(agents))
+        for agent in agents:
+            pending_tasks = await self._kernel.list_pending_tasks_for_system_agent(
+                agent.agent_id,
+                limit=self._max_pending_tasks_per_agent,
+            )
+            for task in pending_tasks:
+                if task.task_id in self._processing_tasks:
+                    continue
+                logger.debug(
+                    "Agent task runtime scheduling task_id=%s system_agent_id=%s",
+                    task.task_id,
+                    agent.agent_id,
+                )
+                background = asyncio.create_task(
+                    self._process_task(agent.agent_id, task.task_id)
+                )
+                self._processing_tasks[task.task_id] = background
+                background.add_done_callback(
+                    lambda done, task_id=task.task_id: self._processing_tasks.pop(
+                        task_id,
+                        None,
+                    )
+                )
+
+    async def _process_task(self, system_agent_id: UUID, task_id: UUID) -> None:
+        logger.debug(
+            "Agent task runtime processing task_id=%s system_agent_id=%s",
+            task_id,
+            system_agent_id,
+        )
+        run_id: UUID | None = None
+        try:
+            claim = await self._kernel.claim_task_for_system_agent(task_id, system_agent_id)
+            if not claim.events:
+                return
+            await self._publish_events(claim.events)
+            if claim.run is None or claim.context is None:
+                raise RuntimeError(
+                    f"Task {task_id} did not produce a run/context during claim"
+                )
+            run_id = claim.run.run_id
+            context = claim.context
+            if self._progress_events_enabled:
+                progress = await self._kernel.append_run_progress(
+                    run_id,
+                    system_agent_id,
+                    f"Executing {context.system_agent.display_name}",
+                )
+                await self._publish_events(progress.events)
+            executor = self._executor_for(context)
+            result = await executor.execute(context)
+            result = _normalize_run_result(result, context=context)
+            completion = await self._kernel.complete_run(run_id, system_agent_id, result)
+            await self._publish_events(completion.events)
+        except asyncio.CancelledError:  # pragma: no cover - shutdown path
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Agent task runtime failed task_id=%s system_agent_id=%s: %s",
+                task_id,
+                system_agent_id,
+                exc,
+            )
+            if run_id is not None:
+                failed = await self._kernel.fail_run(
+                    run_id,
+                    system_agent_id,
+                    str(exc),
+                )
+                await self._publish_events(failed.events)
+
+    def _executor_for(self, context: AgentExecutionContext) -> AgentExecutor:
+        kind = context.system_agent.endpoint.kind
+        try:
+            return self._executors[kind]
+        except KeyError as exc:  # pragma: no cover - defensive
+            raise ValueError(f"No executor configured for endpoint kind {kind!r}") from exc
+
+
+def render_prompt(context: AgentExecutionContext) -> str:
+    contract = _interaction_contract(context)
+    participant_lines = []
+    for participant in context.participants:
+        role_text = ", ".join(participant.roles) if participant.roles else "no declared role"
+        capability_text = (
+            ", ".join(participant.capabilities)
+            if participant.capabilities
+            else "no declared capabilities"
+        )
+        participant_lines.append(
+            f"- {participant.display_name} ({participant.participant_type}) | "
+            f"roles: {role_text} | capabilities: {capability_text}"
         )
 
-    def complete_run(self, run: Run, output: dict) -> EventEnvelope:
-        return EventEnvelope(
-            event_type="run.completed",
-            workspace_id=run.workspace_id,
-            thread_id=run.thread_id,
-            actor=ActorRef(type="agent", id=self.agent_id),
-            target=TargetRef(type="run", id=run.run_id),
-            visibility="agents_only",
-            correlation_id=run.correlation_id,
-            causation_id=run.task_id,
-            sequence=None,
-            timestamp=datetime.now(timezone.utc),
-            payload={"run_id": str(run.run_id), "output": output},
+    memory_lines = []
+    for entry in context.memory_entries:
+        memory_lines.append(
+            f"- [{entry.entry_type}] {entry.title}: {entry.content}"
         )
 
-    def fail_run(self, run: Run, error: str) -> EventEnvelope:
-        return EventEnvelope(
-            event_type="run.failed",
-            workspace_id=run.workspace_id,
-            thread_id=run.thread_id,
-            actor=ActorRef(type="agent", id=self.agent_id),
-            target=TargetRef(type="run", id=run.run_id),
-            visibility="agents_only",
-            correlation_id=run.correlation_id,
-            causation_id=run.task_id,
-            sequence=None,
-            timestamp=datetime.now(timezone.utc),
-            payload={"run_id": str(run.run_id), "error": error},
+    message_lines = []
+    for message in context.messages:
+        author = _message_author_name(context, message.actor.id)
+        message_lines.append(
+            f"[{message.sequence}] {author}: {message.content}"
         )
+
+    role_lines = []
+    for role_definition in context.role_definitions:
+        role_lines.append(f"- {role_definition.name}: {role_definition.definition}")
+
+    trigger_text = context.trigger_message.content if context.trigger_message else ""
+    sections = [
+        f"Workspace: {context.workspace.name}",
+        f"Thread: {context.thread.title}",
+        f"Agent role: {context.system_agent.role}",
+        f"Agent description: {context.system_agent.description}",
+        f"Sequence ceiling: {context.sequence_ceiling}",
+        "",
+        "Workspace participants:",
+        "\n".join(participant_lines) or "- none",
+        "",
+        "Workspace role catalog:",
+        "\n".join(role_lines) or "- none",
+        "",
+        "Workspace memory:",
+        "\n".join(memory_lines) or "- none",
+        "",
+        "Visible thread messages:",
+        "\n".join(message_lines) or "- none",
+        "",
+        "Triggering message:",
+        trigger_text or "- none",
+        "",
+        "Instructions:",
+        "Respond as the attached agent participant for this workspace.",
+        "Use only the visible context above.",
+        "Return a concise, thread-ready response that matches the agent role.",
+    ]
+    if contract.instructions:
+        sections.extend(["", "Agent instructions:", *[f"- {item}" for item in contract.instructions]])
+    response_contract = contract.response_contract
+    sections.extend(
+        [
+            "",
+            "Response contract:",
+            f"- format: {response_contract.format}",
+            f"- title: {response_contract.title or 'none'}",
+            f"- required sections: {', '.join(response_contract.required_sections) or 'none'}",
+        ]
+    )
+    if response_contract.guidance:
+        sections.extend(
+            ["- guidance:"] + [f"  - {item}" for item in response_contract.guidance]
+        )
+    if contract.completion_criteria:
+        sections.extend(
+            ["", "Completion criteria:", *[f"- {item}" for item in contract.completion_criteria]]
+        )
+    return "\n".join(sections)
+
+
+def _message_author_name(context: AgentExecutionContext, actor_id: UUID) -> str:
+    for participant in context.participants:
+        if participant.participant_id == actor_id:
+            return participant.display_name
+    return str(actor_id)
+
+
+def _definition_runtime_value(context: AgentExecutionContext, key: str) -> Any:
+    runtime = context.system_agent.definition.get("runtime")
+    if isinstance(runtime, dict):
+        return runtime.get(key)
+    return None
+
+
+def _extract_text_response(payload: Any) -> str:
+    if isinstance(payload, dict):
+        if isinstance(payload.get("response"), str):
+            return payload["response"]
+        if isinstance(payload.get("message"), str):
+            return payload["message"]
+        if isinstance(payload.get("output_text"), str):
+            return payload["output_text"]
+        if isinstance(payload.get("text"), str):
+            return payload["text"]
+    if isinstance(payload, str):
+        return payload
+    return json.dumps(payload)
+
+
+def _coerce_run_result(
+    payload: Any,
+    *,
+    context: AgentExecutionContext | None = None,
+) -> AgentRunResult:
+    if isinstance(payload, AgentRunResult):
+        return payload
+    if isinstance(payload, dict):
+        if any(key in payload for key in {"stop_reason", "message", "artifacts"}):
+            result = AgentRunResult.model_validate(payload)
+            if context is not None and result.message:
+                result = result.model_copy(
+                    update={"message": _format_thread_message(context, result.message)}
+                )
+            return result
+        if isinstance(payload.get("response"), str):
+            return AgentRunResult(
+                stop_reason="completed",
+                message=_format_thread_message(context, payload["response"])
+                if context is not None
+                else payload["response"],
+                summary="Completed with remote agent endpoint",
+                metadata={"raw_payload": payload},
+            )
+        if isinstance(payload.get("message"), str):
+            return AgentRunResult(
+                stop_reason="completed",
+                message=_format_thread_message(context, payload["message"])
+                if context is not None
+                else payload["message"],
+                summary="Completed with remote agent endpoint",
+                metadata={"raw_payload": payload},
+            )
+    return AgentRunResult(
+        stop_reason="completed",
+        message=_format_thread_message(context, _extract_text_response(payload))
+        if context is not None
+        else _extract_text_response(payload),
+        summary="Completed with remote agent endpoint",
+    )
+
+
+def _normalize_run_result(
+    result: AgentRunResult,
+    *,
+    context: AgentExecutionContext,
+) -> AgentRunResult:
+    if result.message is None:
+        return result
+    return result.model_copy(update={"message": _format_thread_message(context, result.message)})
+
+
+def _format_thread_message(
+    context: AgentExecutionContext | None,
+    body: str,
+) -> str:
+    if context is None:
+        return body.strip()
+    contract = _interaction_contract(context)
+    header = f"{context.system_agent.display_name} ({context.system_agent.role})"
+    title = contract.response_contract.title
+    template = contract.thread_reply_template
+    cleaned = body.strip()
+    if template:
+        try:
+            rendered = template.format(
+                agent_name=context.system_agent.display_name,
+                agent_role=context.system_agent.role,
+                body=cleaned,
+                title=title or "",
+            ).strip()
+            return rendered
+        except KeyError:
+            logger.warning(
+                "Invalid thread_reply_template for agent_id=%s",
+                context.system_agent.agent_id,
+            )
+    if title:
+        return f"{header}\n\n{title}\n\n{cleaned}"
+    return f"{header}\n\n{cleaned}"
+
+
+def _interaction_contract(context: AgentExecutionContext) -> AgentInteractionContract:
+    return (
+        context.thread_reply_contract
+        or context.system_agent.interaction_contract
+        or AgentInteractionContract()
+    )

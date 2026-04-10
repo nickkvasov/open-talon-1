@@ -60,12 +60,16 @@ MIGRATIONS = textwrap.dedent(
         capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
         endpoint JSONB NOT NULL DEFAULT '{}'::jsonb,
         system_prompt TEXT NOT NULL,
+        interaction_contract JSONB NOT NULL DEFAULT '{}'::jsonb,
         definition JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_by UUID NOT NULL,
         created_at TIMESTAMPTZ NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL,
         metadata JSONB NOT NULL DEFAULT '{}'::jsonb
     );
+
+    ALTER TABLE system_agents
+        ADD COLUMN IF NOT EXISTS interaction_contract JSONB NOT NULL DEFAULT '{}'::jsonb;
 
     CREATE INDEX IF NOT EXISTS idx_system_agents_display_name
         ON system_agents(display_name);
@@ -179,6 +183,9 @@ MIGRATIONS = textwrap.dedent(
     CREATE INDEX IF NOT EXISTS idx_tasks_thread_created_at
         ON tasks(thread_id, created_at DESC);
 
+    CREATE INDEX IF NOT EXISTS idx_tasks_target_agent_status
+        ON tasks((metadata->>'target_system_agent_id'), status, created_at);
+
     CREATE TABLE IF NOT EXISTS runs (
         run_id UUID PRIMARY KEY,
         workspace_id UUID NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
@@ -193,6 +200,9 @@ MIGRATIONS = textwrap.dedent(
         updated_at TIMESTAMPTZ NOT NULL,
         metadata JSONB NOT NULL DEFAULT '{}'::jsonb
     );
+
+    CREATE INDEX IF NOT EXISTS idx_runs_task_created_at
+        ON runs(task_id, created_at DESC);
 
     CREATE TABLE IF NOT EXISTS artifacts (
         artifact_id UUID PRIMARY KEY,
@@ -209,5 +219,11 @@ MIGRATIONS = textwrap.dedent(
         updated_at TIMESTAMPTZ NOT NULL,
         metadata JSONB NOT NULL DEFAULT '{}'::jsonb
     );
+
+    CREATE INDEX IF NOT EXISTS idx_artifacts_thread_created_at
+        ON artifacts(thread_id, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_participants_workspace_system_agent
+        ON participants(workspace_id, (metadata->>'system_agent_id'));
     """
 )

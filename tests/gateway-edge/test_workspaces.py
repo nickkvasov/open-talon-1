@@ -242,6 +242,8 @@ async def test_create_agent_participant_advertises_capabilities_and_llm_config(c
 
     assert create_resp.status_code == 200
     assert attach_resp.status_code == 200
+    create_body = create_resp.json()
+    assert create_body["interaction_contract"]["response_contract"]["required_sections"]
     body = attach_resp.json()
     assert body["participant_type"] == "agent"
     assert body["system_agent_id"] == agent_id
@@ -332,6 +334,7 @@ async def test_update_agent_participant_changes_endpoint_prompt_and_role(client,
     assert body["endpoint"]["kind"] == "remote"
     assert body["endpoint"]["model"] == "gpt-5.4-mini"
     assert body["system_prompt"].startswith("You implement changes")
+    assert body["interaction_contract"]["response_contract"]["required_sections"]
     assert body["definition"]["runtime"] == "responses-api"
     assert attach_update_resp.status_code == 200
     assert attach_update_resp.json()["status"] == "busy"
@@ -368,6 +371,7 @@ async def test_create_system_agent_participant_uses_system_scope(client, actor_p
     body = create_resp.json()
     assert body["endpoint"]["kind"] == "system"
     assert body["endpoint"]["url"] is None
+    assert body["interaction_contract"]["response_contract"]["required_sections"]
     assert body["definition"]["routing_group"] == "ops"
 
 

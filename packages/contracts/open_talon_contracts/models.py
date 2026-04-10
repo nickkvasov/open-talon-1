@@ -14,6 +14,17 @@ MessageStatus = Literal["draft", "streaming", "completed", "failed"]
 TaskStatus = Literal["created", "claimed", "released", "completed", "failed"]
 RunStatus = Literal["started", "progressing", "completed", "failed"]
 AgentEndpointKind = Literal["local", "system", "remote"]
+StopReason = Literal[
+    "completed",
+    "needs_user_input",
+    "blocked_dependency",
+    "handoff_required",
+    "budget_exhausted",
+    "tool_failure",
+    "policy_refused",
+    "cancelled",
+    "superseded",
+]
 
 
 def utcnow() -> datetime:
@@ -52,6 +63,22 @@ class AgentConfiguration(BaseModel):
     definition: dict[str, Any] = Field(default_factory=dict)
 
 
+class AgentResponseContract(BaseModel):
+    format: Literal["markdown", "text", "json"] = "markdown"
+    title: str | None = None
+    required_sections: list[str] = Field(default_factory=list)
+    guidance: list[str] = Field(default_factory=list)
+    json_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentInteractionContract(BaseModel):
+    instructions: list[str] = Field(default_factory=list)
+    response_contract: AgentResponseContract = Field(default_factory=AgentResponseContract)
+    thread_reply_template: str | None = None
+    completion_criteria: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentDefinition(BaseModel):
     agent_id: UUID
     display_name: str
@@ -60,6 +87,9 @@ class AgentDefinition(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     endpoint: AgentEndpoint
     system_prompt: str
+    interaction_contract: AgentInteractionContract = Field(
+        default_factory=AgentInteractionContract
+    )
     definition: dict[str, Any] = Field(default_factory=dict)
     created_by: UUID
     created_at: datetime = Field(default_factory=utcnow)
@@ -174,6 +204,15 @@ class Task(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class AgentTaskRouting(BaseModel):
+    target_system_agent_id: UUID | None = None
+    target_participant_id: UUID | None = None
+    trigger_message_id: UUID | None = None
+    response_visibility: Visibility = "workspace"
+    sequence_ceiling: int | None = None
+    routing_reason: str | None = None
+
+
 class Artifact(BaseModel):
     artifact_id: UUID
     workspace_id: UUID
@@ -202,6 +241,22 @@ class Run(BaseModel):
     causation_id: UUID | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentArtifactDraft(BaseModel):
+    kind: str
+    title: str
+    content: dict[str, Any] = Field(default_factory=dict)
+    visibility: Visibility = "workspace"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentRunResult(BaseModel):
+    stop_reason: StopReason = "completed"
+    message: str | None = None
+    summary: str | None = None
+    artifacts: list[AgentArtifactDraft] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -290,6 +345,9 @@ class CreateSystemAgentRequest(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     endpoint: AgentEndpoint
     system_prompt: str
+    interaction_contract: AgentInteractionContract = Field(
+        default_factory=AgentInteractionContract
+    )
     definition: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -302,6 +360,7 @@ class UpdateSystemAgentRequest(BaseModel):
     capabilities: list[str] | None = None
     endpoint: AgentEndpoint | None = None
     system_prompt: str | None = None
+    interaction_contract: AgentInteractionContract | None = None
     definition: dict[str, Any] | None = None
     metadata: dict[str, Any] | None = None
 
@@ -356,6 +415,23 @@ class ThreadDetail(BaseModel):
 class TimelinePage(BaseModel):
     thread_id: UUID
     messages: list[TimelineMessage] = Field(default_factory=list)
+
+
+class AgentExecutionContext(BaseModel):
+    workspace: Workspace
+    thread: Thread
+    task: Task
+    run: Run
+    routing: AgentTaskRouting
+    system_agent: AgentDefinition
+    participant: ParticipantProfile
+    participants: list[ParticipantProfile] = Field(default_factory=list)
+    role_definitions: list[RoleDefinition] = Field(default_factory=list)
+    messages: list[TimelineMessage] = Field(default_factory=list)
+    memory_entries: list[MemoryEntry] = Field(default_factory=list)
+    trigger_message: TimelineMessage | None = None
+    sequence_ceiling: int = 0
+    thread_reply_contract: AgentInteractionContract | None = None
 
 
 class ApiKeyCreate(BaseModel):

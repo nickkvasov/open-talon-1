@@ -21,6 +21,7 @@ from uuid import UUID, uuid4
 import httpx
 import websockets
 import websockets.exceptions
+from open_talon_contracts.agent_contracts import build_default_interaction_contract
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -599,6 +600,12 @@ class CollaborationApp(App):
                 "model": model,
             },
         }
+        interaction_contract = build_default_interaction_contract(
+            display_name=display_name,
+            role=role,
+            description=description,
+            capabilities=capabilities,
+        ).model_dump(mode="json")
         response = await self._http_client.post(
             f"{self.gateway}/v1/agents",
             json={
@@ -613,6 +620,7 @@ class CollaborationApp(App):
                     "model": model,
                 },
                 "system_prompt": system_prompt,
+                "interaction_contract": interaction_contract,
                 "definition": definition,
             },
         )

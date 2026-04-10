@@ -27,6 +27,11 @@ for path in (_GW_DIR, _CONTRACTS_DIR, _CORE_COLLAB_DIR):
     if path not in sys.path:
         sys.path.insert(0, path)
 
+from open_talon_contracts.agent_contracts import (
+    build_default_interaction_contract,
+    interaction_contract_is_empty,
+)
+
 
 @asynccontextmanager
 async def _null_lifespan(app: FastAPI):  # type: ignore[type-arg]
@@ -135,6 +140,16 @@ class MockCollaborationService:
     async def create_system_agent(self, payload):
         from gateway_edge.models import AgentDefinition
 
+        interaction_contract = (
+            build_default_interaction_contract(
+                display_name=payload.display_name,
+                role=payload.role,
+                description=payload.description,
+                capabilities=payload.capabilities,
+            )
+            if interaction_contract_is_empty(payload.interaction_contract)
+            else payload.interaction_contract
+        )
         agent = AgentDefinition(
             agent_id=uuid4(),
             display_name=payload.display_name,
@@ -143,6 +158,7 @@ class MockCollaborationService:
             capabilities=payload.capabilities,
             endpoint=payload.endpoint,
             system_prompt=payload.system_prompt,
+            interaction_contract=interaction_contract,
             definition=payload.definition,
             created_by=payload.actor.participant_id,
             created_at=datetime.now(timezone.utc),
@@ -167,11 +183,27 @@ class MockCollaborationService:
                 "capabilities": payload.capabilities or agent.capabilities,
                 "endpoint": payload.endpoint or agent.endpoint,
                 "system_prompt": payload.system_prompt or agent.system_prompt,
+                "interaction_contract": (
+                    payload.interaction_contract
+                    if payload.interaction_contract is not None
+                    else agent.interaction_contract
+                ),
                 "definition": payload.definition if payload.definition is not None else agent.definition,
                 "updated_at": datetime.now(timezone.utc),
                 "metadata": {**agent.metadata, **payload.metadata} if payload.metadata is not None else agent.metadata,
             }
         )
+        if interaction_contract_is_empty(updated.interaction_contract):
+            updated = updated.model_copy(
+                update={
+                    "interaction_contract": build_default_interaction_contract(
+                        display_name=updated.display_name,
+                        role=updated.role,
+                        description=updated.description,
+                        capabilities=updated.capabilities,
+                    )
+                }
+            )
         self.system_agents[str(agent_id)] = updated
         return updated
 
@@ -531,12 +563,19 @@ class MockCollaborationService:
             connection_id=connection_id,
         )
 
-    async def stream_thread_events(self, thread_id: UUID, *, after_sequence: int | None = None, follow: bool = True):
+    async def stream_thread_events(
+        self,
+        thread_id: UUID,
+        *,
+        after_sequence: int | None = None,
+        follow: bool = True,
+        viewer=None,
+    ):
         if str(thread_id) not in self.threads:
             raise KeyError(f"Thread {thread_id} not found")
         sequence_floor = after_sequence or 0
         for event in self.events.get(str(thread_id), []):
-            if (event.sequence or 0) > sequence_floor:
+            if (event.sequence or 0) > sequence_floor and self._event_visible(event, viewer):
                 yield event
         if not follow:
             return
@@ -544,7 +583,9 @@ class MockCollaborationService:
         self.subscriptions.setdefault(str(thread_id), set()).add(queue)
         try:
             while True:
-                yield await queue.get()
+                event = await queue.get()
+                if self._event_visible(event, viewer):
+                    yield event
         finally:
             self.subscriptions[str(thread_id)].discard(queue)
 
@@ -554,6 +595,21 @@ class MockCollaborationService:
     async def _fan_out(self, thread_id: UUID, event) -> None:
         for queue in list(self.subscriptions.get(str(thread_id), set())):
             await queue.put(event)
+
+    @staticmethod
+    def _event_visible(event, viewer) -> bool:
+        if viewer is None:
+            return True
+        if event.visibility in {"public", "workspace"}:
+            return True
+        if event.visibility == "agents_only":
+            return viewer.participant_type == "agent"
+        if event.visibility == "private":
+            return event.actor.id == viewer.participant_id or (
+                event.target.type == "participant"
+                and event.target.id == viewer.participant_id
+            )
+        return False
 
 
 @pytest.fixture

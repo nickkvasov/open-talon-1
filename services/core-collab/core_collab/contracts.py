@@ -11,9 +11,15 @@ if _CONTRACTS_DIR.is_dir():
 
 from open_talon_contracts.models import (  # noqa: E402
     ActorRef,
+    AgentArtifactDraft,
     AgentConfiguration,
     AgentDefinition,
     AgentEndpoint,
+    AgentExecutionContext,
+    AgentInteractionContract,
+    AgentRunResult,
+    AgentResponseContract,
+    AgentTaskRouting,
     AssumeParticipantRoleRequest,
     Artifact,
     CreateAgentParticipantRequest,
@@ -31,6 +37,7 @@ from open_talon_contracts.models import (  # noqa: E402
     PresenceState,
     RoleDefinition,
     Run,
+    StopReason,
     Task,
     TargetRef,
     Thread,
@@ -44,12 +51,23 @@ from open_talon_contracts.models import (  # noqa: E402
     Workspace,
     WorkspaceDetail,
 )
+from open_talon_contracts.agent_contracts import (  # noqa: E402
+    build_default_interaction_contract,
+    interaction_contract_is_empty,
+)
 
 __all__ = [
     "ActorRef",
+    "build_default_interaction_contract",
+    "AgentArtifactDraft",
     "AgentConfiguration",
     "AgentDefinition",
     "AgentEndpoint",
+    "AgentExecutionContext",
+    "AgentInteractionContract",
+    "AgentRunResult",
+    "AgentResponseContract",
+    "AgentTaskRouting",
     "AssumeParticipantRoleRequest",
     "Artifact",
     "CreateAgentParticipantRequest",
@@ -67,6 +85,7 @@ __all__ = [
     "PresenceState",
     "RoleDefinition",
     "Run",
+    "StopReason",
     "Task",
     "TargetRef",
     "Thread",
@@ -79,4 +98,5 @@ __all__ = [
     "UpdateMemoryEntryRequest",
     "Workspace",
     "WorkspaceDetail",
+    "interaction_contract_is_empty",
 ]

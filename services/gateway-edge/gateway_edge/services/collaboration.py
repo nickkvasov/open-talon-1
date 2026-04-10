@@ -8,15 +8,25 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import UUID
 
-_CORE_COLLAB_DIR = Path(__file__).resolve().parents[3] / "services" / "core-collab"
+_ROOT_DIR = Path(__file__).resolve().parents[4]
+
+_CORE_COLLAB_DIR = _ROOT_DIR / "services" / "core-collab"
 if _CORE_COLLAB_DIR.is_dir():
     collab_path = str(_CORE_COLLAB_DIR)
     if collab_path not in sys.path:
         sys.path.insert(0, collab_path)
 
+_AGENT_RUNTIME_DIR = _ROOT_DIR / "services" / "agent-runtime"
+if _AGENT_RUNTIME_DIR.is_dir():
+    agent_runtime_path = str(_AGENT_RUNTIME_DIR)
+    if agent_runtime_path not in sys.path:
+        sys.path.insert(0, agent_runtime_path)
+
 from core_collab import CollaborationKernel, CollaborationRepository  # noqa: E402
+from agent_runtime import AgentTaskRuntime  # noqa: E402
 
 from gateway_edge.db.postgres import get_pool
+from gateway_edge.config import settings
 from gateway_edge.models import (
     AssumeParticipantRoleRequest,
     AgentDefinition,
@@ -55,6 +65,7 @@ logger = logging.getLogger(__name__)
 class CollaborationService:
     def __init__(self) -> None:
         self._kernel: CollaborationKernel | None = None
+        self._agent_runtime: AgentTaskRuntime | None = None
         self._subscriptions: dict[str, set[asyncio.Queue[EventEnvelope]]] = defaultdict(set)
 
     async def start(self) -> None:
@@ -62,9 +73,22 @@ class CollaborationService:
         repository = CollaborationRepository(pool)
         self._kernel = CollaborationKernel(repository)
         await self._kernel.setup_schema()
+        self._agent_runtime = AgentTaskRuntime(
+            kernel=self._kernel,
+            publish_events=self._publish_events,
+            poll_interval_seconds=settings.agent_loop_poll_interval_seconds,
+            max_pending_tasks_per_agent=settings.agent_loop_max_pending_per_agent,
+            progress_events_enabled=settings.agent_loop_progress_events_enabled,
+            model_timeout_seconds=settings.agent_loop_model_timeout_seconds,
+        )
+        if settings.agent_loop_enabled:
+            await self._agent_runtime.start()
         logger.info("Collaboration service started")
 
     async def stop(self) -> None:
+        if self._agent_runtime is not None:
+            await self._agent_runtime.stop()
+            self._agent_runtime = None
         self._subscriptions.clear()
         self._kernel = None
         logger.info("Collaboration service stopped")
@@ -370,19 +394,22 @@ class CollaborationService:
         *,
         after_sequence: int | None = None,
         follow: bool = True,
+        viewer: ParticipantInput | None = None,
     ) -> AsyncIterator[EventEnvelope]:
         logger.debug(
-            "Service stream_thread_events thread_id=%s after_sequence=%s follow=%s",
+            "Service stream_thread_events thread_id=%s after_sequence=%s follow=%s viewer=%s",
             thread_id,
             after_sequence,
             follow,
+            viewer.participant_id if viewer else None,
         )
         kernel = self._require_kernel()
         replay_events = await kernel.list_thread_events(
             thread_id, after_sequence=after_sequence
         )
         for event in replay_events:
-            yield event
+            if self._event_visible_to_viewer(event, viewer):
+                yield event
         if not follow:
             return
         queue: asyncio.Queue[EventEnvelope] = asyncio.Queue()
@@ -396,7 +423,8 @@ class CollaborationService:
         try:
             while True:
                 event = await queue.get()
-                yield event
+                if self._event_visible_to_viewer(event, viewer):
+                    yield event
         finally:
             self._subscriptions[key].discard(queue)
             if not self._subscriptions[key]:
@@ -447,6 +475,27 @@ class CollaborationService:
         if self._kernel is None:
             raise RuntimeError("Collaboration service is not started")
         return self._kernel
+
+    @staticmethod
+    def _event_visible_to_viewer(
+        event: EventEnvelope,
+        viewer: ParticipantInput | None,
+    ) -> bool:
+        if viewer is None:
+            return True
+        if event.visibility in {"public", "workspace"}:
+            return True
+        if event.visibility == "agents_only":
+            return viewer.participant_type == "agent"
+        if event.visibility == "private":
+            return (
+                event.actor.id == viewer.participant_id
+                or (
+                    event.target.type == "participant"
+                    and event.target.id == viewer.participant_id
+                )
+            )
+        return False
 
 
 collaboration_service = CollaborationService()

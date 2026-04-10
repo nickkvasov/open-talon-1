@@ -3,6 +3,8 @@ from .kernel import (
     CommandResult,
     MemoryCommandResult,
     MessageCommandResult,
+    RunCommandResult,
+    TaskCommandResult,
     ThreadCommandResult,
     WorkspaceCommandResult,
 )
@@ -14,6 +16,8 @@ __all__ = [
     "CommandResult",
     "MemoryCommandResult",
     "MessageCommandResult",
+    "RunCommandResult",
+    "TaskCommandResult",
     "ThreadCommandResult",
     "WorkspaceCommandResult",
 ]

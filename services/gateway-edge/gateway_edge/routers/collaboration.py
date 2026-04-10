@@ -557,6 +557,7 @@ async def stream_thread_events_ws(
             thread_id,
             after_sequence=after_sequence,
             follow=True,
+            viewer=participant,
         ):
             logger.debug(
                 "WS send event thread_id=%s participant_id=%s event_type=%s sequence=%s",
