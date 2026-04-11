@@ -280,11 +280,11 @@ pytest -q
 pytest tests/gateway-edge -q
 
 # Infrastructure integration tests
-pytest -m integration test/infrastructure/test_infrastructure.py -v -s
+pytest -m integration tests/infrastructure/test_infrastructure.py -v -s
 
 # Full test coverage: default suite plus integration suite
 pytest -q
-pytest -m integration test/infrastructure/test_infrastructure.py -v -s
+pytest -m integration tests/infrastructure/test_infrastructure.py -v -s
 ```
 
 ## AI Model Initialization Note

@@ -75,7 +75,7 @@ pytest -q
 pytest tests/gateway-edge -q
 pytest tests/core-collab -q
 pytest tests/tui -q
-pytest -m integration test/infrastructure/test_infrastructure.py -v -s
+pytest -m integration tests/infrastructure/test_infrastructure.py -v -s
 ```
 
 If a change touches schema, repository, participant hydration, routing, or migrations:

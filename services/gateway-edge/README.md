@@ -45,7 +45,7 @@ source .venv/bin/activate
 pytest tests/gateway-edge -q
 
 # infrastructure integration
-pytest -m integration test/infrastructure/test_infrastructure.py -v -s
+pytest -m integration tests/infrastructure/test_infrastructure.py -v -s
 ```
 
 ## Key Files
