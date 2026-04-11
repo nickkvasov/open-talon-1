@@ -539,6 +539,19 @@ def render_prompt(context: AgentExecutionContext) -> str:
             f"- {tool.name} | enabled: {'yes' if tool.enabled else 'no'} | {tool.description}"
         )
 
+    tool_result_lines = []
+    for tool_result in context.tool_results:
+        if tool_result.result is None:
+            continue
+        status_text = tool_result.status
+        summary = tool_result.result.error or json.dumps(
+            tool_result.result.output_payload,
+            sort_keys=True,
+        )
+        tool_result_lines.append(
+            f"- {tool_result.tool_name} | status: {status_text} | result: {summary}"
+        )
+
     trigger_text = context.trigger_message.content if context.trigger_message else ""
     sections = [
         f"Workspace: {context.workspace.name}",
@@ -555,6 +568,9 @@ def render_prompt(context: AgentExecutionContext) -> str:
         "",
         "Workspace tools:",
         "\n".join(tool_lines) or "- none",
+        "",
+        "Completed tool results:",
+        "\n".join(tool_result_lines) or "- none",
         "",
         "Workspace memory:",
         "\n".join(memory_lines) or "- none",
@@ -630,7 +646,7 @@ def _coerce_run_result(
     if isinstance(payload, AgentRunResult):
         return payload
     if isinstance(payload, dict):
-        if any(key in payload for key in {"stop_reason", "message", "artifacts"}):
+        if any(key in payload for key in {"stop_reason", "message", "artifacts", "tool_calls"}):
             result = AgentRunResult.model_validate(payload)
             if context is not None and result.message:
                 result = result.model_copy(

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 Visibility = Literal["public", "workspace", "agents_only", "private"]
 ParticipantType = Literal["user", "agent"]
@@ -13,7 +13,17 @@ ThreadState = Literal["active", "paused", "resolved", "archived"]
 MessageStatus = Literal["draft", "streaming", "completed", "failed"]
 TaskStatus = Literal["created", "claimed", "released", "completed", "failed"]
 RunStatus = Literal["started", "progressing", "completed", "failed"]
+RunStepStatus = Literal["created", "claimed", "waiting_tools", "completed", "failed"]
+RunStepKind = Literal["model"]
+ToolCallStatus = Literal["created", "claimed", "completed", "failed"]
 AgentEndpointKind = Literal["local", "system", "remote"]
+ExecutionBackendKind = Literal["docker", "local_process"]
+ToolTrustLevel = Literal["sandboxed", "trusted"]
+ExecutionWorkspaceRefMode = Literal["local_path"]
+NetworkPolicy = Literal["none", "full"]
+WorkspaceAccessMode = Literal["none", "read_only", "read_write"]
+ExecutionInvocationKind = Literal["tool_call"]
+ExecutionStatus = Literal["queued", "running", "completed", "failed", "cancelled", "timed_out"]
 StopReason = Literal[
     "completed",
     "needs_user_input",
@@ -37,7 +47,18 @@ class ActorRef(BaseModel):
 
 
 class TargetRef(BaseModel):
-    type: Literal["workspace", "thread", "message", "task", "artifact", "memory_entry", "run", "participant"]
+    type: Literal[
+        "workspace",
+        "thread",
+        "message",
+        "task",
+        "artifact",
+        "memory_entry",
+        "run",
+        "participant",
+        "run_step",
+        "tool_call",
+    ]
     id: UUID
 
 
@@ -158,12 +179,57 @@ class ToolParameterContract(BaseModel):
     additional_properties: bool = False
 
 
+class ArtifactRef(BaseModel):
+    name: str
+    uri: str
+    content_type: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EnvRef(BaseModel):
+    name: str
+    value: str | None = None
+    source: str | None = None
+    required: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExecutionWorkspaceRef(BaseModel):
+    mode: ExecutionWorkspaceRefMode = "local_path"
+    workspace_id: UUID | None = None
+    uri: str | None = None
+    path: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResultSink(BaseModel):
+    uri: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExecutionLimits(BaseModel):
+    timeout_seconds: int = 60
+    cpu_millis: int | None = None
+    memory_mb: int | None = None
+    pids_limit: int | None = None
+    network: NetworkPolicy = "none"
+    workspace_access: WorkspaceAccessMode = "none"
+
+
+class ToolExecutionBinding(BaseModel):
+    backend_kind: ExecutionBackendKind = "docker"
+    handler_ref: str = ""
+    execution_profile: dict[str, Any] = Field(default_factory=dict)
+    trust_level: ToolTrustLevel = "sandboxed"
+
+
 class SystemToolDefinition(BaseModel):
     tool_id: UUID
     name: str
     description: str
     parameter_contract: ToolParameterContract = Field(default_factory=ToolParameterContract)
     input_schema: dict[str, Any] = Field(default_factory=dict)
+    execution: ToolExecutionBinding = Field(default_factory=ToolExecutionBinding)
     created_by: UUID
     created_at: datetime = Field(default_factory=utcnow)
     updated_by: UUID
@@ -177,6 +243,7 @@ class WorkspaceTool(BaseModel):
     description: str
     parameter_contract: ToolParameterContract = Field(default_factory=ToolParameterContract)
     input_schema: dict[str, Any] = Field(default_factory=dict)
+    execution: ToolExecutionBinding = Field(default_factory=ToolExecutionBinding)
     enabled: bool = True
     attached_by: UUID
     attached_at: datetime = Field(default_factory=utcnow)
@@ -285,6 +352,123 @@ class Run(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class RunStep(BaseModel):
+    step_id: UUID
+    run_id: UUID
+    task_id: UUID
+    workspace_id: UUID
+    thread_id: UUID
+    system_agent_id: UUID
+    step_index: int = 0
+    kind: RunStepKind = "model"
+    status: RunStepStatus = "created"
+    input: dict[str, Any] = Field(default_factory=dict)
+    output: dict[str, Any] = Field(default_factory=dict)
+    claimed_by_worker: str | None = None
+    lease_expires_at: datetime | None = None
+    last_heartbeat_at: datetime | None = None
+    attempt_count: int = 0
+    error: str | None = None
+    execution_handle: str | None = None
+    submitted_at: datetime = Field(default_factory=utcnow)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolCallResult(BaseModel):
+    output_payload: dict[str, Any] = Field(default_factory=dict)
+    stdout_ref: ArtifactRef | None = None
+    stderr_ref: ArtifactRef | None = None
+    artifacts: list[ArtifactRef] = Field(default_factory=list)
+    exit_code: int | None = None
+    error: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolCall(BaseModel):
+    tool_call_id: UUID
+    run_id: UUID
+    run_step_id: UUID
+    task_id: UUID
+    workspace_id: UUID
+    thread_id: UUID
+    system_agent_id: UUID
+    tool_id: UUID
+    tool_name: str
+    status: ToolCallStatus = "created"
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    execution_spec: dict[str, Any] = Field(default_factory=dict)
+    claimed_by_worker: str | None = None
+    lease_expires_at: datetime | None = None
+    last_heartbeat_at: datetime | None = None
+    attempt_count: int = 0
+    error: str | None = None
+    execution_handle: str | None = None
+    result: ToolCallResult | None = None
+    submitted_at: datetime = Field(default_factory=utcnow)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExecutionSpec(BaseModel):
+    invocation_id: UUID
+    kind: ExecutionInvocationKind = "tool_call"
+    handler_ref: str
+    inline_payload: dict[str, Any] = Field(default_factory=dict)
+    artifact_refs: list[ArtifactRef] = Field(default_factory=list)
+    execution_workspace: ExecutionWorkspaceRef | None = Field(
+        default=None,
+        validation_alias=AliasChoices("execution_workspace", "workspace_ref"),
+        serialization_alias="execution_workspace",
+    )
+    limits: ExecutionLimits = Field(default_factory=ExecutionLimits)
+    env_refs: list[EnvRef] = Field(default_factory=list)
+    result_sink: ResultSink | None = None
+    profile: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExecutionHandle(BaseModel):
+    backend_kind: ExecutionBackendKind
+    invocation_id: UUID
+    handle: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExecutionResult(BaseModel):
+    status: ExecutionStatus = "completed"
+    output_payload: dict[str, Any] = Field(default_factory=dict)
+    stdout_ref: ArtifactRef | None = None
+    stderr_ref: ArtifactRef | None = None
+    artifacts: list[ArtifactRef] = Field(default_factory=list)
+    exit_code: int | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentToolCallDraft(BaseModel):
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    summary: str | None = None
+    artifact_refs: list[ArtifactRef] = Field(default_factory=list)
+    execution_workspace: ExecutionWorkspaceRef | None = Field(
+        default=None,
+        validation_alias=AliasChoices("execution_workspace", "workspace_ref"),
+        serialization_alias="execution_workspace",
+    )
+    env_refs: list[EnvRef] = Field(default_factory=list)
+    result_sink: ResultSink | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentArtifactDraft(BaseModel):
     kind: str
     title: str
@@ -297,6 +481,7 @@ class AgentRunResult(BaseModel):
     stop_reason: StopReason = "completed"
     message: str | None = None
     summary: str | None = None
+    tool_calls: list[AgentToolCallDraft] = Field(default_factory=list)
     artifacts: list[AgentArtifactDraft] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -376,6 +561,7 @@ class CreateSystemToolRequest(BaseModel):
     description: str
     parameter_contract: ToolParameterContract = Field(default_factory=ToolParameterContract)
     input_schema: dict[str, Any] = Field(default_factory=dict)
+    execution: ToolExecutionBinding = Field(default_factory=ToolExecutionBinding)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -385,6 +571,7 @@ class UpdateSystemToolRequest(BaseModel):
     description: str | None = None
     parameter_contract: ToolParameterContract | None = None
     input_schema: dict[str, Any] | None = None
+    execution: ToolExecutionBinding | None = None
     metadata: dict[str, Any] | None = None
 
 
@@ -503,6 +690,7 @@ class AgentExecutionContext(BaseModel):
     thread: Thread
     task: Task
     run: Run
+    run_step: RunStep | None = None
     routing: AgentTaskRouting
     system_agent: AgentDefinition
     participant: ParticipantProfile
@@ -514,6 +702,7 @@ class AgentExecutionContext(BaseModel):
     trigger_message: TimelineMessage | None = None
     sequence_ceiling: int = 0
     thread_reply_contract: AgentInteractionContract | None = None
+    tool_results: list[ToolCall] = Field(default_factory=list)
 
 
 class ApiKeyCreate(BaseModel):

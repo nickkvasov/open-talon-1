@@ -10,7 +10,7 @@ Main components:
 
 - `services/gateway-edge`: FastAPI gateway for REST, SSE, WebSocket, auth, admin, and collaboration APIs
 - `services/core-collab`: canonical collaboration domain logic and Postgres repository layer
-- `services/agent-runtime`: background runtime for agent task execution
+- `services/agent-runtime`: stateless workers for agent-loop execution, tool execution, and lease reconciliation
 - `packages/contracts`: shared Pydantic contracts used across services
 - `apps/tui`: terminal UI client for workspace/thread collaboration
 - `infrastructure`: local Docker-based backing services
@@ -20,19 +20,23 @@ Primary local flow:
 
 1. A client talks to `gateway-edge`.
 2. The gateway reads/writes Postgres and Valkey.
-3. Collaboration and agent-runtime services manage shared state and task execution.
-4. Events are streamed back over HTTP/SSE/WebSocket.
+3. `core-collab` persists collaboration state and durable execution state such as `tasks`, `runs`, `run_steps`, and `tool_calls`.
+4. Stateless `agent-runtime` workers claim work, execute model/tool steps, and publish events through Kafka.
+5. Events are streamed back over HTTP/SSE/WebSocket.
 
 ## Important Architecture Rules
 
 - Treat `db/migrations` as the schema source of truth.
 - Do not reintroduce monolithic in-code DDL strings.
+- Postgres is the source of truth for execution state; Kafka is the wake-up and fanout bus.
+- Do not move agent loop execution back into `gateway-edge`.
 - `participants` is a workspace-scoped attachment/state table.
 - Human identity lives in `users`.
 - Agent identity/configuration lives in `system_agents`.
 - `participants.user_id` and `participants.system_agent_id` are the normalized references.
 - Do not duplicate agent profile/config data back into `participants`.
 - Keep workspace-local state on `participants`: status, visibility scope, roles, capabilities, timestamps, and metadata.
+- Keep execution-side workspace materialization separate from collaboration `Workspace` models. Use `ExecutionWorkspaceRef` for executor payloads.
 
 ## Database Rules
 
@@ -85,10 +89,12 @@ If a change touches schema, repository, participant hydration, routing, or migra
 - Preserve the normalized participant model.
 - Avoid hidden schema changes in app startup code.
 - Keep gateway routers thin; prefer logic in services/kernel/repository layers.
+- Keep execution orchestration in Open Talon code and isolate only the backend executor behind the execution interface.
 - Prefer explicit SQL and repository methods for database changes.
 - Keep migration/backfill logic separate from steady-state read/write logic when possible.
 - Do not remove compatibility paths from live data unless the corresponding migration is included.
 - When cleaning legacy columns or data, update both code and migration flow together.
+- When changing worker behavior, cover both durable state transitions and emitted Kafka/thread events in tests.
 
 ## TUI Rules
 
@@ -103,9 +109,10 @@ If a change touches schema, repository, participant hydration, routing, or migra
 1. Read the relevant service, repository, and contract files first.
 2. Check whether the change requires a migration.
 3. If schema changes are involved, add a new file in `db/migrations`.
-4. Update code to match the migrated schema.
-5. Run targeted tests.
-6. Run broader tests if the change affects shared contracts or persistence.
+4. If execution behavior changes, inspect `services/agent-runtime`, `services/core-collab`, and gateway event fanout together.
+5. Update code to match the migrated schema.
+6. Run targeted tests.
+7. Run broader tests if the change affects shared contracts or persistence.
 
 ## Key Files
 
@@ -114,7 +121,10 @@ If a change touches schema, repository, participant hydration, routing, or migra
 - `services/core-collab/core_collab/migrations.py`
 - `services/core-collab/core_collab/repository.py`
 - `services/core-collab/core_collab/kernel.py`
+- `services/agent-runtime/agent_runtime/workers.py`
+- `services/agent-runtime/agent_runtime/execution/`
 - `services/gateway-edge/gateway_edge/services/collaboration.py`
+- `services/gateway-edge/gateway_edge/services/events.py`
 - `services/gateway-edge/gateway_edge/db/postgres.py`
 - `apps/tui/open_talon_tui/main.py`
 

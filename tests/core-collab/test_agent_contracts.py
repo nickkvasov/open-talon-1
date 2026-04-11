@@ -25,9 +25,15 @@ from open_talon_contracts.models import (  # noqa: E402
     ActorRef,
     AgentDefinition,
     AgentEndpoint,
+    ArtifactRef,
+    EventEnvelope,
+    ExecutionSpec,
     MemoryEntry,
     ParticipantProfile,
     Run,
+    RunStep,
+    ToolCall,
+    ToolCallResult,
     SystemToolDefinition,
     CreateSystemAgentRequest,
     ParticipantInput,
@@ -81,6 +87,7 @@ class FakeRepository:
         self._messages = {}
         self._system_tools = {}
         self._workspace_tools = {}
+        self._tool_calls = {}
 
     async def setup_schema(self) -> None:
         self.setup_schema_calls += 1
@@ -154,6 +161,13 @@ class FakeRepository:
                 if message.message_id == message_id:
                     return message
         return None
+
+    async def list_completed_tool_calls_for_run(self, run_id):
+        return [
+            tool_call
+            for tool_call in self._tool_calls.get(run_id, [])
+            if tool_call.status in {"completed", "failed"}
+        ]
 
 
 def _actor() -> ParticipantInput:
@@ -416,6 +430,36 @@ async def test_build_agent_execution_context_filters_messages_and_memory_by_view
         created_at=now,
         updated_at=now,
     )
+    repository._tool_calls[run_id] = [
+        ToolCall(
+            tool_call_id=uuid4(),
+            run_id=run_id,
+            run_step_id=uuid4(),
+            task_id=task_id,
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+            system_agent_id=system_agent_id,
+            tool_id=tool_id,
+            tool_name="repo_search",
+            status="completed",
+            arguments={"query": "migrations"},
+            execution_spec=ExecutionSpec(
+                invocation_id=uuid4(),
+                handler_ref="repo_search",
+                inline_payload={"query": "migrations"},
+            ).model_dump(mode="json"),
+            result=ToolCallResult(
+                output_payload={"matches": ["db/migrations/20260411000100_initial_schema.sql"]},
+                stdout_ref=ArtifactRef(
+                    name="stdout",
+                    uri="/tmp/stdout.txt",
+                    content_type="text/plain",
+                ),
+            ),
+            created_at=now,
+            updated_at=now,
+        )
+    ]
     repository._memory_entries[workspace_id] = [
         MemoryEntry(
             memory_entry_id=uuid4(),
@@ -538,6 +582,8 @@ async def test_build_agent_execution_context_filters_messages_and_memory_by_view
     assert context.workspace_tools[0].parameter_contract.parameters[0].name == "query"
     assert "tool:repo_search" in context.participant.capabilities
     assert "tool:repo_search" in context.participants[0].capabilities
+    assert context.tool_results[0].result is not None
+    assert context.tool_results[0].result.output_payload["matches"][0].endswith("initial_schema.sql")
 
 
 @pytest.mark.asyncio
@@ -650,3 +696,89 @@ async def test_build_agent_execution_context_does_not_advertise_disabled_workspa
 
     assert context.workspace_tools[0].enabled is False
     assert "tool:repo_search" not in context.participant.capabilities
+
+
+@pytest.mark.asyncio
+async def test_build_requeued_execution_events_emits_run_step_and_tool_call_wakeups():
+    actor_id = uuid4()
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    system_agent_id = uuid4()
+    participant_id = uuid4()
+    task_id = uuid4()
+    run_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    repository = FakeRepository()
+    repository._tasks[task_id] = Task(
+        task_id=task_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        title="Run worker",
+        requested_by=actor_id,
+        correlation_id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        metadata={"target_system_agent_id": str(system_agent_id)},
+    )
+    repository._runs[run_id] = Run(
+        run_id=run_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        task_id=task_id,
+        participant_id=participant_id,
+        status="started",
+        correlation_id=repository._tasks[task_id].correlation_id,
+        causation_id=task_id,
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, participant_id)] = ParticipantProfile(
+        participant_id=participant_id,
+        workspace_id=workspace_id,
+        participant_type="agent",
+        system_agent_id=system_agent_id,
+        display_name="Testing Agent",
+        roles=["testing agent"],
+        capabilities=["tests"],
+        created_at=now,
+        updated_at=now,
+    )
+    kernel = CollaborationKernel(repository)
+    run_step = RunStep(
+        step_id=uuid4(),
+        run_id=run_id,
+        task_id=task_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        system_agent_id=system_agent_id,
+        step_index=1,
+        status="created",
+        created_at=now,
+        updated_at=now,
+    )
+    tool_call = ToolCall(
+        tool_call_id=uuid4(),
+        run_id=run_id,
+        run_step_id=run_step.step_id,
+        task_id=task_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        system_agent_id=system_agent_id,
+        tool_id=uuid4(),
+        tool_name="repo_search",
+        status="created",
+        created_at=now,
+        updated_at=now,
+    )
+
+    events = await kernel.build_requeued_execution_events([run_step], [tool_call])
+
+    assert [event.event_type for event in events] == [
+        "run_step.requeued",
+        "tool_call.requeued",
+    ]
+    assert all(event.visibility == "agents_only" for event in events)
+    assert all(event.correlation_id == repository._runs[run_id].correlation_id for event in events)
+    assert events[0].target.type == "run_step"
+    assert events[1].target.type == "tool_call"

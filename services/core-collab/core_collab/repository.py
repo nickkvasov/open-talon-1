@@ -19,8 +19,12 @@ from .contracts import (
     MemoryEntry,
     ParticipantProfile,
     Run,
+    RunStep,
     SystemToolDefinition,
     Task,
+    ToolCall,
+    ToolCallResult,
+    ToolExecutionBinding,
     ToolParameterContract,
     Thread,
     TimelineMessage,
@@ -215,15 +219,20 @@ class CollaborationRepository:
         await conn.execute(
             """
             INSERT INTO system_tools (
-                tool_id, name, description, parameter_contract, input_schema, created_by, created_at,
-                updated_by, updated_at, metadata
+                tool_id, name, description, parameter_contract, input_schema,
+                backend_kind, handler_ref, execution_profile, trust_level,
+                created_by, created_at, updated_by, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             ON CONFLICT (tool_id) DO UPDATE
                 SET name = EXCLUDED.name,
                     description = EXCLUDED.description,
                     parameter_contract = EXCLUDED.parameter_contract,
                     input_schema = EXCLUDED.input_schema,
+                    backend_kind = EXCLUDED.backend_kind,
+                    handler_ref = EXCLUDED.handler_ref,
+                    execution_profile = EXCLUDED.execution_profile,
+                    trust_level = EXCLUDED.trust_level,
                     updated_by = EXCLUDED.updated_by,
                     updated_at = EXCLUDED.updated_at,
                     metadata = EXCLUDED.metadata
@@ -233,6 +242,10 @@ class CollaborationRepository:
             tool.description,
             self._json_dumps(tool.parameter_contract.model_dump(mode="json")),
             self._json_dumps(tool.input_schema),
+            tool.execution.backend_kind,
+            tool.execution.handler_ref,
+            self._json_dumps(tool.execution.execution_profile),
+            tool.execution.trust_level,
             tool.created_by,
             tool.created_at,
             tool.updated_by,
@@ -601,6 +614,127 @@ class CollaborationRepository:
             self._json_dumps(run.metadata),
         )
 
+    async def upsert_run_step(self, conn: asyncpg.Connection, step: RunStep) -> None:
+        await conn.execute(
+            """
+            INSERT INTO run_steps (
+                step_id, run_id, task_id, workspace_id, thread_id, system_agent_id,
+                step_index, kind, status, input, output, claimed_by_worker,
+                lease_expires_at, last_heartbeat_at, attempt_count, error,
+                execution_handle, submitted_at, started_at, finished_at,
+                created_at, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11, $12,
+                $13, $14, $15, $16,
+                $17, $18, $19, $20,
+                $21, $22, $23
+            )
+            ON CONFLICT (step_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    input = EXCLUDED.input,
+                    output = EXCLUDED.output,
+                    claimed_by_worker = EXCLUDED.claimed_by_worker,
+                    lease_expires_at = EXCLUDED.lease_expires_at,
+                    last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+                    attempt_count = EXCLUDED.attempt_count,
+                    error = EXCLUDED.error,
+                    execution_handle = EXCLUDED.execution_handle,
+                    submitted_at = EXCLUDED.submitted_at,
+                    started_at = EXCLUDED.started_at,
+                    finished_at = EXCLUDED.finished_at,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            step.step_id,
+            step.run_id,
+            step.task_id,
+            step.workspace_id,
+            step.thread_id,
+            step.system_agent_id,
+            step.step_index,
+            step.kind,
+            step.status,
+            self._json_dumps(step.input),
+            self._json_dumps(step.output),
+            step.claimed_by_worker,
+            step.lease_expires_at,
+            step.last_heartbeat_at,
+            step.attempt_count,
+            step.error,
+            step.execution_handle,
+            step.submitted_at,
+            step.started_at,
+            step.finished_at,
+            step.created_at,
+            step.updated_at,
+            self._json_dumps(step.metadata),
+        )
+
+    async def upsert_tool_call(self, conn: asyncpg.Connection, tool_call: ToolCall) -> None:
+        await conn.execute(
+            """
+            INSERT INTO tool_calls (
+                tool_call_id, run_id, run_step_id, task_id, workspace_id, thread_id,
+                system_agent_id, tool_id, tool_name, status, arguments, execution_spec,
+                claimed_by_worker, lease_expires_at, last_heartbeat_at, attempt_count,
+                error, execution_handle, result, submitted_at, started_at, finished_at,
+                created_at, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11, $12,
+                $13, $14, $15, $16,
+                $17, $18, $19, $20, $21, $22,
+                $23, $24, $25
+            )
+            ON CONFLICT (tool_call_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    arguments = EXCLUDED.arguments,
+                    execution_spec = EXCLUDED.execution_spec,
+                    claimed_by_worker = EXCLUDED.claimed_by_worker,
+                    lease_expires_at = EXCLUDED.lease_expires_at,
+                    last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+                    attempt_count = EXCLUDED.attempt_count,
+                    error = EXCLUDED.error,
+                    execution_handle = EXCLUDED.execution_handle,
+                    result = EXCLUDED.result,
+                    submitted_at = EXCLUDED.submitted_at,
+                    started_at = EXCLUDED.started_at,
+                    finished_at = EXCLUDED.finished_at,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            tool_call.tool_call_id,
+            tool_call.run_id,
+            tool_call.run_step_id,
+            tool_call.task_id,
+            tool_call.workspace_id,
+            tool_call.thread_id,
+            tool_call.system_agent_id,
+            tool_call.tool_id,
+            tool_call.tool_name,
+            tool_call.status,
+            self._json_dumps(tool_call.arguments),
+            self._json_dumps(tool_call.execution_spec),
+            tool_call.claimed_by_worker,
+            tool_call.lease_expires_at,
+            tool_call.last_heartbeat_at,
+            tool_call.attempt_count,
+            tool_call.error,
+            tool_call.execution_handle,
+            self._json_dumps(
+                tool_call.result.model_dump(mode="json") if tool_call.result is not None else None
+            ),
+            tool_call.submitted_at,
+            tool_call.started_at,
+            tool_call.finished_at,
+            tool_call.created_at,
+            tool_call.updated_at,
+            self._json_dumps(tool_call.metadata),
+        )
+
     async def upsert_artifact(
         self, conn: asyncpg.Connection, artifact: Artifact
     ) -> None:
@@ -669,8 +803,9 @@ class CollaborationRepository:
     async def list_system_tools(self) -> list[SystemToolDefinition]:
         rows = await self._pool.fetch(
             """
-            SELECT tool_id, name, description, parameter_contract, input_schema, created_by, created_at,
-                   updated_by, updated_at, metadata
+            SELECT tool_id, name, description, parameter_contract, input_schema,
+                   backend_kind, handler_ref, execution_profile, trust_level,
+                   created_by, created_at, updated_by, updated_at, metadata
             FROM system_tools
             ORDER BY created_at ASC
             """
@@ -692,8 +827,9 @@ class CollaborationRepository:
     async def fetch_system_tool(self, tool_id: UUID) -> SystemToolDefinition | None:
         row = await self._pool.fetchrow(
             """
-            SELECT tool_id, name, description, parameter_contract, input_schema, created_by, created_at,
-                   updated_by, updated_at, metadata
+            SELECT tool_id, name, description, parameter_contract, input_schema,
+                   backend_kind, handler_ref, execution_profile, trust_level,
+                   created_by, created_at, updated_by, updated_at, metadata
             FROM system_tools
             WHERE tool_id = $1
             """,
@@ -705,6 +841,7 @@ class CollaborationRepository:
         rows = await self._pool.fetch(
             """
             SELECT wt.workspace_id, wt.tool_id, st.name, st.description, st.parameter_contract, st.input_schema,
+                   st.backend_kind, st.handler_ref, st.execution_profile, st.trust_level,
                    wt.enabled, wt.attached_by, wt.attached_at, wt.updated_at, wt.metadata
             FROM workspace_tools wt
             JOIN system_tools st ON wt.tool_id = st.tool_id
@@ -723,6 +860,7 @@ class CollaborationRepository:
         row = await self._pool.fetchrow(
             """
             SELECT wt.workspace_id, wt.tool_id, st.name, st.description, st.parameter_contract, st.input_schema,
+                   st.backend_kind, st.handler_ref, st.execution_profile, st.trust_level,
                    wt.enabled, wt.attached_by, wt.attached_at, wt.updated_at, wt.metadata
             FROM workspace_tools wt
             JOIN system_tools st ON wt.tool_id = st.tool_id
@@ -731,6 +869,26 @@ class CollaborationRepository:
             """,
             workspace_id,
             tool_id,
+        )
+        return self._workspace_tool_from_row(row) if row else None
+
+    async def fetch_workspace_tool_by_name(
+        self,
+        workspace_id: UUID,
+        tool_name: str,
+    ) -> WorkspaceTool | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT wt.workspace_id, wt.tool_id, st.name, st.description, st.parameter_contract, st.input_schema,
+                   st.backend_kind, st.handler_ref, st.execution_profile, st.trust_level,
+                   wt.enabled, wt.attached_by, wt.attached_at, wt.updated_at, wt.metadata
+            FROM workspace_tools wt
+            JOIN system_tools st ON wt.tool_id = st.tool_id
+            WHERE wt.workspace_id = $1
+              AND st.name = $2
+            """,
+            workspace_id,
+            tool_name,
         )
         return self._workspace_tool_from_row(row) if row else None
 
@@ -888,6 +1046,291 @@ class CollaborationRepository:
         )
         return self._run_from_row(row) if row else None
 
+    async def fetch_run_step(self, step_id: UUID) -> RunStep | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT step_id, run_id, task_id, workspace_id, thread_id, system_agent_id,
+                   step_index, kind, status, input, output, claimed_by_worker,
+                   lease_expires_at, last_heartbeat_at, attempt_count, error,
+                   execution_handle, submitted_at, started_at, finished_at,
+                   created_at, updated_at, metadata
+            FROM run_steps
+            WHERE step_id = $1
+            """,
+            step_id,
+        )
+        return self._run_step_from_row(row) if row else None
+
+    async def list_run_steps(self, run_id: UUID) -> list[RunStep]:
+        rows = await self._pool.fetch(
+            """
+            SELECT step_id, run_id, task_id, workspace_id, thread_id, system_agent_id,
+                   step_index, kind, status, input, output, claimed_by_worker,
+                   lease_expires_at, last_heartbeat_at, attempt_count, error,
+                   execution_handle, submitted_at, started_at, finished_at,
+                   created_at, updated_at, metadata
+            FROM run_steps
+            WHERE run_id = $1
+            ORDER BY step_index ASC, created_at ASC
+            """,
+            run_id,
+        )
+        return [self._run_step_from_row(row) for row in rows]
+
+    async def claim_next_run_step(
+        self,
+        *,
+        worker_id: str,
+        lease_expires_at,
+        now,
+    ) -> RunStep | None:
+        row = await self._pool.fetchrow(
+            """
+            WITH candidate AS (
+                SELECT step_id
+                FROM run_steps
+                WHERE status = 'created'
+                  AND (
+                    SELECT COUNT(*)
+                    FROM run_steps active
+                    WHERE active.run_id = run_steps.run_id
+                      AND active.status = 'claimed'
+                  ) = 0
+                ORDER BY submitted_at ASC, created_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE run_steps rs
+            SET status = 'claimed',
+                claimed_by_worker = $1,
+                lease_expires_at = $2,
+                last_heartbeat_at = $3,
+                started_at = COALESCE(rs.started_at, $3),
+                updated_at = $3,
+                attempt_count = rs.attempt_count + 1
+            FROM candidate
+            WHERE rs.step_id = candidate.step_id
+            RETURNING rs.step_id, rs.run_id, rs.task_id, rs.workspace_id, rs.thread_id, rs.system_agent_id,
+                      rs.step_index, rs.kind, rs.status, rs.input, rs.output, rs.claimed_by_worker,
+                      rs.lease_expires_at, rs.last_heartbeat_at, rs.attempt_count, rs.error,
+                      rs.execution_handle, rs.submitted_at, rs.started_at, rs.finished_at,
+                      rs.created_at, rs.updated_at, rs.metadata
+            """,
+            worker_id,
+            lease_expires_at,
+            now,
+        )
+        return self._run_step_from_row(row) if row else None
+
+    async def heartbeat_run_step(
+        self,
+        *,
+        step_id: UUID,
+        worker_id: str,
+        lease_expires_at,
+        now,
+    ) -> RunStep | None:
+        row = await self._pool.fetchrow(
+            """
+            UPDATE run_steps
+            SET lease_expires_at = $3,
+                last_heartbeat_at = $4,
+                updated_at = $4
+            WHERE step_id = $1
+              AND claimed_by_worker = $2
+              AND status = 'claimed'
+            RETURNING step_id, run_id, task_id, workspace_id, thread_id, system_agent_id,
+                      step_index, kind, status, input, output, claimed_by_worker,
+                      lease_expires_at, last_heartbeat_at, attempt_count, error,
+                      execution_handle, submitted_at, started_at, finished_at,
+                      created_at, updated_at, metadata
+            """,
+            step_id,
+            worker_id,
+            lease_expires_at,
+            now,
+        )
+        return self._run_step_from_row(row) if row else None
+
+    async def requeue_expired_run_steps(self, *, now) -> list[RunStep]:
+        rows = await self._pool.fetch(
+            """
+            UPDATE run_steps
+            SET status = 'created',
+                claimed_by_worker = NULL,
+                lease_expires_at = NULL,
+                last_heartbeat_at = NULL,
+                execution_handle = NULL,
+                updated_at = $1
+            WHERE status = 'claimed'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < $1
+            RETURNING step_id, run_id, task_id, workspace_id, thread_id, system_agent_id,
+                      step_index, kind, status, input, output, claimed_by_worker,
+                      lease_expires_at, last_heartbeat_at, attempt_count, error,
+                      execution_handle, submitted_at, started_at, finished_at,
+                      created_at, updated_at, metadata
+            """,
+            now,
+        )
+        return [self._run_step_from_row(row) for row in rows]
+
+    async def fetch_tool_call(self, tool_call_id: UUID) -> ToolCall | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT tool_call_id, run_id, run_step_id, task_id, workspace_id, thread_id,
+                   system_agent_id, tool_id, tool_name, status, arguments, execution_spec,
+                   claimed_by_worker, lease_expires_at, last_heartbeat_at, attempt_count,
+                   error, execution_handle, result, submitted_at, started_at, finished_at,
+                   created_at, updated_at, metadata
+            FROM tool_calls
+            WHERE tool_call_id = $1
+            """,
+            tool_call_id,
+        )
+        return self._tool_call_from_row(row) if row else None
+
+    async def list_tool_calls_for_run_step(self, run_step_id: UUID) -> list[ToolCall]:
+        rows = await self._pool.fetch(
+            """
+            SELECT tool_call_id, run_id, run_step_id, task_id, workspace_id, thread_id,
+                   system_agent_id, tool_id, tool_name, status, arguments, execution_spec,
+                   claimed_by_worker, lease_expires_at, last_heartbeat_at, attempt_count,
+                   error, execution_handle, result, submitted_at, started_at, finished_at,
+                   created_at, updated_at, metadata
+            FROM tool_calls
+            WHERE run_step_id = $1
+            ORDER BY created_at ASC
+            """,
+            run_step_id,
+        )
+        return [self._tool_call_from_row(row) for row in rows]
+
+    async def list_completed_tool_calls_for_run(self, run_id: UUID) -> list[ToolCall]:
+        rows = await self._pool.fetch(
+            """
+            SELECT tool_call_id, run_id, run_step_id, task_id, workspace_id, thread_id,
+                   system_agent_id, tool_id, tool_name, status, arguments, execution_spec,
+                   claimed_by_worker, lease_expires_at, last_heartbeat_at, attempt_count,
+                   error, execution_handle, result, submitted_at, started_at, finished_at,
+                   created_at, updated_at, metadata
+            FROM tool_calls
+            WHERE run_id = $1
+              AND status IN ('completed', 'failed')
+            ORDER BY created_at ASC
+            """,
+            run_id,
+        )
+        return [self._tool_call_from_row(row) for row in rows]
+
+    async def claim_next_tool_call(
+        self,
+        *,
+        worker_id: str,
+        lease_expires_at,
+        now,
+        max_parallel_calls_per_run: int,
+        max_concurrent_calls_per_tool: int,
+    ) -> ToolCall | None:
+        row = await self._pool.fetchrow(
+            """
+            WITH candidate AS (
+                SELECT tc.tool_call_id
+                FROM tool_calls tc
+                WHERE tc.status = 'created'
+                  AND (
+                    SELECT COUNT(*)
+                    FROM tool_calls active
+                    WHERE active.run_id = tc.run_id
+                      AND active.status = 'claimed'
+                  ) < $4
+                  AND (
+                    SELECT COUNT(*)
+                    FROM tool_calls active
+                    WHERE active.tool_name = tc.tool_name
+                      AND active.status = 'claimed'
+                  ) < $5
+                ORDER BY tc.submitted_at ASC, tc.created_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE tool_calls tc
+            SET status = 'claimed',
+                claimed_by_worker = $1,
+                lease_expires_at = $2,
+                last_heartbeat_at = $3,
+                started_at = COALESCE(tc.started_at, $3),
+                updated_at = $3,
+                attempt_count = tc.attempt_count + 1
+            FROM candidate
+            WHERE tc.tool_call_id = candidate.tool_call_id
+            RETURNING tc.tool_call_id, tc.run_id, tc.run_step_id, tc.task_id, tc.workspace_id, tc.thread_id,
+                      tc.system_agent_id, tc.tool_id, tc.tool_name, tc.status, tc.arguments, tc.execution_spec,
+                      tc.claimed_by_worker, tc.lease_expires_at, tc.last_heartbeat_at, tc.attempt_count,
+                      tc.error, tc.execution_handle, tc.result, tc.submitted_at, tc.started_at, tc.finished_at,
+                      tc.created_at, tc.updated_at, tc.metadata
+            """,
+            worker_id,
+            lease_expires_at,
+            now,
+            max_parallel_calls_per_run,
+            max_concurrent_calls_per_tool,
+        )
+        return self._tool_call_from_row(row) if row else None
+
+    async def heartbeat_tool_call(
+        self,
+        *,
+        tool_call_id: UUID,
+        worker_id: str,
+        lease_expires_at,
+        now,
+    ) -> ToolCall | None:
+        row = await self._pool.fetchrow(
+            """
+            UPDATE tool_calls
+            SET lease_expires_at = $3,
+                last_heartbeat_at = $4,
+                updated_at = $4
+            WHERE tool_call_id = $1
+              AND claimed_by_worker = $2
+              AND status = 'claimed'
+            RETURNING tool_call_id, run_id, run_step_id, task_id, workspace_id, thread_id,
+                      system_agent_id, tool_id, tool_name, status, arguments, execution_spec,
+                      claimed_by_worker, lease_expires_at, last_heartbeat_at, attempt_count,
+                      error, execution_handle, result, submitted_at, started_at, finished_at,
+                      created_at, updated_at, metadata
+            """,
+            tool_call_id,
+            worker_id,
+            lease_expires_at,
+            now,
+        )
+        return self._tool_call_from_row(row) if row else None
+
+    async def requeue_expired_tool_calls(self, *, now) -> list[ToolCall]:
+        rows = await self._pool.fetch(
+            """
+            UPDATE tool_calls
+            SET status = 'created',
+                claimed_by_worker = NULL,
+                lease_expires_at = NULL,
+                last_heartbeat_at = NULL,
+                execution_handle = NULL,
+                updated_at = $1
+            WHERE status = 'claimed'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < $1
+            RETURNING tool_call_id, run_id, run_step_id, task_id, workspace_id, thread_id,
+                      system_agent_id, tool_id, tool_name, status, arguments, execution_spec,
+                      claimed_by_worker, lease_expires_at, last_heartbeat_at, attempt_count,
+                      error, execution_handle, result, submitted_at, started_at, finished_at,
+                      created_at, updated_at, metadata
+            """,
+            now,
+        )
+        return [self._tool_call_from_row(row) for row in rows]
+
     async def fetch_message(self, message_id: UUID) -> TimelineMessage | None:
         row = await self._pool.fetchrow(
             """
@@ -1032,6 +1475,71 @@ class CollaborationRepository:
         )
 
     @staticmethod
+    def _run_step_from_row(row: asyncpg.Record) -> RunStep:
+        return RunStep(
+            step_id=row["step_id"],
+            run_id=row["run_id"],
+            task_id=row["task_id"],
+            workspace_id=row["workspace_id"],
+            thread_id=row["thread_id"],
+            system_agent_id=row["system_agent_id"],
+            step_index=row["step_index"],
+            kind=row["kind"],
+            status=row["status"],
+            input=CollaborationRepository._json_value(row["input"], default={}),
+            output=CollaborationRepository._json_value(row["output"], default={}),
+            claimed_by_worker=row["claimed_by_worker"],
+            lease_expires_at=row["lease_expires_at"],
+            last_heartbeat_at=row["last_heartbeat_at"],
+            attempt_count=row["attempt_count"],
+            error=row["error"],
+            execution_handle=row["execution_handle"],
+            submitted_at=row["submitted_at"],
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _tool_call_from_row(row: asyncpg.Record) -> ToolCall:
+        result_payload = CollaborationRepository._json_value(row["result"], default=None)
+        return ToolCall(
+            tool_call_id=row["tool_call_id"],
+            run_id=row["run_id"],
+            run_step_id=row["run_step_id"],
+            task_id=row["task_id"],
+            workspace_id=row["workspace_id"],
+            thread_id=row["thread_id"],
+            system_agent_id=row["system_agent_id"],
+            tool_id=row["tool_id"],
+            tool_name=row["tool_name"],
+            status=row["status"],
+            arguments=CollaborationRepository._json_value(row["arguments"], default={}),
+            execution_spec=CollaborationRepository._json_value(
+                row["execution_spec"], default={}
+            ),
+            claimed_by_worker=row["claimed_by_worker"],
+            lease_expires_at=row["lease_expires_at"],
+            last_heartbeat_at=row["last_heartbeat_at"],
+            attempt_count=row["attempt_count"],
+            error=row["error"],
+            execution_handle=row["execution_handle"],
+            result=(
+                ToolCallResult.model_validate(result_payload)
+                if result_payload is not None
+                else None
+            ),
+            submitted_at=row["submitted_at"],
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
     def _workspace_from_row(row: asyncpg.Record) -> Workspace:
         return Workspace(
             workspace_id=row["workspace_id"],
@@ -1155,6 +1663,14 @@ class CollaborationRepository:
             input_schema=CollaborationRepository._json_value(
                 row["input_schema"], default={}
             ),
+            execution=ToolExecutionBinding(
+                backend_kind=row["backend_kind"],
+                handler_ref=row["handler_ref"],
+                execution_profile=CollaborationRepository._json_value(
+                    row["execution_profile"], default={}
+                ),
+                trust_level=row["trust_level"],
+            ),
             created_by=row["created_by"],
             created_at=row["created_at"],
             updated_by=row["updated_by"],
@@ -1175,6 +1691,14 @@ class CollaborationRepository:
             ),
             input_schema=CollaborationRepository._json_value(
                 row["input_schema"], default={}
+            ),
+            execution=ToolExecutionBinding(
+                backend_kind=row["backend_kind"],
+                handler_ref=row["handler_ref"],
+                execution_profile=CollaborationRepository._json_value(
+                    row["execution_profile"], default={}
+                ),
+                trust_level=row["trust_level"],
             ),
             enabled=row["enabled"],
             attached_by=row["attached_by"],

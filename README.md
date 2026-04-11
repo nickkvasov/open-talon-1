@@ -13,7 +13,7 @@ At a high level:
 - `services/gateway-edge` is the main entrypoint for clients and developer tools
 - `apps/tui` provides a terminal UI that talks to the gateway
 - `services/core-collab` manages shared collaboration concepts like workspaces, threads, participants, presence, and timelines across both humans and agents
-- `services/agent-runtime` runs background agent work and publishes events back into the system
+- `services/agent-runtime` runs stateless background workers for agent loops, tool execution, and lease reconciliation
 - `packages/contracts` defines shared models and contracts used across services
 - `infrastructure` provides the local backing services that make the system work end to end
 
@@ -21,9 +21,10 @@ The typical flow is:
 
 1. A client sends a request to `gateway-edge`.
 2. The gateway reads and writes state in Postgres and Valkey, and publishes asynchronous work through Kafka.
-3. Collaboration and agent services process that work and emit events for both user and agent participants.
-4. The gateway streams results back to clients over HTTP, SSE, or WebSocket.
-5. Langfuse captures observability data for prompts, traces, and evaluations.
+3. `core-collab` persists durable execution state in Postgres, including `tasks`, `runs`, `run_steps`, and `tool_calls`.
+4. Stateless `agent-runtime` workers claim runnable work, execute model turns or tool calls, and publish events back into Kafka.
+5. The gateway streams results back to clients over HTTP, SSE, or WebSocket.
+6. Langfuse captures observability data for prompts, traces, and evaluations.
 
 ## Tools Model
 
@@ -39,8 +40,33 @@ Each system tool includes:
 - a human-readable name and description
 - a `parameter_contract` describing accepted parameters
 - an `input_schema` for structured validation/integration use
+- an explicit `execution` binding that selects the execution backend, handler, execution profile, and trust level
 
 When a tool is attached to a workspace, attached agent participants advertise it as a capability using the `tool:<name>` form, and the runtime includes the attached tool definitions in the agent execution context.
+
+## Execution Infrastructure
+
+Open Talon now runs agent execution through durable stateless workers:
+
+- Postgres is the source of truth for execution state
+- Kafka is the wake-up and fanout bus
+- `gateway-edge` no longer runs agent loops in-process
+- `agent-loop-worker` claims `run_steps` and executes model turns
+- `tool-worker` claims `tool_calls` and dispatches isolated tool execution
+- `reconciler` requeues expired leases and republishes wakeup events
+
+Execution contracts are backend-neutral:
+
+- `ExecutionSpec` is the payload envelope for isolated execution
+- `ExecutionWorkspaceRef` identifies execution-side workspace materialization and is intentionally separate from the collaboration `Workspace` model
+- `ExecutionResult` captures structured outputs, logs, artifacts, and terminal status
+
+V1 execution backends:
+
+- `docker`: default backend for arbitrary or untrusted tools
+- `local_process`: minimal backend for tests and explicitly trusted built-ins
+
+The Docker backend uses a short-lived container with a read-only root filesystem, dropped capabilities, no-new-privileges, resource limits, and `--network none` by default.
 
 Common tool endpoints:
 
@@ -64,11 +90,19 @@ Common tool endpoints:
 
 ## Infrastructure
 
-`./open-talon start` brings up the full local infrastructure stack and then starts the supported local gateway from `services/gateway-edge`.
+`./open-talon start` brings up the full local infrastructure stack and then starts the supported local processes for:
+
+- `gateway-edge`
+- `agent-loop-worker`
+- `tool-worker`
+- `reconciler`
 
 Local services:
 
 - `gateway-edge`: primary local API gateway for REST, SSE, WebSocket, collaboration, and admin APIs
+- `agent-loop-worker`: local worker that executes agent model steps from durable `run_steps`
+- `tool-worker`: local worker that executes isolated tool invocations from durable `tool_calls`
+- `reconciler`: local worker that requeues expired leases and republishes wakeups
 - `postgres`: application database with `pgvector` enabled
 - `pgadmin`: pgAdmin 4 web UI for inspecting and querying the local Postgres instance
 - `kafka`: event bus for chat, collaboration, and agent-runtime traffic
@@ -229,6 +263,7 @@ Infra defaults are defined in `infrastructure/.env.example`, including:
 - Langfuse database name and bootstrap credentials
 - ClickHouse, MinIO, and Valkey credentials used by Langfuse
 - the required Ollama model list for local startup
+- worker scaling and lease settings such as `AGENT_STEP_WORKER_CONCURRENCY`, `TOOL_WORKER_CONCURRENCY`, `LEASE_TTL_SECONDS`, and `RECONCILE_INTERVAL_SECONDS`
 
 ## Pytest Orchestration
 

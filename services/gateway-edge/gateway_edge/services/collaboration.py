@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -13,20 +12,13 @@ _ROOT_DIR = Path(__file__).resolve().parents[4]
 _CORE_COLLAB_DIR = _ROOT_DIR / "services" / "core-collab"
 if _CORE_COLLAB_DIR.is_dir():
     collab_path = str(_CORE_COLLAB_DIR)
+    import sys
     if collab_path not in sys.path:
         sys.path.insert(0, collab_path)
 
-_AGENT_RUNTIME_DIR = _ROOT_DIR / "services" / "agent-runtime"
-if _AGENT_RUNTIME_DIR.is_dir():
-    agent_runtime_path = str(_AGENT_RUNTIME_DIR)
-    if agent_runtime_path not in sys.path:
-        sys.path.insert(0, agent_runtime_path)
-
 from core_collab import CollaborationKernel, CollaborationRepository  # noqa: E402
-from agent_runtime import AgentTaskRuntime  # noqa: E402
 
 from gateway_edge.db.postgres import get_pool
-from gateway_edge.config import settings
 from gateway_edge.models import (
     AssumeParticipantRoleRequest,
     AgentDefinition,
@@ -73,7 +65,6 @@ logger = logging.getLogger(__name__)
 class CollaborationService:
     def __init__(self) -> None:
         self._kernel: CollaborationKernel | None = None
-        self._agent_runtime: AgentTaskRuntime | None = None
         self._subscriptions: dict[str, set[asyncio.Queue[EventEnvelope]]] = defaultdict(set)
 
     async def start(self) -> None:
@@ -81,22 +72,11 @@ class CollaborationService:
         repository = CollaborationRepository(pool)
         self._kernel = CollaborationKernel(repository)
         await self._kernel.setup_schema()
-        self._agent_runtime = AgentTaskRuntime(
-            kernel=self._kernel,
-            publish_events=self._publish_events,
-            poll_interval_seconds=settings.agent_loop_poll_interval_seconds,
-            max_pending_tasks_per_agent=settings.agent_loop_max_pending_per_agent,
-            progress_events_enabled=settings.agent_loop_progress_events_enabled,
-            model_timeout_seconds=settings.agent_loop_model_timeout_seconds,
-        )
-        if settings.agent_loop_enabled:
-            await self._agent_runtime.start()
+        event_service.set_event_handler(self._handle_published_event)
         logger.info("Collaboration service started")
 
     async def stop(self) -> None:
-        if self._agent_runtime is not None:
-            await self._agent_runtime.stop()
-            self._agent_runtime = None
+        event_service.set_event_handler(None)
         self._subscriptions.clear()
         self._kernel = None
         logger.info("Collaboration service stopped")
@@ -576,8 +556,10 @@ class CollaborationService:
                 event.visibility,
             )
             await event_service.publish_event(event)
-            for queue in list(self._subscriptions.get(str(event.thread_id), set())):
-                await queue.put(event)
+
+    async def _handle_published_event(self, event: EventEnvelope) -> None:
+        for queue in list(self._subscriptions.get(str(event.thread_id), set())):
+            await queue.put(event)
 
     def _require_kernel(self) -> CollaborationKernel:
         if self._kernel is None:

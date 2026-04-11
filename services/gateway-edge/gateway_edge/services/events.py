@@ -5,10 +5,11 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from collections import deque
 from uuid import UUID
 
 from aiokafka.admin import AIOKafkaAdminClient, NewTopic
-from aiokafka import AIOKafkaProducer
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from aiokafka.errors import KafkaConnectionError
 
 from gateway_edge.config import settings
@@ -21,6 +22,11 @@ class EventService:
     def __init__(self) -> None:
         self._producer: AIOKafkaProducer | None = None
         self._admin: AIOKafkaAdminClient | None = None
+        self._consumer: AIOKafkaConsumer | None = None
+        self._consumer_task: asyncio.Task[None] | None = None
+        self._event_handler: Callable[[EventEnvelope], Awaitable[None]] | None = None
+        self._recent_event_ids: deque[UUID] = deque(maxlen=4096)
+        self._recent_event_id_set: set[UUID] = set()
         self._response_futures: dict[UUID, asyncio.Future[KafkaChatResponse]] = {}
         self._stream_queues: dict[UUID, asyncio.Queue[StreamEvent | None]] = {}
 
@@ -36,9 +42,30 @@ class EventService:
             value_serializer=lambda v: json.dumps(v).encode(),
         )
         await self._start_kafka_client(self._producer.start, "producer")
+        self._consumer = AIOKafkaConsumer(
+            settings.kafka_collab_events_topic,
+            settings.kafka_workspace_events_topic,
+            settings.kafka_agent_tasks_topic,
+            settings.kafka_agent_events_topic,
+            settings.kafka_presence_topic,
+            bootstrap_servers=settings.kafka_bootstrap_servers,
+            group_id=f"{settings.kafka_consumer_group}-events",
+            auto_offset_reset="latest",
+            enable_auto_commit=True,
+            value_deserializer=lambda v: json.loads(v.decode()),
+        )
+        await self._start_kafka_client(self._consumer.start, "consumer")
+        self._consumer_task = asyncio.create_task(self._consume_events())
         logger.info("Kafka event publisher ready (%.0f ms)", (time.monotonic() - t0) * 1000)
 
     async def stop(self) -> None:
+        if self._consumer_task is not None:
+            self._consumer_task.cancel()
+            await asyncio.gather(self._consumer_task, return_exceptions=True)
+            self._consumer_task = None
+        if self._consumer is not None:
+            await self._consumer.stop()
+            self._consumer = None
         if self._producer is not None:
             await self._producer.stop()
             self._producer = None
@@ -105,6 +132,7 @@ class EventService:
 
     async def publish_event(self, event: EventEnvelope) -> None:
         if self._producer is None:
+            await self._dispatch_event(event)
             return
         topic = self._topic_for_event(event)
         key = str(event.thread_id or event.workspace_id).encode()
@@ -113,6 +141,13 @@ class EventService:
             key=key,
             value=event.model_dump(mode="json"),
         )
+        await self._dispatch_event(event)
+
+    def set_event_handler(
+        self,
+        handler: Callable[[EventEnvelope], Awaitable[None]] | None,
+    ) -> None:
+        self._event_handler = handler
 
     def register_response_future(self, correlation_id: UUID) -> None:
         loop = asyncio.get_running_loop()
@@ -149,6 +184,20 @@ class EventService:
     async def publish_chat_request(self, request: KafkaChatRequest) -> None:
         if settings.echo_agent_enabled:
             asyncio.create_task(self._emit_echo_response(request))
+
+    async def _consume_events(self) -> None:
+        if self._consumer is None:
+            return
+        try:
+            async for message in self._consumer:
+                try:
+                    event = EventEnvelope.model_validate(message.value)
+                except Exception:
+                    logger.exception("Invalid collaboration event received from Kafka")
+                    continue
+                await self._dispatch_event(event)
+        except asyncio.CancelledError:  # pragma: no cover - shutdown path
+            raise
 
     async def _emit_echo_response(self, request: KafkaChatRequest) -> None:
         content = f"Echo: {request.message}"
@@ -188,17 +237,37 @@ class EventService:
             return settings.kafka_presence_topic
         if event.event_type.startswith("workspace.") or event.thread_id is None:
             return settings.kafka_workspace_events_topic
-        if event.event_type == "task.created" and event.visibility == "agents_only":
+        if (
+            event.visibility == "agents_only"
+            and event.event_type in {"task.created", "tool_call.created", "tool_call.requeued", "run_step.requeued"}
+        ):
             return settings.kafka_agent_tasks_topic
         if (
             event.visibility == "agents_only"
             and (
                 event.event_type.startswith("task.")
                 or event.event_type.startswith("run.")
+                or event.event_type.startswith("tool_call.")
             )
         ):
             return settings.kafka_agent_events_topic
         return settings.kafka_collab_events_topic
+
+    async def _dispatch_event(self, event: EventEnvelope) -> None:
+        if event.event_id in self._recent_event_id_set:
+            return
+        self._remember_event_id(event.event_id)
+        if self._event_handler is not None:
+            await self._event_handler(event)
+
+    def _remember_event_id(self, event_id: UUID) -> None:
+        if event_id in self._recent_event_id_set:
+            return
+        if len(self._recent_event_ids) == self._recent_event_ids.maxlen:
+            stale = self._recent_event_ids.popleft()
+            self._recent_event_id_set.discard(stale)
+        self._recent_event_ids.append(event_id)
+        self._recent_event_id_set.add(event_id)
 
 
 event_service = EventService()

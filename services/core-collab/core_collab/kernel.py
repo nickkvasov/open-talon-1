@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 from uuid import UUID, uuid4
 
@@ -14,6 +14,7 @@ from .contracts import (
     AgentDefinition,
     AgentExecutionContext,
     AgentRunResult,
+    AgentToolCallDraft,
     AgentTaskRouting,
     AttachWorkspaceToolRequest,
     AssumeParticipantRoleRequest,
@@ -28,6 +29,7 @@ from .contracts import (
     DeleteParticipantRequest,
     DeleteWorkspaceToolRequest,
     DeleteWorkspaceRequest,
+    ExecutionWorkspaceRef,
     EventEnvelope,
     Membership,
     MemoryEntry,
@@ -36,6 +38,9 @@ from .contracts import (
     PresenceState,
     RoleDefinition,
     SystemToolDefinition,
+    RunStep,
+    ExecutionSpec,
+    ExecutionLimits,
     Task,
     TargetRef,
     Thread,
@@ -44,6 +49,8 @@ from .contracts import (
     TimelinePage,
     Run,
     StopReason,
+    ToolCall,
+    ToolCallResult,
     UpdateSystemAgentRequest,
     UpsertRoleDefinitionRequest,
     UpdateSystemToolRequest,
@@ -118,6 +125,22 @@ class TaskCommandResult(CommandResult):
     task: Task | None = None
     run: Run | None = None
     context: AgentExecutionContext | None = None
+
+
+@dataclass
+class RunStepCommandResult(CommandResult):
+    step: RunStep | None = None
+    run: Run | None = None
+    task: Task | None = None
+    context: AgentExecutionContext | None = None
+
+
+@dataclass
+class ToolCallCommandResult(CommandResult):
+    tool_call: ToolCall | None = None
+    step: RunStep | None = None
+    run: Run | None = None
+    task: Task | None = None
 
 
 @dataclass
@@ -345,12 +368,16 @@ class CollaborationKernel:
         self, payload: CreateSystemToolRequest
     ) -> SystemToolCommandResult:
         now = self._now()
+        execution = payload.execution.model_copy(
+            update={"handler_ref": payload.execution.handler_ref or payload.name}
+        )
         tool = SystemToolDefinition(
             tool_id=uuid4(),
             name=payload.name,
             description=payload.description,
             parameter_contract=payload.parameter_contract,
             input_schema=payload.input_schema,
+            execution=execution,
             created_by=payload.actor.participant_id,
             created_at=now,
             updated_by=payload.actor.participant_id,
@@ -384,6 +411,17 @@ class CollaborationKernel:
                     payload.input_schema
                     if payload.input_schema is not None
                     else existing.input_schema
+                ),
+                "execution": (
+                    payload.execution.model_copy(
+                        update={
+                            "handler_ref": payload.execution.handler_ref
+                            or payload.name
+                            or existing.name
+                        }
+                    )
+                    if payload.execution is not None
+                    else existing.execution
                 ),
                 "updated_by": payload.actor.participant_id,
                 "updated_at": self._now(),
@@ -554,6 +592,7 @@ class CollaborationKernel:
             description=system_tool.description,
             parameter_contract=system_tool.parameter_contract,
             input_schema=system_tool.input_schema,
+            execution=system_tool.execution,
             enabled=payload.enabled,
             attached_by=payload.actor.participant_id,
             attached_at=now,
@@ -1044,6 +1083,23 @@ class CollaborationKernel:
                     },
                 )
                 await self._repository.upsert_run(conn, run)
+                initial_step = RunStep(
+                    step_id=uuid4(),
+                    run_id=run.run_id,
+                    task_id=claimed_task.task_id,
+                    workspace_id=claimed_task.workspace_id,
+                    thread_id=claimed_task.thread_id,
+                    system_agent_id=system_agent_id,
+                    step_index=0,
+                    status="created",
+                    submitted_at=now,
+                    created_at=now,
+                    updated_at=now,
+                    metadata={
+                        "participant_id": str(participant.participant_id),
+                    },
+                )
+                await self._repository.upsert_run_step(conn, initial_step)
                 actor = ActorRef(type="agent", id=participant.participant_id)
                 events = [
                     await self._build_thread_event(
@@ -1143,6 +1199,7 @@ class CollaborationKernel:
             memory_entries,
             viewer=participant,
         )
+        tool_results = await self._repository.list_completed_tool_calls_for_run(run.run_id)
         return AgentExecutionContext(
             workspace=workspace,
             thread=thread,
@@ -1159,7 +1216,413 @@ class CollaborationKernel:
             trigger_message=trigger_message,
             sequence_ceiling=routing.sequence_ceiling or 0,
             thread_reply_contract=system_agent.interaction_contract,
+            tool_results=tool_results,
         )
+
+    async def build_agent_execution_context_for_run_step(
+        self,
+        step_id: UUID,
+    ) -> AgentExecutionContext:
+        step = await self._repository.fetch_run_step(step_id)
+        if step is None:
+            raise KeyError(f"Run step {step_id} not found")
+        context = await self.build_agent_execution_context(
+            step.task_id,
+            step.system_agent_id,
+            step.run_id,
+        )
+        return context.model_copy(update={"run_step": step})
+
+    async def claim_next_run_step(
+        self,
+        *,
+        worker_id: str,
+        lease_ttl_seconds: int,
+    ) -> RunStepCommandResult:
+        now = self._now()
+        step = await self._repository.claim_next_run_step(
+            worker_id=worker_id,
+            lease_expires_at=now + timedelta(seconds=lease_ttl_seconds),
+            now=now,
+        )
+        if step is None:
+            return RunStepCommandResult()
+        run = await self._repository.fetch_run(step.run_id)
+        if run is None:
+            raise KeyError(f"Run {step.run_id} not found")
+        task = await self._repository.fetch_task(step.task_id)
+        if task is None:
+            raise KeyError(f"Task {step.task_id} not found")
+        context = await self.build_agent_execution_context_for_run_step(step.step_id)
+        return RunStepCommandResult(
+            step=step,
+            run=run,
+            task=task,
+            context=context,
+        )
+
+    async def heartbeat_run_step(
+        self,
+        *,
+        step_id: UUID,
+        worker_id: str,
+        lease_ttl_seconds: int,
+    ) -> RunStep | None:
+        now = self._now()
+        return await self._repository.heartbeat_run_step(
+            step_id=step_id,
+            worker_id=worker_id,
+            lease_expires_at=now + timedelta(seconds=lease_ttl_seconds),
+            now=now,
+        )
+
+    async def queue_tool_calls_for_run_step(
+        self,
+        step_id: UUID,
+        worker_id: str,
+        drafts: list[AgentToolCallDraft],
+    ) -> RunStepCommandResult:
+        step = await self._repository.fetch_run_step(step_id)
+        if step is None:
+            raise KeyError(f"Run step {step_id} not found")
+        if step.claimed_by_worker != worker_id:
+            raise ValueError(f"Run step {step_id} is not claimed by worker {worker_id}")
+        run = await self._repository.fetch_run(step.run_id)
+        if run is None:
+            raise KeyError(f"Run {step.run_id} not found")
+        task = await self._repository.fetch_task(step.task_id)
+        if task is None:
+            raise KeyError(f"Task {step.task_id} not found")
+        system_agent = await self._repository.fetch_system_agent(step.system_agent_id)
+        if system_agent is None:
+            raise KeyError(f"System agent {step.system_agent_id} not found")
+        participant = await self._require_run_participant(
+            run=run,
+            task=task,
+            system_agent_id=step.system_agent_id,
+        )
+        actor = ActorRef(type="agent", id=participant.participant_id)
+        now = self._now()
+        queued_step = step.model_copy(
+            update={
+                "status": "waiting_tools",
+                "output": {
+                    "tool_calls_requested": [
+                        draft.model_dump(mode="json") for draft in drafts
+                    ]
+                },
+                "lease_expires_at": None,
+                "last_heartbeat_at": None,
+                "claimed_by_worker": None,
+                "execution_handle": None,
+                "updated_at": now,
+            }
+        )
+        events: list[EventEnvelope] = []
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_run_step(conn, queued_step)
+                for draft in drafts:
+                    tool = await self._repository.fetch_workspace_tool_by_name(
+                        task.workspace_id,
+                        draft.tool_name,
+                    )
+                    if tool is None:
+                        raise KeyError(
+                            f"Workspace tool {draft.tool_name!r} not found in workspace {task.workspace_id}"
+                        )
+                    tool_call = ToolCall(
+                        tool_call_id=uuid4(),
+                        run_id=run.run_id,
+                        run_step_id=step.step_id,
+                        task_id=task.task_id,
+                        workspace_id=task.workspace_id,
+                        thread_id=task.thread_id,
+                        system_agent_id=step.system_agent_id,
+                        tool_id=tool.tool_id,
+                        tool_name=tool.name,
+                        status="created",
+                        arguments=draft.arguments,
+                        execution_spec=self._build_tool_execution_spec(
+                            tool=tool,
+                            draft=draft,
+                            workspace_id=task.workspace_id,
+                        ).model_dump(mode="json"),
+                        submitted_at=now,
+                        created_at=now,
+                        updated_at=now,
+                        metadata=draft.metadata,
+                    )
+                    await self._repository.upsert_tool_call(conn, tool_call)
+                    event = await self._build_thread_event(
+                        conn,
+                        task.workspace_id,
+                        task.thread_id,
+                        "tool_call.created",
+                        actor=actor,
+                        target=TargetRef(type="tool_call", id=tool_call.tool_call_id),
+                        payload=tool_call.model_dump(mode="json"),
+                        visibility="agents_only",
+                        timestamp=now,
+                        correlation_id=run.correlation_id,
+                        causation_id=task.task_id,
+                    )
+                    events.append(event)
+                for event in events:
+                    await self._repository.record_event(conn, event)
+        return RunStepCommandResult(
+            step=queued_step,
+            run=run,
+            task=task,
+            events=events,
+        )
+
+    async def complete_run_step(
+        self,
+        step_id: UUID,
+        worker_id: str,
+        result: AgentRunResult,
+    ) -> RunCommandResult:
+        step = await self._repository.fetch_run_step(step_id)
+        if step is None:
+            raise KeyError(f"Run step {step_id} not found")
+        if step.claimed_by_worker != worker_id:
+            raise ValueError(f"Run step {step_id} is not claimed by worker {worker_id}")
+        now = self._now()
+        updated_step = step.model_copy(
+            update={
+                "status": "completed",
+                "output": result.model_dump(mode="json"),
+                "finished_at": now,
+                "lease_expires_at": None,
+                "last_heartbeat_at": None,
+                "claimed_by_worker": None,
+                "execution_handle": None,
+                "updated_at": now,
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_run_step(conn, updated_step)
+        completion = await self.complete_run(step.run_id, step.system_agent_id, result)
+        return completion
+
+    async def fail_run_step(
+        self,
+        step_id: UUID,
+        worker_id: str,
+        error: str,
+        *,
+        stop_reason: StopReason = "tool_failure",
+    ) -> RunCommandResult:
+        step = await self._repository.fetch_run_step(step_id)
+        if step is None:
+            raise KeyError(f"Run step {step_id} not found")
+        if step.claimed_by_worker != worker_id:
+            raise ValueError(f"Run step {step_id} is not claimed by worker {worker_id}")
+        now = self._now()
+        updated_step = step.model_copy(
+            update={
+                "status": "failed",
+                "error": error,
+                "finished_at": now,
+                "lease_expires_at": None,
+                "last_heartbeat_at": None,
+                "claimed_by_worker": None,
+                "execution_handle": None,
+                "updated_at": now,
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_run_step(conn, updated_step)
+        return await self.fail_run(step.run_id, step.system_agent_id, error, stop_reason=stop_reason)
+
+    async def claim_next_tool_call(
+        self,
+        *,
+        worker_id: str,
+        lease_ttl_seconds: int,
+        max_parallel_calls_per_run: int,
+        max_concurrent_calls_per_tool: int,
+    ) -> ToolCallCommandResult:
+        now = self._now()
+        tool_call = await self._repository.claim_next_tool_call(
+            worker_id=worker_id,
+            lease_expires_at=now + timedelta(seconds=lease_ttl_seconds),
+            now=now,
+            max_parallel_calls_per_run=max_parallel_calls_per_run,
+            max_concurrent_calls_per_tool=max_concurrent_calls_per_tool,
+        )
+        if tool_call is None:
+            return ToolCallCommandResult()
+        step = await self._repository.fetch_run_step(tool_call.run_step_id)
+        run = await self._repository.fetch_run(tool_call.run_id)
+        task = await self._repository.fetch_task(tool_call.task_id)
+        if step is None or run is None or task is None:
+            raise KeyError(f"Tool call {tool_call.tool_call_id} is missing execution state")
+        participant = await self._require_run_participant(
+            run=run,
+            task=task,
+            system_agent_id=tool_call.system_agent_id,
+        )
+        actor = ActorRef(type="agent", id=participant.participant_id)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                event = await self._build_thread_event(
+                    conn,
+                    task.workspace_id,
+                    task.thread_id,
+                    "tool_call.claimed",
+                    actor=actor,
+                    target=TargetRef(type="tool_call", id=tool_call.tool_call_id),
+                    payload=tool_call.model_dump(mode="json"),
+                    visibility="agents_only",
+                    timestamp=now,
+                    correlation_id=run.correlation_id,
+                    causation_id=task.task_id,
+                )
+                await self._repository.record_event(conn, event)
+        return ToolCallCommandResult(
+            tool_call=tool_call,
+            step=step,
+            run=run,
+            task=task,
+            events=[event],
+        )
+
+    async def heartbeat_tool_call(
+        self,
+        *,
+        tool_call_id: UUID,
+        worker_id: str,
+        lease_ttl_seconds: int,
+    ) -> ToolCall | None:
+        now = self._now()
+        return await self._repository.heartbeat_tool_call(
+            tool_call_id=tool_call_id,
+            worker_id=worker_id,
+            lease_expires_at=now + timedelta(seconds=lease_ttl_seconds),
+            now=now,
+        )
+
+    async def update_tool_call_execution_handle(
+        self,
+        tool_call_id: UUID,
+        worker_id: str,
+        execution_handle: str,
+    ) -> ToolCall | None:
+        tool_call = await self._repository.fetch_tool_call(tool_call_id)
+        if tool_call is None:
+            raise KeyError(f"Tool call {tool_call_id} not found")
+        if tool_call.claimed_by_worker != worker_id:
+            raise ValueError(
+                f"Tool call {tool_call_id} is not claimed by worker {worker_id}"
+            )
+        now = self._now()
+        updated = tool_call.model_copy(
+            update={
+                "execution_handle": execution_handle,
+                "updated_at": now,
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_tool_call(conn, updated)
+        return updated
+
+    async def complete_tool_call(
+        self,
+        tool_call_id: UUID,
+        worker_id: str,
+        result: ToolCallResult,
+    ) -> ToolCallCommandResult:
+        return await self._finalize_tool_call(
+            tool_call_id,
+            worker_id,
+            status="completed",
+            result=result,
+            error=result.error,
+            event_type="tool_call.completed",
+        )
+
+    async def fail_tool_call(
+        self,
+        tool_call_id: UUID,
+        worker_id: str,
+        error: str,
+    ) -> ToolCallCommandResult:
+        return await self._finalize_tool_call(
+            tool_call_id,
+            worker_id,
+            status="failed",
+            result=ToolCallResult(error=error),
+            error=error,
+            event_type="tool_call.failed",
+        )
+
+    async def reconcile_expired_execution_leases(self) -> tuple[list[RunStep], list[ToolCall]]:
+        now = self._now()
+        run_steps = await self._repository.requeue_expired_run_steps(now=now)
+        tool_calls = await self._repository.requeue_expired_tool_calls(now=now)
+        return run_steps, tool_calls
+
+    async def build_requeued_execution_events(
+        self,
+        run_steps: list[RunStep],
+        tool_calls: list[ToolCall],
+    ) -> list[EventEnvelope]:
+        timestamp = self._now()
+        events: list[EventEnvelope] = []
+        for step in run_steps:
+            run = await self._repository.fetch_run(step.run_id)
+            task = await self._repository.fetch_task(step.task_id)
+            if run is None or task is None:
+                continue
+            participant = await self._require_run_participant(
+                run=run,
+                task=task,
+                system_agent_id=step.system_agent_id,
+            )
+            events.append(
+                EventEnvelope(
+                    event_type="run_step.requeued",
+                    workspace_id=step.workspace_id,
+                    thread_id=step.thread_id,
+                    actor=ActorRef(type="agent", id=participant.participant_id),
+                    target=TargetRef(type="run_step", id=step.step_id),
+                    visibility="agents_only",
+                    correlation_id=run.correlation_id,
+                    causation_id=task.task_id,
+                    timestamp=timestamp,
+                    payload=step.model_dump(mode="json"),
+                )
+            )
+        for tool_call in tool_calls:
+            run = await self._repository.fetch_run(tool_call.run_id)
+            task = await self._repository.fetch_task(tool_call.task_id)
+            if run is None or task is None:
+                continue
+            participant = await self._require_run_participant(
+                run=run,
+                task=task,
+                system_agent_id=tool_call.system_agent_id,
+            )
+            events.append(
+                EventEnvelope(
+                    event_type="tool_call.requeued",
+                    workspace_id=tool_call.workspace_id,
+                    thread_id=tool_call.thread_id,
+                    actor=ActorRef(type="agent", id=participant.participant_id),
+                    target=TargetRef(type="tool_call", id=tool_call.tool_call_id),
+                    visibility="agents_only",
+                    correlation_id=run.correlation_id,
+                    causation_id=task.task_id,
+                    timestamp=timestamp,
+                    payload=tool_call.model_dump(mode="json"),
+                )
+            )
+        return events
 
     async def append_run_progress(
         self,
@@ -2056,6 +2519,164 @@ class CollaborationKernel:
             "budget_exhausted",
             "tool_failure",
         }
+
+    async def _finalize_tool_call(
+        self,
+        tool_call_id: UUID,
+        worker_id: str,
+        *,
+        status: str,
+        result: ToolCallResult,
+        error: str | None,
+        event_type: str,
+    ) -> ToolCallCommandResult:
+        tool_call = await self._repository.fetch_tool_call(tool_call_id)
+        if tool_call is None:
+            raise KeyError(f"Tool call {tool_call_id} not found")
+        if tool_call.claimed_by_worker != worker_id:
+            raise ValueError(
+                f"Tool call {tool_call_id} is not claimed by worker {worker_id}"
+            )
+        step = await self._repository.fetch_run_step(tool_call.run_step_id)
+        run = await self._repository.fetch_run(tool_call.run_id)
+        task = await self._repository.fetch_task(tool_call.task_id)
+        if step is None or run is None or task is None:
+            raise KeyError(f"Tool call {tool_call_id} is missing execution state")
+        participant = await self._require_run_participant(
+            run=run,
+            task=task,
+            system_agent_id=tool_call.system_agent_id,
+        )
+        actor = ActorRef(type="agent", id=participant.participant_id)
+        now = self._now()
+        updated_tool_call = tool_call.model_copy(
+            update={
+                "status": status,
+                "error": error,
+                "result": result,
+                "lease_expires_at": None,
+                "last_heartbeat_at": None,
+                "claimed_by_worker": None,
+                "execution_handle": None,
+                "finished_at": now,
+                "updated_at": now,
+            }
+        )
+        next_step: RunStep | None = None
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_tool_call(conn, updated_tool_call)
+                event = await self._build_thread_event(
+                    conn,
+                    task.workspace_id,
+                    task.thread_id,
+                    event_type,
+                    actor=actor,
+                    target=TargetRef(type="tool_call", id=tool_call_id),
+                    payload=updated_tool_call.model_dump(mode="json"),
+                    visibility="agents_only",
+                    timestamp=now,
+                    correlation_id=run.correlation_id,
+                    causation_id=task.task_id,
+                )
+                await self._repository.record_event(conn, event)
+                remaining = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM tool_calls
+                    WHERE run_step_id = $1
+                      AND status NOT IN ('completed', 'failed')
+                    """,
+                    step.step_id,
+                )
+                step_status = await conn.fetchval(
+                    """
+                    SELECT status
+                    FROM run_steps
+                    WHERE step_id = $1
+                    FOR UPDATE
+                    """,
+                    step.step_id,
+                )
+                if remaining == 0 and step_status == "waiting_tools":
+                    step = step.model_copy(
+                        update={
+                            "status": "completed",
+                            "lease_expires_at": None,
+                            "last_heartbeat_at": None,
+                            "claimed_by_worker": None,
+                            "execution_handle": None,
+                            "finished_at": now,
+                            "updated_at": now,
+                        }
+                    )
+                    await self._repository.upsert_run_step(conn, step)
+                    next_step = RunStep(
+                        step_id=uuid4(),
+                        run_id=step.run_id,
+                        task_id=step.task_id,
+                        workspace_id=step.workspace_id,
+                        thread_id=step.thread_id,
+                        system_agent_id=step.system_agent_id,
+                        step_index=step.step_index + 1,
+                        status="created",
+                        submitted_at=now,
+                        created_at=now,
+                        updated_at=now,
+                        metadata=step.metadata,
+                    )
+                    await self._repository.upsert_run_step(conn, next_step)
+
+        return ToolCallCommandResult(
+            tool_call=updated_tool_call,
+            step=next_step or step,
+            run=run,
+            task=task,
+            events=[event],
+        )
+
+    def _build_tool_execution_spec(
+        self,
+        *,
+        tool: WorkspaceTool,
+        draft: AgentToolCallDraft,
+        workspace_id: UUID,
+    ) -> ExecutionSpec:
+        profile = dict(tool.execution.execution_profile)
+        return ExecutionSpec(
+            invocation_id=uuid4(),
+            handler_ref=tool.execution.handler_ref or tool.name,
+            inline_payload=draft.arguments,
+            artifact_refs=draft.artifact_refs,
+            execution_workspace=(
+                draft.execution_workspace
+                if draft.execution_workspace is not None
+                else self._execution_workspace_for_workspace(workspace_id)
+            ),
+            limits=ExecutionLimits(
+                timeout_seconds=int(profile.get("timeout_seconds", 60)),
+                cpu_millis=profile.get("cpu_millis"),
+                memory_mb=profile.get("memory_mb"),
+                pids_limit=profile.get("pids_limit"),
+                network=profile.get("network", "none"),
+                workspace_access=profile.get("workspace_access", "read_only"),
+            ),
+            env_refs=draft.env_refs,
+            result_sink=draft.result_sink,
+            profile=profile,
+            metadata={
+                "tool_id": str(tool.tool_id),
+                "tool_name": tool.name,
+                "backend_kind": tool.execution.backend_kind,
+            },
+        )
+
+    @staticmethod
+    def _execution_workspace_for_workspace(workspace_id: UUID) -> ExecutionWorkspaceRef:
+        return ExecutionWorkspaceRef(
+            mode="local_path",
+            workspace_id=workspace_id,
+        )
 
     @staticmethod
     def _artifact_from_draft(

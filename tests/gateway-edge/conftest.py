@@ -205,6 +205,9 @@ class MockCollaborationService:
             description=payload.description,
             parameter_contract=payload.parameter_contract,
             input_schema=payload.input_schema,
+            execution=payload.execution.model_copy(
+                update={"handler_ref": payload.execution.handler_ref or payload.name}
+            ),
             created_by=payload.actor.participant_id,
             created_at=now,
             updated_by=payload.actor.participant_id,
@@ -231,6 +234,7 @@ class MockCollaborationService:
                     else tool.parameter_contract
                 ),
                 "input_schema": payload.input_schema if payload.input_schema is not None else tool.input_schema,
+                "execution": payload.execution if payload.execution is not None else tool.execution,
                 "updated_by": payload.actor.participant_id,
                 "updated_at": datetime.now(timezone.utc),
                 "metadata": {**tool.metadata, **payload.metadata} if payload.metadata is not None else tool.metadata,
@@ -312,6 +316,7 @@ class MockCollaborationService:
             description=system_tool.description,
             parameter_contract=system_tool.parameter_contract,
             input_schema=system_tool.input_schema,
+            execution=system_tool.execution,
             enabled=payload.enabled,
             attached_by=payload.actor.participant_id,
             attached_at=now,
