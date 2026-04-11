@@ -22,26 +22,67 @@ source .venv/bin/activate
 python -m open_talon_tui.main
 ```
 
-Common flags:
+For the local dev stack, the TUI defaults to the local Keycloak realm:
+
+- issuer: `http://127.0.0.1:8081/realms/open-talon`
+- client id: `open-talon-tui`
+
+So this is enough for most local usage:
+
+```bash
+./open-talon tui --profile nikolay
+```
 
 ```bash
 python -m open_talon_tui.main \
   --gateway http://127.0.0.1:8000 \
-  --display-name Nikolay \
+  --profile nikolay \
+  --oidc-issuer-url http://127.0.0.1:8081/realms/open-talon \
+  --oidc-client-id open-talon-tui \
   --workspace-name Workspace \
   --thread-title General
+```
+
+Human TUI users must authenticate through Keycloak. Local unsigned profiles, API-key auth, and OpenBao token auth are not supported for normal human TUI use.
+The TUI can still start signed out so you can run `/auth login` from inside the app before joining workspaces or sending messages.
+
+If you want reliable terminal mouse selection and terminal-native clickable links, use `tui2` instead of the full-screen Textual UI:
+
+```bash
+./open-talon tui2 --profile nikolay
+```
+
+`tui2` is a scrollback-first client. It prints plain timeline lines into the normal terminal, so you can select text with the mouse the same way you would in any shell scrollback. URLs are printed as raw URLs and also emitted as terminal hyperlinks when supported by the terminal emulator.
+
+You can also trigger the same Keycloak device-login flow directly from the CLI:
+
+```bash
+python -m open_talon_tui.main auth login \
+  --gateway http://127.0.0.1:8000 \
+  --profile nikolay \
+  --oidc-issuer-url http://127.0.0.1:8081/realms/open-talon \
+  --oidc-client-id open-talon-tui
 ```
 
 ## Slash Commands
 
 The TUI supports several slash-command families:
 
+- `/auth`
 - `/workspace`
+- `/account`
 - `/participant`
 - `/thread`
 - `/role`
 - `/agent`
 - `/tool`
+
+### Auth Commands
+
+```text
+/auth login
+/auth logout
+```
 
 ### Tool Commands
 
@@ -81,6 +122,16 @@ Current built-in agent flow:
 /workspace delete <id|name|current>
 ```
 
+### Account Commands
+
+```text
+/account login
+/account whoami
+/account list
+/account switch <profile>
+/account logout
+```
+
 ### Participant Commands
 
 ```text
@@ -110,5 +161,36 @@ Current built-in agent flow:
 ## Notes
 
 - Tool resolution in the TUI accepts full id, short id prefix, or exact name.
-- The TUI stores lightweight local client state under `~/.open-talon/`.
+- The TUI stores per-profile state and tokens under `~/.open-talon/profiles/<profile>/`.
+- Signed-out startup is allowed only so a human can run `/auth login`; workspace, thread, participant, role, tool, agent, and message actions still require an authenticated Keycloak session.
+- The TUI now uses a simpler plain-log timeline again so the core app behavior stays reliable.
+- Use `/copy` to copy the full timeline to the clipboard.
+- Use `/links` to list detected URLs and `/open <number|last|url>` to open one reliably.
+- Use `/quit` to leave the TUI and `/clear` to clear the visible timeline.
+- Only the current per-profile state/token format is supported. Old local TUI auth/state is not migrated and users must sign in again.
 - Slash-command suggestions are built into the input box and update as you type.
+
+## TUI2
+
+`tui2` is the recommended terminal client when copy/paste and mouse link interaction matter more than full-screen UI layout.
+
+Useful commands in `tui2`:
+
+```text
+/help
+/auth login
+/auth logout
+/account whoami
+/account list
+/account switch <profile>
+/workspace list
+/workspace create <name>
+/workspace use <id|name>
+/thread list
+/thread create <title>
+/thread use <id|title>
+/links
+/open <number|last|url>
+/copy
+/quit
+```

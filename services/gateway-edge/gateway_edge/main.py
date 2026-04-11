@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from gateway_edge.auth.middleware import AuthMiddleware
 from gateway_edge.config import settings
 from gateway_edge.db.postgres import setup_postgres, teardown_postgres
-from gateway_edge.routers import admin, chat, collaboration, health
+from gateway_edge.routers import admin, auth, chat, collaboration, health
 from gateway_edge.services.collaboration import collaboration_service
 from gateway_edge.services.events import event_service
 from gateway_edge.services.session import setup_valkey, teardown_valkey
@@ -77,6 +77,7 @@ def create_app() -> FastAPI:
 
     # ── Routers ───────────────────────────────────────────────────────────────
     app.include_router(health.router)
+    app.include_router(auth.router)
     app.include_router(chat.router)
     app.include_router(collaboration.router)
     app.include_router(admin.router)

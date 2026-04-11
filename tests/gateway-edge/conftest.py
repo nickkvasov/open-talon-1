@@ -74,6 +74,7 @@ class MockCollaborationService:
             participant_id=payload.actor.participant_id,
             workspace_id=workspace.workspace_id,
             participant_type=payload.actor.participant_type,
+            user_id=payload.actor.user_id,
             display_name=payload.actor.display_name,
             description=payload.actor.description,
             roles=payload.actor.roles,
@@ -98,6 +99,51 @@ class MockCollaborationService:
 
     async def list_workspaces(self):
         return list(self.workspaces.values())
+
+    async def resolve_authenticated_user_actor(
+        self,
+        *,
+        workspace_id: UUID,
+        auth_context,
+        auto_create: bool = True,
+    ):
+        participants = self.participants.get(str(workspace_id), {})
+        for participant in participants.values():
+            if participant.user_id == auth_context.user_id:
+                from gateway_edge.models import ParticipantInput
+
+                return ParticipantInput(
+                    participant_id=participant.participant_id,
+                    participant_type="user",
+                    user_id=auth_context.user_id,
+                    display_name=auth_context.display_name or "user",
+                )
+        if not auto_create:
+            raise KeyError(f"Authenticated user {auth_context.user_id} not found")
+        from gateway_edge.models import ParticipantInput
+
+        return ParticipantInput(
+            participant_id=uuid4(),
+            participant_type="user",
+            user_id=auth_context.user_id,
+            display_name=auth_context.display_name or "user",
+        )
+
+    async def resolve_authenticated_thread_actor(
+        self,
+        *,
+        thread_id: UUID,
+        auth_context,
+        auto_create: bool = True,
+    ):
+        thread = self.threads.get(str(thread_id))
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
+        return await self.resolve_authenticated_user_actor(
+            workspace_id=thread.workspace_id,
+            auth_context=auth_context,
+            auto_create=auto_create,
+        )
 
     async def delete_workspace(self, workspace_id: UUID, payload):
         workspace = self.workspaces.pop(str(workspace_id), None)
@@ -473,6 +519,7 @@ class MockCollaborationService:
                     participant_id=payload.actor.participant_id,
                     workspace_id=workspace_id,
                     participant_type=payload.actor.participant_type,
+                    user_id=payload.actor.user_id,
                     display_name=payload.actor.display_name,
                     description=payload.actor.description,
                     roles=payload.actor.roles,

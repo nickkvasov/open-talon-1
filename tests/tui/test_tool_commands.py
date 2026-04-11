@@ -23,8 +23,11 @@ from open_talon_tui.main import CollaborationApp
 async def test_tool_attach_adds_tool_to_workspace(monkeypatch):
     app = CollaborationApp(
         gateway="http://127.0.0.1:8000",
+        profile="test-profile",
         api_key=None,
         openbao_token=None,
+        oidc_issuer_url=None,
+        oidc_client_id=None,
         display_name="Nikolay",
         workspace_name="Workspace",
         thread_title="General",
@@ -72,8 +75,11 @@ async def test_tool_attach_adds_tool_to_workspace(monkeypatch):
 async def test_tool_show_displays_parameter_contract(monkeypatch):
     app = CollaborationApp(
         gateway="http://127.0.0.1:8000",
+        profile="test-profile",
         api_key=None,
         openbao_token=None,
+        oidc_issuer_url=None,
+        oidc_client_id=None,
         display_name="Nikolay",
         workspace_name="Workspace",
         thread_title="General",
@@ -117,8 +123,11 @@ async def test_tool_show_displays_parameter_contract(monkeypatch):
 async def test_tool_attached_lists_workspace_tools(monkeypatch):
     app = CollaborationApp(
         gateway="http://127.0.0.1:8000",
+        profile="test-profile",
         api_key=None,
         openbao_token=None,
+        oidc_issuer_url=None,
+        oidc_client_id=None,
         display_name="Nikolay",
         workspace_name="Workspace",
         thread_title="General",
@@ -154,8 +163,11 @@ async def test_tool_attached_lists_workspace_tools(monkeypatch):
 async def test_tool_detach_removes_workspace_tool(monkeypatch):
     app = CollaborationApp(
         gateway="http://127.0.0.1:8000",
+        profile="test-profile",
         api_key=None,
         openbao_token=None,
+        oidc_issuer_url=None,
+        oidc_client_id=None,
         display_name="Nikolay",
         workspace_name="Workspace",
         thread_title="General",

@@ -2804,7 +2804,11 @@ class CollaborationKernel:
             participant_id=actor.participant_id,
             workspace_id=workspace_id,
             participant_type=actor.participant_type,
-            user_id=actor.participant_id if actor.participant_type == "user" else None,
+            user_id=(
+                actor.user_id
+                if actor.participant_type == "user"
+                else None
+            ),
             display_name=actor.display_name,
             description=actor.description,
             roles=actor.roles,
@@ -2835,6 +2839,27 @@ class CollaborationKernel:
                 updated_at=participant.updated_at,
                 metadata={},
             ),
+        )
+
+    async def resolve_authenticated_user_actor(
+        self,
+        workspace_id: UUID,
+        *,
+        user_id: UUID,
+        display_name: str,
+        auto_create: bool = True,
+    ) -> ParticipantInput:
+        participant = await self._repository.fetch_user_participant(workspace_id, user_id)
+        if participant is None and not auto_create:
+            raise KeyError(
+                f"Authenticated user {user_id} is not attached to workspace {workspace_id}"
+            )
+        participant_id = participant.participant_id if participant is not None else uuid4()
+        return ParticipantInput(
+            participant_id=participant_id,
+            participant_type="user",
+            user_id=user_id,
+            display_name=display_name,
         )
 
     @staticmethod

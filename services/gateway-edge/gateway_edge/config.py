@@ -23,10 +23,16 @@ class Settings(BaseSettings):
     # none     = no auth (dev)
     # api_key  = X-API-Key header checked against Valkey
     # openbao  = Bearer token validated via OpenBao /v1/auth/token/lookup-self
+    # oidc     = Bearer token validated via OIDC discovery + JWKS
     # any      = accept if any of the above passes
-    auth_mode: Literal["none", "api_key", "openbao", "any"] = "none"
+    auth_mode: Literal["none", "api_key", "openbao", "oidc", "any"] = "none"
     # Paths always allowed without auth
     auth_skip_paths: str = "/health,/ready,/docs,/openapi.json,/favicon.ico"
+    oidc_issuer_url: str = "http://127.0.0.1:8081/realms/open-talon"
+    oidc_audience: str = "open-talon-tui"
+    oidc_client_id_tui: str = "open-talon-tui"
+    oidc_cache_ttl_seconds: int = 300
+    oidc_admin_role: str = "open-talon-admin"
 
     # ── Postgres ─────────────────────────────────────────────────────────────
     postgres_host: str = "localhost"

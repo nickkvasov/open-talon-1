@@ -23,6 +23,19 @@ load_local_env() {
     source "${INFRA_ENV_FILE}"
     set +a
   fi
+  : "${OPEN_TALON_OIDC_ISSUER_URL:=http://127.0.0.1:8081/realms/open-talon}"
+  : "${OPEN_TALON_OIDC_CLIENT_ID:=open-talon-tui}"
+  : "${AUTH_MODE:=any}"
+  : "${OIDC_ISSUER_URL:=${OPEN_TALON_OIDC_ISSUER_URL}}"
+  : "${OIDC_CLIENT_ID_TUI:=${OPEN_TALON_OIDC_CLIENT_ID}}"
+  : "${OIDC_AUDIENCE:=${OIDC_CLIENT_ID_TUI}}"
+  export \
+    OPEN_TALON_OIDC_ISSUER_URL \
+    OPEN_TALON_OIDC_CLIENT_ID \
+    AUTH_MODE \
+    OIDC_ISSUER_URL \
+    OIDC_CLIENT_ID_TUI \
+    OIDC_AUDIENCE
 }
 
 ensure_python() {
@@ -169,6 +182,8 @@ start_cmd() {
       kafka \
       valkey \
       openbao \
+      keycloak \
+      keycloak-init \
       ollama \
       clickhouse \
       minio \
@@ -286,12 +301,23 @@ tui_cmd() {
   exec env PYTHONPATH="${pythonpath}" "${PYTHON_BIN}" -m open_talon_tui.main --gateway http://127.0.0.1:8000 "$@"
 }
 
+tui2_cmd() {
+  ensure_python
+  load_local_env
+  local pythonpath
+  pythonpath="$(repo_pythonpath)"
+  exec env PYTHONPATH="${pythonpath}" "${PYTHON_BIN}" -m open_talon_tui.tui2 --gateway http://127.0.0.1:8000 "$@"
+}
+
 usage() {
   cat <<EOF
 Usage:
   ./open-talon start
   ./open-talon stop
   ./open-talon tui [extra tui args]
+  ./open-talon tui auth login [auth args]
+  ./open-talon tui2 [extra tui2 args]
+  ./open-talon tui2 auth login [auth args]
 EOF
 }
 
@@ -307,6 +333,10 @@ case "${1:-}" in
   tui)
     shift
     tui_cmd "$@"
+    ;;
+  tui2)
+    shift
+    tui2_cmd "$@"
     ;;
   *)
     usage

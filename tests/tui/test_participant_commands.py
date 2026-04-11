@@ -23,8 +23,11 @@ from open_talon_tui.main import CollaborationApp
 async def test_participant_remove_deletes_target_and_reports_success(monkeypatch):
     app = CollaborationApp(
         gateway="http://127.0.0.1:8000",
+        profile="test-profile",
         api_key=None,
         openbao_token=None,
+        oidc_issuer_url=None,
+        oidc_client_id=None,
         display_name="Nikolay",
         workspace_name="Workspace",
         thread_title="General",
@@ -65,8 +68,11 @@ async def test_participant_remove_deletes_target_and_reports_success(monkeypatch
 async def test_participant_remove_rejects_current_participant(monkeypatch):
     app = CollaborationApp(
         gateway="http://127.0.0.1:8000",
+        profile="test-profile",
         api_key=None,
         openbao_token=None,
+        oidc_issuer_url=None,
+        oidc_client_id=None,
         display_name="Nikolay",
         workspace_name="Workspace",
         thread_title="General",

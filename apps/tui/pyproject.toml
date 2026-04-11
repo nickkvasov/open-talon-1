@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 talon-tui = "open_talon_tui.main:main"
+talon-tui2 = "open_talon_tui.tui2:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["open_talon_tui"]
