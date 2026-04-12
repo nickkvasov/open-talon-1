@@ -103,22 +103,35 @@ Important distinction:
 
 ## 7. Use The TUI With A Profile
 
-Start the TUI with a named local profile:
+For the most reliable terminal experience, start `tui2` with a named local profile:
 
 ```bash
-./open-talon tui \
-  --profile nikolay \
-  --oidc-issuer-url http://127.0.0.1:8081/realms/open-talon \
-  --oidc-client-id open-talon-tui
+./open-talon tui2 --profile admin
 ```
 
-For a simpler scrollback-first terminal client with normal mouse selection and terminal-native clickable links, use:
+That opens the scrollback-first terminal client in normal terminal mode. Mouse selection works like a regular shell session, and URLs are printed as plain text so they stay easy to copy or open.
+
+If you want to authenticate a profile before opening the terminal client, trigger the same device-login flow directly from the CLI:
 
 ```bash
-./open-talon tui2 --profile nikolay
+./open-talon tui2 auth login --profile admin
 ```
 
-For the local dev stack, `./open-talon tui` now defaults to:
+Inside `tui2`, the basic first-run flow is:
+
+```text
+/auth login
+/account whoami
+/workspace list
+```
+
+The full-screen Textual UI is still available:
+
+```bash
+./open-talon tui --profile admin
+```
+
+For the local dev stack, both TUI entrypoints default to:
 
 - issuer: `http://127.0.0.1:8081/realms/open-talon`
 - client id: `open-talon-tui`
@@ -126,14 +139,14 @@ For the local dev stack, `./open-talon tui` now defaults to:
 So in most local cases you only need:
 
 ```bash
-./open-talon tui --profile nikolay
+./open-talon tui2 --profile admin
 ```
 
-If you want to authenticate a profile before opening the Textual UI, trigger the same device-login flow from the CLI:
+If you want to authenticate a profile before opening the full-screen Textual UI, trigger the same device-login flow from the CLI:
 
 ```bash
 ./open-talon tui auth login \
-  --profile nikolay \
+  --profile admin \
   --oidc-issuer-url http://127.0.0.1:8081/realms/open-talon \
   --oidc-client-id open-talon-tui
 ```
@@ -144,10 +157,10 @@ Important behavior:
 - profile state and tokens are stored under `~/.open-talon/profiles/<profile>/`
 - the TUI uses Keycloak device flow for human login
 - the TUI may start signed out so `/auth login` can be used, but collaboration actions still require Keycloak authentication
-- the TUI now uses a simpler plain-log timeline so the core terminal controls stay reliable
-- `/copy` copies the full timeline to the clipboard
-- `/links` lists detected URLs and `/open <number|last|url>` opens one reliably
-- `/quit` exits the TUI and `/clear` clears the visible timeline
+- `tui2` is the recommended client when you want reliable terminal scrollback, mouse copy/select, and plain clickable/copyable URLs
+- `/copy` copies the full `tui2` timeline to the clipboard
+- `/links` lists detected URLs and `/open <number|last|url>` opens one reliably in `tui2`
+- `/quit` exits the active TUI client and `/clear` clears the visible timeline
 - the gateway derives the authenticated human actor server-side
 - the TUI no longer owns human identity through a local `participant_id`
 - only the current per-profile TUI state/token format is supported; older local auth/state is not migrated and existing users must sign in again
@@ -185,12 +198,14 @@ Useful `tui2` commands:
 Typical local usage examples:
 
 ```bash
-./open-talon tui --profile supervisor --oidc-issuer-url http://127.0.0.1:8081/realms/open-talon --oidc-client-id open-talon-tui
-./open-talon tui --profile user1 --oidc-issuer-url http://127.0.0.1:8081/realms/open-talon --oidc-client-id open-talon-tui
-./open-talon tui --profile user2 --oidc-issuer-url http://127.0.0.1:8081/realms/open-talon --oidc-client-id open-talon-tui
+./open-talon tui2 --profile supervisor
+./open-talon tui2 --profile user1
+./open-talon tui2 --profile user2
 ```
 
 That lets multiple humans use the same machine without sharing identity. Each profile gets its own state and token files under `~/.open-talon/profiles/<profile>/`.
+
+Recent live verification in local dev confirmed the end-to-end `tui2` flow for the realm user `admin`: profile bootstrap, `/account whoami`, `/thread create`, and a real message send all completed successfully against the running stack.
 
 ## 8. Quick Verification
 

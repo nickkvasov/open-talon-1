@@ -12,6 +12,7 @@ At a high level:
 
 - `services/gateway-edge` is the main entrypoint for clients and developer tools
 - `apps/tui` provides a terminal UI that talks to the gateway
+  - `tui2` is the recommended scrollback-first terminal client for reliable mouse copy/select and terminal-native link handling
 - `services/core-collab` manages shared collaboration concepts like workspaces, threads, participants, presence, and timelines across both humans and agents
 - `services/agent-runtime` runs stateless background workers for agent loops, tool execution, and lease reconciliation
 - `packages/contracts` defines shared models and contracts used across services
@@ -185,6 +186,8 @@ Default local development credentials:
   admin username: `admin`
   admin password: `admin`
   default realm: `open-talon`
+  realm users:
+  `admin` / `admin123`, `supervisor` / `supervisor123`, `user1` / `user12345`, `user2` / `user22345`
 - `Langfuse UI`
   URL: [http://localhost:3000](http://localhost:3000)
   email: `admin@example.com`
@@ -244,6 +247,28 @@ In the current auth model, the TUI is a **multi-profile** client:
 - each profile stores separate workspace/thread state and bearer tokens
 - human login is designed around Keycloak device flow
 - two users on the same device should use different TUI profiles rather than sharing one local participant identity
+
+For terminal-first usage, prefer `tui2`:
+
+```bash
+./open-talon tui2 --profile admin
+```
+
+`tui2` runs in normal terminal scrollback instead of a full-screen widget layout, so mouse selection works like a regular shell session and raw URLs remain easy to copy or open.
+
+Useful local flows:
+
+```bash
+./open-talon tui2 --profile admin
+./open-talon tui2 auth login --profile admin
+```
+
+Inside `tui2`, the minimum auth path is:
+
+```text
+/auth login
+/account whoami
+```
 
 ## Database Migrations
 

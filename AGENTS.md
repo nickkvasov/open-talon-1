@@ -13,6 +13,7 @@ Main components:
 - `services/agent-runtime`: stateless workers for agent-loop execution, tool execution, and lease reconciliation
 - `packages/contracts`: shared Pydantic contracts used across services
 - `apps/tui`: terminal UI client for workspace/thread collaboration
+  - `open_talon_tui.tui2` is the preferred human terminal client when copy/select/link behavior matters
 - `infrastructure`: local Docker-based backing services
 - `db/migrations`: source of truth for database schema changes
 
@@ -119,6 +120,9 @@ If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 - The TUI is profile-based, not single-user-per-device.
 - Do not reintroduce a single global local participant identity file for human users.
 - Human TUI sessions should authenticate with bearer tokens and rely on server-derived participant identity.
+- Keep `tui2` resilient: network/auth failures should degrade to readable system messages, not tracebacks.
+- When changing collaboration bootstrap or response parsing, keep `main.py` and `tui2.py` aligned on gateway contract shapes.
+- Prefer `tui2` guidance in docs when the goal is reliable mouse copy or link interaction in the terminal.
 
 ## Recommended Workflow For Agents
 
@@ -145,6 +149,7 @@ If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 - `services/gateway-edge/gateway_edge/services/events.py`
 - `services/gateway-edge/gateway_edge/db/postgres.py`
 - `apps/tui/open_talon_tui/main.py`
+- `apps/tui/open_talon_tui/tui2.py`
 
 ## When In Doubt
 

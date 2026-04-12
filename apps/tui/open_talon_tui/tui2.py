@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import json
+import os
 import sys
 import threading
 import webbrowser
@@ -101,6 +101,53 @@ class ScrollbackTUI2:
         self._stop = False
         self._stdout_lock = threading.Lock()
 
+    @staticmethod
+    def _http_status_code(exc: Exception) -> int | None:
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code
+        response = getattr(exc, "response", None)
+        if response is not None:
+            return getattr(response, "status_code", None)
+        return getattr(exc, "status_code", None)
+
+    def _describe_exception(self, exc: Exception) -> str:
+        if isinstance(exc, httpx.HTTPStatusError):
+            detail = ""
+            try:
+                body = exc.response.json()
+            except Exception:
+                body = None
+            if isinstance(body, dict):
+                for key in ("detail", "message", "error_description", "error"):
+                    value = body.get(key)
+                    if isinstance(value, str) and value.strip():
+                        detail = value.strip()
+                        break
+            if not detail:
+                try:
+                    detail = exc.response.text.strip()
+                except Exception:
+                    detail = ""
+            detail = detail[:160]
+            if detail:
+                return f"{exc.response.status_code} {detail}"
+            return f"{exc.response.status_code} {exc.response.reason_phrase}".strip()
+        message = str(exc).strip()
+        return message or exc.__class__.__name__
+
+    def _handle_runtime_error(
+        self,
+        exc: Exception,
+        *,
+        context: str,
+        invalidate_auth: bool = True,
+    ) -> None:
+        status_code = self._http_status_code(exc)
+        if invalidate_auth and status_code in {401, 403} and self.tokens is not None:
+            self._invalidate_saved_session("authentication expired; run /auth login")
+            return
+        self._write_system(f"{context}: {self._describe_exception(exc)}")
+
     @property
     def _auth_headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
@@ -143,6 +190,18 @@ class ScrollbackTUI2:
         self._http_client.headers.clear()
         self._http_client.headers.update(self._auth_headers)
 
+    def _invalidate_saved_session(self, reason: str) -> None:
+        self.tokens = None
+        self.current_user = None
+        self.state = reset_profile_session_state(
+            self.profile,
+            display_name=self.state.display_name,
+            participant_type="user",
+        )
+        save_tokens(self.profile, None)
+        self._sync_http_auth()
+        self._write_system(reason)
+
     @staticmethod
     def _token_expiring_soon(tokens: TokenState | None, *, skew_seconds: int = 30) -> bool:
         if tokens is None or not tokens.expires_at:
@@ -156,27 +215,30 @@ class ScrollbackTUI2:
     async def _refresh_oidc_tokens(self) -> bool:
         if self.tokens is None or not self.tokens.refresh_token:
             return False
-        discovery = await discover_oidc(self.oidc_issuer_url)
-        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
-            response = await client.post(
-                discovery["token_endpoint"],
-                data={
-                    "grant_type": "refresh_token",
-                    "client_id": self.oidc_client_id,
-                    "refresh_token": self.tokens.refresh_token,
-                },
+        try:
+            discovery = await discover_oidc(self.oidc_issuer_url)
+            async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+                response = await client.post(
+                    discovery["token_endpoint"],
+                    data={
+                        "grant_type": "refresh_token",
+                        "client_id": self.oidc_client_id,
+                        "refresh_token": self.tokens.refresh_token,
+                    },
+                )
+            if response.status_code >= 400:
+                return False
+            body = response.json()
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=body.get("expires_in", 300))
+            self.tokens = TokenState(
+                access_token=body["access_token"],
+                refresh_token=body.get("refresh_token", self.tokens.refresh_token),
+                expires_at=expires_at.isoformat(),
+                issuer=self.oidc_issuer_url,
+                client_id=self.oidc_client_id,
             )
-        if response.status_code >= 400:
+        except Exception:
             return False
-        body = response.json()
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=body.get("expires_in", 300))
-        self.tokens = TokenState(
-            access_token=body["access_token"],
-            refresh_token=body.get("refresh_token", self.tokens.refresh_token),
-            expires_at=expires_at.isoformat(),
-            issuer=self.oidc_issuer_url,
-            client_id=self.oidc_client_id,
-        )
         save_tokens(self.profile, self.tokens)
         self._sync_http_auth()
         return True
@@ -185,16 +247,22 @@ class ScrollbackTUI2:
         if self._token_expiring_soon(self.tokens):
             refreshed = await self._refresh_oidc_tokens()
             if not refreshed:
-                self._write_system("token refresh failed; run /auth login")
+                self._invalidate_saved_session("token refresh failed; run /auth login")
 
     async def _load_current_user(self) -> None:
         if self.tokens is None:
             self.current_user = None
             return
-        self.current_user = await fetch_current_user(
-            gateway=self.gateway,
-            access_token=self.tokens.access_token,
-        )
+        try:
+            self.current_user = await fetch_current_user(
+                gateway=self.gateway,
+                access_token=self.tokens.access_token,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401:
+                self._invalidate_saved_session("saved login expired; run /auth login")
+                return
+            raise
         self.state.user_id = self.current_user["user_id"]
         self.state.display_name = self.current_user["display_name"]
         self.state.participant_type = "user"
@@ -224,6 +292,30 @@ class ScrollbackTUI2:
             self.state.participant_id = current.get("participant_id")
             self.state.display_name = current.get("display_name", self.state.display_name)
 
+    @staticmethod
+    def _extract_workspace_id(body: dict) -> str:
+        workspace = body.get("workspace")
+        if isinstance(workspace, dict):
+            workspace_id = workspace.get("workspace_id")
+            if isinstance(workspace_id, str) and workspace_id:
+                return workspace_id
+        workspace_id = body.get("workspace_id")
+        if isinstance(workspace_id, str) and workspace_id:
+            return workspace_id
+        raise KeyError("workspace_id")
+
+    @staticmethod
+    def _extract_thread_id(body: dict) -> str:
+        thread = body.get("thread")
+        if isinstance(thread, dict):
+            thread_id = thread.get("thread_id")
+            if isinstance(thread_id, str) and thread_id:
+                return thread_id
+        thread_id = body.get("thread_id")
+        if isinstance(thread_id, str) and thread_id:
+            return thread_id
+        raise KeyError("thread_id")
+
     async def _ensure_context(self) -> None:
         assert self._http_client is not None
 
@@ -246,7 +338,7 @@ class ScrollbackTUI2:
             )
             response.raise_for_status()
             body = response.json()
-            self.state.workspace_id = body["workspace"]["workspace_id"]
+            self.state.workspace_id = self._extract_workspace_id(body)
             self._set_current_participant(body.get("participants", []))
             save_state(self.profile, self.state)
 
@@ -271,8 +363,12 @@ class ScrollbackTUI2:
         )
         response.raise_for_status()
         body = response.json()
-        self.state.thread_id = body["thread_id"]
+        self.state.thread_id = self._extract_thread_id(body)
+        memberships = body.get("memberships", [])
+        if memberships:
+            self.state.participant_id = memberships[0].get("participant_id", self.state.participant_id)
         self.state.last_sequence = 0
+        self._seen_message_ids.clear()
         save_state(self.profile, self.state)
 
     async def _list_workspaces(self) -> list[dict]:
@@ -386,6 +482,9 @@ class ScrollbackTUI2:
         assert self.state.thread_id is not None
         ws_base = self.gateway.replace("http://", "ws://").replace("https://", "wss://")
         while True:
+            await self._ensure_bearer_token()
+            if not self._is_authenticated:
+                return
             query = urlencode({"after_sequence": self.state.last_sequence})
             url = f"{ws_base}/v1/threads/{self.state.thread_id}/ws?{query}"
             headers = list(self._auth_headers.items())
@@ -398,22 +497,43 @@ class ScrollbackTUI2:
                 raise
             except websockets.exceptions.ConnectionClosed:
                 pass
+            except websockets.exceptions.InvalidStatus as exc:
+                status_code = self._http_status_code(exc)
+                if status_code in {401, 403}:
+                    self._invalidate_saved_session("websocket session expired; run /auth login")
+                    return
+                self._write_system(f"websocket error: {self._describe_exception(exc)}")
             except Exception as exc:
-                self._write_system(f"websocket error: {exc}")
+                self._write_system(f"websocket error: {self._describe_exception(exc)}")
             finally:
                 self._ws = None
             await asyncio.sleep(3)
 
     async def _activate_profile_session(self) -> None:
-        await self._ensure_bearer_token()
+        try:
+            await self._ensure_bearer_token()
+        except Exception as exc:
+            self._handle_runtime_error(exc, context="unable to refresh login")
+            return
         self._sync_http_auth()
         if self.tokens is None:
             self.current_user = None
             self._write_system(f"signed out ({self.profile}); run /auth login")
             return
-        await self._load_current_user()
-        await self._ensure_context()
-        await self._load_timeline()
+        try:
+            await self._load_current_user()
+        except Exception as exc:
+            self._handle_runtime_error(exc, context="unable to load current user")
+            return
+        if self.current_user is None or self.tokens is None:
+            self._write_system(f"signed out ({self.profile}); run /auth login")
+            return
+        try:
+            await self._ensure_context()
+            await self._load_timeline()
+        except Exception as exc:
+            self._handle_runtime_error(exc, context="unable to load workspace context")
+            return
         self._start_ws()
         self._write_system(
             f"profile {self.profile} ready as {self.state.display_name} in workspace {self.state.workspace_id[:8]} thread {self.state.thread_id[:8]}"
@@ -421,11 +541,15 @@ class ScrollbackTUI2:
 
     async def _login(self) -> None:
         self._write_system("starting device login")
-        self.tokens = await run_device_login(
-            issuer_url=self.oidc_issuer_url,
-            client_id=self.oidc_client_id,
-            write_line=self._print_line,
-        )
+        try:
+            self.tokens = await run_device_login(
+                issuer_url=self.oidc_issuer_url,
+                client_id=self.oidc_client_id,
+                write_line=self._print_line,
+            )
+        except Exception as exc:
+            self._write_system(f"login failed: {self._describe_exception(exc)}")
+            return
         save_tokens(self.profile, self.tokens)
         await self._activate_profile_session()
 
@@ -664,7 +788,11 @@ class ScrollbackTUI2:
         if url is None:
             self._write_system(f"link not found: {normalized}")
             return
-        webbrowser.open(url, new=2)
+        try:
+            webbrowser.open(url, new=2)
+        except Exception as exc:
+            self._write_system(f"unable to open link: {self._describe_exception(exc)}")
+            return
         self._write_system(f"opened link: {url}")
 
     def _copy_history(self) -> None:
@@ -726,7 +854,10 @@ class ScrollbackTUI2:
         self._print_line("Scrollback-first mode. Mouse selection should work normally in your terminal.")
         self._print_line("Type /help for commands.")
         try:
-            await self._activate_profile_session()
+            try:
+                await self._activate_profile_session()
+            except Exception as exc:
+                self._handle_runtime_error(exc, context="startup error", invalidate_auth=False)
             while not self._stop:
                 try:
                     raw = await asyncio.to_thread(input, f"{self.profile}> ")
@@ -738,10 +869,13 @@ class ScrollbackTUI2:
                 text = raw.strip()
                 if not text:
                     continue
-                if text.startswith("/"):
-                    await self._handle_command(text)
-                else:
-                    await self._send_message(text)
+                try:
+                    if text.startswith("/"):
+                        await self._handle_command(text)
+                    else:
+                        await self._send_message(text)
+                except Exception as exc:
+                    self._handle_runtime_error(exc, context="command failed")
         finally:
             await self._close_ws()
             if self._http_client is not None:
