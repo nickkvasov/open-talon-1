@@ -50,6 +50,9 @@ def test_local_startup_includes_keycloak_init_helper():
     assert "KC_BOOTSTRAP_ADMIN_USERNAME" in compose
     assert "KC_BOOTSTRAP_ADMIN_PASSWORD" in compose
     assert "keycloak \\\n      keycloak-init \\" in launcher
+    assert 'AGENT_TASK_PID_FILE="${RUN_DIR}/agent-task-worker.pid"' in launcher
+    assert '"agent-task-worker" \\' in launcher
+    assert '"agent_runtime.agent_task_worker" \\' in launcher
     assert ': "${AUTH_MODE:=any}"' in launcher
     assert ': "${OIDC_ISSUER_URL:=${OPEN_TALON_OIDC_ISSUER_URL}}"' in launcher
     assert ': "${OIDC_CLIENT_ID_TUI:=${OPEN_TALON_OIDC_CLIENT_ID}}"' in launcher

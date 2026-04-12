@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -10,6 +11,7 @@ from gateway_edge.auth.api_key import validate_api_key
 from gateway_edge.auth.identity import sync_oidc_auth_context
 from gateway_edge.auth.oidc import validate_oidc_token
 from gateway_edge.auth.openbao import validate_openbao_token
+from gateway_edge.authz import require_admin_access
 from gateway_edge.config import settings
 from gateway_edge.models import (
     AuthContext,
@@ -17,16 +19,21 @@ from gateway_edge.models import (
     AgentDefinition,
     AttachWorkspaceToolRequest,
     CreateAgentParticipantRequest,
+    CreateLlmProviderRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
+    DeleteLlmProviderRequest,
     DeleteParticipantRequest,
     DeleteWorkspaceToolRequest,
     DeleteWorkspaceRequest,
     MemoryEntry,
+    LlmEngineDescriptor,
+    LlmProviderDefinition,
+    LlmProviderHealthReport,
     ParticipantInput,
     ParticipantProfile,
     RoleDefinition,
@@ -39,6 +46,7 @@ from gateway_edge.models import (
     UpsertRoleDefinitionRequest,
     UpdateSystemToolRequest,
     UpdateAgentParticipantRequest,
+    UpdateLlmProviderRequest,
     UpdateMemoryEntryRequest,
     UpdateWorkspaceToolRequest,
     Workspace,
@@ -46,6 +54,8 @@ from gateway_edge.models import (
     WorkspaceTool,
 )
 from gateway_edge.services import collaboration as collab_svc
+from gateway_edge.services.llm_provider_health import check_llm_provider_health
+from gateway_edge.services.llm_registry import list_registered_llm_engines
 
 router = APIRouter(prefix="/v1", tags=["collaboration"])
 logger = logging.getLogger(__name__)
@@ -373,6 +383,167 @@ async def create_system_agent(
     )
     try:
         return await collab_svc.collaboration_service.create_system_agent(payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/llm-engines",
+    response_model=list[LlmEngineDescriptor],
+    summary="List registered LLM engines available to the system",
+)
+async def list_llm_engines() -> list[LlmEngineDescriptor]:
+    logger.debug("HTTP list_llm_engines")
+    return await list_registered_llm_engines()
+
+
+@router.post(
+    "/llm-providers",
+    response_model=LlmProviderDefinition,
+    summary="Create a system-level LLM provider definition",
+)
+async def create_llm_provider(
+    request: Request,
+    payload: CreateLlmProviderRequest,
+) -> LlmProviderDefinition:
+    require_admin_access(request)
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    logger.debug(
+        "HTTP create_llm_provider actor=%s engine_id=%r provider=%s",
+        _actor_log(payload.actor),
+        payload.engine_id,
+        payload.provider,
+    )
+    try:
+        return await collab_svc.collaboration_service.create_llm_provider(payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/llm-providers/validate",
+    response_model=LlmProviderHealthReport,
+    summary="Validate an LLM provider definition without persisting it",
+)
+async def validate_llm_provider(
+    request: Request,
+    payload: CreateLlmProviderRequest,
+) -> LlmProviderHealthReport:
+    require_admin_access(request)
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    logger.debug(
+        "HTTP validate_llm_provider actor=%s engine_id=%r provider=%s",
+        _actor_log(payload.actor),
+        payload.engine_id,
+        payload.provider,
+    )
+    try:
+        now = datetime.now(timezone.utc)
+        provider = LlmProviderDefinition(
+            provider_id=uuid4(),
+            engine_id=payload.engine_id,
+            display_name=payload.display_name,
+            description=payload.description,
+            provider=payload.provider,
+            endpoint_kind=payload.endpoint_kind,
+            url=payload.url,
+            default_model=payload.default_model,
+            capabilities=payload.capabilities,
+            locality=payload.locality,
+            priority=payload.priority,
+            enabled=payload.enabled,
+            secret_config=payload.secret_config,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        return await check_llm_provider_health(provider)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/llm-providers",
+    response_model=list[LlmProviderDefinition],
+    summary="List system-level LLM provider definitions",
+)
+async def list_llm_providers(request: Request) -> list[LlmProviderDefinition]:
+    require_admin_access(request)
+    logger.debug("HTTP list_llm_providers")
+    try:
+        return await collab_svc.collaboration_service.list_llm_providers()
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch(
+    "/llm-providers/{provider_id}",
+    response_model=LlmProviderDefinition,
+    summary="Update a system-level LLM provider definition",
+)
+async def update_llm_provider(
+    request: Request,
+    provider_id: UUID,
+    payload: UpdateLlmProviderRequest,
+) -> LlmProviderDefinition:
+    require_admin_access(request)
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    logger.debug(
+        "HTTP update_llm_provider provider_id=%s actor=%s",
+        provider_id,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.update_llm_provider(
+            provider_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/llm-providers/{provider_id}",
+    response_model=dict,
+    summary="Delete a system-level LLM provider definition",
+)
+async def delete_llm_provider(
+    request: Request,
+    provider_id: UUID,
+    payload: DeleteLlmProviderRequest = Body(...),
+) -> dict[str, bool | str]:
+    require_admin_access(request)
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    logger.debug(
+        "HTTP delete_llm_provider provider_id=%s actor=%s",
+        provider_id,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.delete_llm_provider(
+            provider_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/llm-providers/{provider_id}/health-check",
+    response_model=LlmProviderHealthReport,
+    summary="Validate a stored LLM provider configuration",
+)
+async def health_check_llm_provider(
+    request: Request,
+    provider_id: UUID,
+) -> LlmProviderHealthReport:
+    require_admin_access(request)
+    logger.debug("HTTP health_check_llm_provider provider_id=%s", provider_id)
+    try:
+        provider = await collab_svc.collaboration_service.get_llm_provider(provider_id)
+        return await check_llm_provider_health(provider)
     except Exception as exc:
         raise _http_error(exc) from exc
 

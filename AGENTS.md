@@ -10,7 +10,7 @@ Main components:
 
 - `services/gateway-edge`: FastAPI gateway for REST, SSE, WebSocket, auth, admin, and collaboration APIs
 - `services/core-collab`: canonical collaboration domain logic and Postgres repository layer
-- `services/agent-runtime`: stateless workers for agent-loop execution, tool execution, and lease reconciliation
+- `services/agent-runtime`: stateless workers for task dispatch, agent-loop execution, tool execution, and lease reconciliation
 - `packages/contracts`: shared Pydantic contracts used across services
 - `apps/tui`: terminal UI client for workspace/thread collaboration
   - `open_talon_tui.tui2` is the preferred human terminal client when copy/select/link behavior matters
@@ -41,6 +41,8 @@ Primary local flow:
 - Keep workspace-local state on `participants`: status, visibility scope, roles, capabilities, timestamps, and metadata.
 - Keep execution-side workspace materialization separate from collaboration `Workspace` models. Use `ExecutionWorkspaceRef` for executor payloads.
 - Authenticated human identity should be derived in `gateway-edge` from OIDC auth context, not trusted from client-provided actor fields.
+- LLM providers are persistent records in `llm_providers`; do not reintroduce env-defined engine registries.
+- Local OpenBao now uses persistent file storage under `infrastructure/data/openbao`; do not assume `docker compose down` clears local secrets.
 
 ## Database Rules
 
@@ -70,6 +72,10 @@ source .venv/bin/activate
   - base URL: `http://127.0.0.1:8081`
   - realm: `open-talon`
   - TUI client: `open-talon-tui`
+- Default local OpenBao:
+  - base URL: `http://127.0.0.1:8200`
+  - root token: `root`
+  - persistent data dir: `infrastructure/data/openbao`
 - Local infrastructure defaults are documented in `infrastructure/.env.example`.
 
 ## Testing Expectations
@@ -109,6 +115,7 @@ If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 - Do not remove compatibility paths from live data unless the corresponding migration is included.
 - When cleaning legacy columns or data, update both code and migration flow together.
 - When changing worker behavior, cover both durable state transitions and emitted Kafka/thread events in tests.
+- When changing provider or secret behavior, keep `gateway-edge`, `core-collab`, `agent-runtime`, and docs aligned on persistent provider definitions and OpenBao-backed secret resolution.
 
 ## TUI Rules
 
@@ -131,9 +138,10 @@ If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 3. If schema changes are involved, add a new file in `db/migrations`.
 4. If auth or identity behavior changes, inspect `services/gateway-edge`, `services/core-collab`, `packages/contracts`, and TUI flows together.
 5. If execution behavior changes, inspect `services/agent-runtime`, `services/core-collab`, and gateway event fanout together.
-6. Update code to match the migrated schema.
-7. Run targeted tests.
-8. Run broader tests if the change affects shared contracts or persistence.
+6. If LLM provider or secret behavior changes, inspect `llm_providers` migrations, gateway provider routes, runtime secret resolution, and local OpenBao wiring together.
+7. Update code to match the migrated schema.
+8. Run targeted tests.
+9. Run broader tests if the change affects shared contracts or persistence.
 
 ## Key Files
 
@@ -143,11 +151,15 @@ If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 - `services/core-collab/core_collab/repository.py`
 - `services/core-collab/core_collab/kernel.py`
 - `services/agent-runtime/agent_runtime/workers.py`
+- `services/agent-runtime/agent_runtime/agent_task_worker.py`
+- `services/agent-runtime/agent_runtime/secrets.py`
 - `services/agent-runtime/agent_runtime/execution/`
 - `services/gateway-edge/gateway_edge/services/collaboration.py`
+- `services/gateway-edge/gateway_edge/services/llm_provider_health.py`
 - `services/gateway-edge/gateway_edge/auth/`
 - `services/gateway-edge/gateway_edge/services/events.py`
 - `services/gateway-edge/gateway_edge/db/postgres.py`
+- `packages/contracts/open_talon_contracts/llm_engines.py`
 - `apps/tui/open_talon_tui/main.py`
 - `apps/tui/open_talon_tui/tui2.py`
 

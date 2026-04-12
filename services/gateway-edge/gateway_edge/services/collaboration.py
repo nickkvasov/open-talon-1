@@ -25,17 +25,20 @@ from gateway_edge.models import (
     AgentDefinition,
     AttachWorkspaceToolRequest,
     CreateAgentParticipantRequest,
+    CreateLlmProviderRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
+    DeleteLlmProviderRequest,
     DeleteParticipantRequest,
     DeleteWorkspaceToolRequest,
     DeleteWorkspaceRequest,
     EventEnvelope,
     MemoryEntry,
+    LlmProviderDefinition,
     ParticipantInput,
     RoleDefinition,
     SystemToolDefinition,
@@ -47,6 +50,7 @@ from gateway_edge.models import (
     UpsertRoleDefinitionRequest,
     UpdateSystemToolRequest,
     UpdateAgentParticipantRequest,
+    UpdateLlmProviderRequest,
     UpdateMemoryEntryRequest,
     UpdateWorkspaceToolRequest,
     Workspace,
@@ -170,8 +174,24 @@ class CollaborationService:
         assert result.agent is not None
         return result.agent
 
+    async def create_llm_provider(
+        self, payload: CreateLlmProviderRequest
+    ) -> LlmProviderDefinition:
+        result = await self._require_kernel().create_llm_provider(payload)
+        assert result.provider is not None
+        return result.provider
+
     async def list_system_agents(self) -> list[AgentDefinition]:
         return await self._require_kernel().list_system_agents()
+
+    async def list_llm_providers(self) -> list[LlmProviderDefinition]:
+        return await self._require_kernel().list_llm_providers()
+
+    async def get_llm_provider(self, provider_id: UUID) -> LlmProviderDefinition:
+        provider = await self._require_kernel().get_llm_provider(provider_id)
+        if provider is None:
+            raise KeyError(f"LLM provider {provider_id} not found")
+        return provider
 
     async def create_system_tool(
         self, payload: CreateSystemToolRequest
@@ -190,12 +210,26 @@ class CollaborationService:
         assert result.tool is not None
         return result.tool
 
+    async def update_llm_provider(
+        self, provider_id: UUID, payload: UpdateLlmProviderRequest
+    ) -> LlmProviderDefinition:
+        result = await self._require_kernel().update_llm_provider(provider_id, payload)
+        assert result.provider is not None
+        return result.provider
+
     async def update_system_agent(
         self, agent_id: UUID, payload: UpdateSystemAgentRequest
     ) -> AgentDefinition:
         result = await self._require_kernel().update_system_agent(agent_id, payload)
         assert result.agent is not None
         return result.agent
+
+    async def delete_llm_provider(
+        self,
+        provider_id: UUID,
+        payload: DeleteLlmProviderRequest,
+    ) -> dict[str, bool | str]:
+        return await self._require_kernel().delete_llm_provider(provider_id, payload)
 
     async def upsert_role_definition(
         self,

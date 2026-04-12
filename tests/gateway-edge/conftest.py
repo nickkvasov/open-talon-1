@@ -43,6 +43,7 @@ class MockCollaborationService:
         self.workspaces = {}
         self.system_agents = {}
         self.system_tools = {}
+        self.llm_providers = {}
         self.participants = {}
         self.role_definitions = {}
         self.workspace_tools = {}
@@ -241,6 +242,59 @@ class MockCollaborationService:
     async def list_system_agents(self):
         return list(self.system_agents.values())
 
+    def _system_agents_referencing_engine(self, engine_id: str):
+        referenced = []
+        for agent in self.system_agents.values():
+            if agent.endpoint.engine_id == engine_id:
+                referenced.append(agent)
+                continue
+            runtime = agent.definition.get("runtime")
+            if not isinstance(runtime, dict):
+                continue
+            if runtime.get("engine_id") == engine_id:
+                referenced.append(agent)
+                continue
+            preferred_engine_ids = runtime.get("preferred_engine_ids")
+            if isinstance(preferred_engine_ids, list) and engine_id in preferred_engine_ids:
+                referenced.append(agent)
+        return referenced
+
+    async def create_llm_provider(self, payload):
+        from gateway_edge.models import LlmProviderDefinition
+
+        now = datetime.now(timezone.utc)
+        provider = LlmProviderDefinition(
+            provider_id=uuid4(),
+            engine_id=payload.engine_id,
+            display_name=payload.display_name,
+            description=payload.description,
+            provider=payload.provider,
+            endpoint_kind=payload.endpoint_kind,
+            url=payload.url,
+            default_model=payload.default_model,
+            capabilities=payload.capabilities,
+            locality=payload.locality,
+            priority=payload.priority,
+            enabled=payload.enabled,
+            secret_config=payload.secret_config,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        self.llm_providers[str(provider.provider_id)] = provider
+        return provider
+
+    async def list_llm_providers(self):
+        return list(self.llm_providers.values())
+
+    async def get_llm_provider(self, provider_id: UUID):
+        provider = self.llm_providers.get(str(provider_id))
+        if provider is None:
+            raise KeyError(f"LLM provider {provider_id} not found")
+        return provider
+
     async def create_system_tool(self, payload):
         from gateway_edge.models import SystemToolDefinition
 
@@ -324,6 +378,68 @@ class MockCollaborationService:
             )
         self.system_agents[str(agent_id)] = updated
         return updated
+
+    async def update_llm_provider(self, provider_id: UUID, payload):
+        provider = self.llm_providers.get(str(provider_id))
+        if provider is None:
+            raise KeyError(f"LLM provider {provider_id} not found")
+        references = self._system_agents_referencing_engine(provider.engine_id)
+        if payload.engine_id is not None and payload.engine_id != provider.engine_id and references:
+            raise ValueError(
+                f"Cannot rename LLM provider engine_id {provider.engine_id!r}; "
+                f"referenced by system agents: {', '.join(agent.display_name for agent in references)}"
+            )
+        if provider.enabled and payload.enabled is False and references:
+            raise ValueError(
+                f"Cannot disable LLM provider {provider.engine_id!r}; "
+                f"referenced by system agents: {', '.join(agent.display_name for agent in references)}"
+            )
+        updated = provider.model_copy(
+            update={
+                "engine_id": payload.engine_id or provider.engine_id,
+                "display_name": payload.display_name or provider.display_name,
+                "description": payload.description or provider.description,
+                "provider": payload.provider or provider.provider,
+                "endpoint_kind": payload.endpoint_kind or provider.endpoint_kind,
+                "url": payload.url if payload.url is not None else provider.url,
+                "default_model": (
+                    payload.default_model
+                    if payload.default_model is not None
+                    else provider.default_model
+                ),
+                "capabilities": (
+                    payload.capabilities
+                    if payload.capabilities is not None
+                    else provider.capabilities
+                ),
+                "locality": payload.locality or provider.locality,
+                "priority": payload.priority if payload.priority is not None else provider.priority,
+                "enabled": payload.enabled if payload.enabled is not None else provider.enabled,
+                "secret_config": (
+                    payload.secret_config
+                    if payload.secret_config is not None
+                    else provider.secret_config
+                ),
+                "updated_by": payload.actor.participant_id,
+                "updated_at": datetime.now(timezone.utc),
+                "metadata": {**provider.metadata, **payload.metadata} if payload.metadata is not None else provider.metadata,
+            }
+        )
+        self.llm_providers[str(provider_id)] = updated
+        return updated
+
+    async def delete_llm_provider(self, provider_id: UUID, payload):
+        provider = self.llm_providers.get(str(provider_id))
+        if provider is None:
+            raise KeyError(f"LLM provider {provider_id} not found")
+        references = self._system_agents_referencing_engine(provider.engine_id)
+        if references:
+            raise ValueError(
+                f"Cannot delete LLM provider {provider.engine_id!r}; "
+                f"referenced by system agents: {', '.join(agent.display_name for agent in references)}"
+            )
+        self.llm_providers.pop(str(provider_id), None)
+        return {"deleted": True, "provider_id": str(provider_id)}
 
     async def upsert_role_definition(self, workspace_id: UUID, payload):
         from gateway_edge.models import RoleDefinition

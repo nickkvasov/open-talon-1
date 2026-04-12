@@ -152,7 +152,7 @@ def test_openbao_connection(infrastructure):
     client = hvac.Client(url=f'http://localhost:{BAO_PORT}', token=BAO_ROOT_TOKEN)
     assert client.is_authenticated()
     
-    # In OpenBao dev mode, the 'secret' KV v2 engine is enabled by default
+    # The local init helper keeps the 'secret' KV v2 engine available.
     client.secrets.kv.v2.create_or_update_secret(
         path='test_secret',
         secret=dict(foo='bar'),

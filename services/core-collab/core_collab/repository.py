@@ -17,6 +17,7 @@ from .contracts import (
     EventEnvelope,
     Membership,
     MemoryEntry,
+    LlmProviderDefinition,
     ParticipantProfile,
     Run,
     RunStep,
@@ -317,6 +318,58 @@ class CollaborationRepository:
             self._json_dumps(tool.metadata),
         )
 
+    async def upsert_llm_provider(
+        self, conn: asyncpg.Connection, provider: LlmProviderDefinition
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO llm_providers (
+                provider_id, engine_id, display_name, description, provider, endpoint_kind,
+                url, default_model, capabilities, locality, priority, enabled, secret_config,
+                created_by, created_at, updated_by, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11, $12, $13,
+                $14, $15, $16, $17, $18
+            )
+            ON CONFLICT (provider_id) DO UPDATE
+                SET engine_id = EXCLUDED.engine_id,
+                    display_name = EXCLUDED.display_name,
+                    description = EXCLUDED.description,
+                    provider = EXCLUDED.provider,
+                    endpoint_kind = EXCLUDED.endpoint_kind,
+                    url = EXCLUDED.url,
+                    default_model = EXCLUDED.default_model,
+                    capabilities = EXCLUDED.capabilities,
+                    locality = EXCLUDED.locality,
+                    priority = EXCLUDED.priority,
+                    enabled = EXCLUDED.enabled,
+                    secret_config = EXCLUDED.secret_config,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            provider.provider_id,
+            provider.engine_id,
+            provider.display_name,
+            provider.description,
+            provider.provider,
+            provider.endpoint_kind,
+            provider.url,
+            provider.default_model,
+            self._json_dumps(provider.capabilities),
+            provider.locality,
+            provider.priority,
+            provider.enabled,
+            self._json_dumps(provider.secret_config),
+            provider.created_by,
+            provider.created_at,
+            provider.updated_by,
+            provider.updated_at,
+            self._json_dumps(provider.metadata),
+        )
+
     async def upsert_workspace_tool(
         self,
         conn: asyncpg.Connection,
@@ -359,6 +412,21 @@ class CollaborationRepository:
             """,
             workspace_id,
             tool_id,
+        )
+        return result.endswith("1")
+
+    async def delete_llm_provider(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        provider_id: UUID,
+    ) -> bool:
+        result = await conn.execute(
+            """
+            DELETE FROM llm_providers
+            WHERE provider_id = $1
+            """,
+            provider_id,
         )
         return result.endswith("1")
 
@@ -864,6 +932,34 @@ class CollaborationRepository:
         )
         return [self._system_agent_from_row(row) for row in rows]
 
+    async def list_system_agents_referencing_llm_engine(
+        self,
+        engine_id: str,
+    ) -> list[AgentDefinition]:
+        rows = await self._pool.fetch(
+            """
+            SELECT agent_id, display_name, description, role, capabilities, endpoint,
+                   system_prompt, interaction_contract, definition, created_by, created_at, updated_at, metadata
+            FROM system_agents
+            WHERE endpoint->>'engine_id' = $1
+               OR definition->'runtime'->>'engine_id' = $1
+               OR EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements_text(
+                        CASE
+                            WHEN jsonb_typeof(definition->'runtime'->'preferred_engine_ids') = 'array'
+                                THEN definition->'runtime'->'preferred_engine_ids'
+                            ELSE '[]'::jsonb
+                        END
+                    ) AS preferred(engine_id)
+                    WHERE preferred.engine_id = $1
+               )
+            ORDER BY created_at ASC
+            """,
+            engine_id,
+        )
+        return [self._system_agent_from_row(row) for row in rows]
+
     async def list_system_tools(self) -> list[SystemToolDefinition]:
         rows = await self._pool.fetch(
             """
@@ -875,6 +971,18 @@ class CollaborationRepository:
             """
         )
         return [self._system_tool_from_row(row) for row in rows]
+
+    async def list_llm_providers(self) -> list[LlmProviderDefinition]:
+        rows = await self._pool.fetch(
+            """
+            SELECT provider_id, engine_id, display_name, description, provider, endpoint_kind,
+                   url, default_model, capabilities, locality, priority, enabled, secret_config,
+                   created_by, created_at, updated_by, updated_at, metadata
+            FROM llm_providers
+            ORDER BY created_at ASC
+            """
+        )
+        return [self._llm_provider_from_row(row) for row in rows]
 
     async def fetch_system_agent(self, agent_id: UUID) -> AgentDefinition | None:
         row = await self._pool.fetchrow(
@@ -900,6 +1008,19 @@ class CollaborationRepository:
             tool_id,
         )
         return self._system_tool_from_row(row) if row else None
+
+    async def fetch_llm_provider(self, provider_id: UUID) -> LlmProviderDefinition | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT provider_id, engine_id, display_name, description, provider, endpoint_kind,
+                   url, default_model, capabilities, locality, priority, enabled, secret_config,
+                   created_by, created_at, updated_by, updated_at, metadata
+            FROM llm_providers
+            WHERE provider_id = $1
+            """,
+            provider_id,
+        )
+        return self._llm_provider_from_row(row) if row else None
 
     async def list_workspace_tools(self, workspace_id: UUID) -> list[WorkspaceTool]:
         rows = await self._pool.fetch(
@@ -1779,6 +1900,34 @@ class CollaborationRepository:
                     row["execution_profile"], default={}
                 ),
                 trust_level=row["trust_level"],
+            ),
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_by=row["updated_by"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _llm_provider_from_row(row: asyncpg.Record) -> LlmProviderDefinition:
+        return LlmProviderDefinition(
+            provider_id=row["provider_id"],
+            engine_id=row["engine_id"],
+            display_name=row["display_name"],
+            description=row["description"],
+            provider=row["provider"],
+            endpoint_kind=row["endpoint_kind"],
+            url=row["url"],
+            default_model=row["default_model"],
+            capabilities=list(
+                CollaborationRepository._json_value(row["capabilities"], default=[])
+            ),
+            locality=row["locality"],
+            priority=row["priority"],
+            enabled=row["enabled"],
+            secret_config=CollaborationRepository._json_value(
+                row["secret_config"],
+                default={},
             ),
             created_by=row["created_by"],
             created_at=row["created_at"],

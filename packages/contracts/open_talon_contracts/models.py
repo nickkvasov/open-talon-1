@@ -6,6 +6,8 @@ from uuid import UUID, uuid4
 
 from pydantic import AliasChoices, BaseModel, Field
 
+from .llm_engines import LlmEngineEndpointKind, LlmEngineLocality
+
 Visibility = Literal["public", "workspace", "agents_only", "private"]
 ParticipantType = Literal["user", "agent"]
 ParticipantStatus = Literal["active", "idle", "busy", "offline"]
@@ -77,6 +79,8 @@ class AgentEndpoint(BaseModel):
     kind: AgentEndpointKind
     url: str | None = None
     model: str | None = None
+    engine_id: str | None = None
+    provider: str | None = None
 
 
 class AgentConfiguration(BaseModel):
@@ -235,6 +239,43 @@ class SystemToolDefinition(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
     updated_by: UUID
     updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LlmProviderDefinition(BaseModel):
+    provider_id: UUID
+    engine_id: str
+    display_name: str
+    description: str
+    provider: str
+    endpoint_kind: LlmEngineEndpointKind = "remote"
+    url: str | None = None
+    default_model: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    locality: LlmEngineLocality = "cloud"
+    priority: int = 100
+    enabled: bool = True
+    secret_config: dict[str, Any] = Field(default_factory=dict)
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LlmProviderHealthCheck(BaseModel):
+    name: str
+    status: Literal["ok", "warn", "fail"]
+    detail: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LlmProviderHealthReport(BaseModel):
+    provider_id: UUID
+    engine_id: str
+    status: Literal["healthy", "degraded", "unhealthy"]
+    checked_at: datetime = Field(default_factory=utcnow)
+    checks: list[LlmProviderHealthCheck] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -574,6 +615,44 @@ class UpdateSystemToolRequest(BaseModel):
     input_schema: dict[str, Any] | None = None
     execution: ToolExecutionBinding | None = None
     metadata: dict[str, Any] | None = None
+
+
+class CreateLlmProviderRequest(BaseModel):
+    actor: ParticipantInput
+    engine_id: str
+    display_name: str
+    description: str
+    provider: str
+    endpoint_kind: LlmEngineEndpointKind = "remote"
+    url: str | None = None
+    default_model: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    locality: LlmEngineLocality = "cloud"
+    priority: int = 100
+    enabled: bool = True
+    secret_config: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateLlmProviderRequest(BaseModel):
+    actor: ParticipantInput
+    engine_id: str | None = None
+    display_name: str | None = None
+    description: str | None = None
+    provider: str | None = None
+    endpoint_kind: LlmEngineEndpointKind | None = None
+    url: str | None = None
+    default_model: str | None = None
+    capabilities: list[str] | None = None
+    locality: LlmEngineLocality | None = None
+    priority: int | None = None
+    enabled: bool | None = None
+    secret_config: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class DeleteLlmProviderRequest(BaseModel):
+    actor: ParticipantInput
 
 
 class AttachWorkspaceToolRequest(BaseModel):

@@ -20,12 +20,14 @@ from .contracts import (
     AssumeParticipantRoleRequest,
     Artifact,
     CreateAgentParticipantRequest,
+    CreateLlmProviderRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
+    DeleteLlmProviderRequest,
     DeleteParticipantRequest,
     DeleteWorkspaceToolRequest,
     DeleteWorkspaceRequest,
@@ -33,6 +35,7 @@ from .contracts import (
     EventEnvelope,
     Membership,
     MemoryEntry,
+    LlmProviderDefinition,
     ParticipantInput,
     ParticipantProfile,
     PresenceState,
@@ -52,6 +55,7 @@ from .contracts import (
     ToolCall,
     ToolCallResult,
     UpdateSystemAgentRequest,
+    UpdateLlmProviderRequest,
     UpsertRoleDefinitionRequest,
     UpdateSystemToolRequest,
     build_default_interaction_contract,
@@ -118,6 +122,11 @@ class SystemToolCommandResult(CommandResult):
 @dataclass
 class AgentDefinitionCommandResult(CommandResult):
     agent: AgentDefinition | None = None
+
+
+@dataclass
+class LlmProviderCommandResult(CommandResult):
+    provider: LlmProviderDefinition | None = None
 
 
 @dataclass
@@ -389,8 +398,43 @@ class CollaborationKernel:
                 await self._repository.upsert_system_tool(conn, tool)
         return SystemToolCommandResult(tool=tool)
 
+    async def create_llm_provider(
+        self, payload: CreateLlmProviderRequest
+    ) -> LlmProviderCommandResult:
+        now = self._now()
+        provider = LlmProviderDefinition(
+            provider_id=uuid4(),
+            engine_id=payload.engine_id,
+            display_name=payload.display_name,
+            description=payload.description,
+            provider=payload.provider,
+            endpoint_kind=payload.endpoint_kind,
+            url=payload.url,
+            default_model=payload.default_model,
+            capabilities=payload.capabilities,
+            locality=payload.locality,
+            priority=payload.priority,
+            enabled=payload.enabled,
+            secret_config=payload.secret_config,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_llm_provider(conn, provider)
+        return LlmProviderCommandResult(provider=provider)
+
     async def list_system_tools(self) -> list[SystemToolDefinition]:
         return await self._repository.list_system_tools()
+
+    async def list_llm_providers(self) -> list[LlmProviderDefinition]:
+        return await self._repository.list_llm_providers()
+
+    async def get_llm_provider(self, provider_id: UUID) -> LlmProviderDefinition | None:
+        return await self._repository.fetch_llm_provider(provider_id)
 
     async def update_system_tool(
         self, tool_id: UUID, payload: UpdateSystemToolRequest
@@ -437,6 +481,63 @@ class CollaborationKernel:
                 await self._repository.upsert_system_tool(conn, updated)
         return SystemToolCommandResult(tool=updated)
 
+    async def update_llm_provider(
+        self, provider_id: UUID, payload: UpdateLlmProviderRequest
+    ) -> LlmProviderCommandResult:
+        existing = await self._repository.fetch_llm_provider(provider_id)
+        if existing is None:
+            raise KeyError(f"LLM provider {provider_id} not found")
+        references = await self._llm_provider_references(existing.engine_id)
+        if payload.engine_id is not None and payload.engine_id != existing.engine_id and references:
+            raise ValueError(
+                f"Cannot rename LLM provider engine_id {existing.engine_id!r}; "
+                f"referenced by system agents: {', '.join(agent.display_name for agent in references)}"
+            )
+        if existing.enabled and payload.enabled is False and references:
+            raise ValueError(
+                f"Cannot disable LLM provider {existing.engine_id!r}; "
+                f"referenced by system agents: {', '.join(agent.display_name for agent in references)}"
+            )
+        updated = existing.model_copy(
+            update={
+                "engine_id": payload.engine_id or existing.engine_id,
+                "display_name": payload.display_name or existing.display_name,
+                "description": payload.description or existing.description,
+                "provider": payload.provider or existing.provider,
+                "endpoint_kind": payload.endpoint_kind or existing.endpoint_kind,
+                "url": payload.url if payload.url is not None else existing.url,
+                "default_model": (
+                    payload.default_model
+                    if payload.default_model is not None
+                    else existing.default_model
+                ),
+                "capabilities": (
+                    payload.capabilities
+                    if payload.capabilities is not None
+                    else existing.capabilities
+                ),
+                "locality": payload.locality or existing.locality,
+                "priority": payload.priority if payload.priority is not None else existing.priority,
+                "enabled": payload.enabled if payload.enabled is not None else existing.enabled,
+                "secret_config": (
+                    payload.secret_config
+                    if payload.secret_config is not None
+                    else existing.secret_config
+                ),
+                "updated_by": payload.actor.participant_id,
+                "updated_at": self._now(),
+                "metadata": (
+                    {**existing.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else existing.metadata
+                ),
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_llm_provider(conn, updated)
+        return LlmProviderCommandResult(provider=updated)
+
     async def update_system_agent(
         self, agent_id: UUID, payload: UpdateSystemAgentRequest
     ) -> AgentDefinitionCommandResult:
@@ -477,6 +578,31 @@ class CollaborationKernel:
             async with conn.transaction():
                 await self._repository.upsert_system_agent(conn, updated)
         return AgentDefinitionCommandResult(agent=updated)
+
+    async def delete_llm_provider(
+        self, provider_id: UUID, payload: DeleteLlmProviderRequest
+    ) -> dict[str, bool | str]:
+        existing = await self._repository.fetch_llm_provider(provider_id)
+        if existing is None:
+            raise KeyError(f"LLM provider {provider_id} not found")
+        references = await self._llm_provider_references(existing.engine_id)
+        if references:
+            raise ValueError(
+                f"Cannot delete LLM provider {existing.engine_id!r}; "
+                f"referenced by system agents: {', '.join(agent.display_name for agent in references)}"
+            )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                deleted = await self._repository.delete_llm_provider(
+                    conn,
+                    provider_id=provider_id,
+                )
+        if not deleted:
+            raise KeyError(f"LLM provider {provider_id} not found")
+        return {"deleted": True, "provider_id": str(provider_id)}
+
+    async def _llm_provider_references(self, engine_id: str) -> list[AgentDefinition]:
+        return await self._repository.list_system_agents_referencing_llm_engine(engine_id)
 
     async def _backfill_system_agent_interaction_contracts(self) -> None:
         agents = await self._repository.list_system_agents()

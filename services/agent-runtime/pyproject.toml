@@ -16,6 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
+talon-agent-task-worker = "agent_runtime.agent_task_worker:main"
 talon-agent-loop-worker = "agent_runtime.agent_loop_worker:main"
 talon-tool-worker = "agent_runtime.tool_worker:main"
 talon-reconciler = "agent_runtime.reconciler:main"

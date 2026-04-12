@@ -26,9 +26,15 @@ import websockets
 import websockets.exceptions
 
 from open_talon_tui.main import (
+    _LLM_PROVIDER_COMMAND_HELP,
+    _LLM_PROVIDER_CREATE_USAGE,
+    _LLM_PROVIDER_UPDATE_USAGE,
     _DEFAULT_OIDC_CLIENT_ID,
     _DEFAULT_OIDC_ISSUER_URL,
     _URL_PATTERN,
+    _build_llm_provider_payload,
+    _parse_command_assignments,
+    _resolve_llm_provider_target,
     ClientState,
     TokenState,
     discover_oidc,
@@ -104,6 +110,13 @@ class ScrollbackTUI2:
         "/account whoami",
         "/account list",
         "/account switch",
+        "/llm-provider list",
+        "/llm-provider show",
+        "/llm-provider create",
+        "/llm-provider update",
+        "/llm-provider enable",
+        "/llm-provider disable",
+        "/llm-provider delete",
         "/workspace list",
         "/workspace show",
         "/workspace create",
@@ -166,6 +179,7 @@ class ScrollbackTUI2:
         self._prompt_cursor = 0
         self._recent_activity: list[str] = []
         self._last_user_validation_at: datetime | None = None
+        self._llm_provider_suggestions: list[dict[str, str]] = []
 
     def _command_suggestions(self, buffer: str) -> list[str]:
         stripped = buffer.lstrip()
@@ -210,6 +224,23 @@ class ScrollbackTUI2:
                 for target in link_targets
                 if f"/open {target}".startswith(stripped.rstrip())
             ]
+        elif parts[0] == "/llm-provider" and len(parts) == 2:
+            provider_targets: list[str] = []
+            for provider in self._llm_provider_suggestions:
+                for candidate in (
+                    provider["display_name"],
+                    provider["engine_id"],
+                    provider["provider_id"][:8],
+                    provider["provider_id"],
+                ):
+                    if candidate not in provider_targets:
+                        provider_targets.append(candidate)
+            if parts[1] in {"show", "update", "delete", "enable", "disable"}:
+                suggestions = [
+                    f"/llm-provider {parts[1]} {target}"
+                    for target in provider_targets
+                    if f"/llm-provider {parts[1]} {target}".startswith(stripped.rstrip())
+                ]
         return [f"{leading_space}{suggestion}" for suggestion in suggestions]
 
     @staticmethod
@@ -780,6 +811,58 @@ class ScrollbackTUI2:
         response.raise_for_status()
         return response.json()
 
+    async def _list_llm_providers(self) -> list[dict]:
+        assert self._http_client is not None
+        response = await self._http_client.get(f"{self.gateway}/v1/llm-providers")
+        response.raise_for_status()
+        providers = response.json()
+        self._llm_provider_suggestions = [
+            {
+                "provider_id": item["provider_id"],
+                "engine_id": item["engine_id"],
+                "display_name": item["display_name"],
+            }
+            for item in providers
+        ]
+        return providers
+
+    async def _create_llm_provider(self, payload: dict[str, object]) -> dict:
+        assert self._http_client is not None
+        response = await self._http_client.post(
+            f"{self.gateway}/v1/llm-providers",
+            json={
+                "actor": self.actor_payload,
+                **payload,
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def _update_llm_provider(
+        self,
+        provider_id: str,
+        payload: dict[str, object],
+    ) -> dict:
+        assert self._http_client is not None
+        response = await self._http_client.patch(
+            f"{self.gateway}/v1/llm-providers/{provider_id}",
+            json={
+                "actor": self.actor_payload,
+                **payload,
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def _delete_llm_provider(self, provider_id: str) -> None:
+        assert self._http_client is not None
+        response = await self._http_client.request(
+            "DELETE",
+            f"{self.gateway}/v1/llm-providers/{provider_id}",
+            json={"actor": self.actor_payload},
+        )
+        response.raise_for_status()
+
     def _resolve_workspace_target(self, workspaces: list[dict], target: str) -> dict | None:
         normalized = target.strip()
         if not normalized or normalized == "current":
@@ -811,6 +894,141 @@ class ScrollbackTUI2:
             if thread["title"].lower() == lowered:
                 return thread
         return None
+
+    async def _handle_llm_provider_command(self, command: str) -> None:
+        if not self._is_authenticated:
+            self._write_system("sign in first with /auth login")
+            return
+        parts = command.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            self._write_system(_LLM_PROVIDER_COMMAND_HELP)
+            return
+        action = parts[1].lower()
+        target = parts[2].strip() if len(parts) > 2 else ""
+
+        if action == "list":
+            providers = await self._list_llm_providers()
+            if not providers:
+                self._write_system("no llm providers found")
+                return
+            for provider in providers:
+                locality = provider.get("locality") or "unknown"
+                enabled = "enabled" if provider.get("enabled", True) else "disabled"
+                model = provider.get("default_model") or "auto"
+                self._write_system(
+                    f"{provider['display_name']} ({provider['engine_id']}) | provider={provider['provider']} | model={model} | locality={locality} | {enabled}"
+                )
+            return
+
+        if action == "create":
+            if not target:
+                self._write_system(_LLM_PROVIDER_CREATE_USAGE)
+                return
+            try:
+                payload = _build_llm_provider_payload(
+                    _parse_command_assignments(target),
+                    partial=False,
+                )
+            except ValueError as exc:
+                self._write_system(str(exc))
+                self._write_system(_LLM_PROVIDER_CREATE_USAGE)
+                return
+            provider = await self._create_llm_provider(payload)
+            self._write_system(
+                f"created llm provider: {provider['display_name']} ({provider['engine_id']})"
+            )
+            return
+
+        if action not in {"show", "update", "enable", "disable", "delete"}:
+            self._write_system(_LLM_PROVIDER_COMMAND_HELP)
+            return
+
+        providers = await self._list_llm_providers()
+        provider, remainder = None, ""
+        if action == "update":
+            target_parts = target.split(maxsplit=1)
+            lookup_target = target_parts[0] if target_parts else ""
+            remainder = target_parts[1] if len(target_parts) > 1 else ""
+            provider = _resolve_llm_provider_target(providers, lookup_target)
+            if provider is None:
+                self._write_system(f"llm provider not found: {lookup_target or 'current'}")
+                return
+            if not remainder:
+                self._write_system(_LLM_PROVIDER_UPDATE_USAGE)
+                return
+        else:
+            provider = _resolve_llm_provider_target(providers, target)
+            if provider is None:
+                self._write_system(f"llm provider not found: {target}")
+                return
+
+        if action == "show":
+            capabilities = ", ".join(provider.get("capabilities", [])) or "none"
+            self._write_system(f"name: {provider['display_name']}")
+            self._write_system(f"id: {provider['provider_id']}")
+            self._write_system(f"engine id: {provider['engine_id']}")
+            self._write_system(f"provider: {provider['provider']}")
+            self._write_system(
+                f"endpoint: {provider.get('endpoint_kind', 'remote')} {provider.get('url') or ''}".rstrip()
+            )
+            self._write_system(f"default model: {provider.get('default_model') or 'auto'}")
+            self._write_system(
+                f"locality: {provider.get('locality', 'unknown')} | priority: {provider.get('priority', 100)} | enabled: {provider.get('enabled', True)}"
+            )
+            self._write_system(f"capabilities: {capabilities}")
+            if provider.get("secret_config"):
+                self._write_system(
+                    "secret config: " + json.dumps(provider["secret_config"], sort_keys=True)
+                )
+            if provider.get("metadata"):
+                self._write_system(
+                    "metadata: " + json.dumps(provider["metadata"], sort_keys=True)
+                )
+            return
+
+        if action == "update":
+            try:
+                payload = _build_llm_provider_payload(
+                    _parse_command_assignments(remainder),
+                    partial=True,
+                )
+            except ValueError as exc:
+                self._write_system(str(exc))
+                self._write_system(_LLM_PROVIDER_UPDATE_USAGE)
+                return
+            if not payload:
+                self._write_system(_LLM_PROVIDER_UPDATE_USAGE)
+                return
+            updated = await self._update_llm_provider(provider["provider_id"], payload)
+            self._write_system(
+                f"updated llm provider: {updated['display_name']} ({updated['engine_id']})"
+            )
+            return
+
+        if action in {"enable", "disable"}:
+            enabled = action == "enable"
+            updated = await self._update_llm_provider(
+                provider["provider_id"],
+                {"enabled": enabled},
+            )
+            self._write_system(
+                f"{action}d llm provider: {updated['display_name']} ({updated['engine_id']})"
+            )
+            return
+
+        if action == "delete":
+            await self._delete_llm_provider(provider["provider_id"])
+            self._llm_provider_suggestions = [
+                item
+                for item in self._llm_provider_suggestions
+                if item["provider_id"] != provider["provider_id"]
+            ]
+            self._write_system(
+                f"deleted llm provider: {provider['display_name']} ({provider['engine_id']})"
+            )
+            return
+
+        self._write_system(_LLM_PROVIDER_COMMAND_HELP)
 
     async def _load_timeline(self) -> None:
         assert self._http_client is not None
@@ -1217,7 +1435,7 @@ class ScrollbackTUI2:
     async def _handle_command(self, text: str) -> None:
         if text == "/help":
             self._write_system(
-                "commands: /auth login | /auth logout | /account whoami | /account list | /account switch <profile> | /workspace list | /workspace create <name> | /workspace use <id|name> | /thread list | /thread create <title> | /thread use <id|title> | /links | /open <n|last|url> | /copy | /quit"
+                "commands: /auth login | /auth logout | /account whoami | /account list | /account switch <profile> | /llm-provider list | /llm-provider show <id|engine_id|name> | /llm-provider create key=value ... | /llm-provider update <target> field=value ... | /workspace list | /workspace create <name> | /workspace use <id|name> | /thread list | /thread create <title> | /thread use <id|title> | /links | /open <n|last|url> | /copy | /quit"
             )
             return
         if text == "/quit":
@@ -1245,6 +1463,9 @@ class ScrollbackTUI2:
             return
         if text == "/account" or text.startswith("/account "):
             await self._handle_account_command(text)
+            return
+        if text == "/llm-provider" or text.startswith("/llm-provider "):
+            await self._handle_llm_provider_command(text)
             return
         if text == "/workspace" or text.startswith("/workspace "):
             await self._handle_workspace_command(text)

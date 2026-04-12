@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 
+from open_talon_contracts.local_env import load_repo_local_env
+
 
 def _get_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -46,6 +48,7 @@ class RuntimeWorkerSettings:
 
     @classmethod
     def from_env(cls) -> "RuntimeWorkerSettings":
+        load_repo_local_env()
         postgres_user = os.getenv("POSTGRES_USER", "admin")
         postgres_password = os.getenv("POSTGRES_PASSWORD", "password")
         postgres_host = os.getenv("POSTGRES_HOST", "localhost")

@@ -30,6 +30,7 @@ Launch the local infrastructure and the supported Python processes:
 This starts:
 
 - `gateway-edge`
+- `agent-task-worker`
 - `agent-loop-worker`
 - `tool-worker`
 - `reconciler`
@@ -37,12 +38,15 @@ This starts:
 - Kafka
 - Valkey
 - OpenBao
+- `openbao-init`
 - Keycloak
 - `keycloak-init`
 - Ollama
 - Langfuse and its backing services
 
 `keycloak-init` is a local-only helper that normalizes Keycloak for development after the main container boots. It makes sure both the `master` and `open-talon` realms allow local HTTP access.
+
+`openbao-init` is a local-only helper that initializes and unseals OpenBao, enables the `secret/` KV v2 mount, and recreates the stable local `root` token if needed.
 
 ## 3. Check The Main Endpoints
 
@@ -69,6 +73,8 @@ This starts:
 - Langfuse: `admin@example.com` / `admin123456`
 
 All local defaults come from [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example).
+
+OpenBao local data is persistent. Secrets survive `./open-talon stop` and `docker compose down` until you remove `infrastructure/data/openbao`.
 
 ## 5. Keycloak Local Auth Model
 
@@ -233,7 +239,113 @@ If you changed schema, auth, routing, or participant identity behavior, run:
 pytest -q
 ```
 
-## 9. Common Keycloak Recovery Commands
+## 9. Seeded OpenAI Agent Smoke Test
+
+The local migrations seed:
+
+- `local-ollama`
+- `openai-responses`
+- sample system agent `Reasoning Planner` with `agent_id` `33333333-3333-3333-3333-333333333333`
+
+To test the seeded OpenAI-backed agent end to end:
+
+1. Store a real OpenAI key in local OpenBao:
+
+```bash
+curl -X POST http://127.0.0.1:8200/v1/secret/data/open-talon/llm/openai \
+  -H 'X-Vault-Token: root' \
+  -H 'Content-Type: application/json' \
+  -d '{"data":{"api_key":"sk-..."}}'
+```
+
+2. Run the local smoke harness from the repo root:
+
+```bash
+VALKEY_PASSWORD=langfuse-dev-secret PYTHONPATH=services/gateway-edge:packages/contracts ./.venv/bin/python - <<'PY'
+import asyncio
+import json
+import time
+
+import httpx
+
+from gateway_edge.auth.api_key import create_api_key
+from gateway_edge.models import ApiKeyCreate
+from gateway_edge.services.session import setup_valkey, teardown_valkey
+
+AGENT_ID = "33333333-3333-3333-3333-333333333333"
+ACTOR = {
+    "participant_id": "00000000-0000-0000-0000-000000000001",
+    "participant_type": "user",
+    "display_name": "Admin",
+}
+
+async def main() -> None:
+    await setup_valkey()
+    try:
+        api_key = await create_api_key(ApiKeyCreate(label="quickstart-agent-smoke"))
+        async with httpx.AsyncClient(
+            base_url="http://127.0.0.1:8000",
+            headers={"X-API-Key": api_key.raw_key},
+            timeout=30.0,
+            trust_env=False,
+        ) as client:
+            workspace_resp = await client.post(
+                "/v1/workspaces",
+                json={"name": f"Quickstart Agent Test {int(time.time())}", "actor": ACTOR},
+            )
+            workspace_resp.raise_for_status()
+            workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+
+            attach_resp = await client.post(
+                f"/v1/workspaces/{workspace_id}/agents",
+                json={"actor": ACTOR, "agent_id": AGENT_ID},
+            )
+            attach_resp.raise_for_status()
+
+            thread_resp = await client.post(
+                f"/v1/workspaces/{workspace_id}/threads",
+                json={"title": "Seeded agent smoke test", "actor": ACTOR},
+            )
+            thread_resp.raise_for_status()
+            thread_id = thread_resp.json()["thread"]["thread_id"]
+
+            message_resp = await client.post(
+                f"/v1/threads/{thread_id}/messages",
+                json={
+                    "actor": ACTOR,
+                    "content": "Plan a three-step rollout for adding Anthropic as a new provider, including validation and tests.",
+                    "visibility": "public",
+                },
+            )
+            message_resp.raise_for_status()
+
+            for _ in range(60):
+                timeline_resp = await client.get(f"/v1/threads/{thread_id}/timeline")
+                timeline_resp.raise_for_status()
+                timeline = timeline_resp.json()
+                if len(timeline.get("messages", [])) >= 2:
+                    print(json.dumps(timeline, indent=2))
+                    return
+                await asyncio.sleep(2)
+
+            raise RuntimeError("seeded agent did not reply within 120 seconds")
+    finally:
+        await teardown_valkey()
+
+asyncio.run(main())
+PY
+```
+
+Expected result:
+
+- the thread timeline contains your message and at least one reply from `Reasoning Planner`
+- the reply confirms the full path is working: gateway, durable task creation, `agent-task-worker`, `agent-loop-worker`, OpenBao secret resolution, and the OpenAI provider call
+
+Known current limitation:
+
+- the seeded OpenAI path still posts raw OpenAI response JSON into the final thread message body; execution works, but response formatting is still rough
+
+## 10. Common Keycloak Recovery Commands
 
 If the local Keycloak UI says HTTPS is required or the realm state looks stale:
 
@@ -256,7 +368,7 @@ Expected healthy signal from the helper logs:
 
 - `Keycloak local dev realms updated.`
 
-## 10. Stop Everything
+## 11. Stop Everything
 
 ```bash
 ./open-talon stop

@@ -361,6 +361,7 @@ def test_tui2_command_suggestions_cover_supported_commands(tmp_path, monkeypatch
     assert "/workspace show" in suggestions
     assert "/workspace create" in suggestions
     assert "/workspace use" in suggestions
+    assert "/llm-provider list" in client._command_suggestions("/llm")
 
 
 def test_tui2_command_suggestions_include_profiles_and_links(tmp_path, monkeypatch):
@@ -392,6 +393,115 @@ def test_tui2_command_suggestions_include_profiles_and_links(tmp_path, monkeypat
     assert "/account switch bob" in account_suggestions
     assert "/open 1" in open_suggestions
     assert "/open last" in open_suggestions
+
+
+@pytest.mark.asyncio
+async def test_tui2_llm_provider_show_displays_provider(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+    client.tokens = TokenState(
+        access_token="token",
+        refresh_token=None,
+        expires_at=None,
+        issuer="http://127.0.0.1:8081/realms/open-talon",
+        client_id="open-talon-tui",
+    )
+    client.current_user = {"user_id": "user-123", "display_name": "Alice Example"}
+    writes: list[str] = []
+    provider = {
+        "provider_id": "provider-1234",
+        "engine_id": "openai-responses",
+        "display_name": "OpenAI Responses",
+        "description": "OpenAI Responses API",
+        "provider": "openai",
+        "endpoint_kind": "remote",
+        "url": "https://api.openai.com/v1/responses",
+        "default_model": "gpt-5.4-mini",
+        "capabilities": ["text", "reasoning"],
+        "locality": "cloud",
+        "priority": 100,
+        "enabled": True,
+        "secret_config": {"openbao": {"path": "open-talon/llm/openai", "field": "api_key"}},
+        "metadata": {"team": "platform"},
+    }
+
+    async def fake_list_llm_providers():
+        client._llm_provider_suggestions = [
+            {
+                "provider_id": provider["provider_id"],
+                "engine_id": provider["engine_id"],
+                "display_name": provider["display_name"],
+            }
+        ]
+        return [provider]
+
+    monkeypatch.setattr(client, "_list_llm_providers", fake_list_llm_providers)
+    monkeypatch.setattr(client, "_write_system", lambda text: writes.append(text))
+
+    await client._handle_llm_provider_command("/llm-provider show openai-responses")
+
+    assert "name: OpenAI Responses" in writes
+    assert "engine id: openai-responses" in writes
+    assert any("secret config:" in line for line in writes)
+
+
+@pytest.mark.asyncio
+async def test_tui2_llm_provider_create_parses_key_value_payload(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+    client.tokens = TokenState(
+        access_token="token",
+        refresh_token=None,
+        expires_at=None,
+        issuer="http://127.0.0.1:8081/realms/open-talon",
+        client_id="open-talon-tui",
+    )
+    client.current_user = {"user_id": "user-123", "display_name": "Alice Example"}
+    writes: list[str] = []
+    captured: dict[str, object] = {}
+
+    async def fake_create_llm_provider(payload: dict[str, object]):
+        captured.update(payload)
+        return {
+            "provider_id": "provider-5678",
+            "engine_id": payload["engine_id"],
+            "display_name": payload["display_name"],
+        }
+
+    monkeypatch.setattr(client, "_create_llm_provider", fake_create_llm_provider)
+    monkeypatch.setattr(client, "_write_system", lambda text: writes.append(text))
+
+    await client._handle_llm_provider_command(
+        "/llm-provider create "
+        'engine_id=groq-llama display_name="Groq Llama" provider=groq '
+        'description="Groq chat endpoint" url=https://api.groq.com/openai/v1/responses '
+        "capabilities=text,fast locality=cloud priority=80 enabled=true"
+    )
+
+    assert captured["engine_id"] == "groq-llama"
+    assert captured["display_name"] == "Groq Llama"
+    assert captured["capabilities"] == ["text", "fast"]
+    assert captured["priority"] == 80
+    assert captured["enabled"] is True
+    assert "created llm provider: Groq Llama (groq-llama)" in writes
 
 
 def test_tui2_auth_login_cli_triggers_shared_auth_workflow(tmp_path, monkeypatch, capsys):

@@ -69,6 +69,7 @@ Open Talon now runs agent execution through durable stateless workers:
 - Postgres is the source of truth for execution state
 - Kafka is the wake-up and fanout bus
 - `gateway-edge` no longer runs agent loops in-process
+- `agent-task-worker` claims `tasks`, creates `runs`, and resolves the target LLM engine
 - `agent-loop-worker` claims `run_steps` and executes model turns
 - `tool-worker` claims `tool_calls` and dispatches isolated tool execution
 - `reconciler` requeues expired leases and republishes wakeup events
@@ -100,7 +101,7 @@ Common tool endpoints:
 
 - **PostgreSQL**: Deployed via `pgvector/pgvector:pg16` directly supporting native `JSONB` properties alongside algorithmic embeddings operations for Vector Similarity Searching natively in the engine.
 - **Kafka**: Deployed using `apache/kafka:3.8.0` utilizing `KRaft` mode (omitting Zookeeper), configured natively on mapped loops using high level partition assignments.
-- **OpenBao**: Open-source fork of Hashicorp Vault running in local development for secrets-oriented workflows.
+- **OpenBao**: Open-source fork of Hashicorp Vault running in local development for secrets-oriented workflows, backed by a persistent local file store under `infrastructure/data/openbao`.
 - **Keycloak**: Local identity provider for registration, login, OIDC token issuance, and device/browser flows.
 - **Valkey**: Drop-in compatible Redis equivalent caching infrastructure configured to handle immediate TTL caching.
 - **Langfuse**: Self-hosted LLM observability stack for traces, prompts, and evaluations, deployed with Langfuse Web/Worker plus ClickHouse and MinIO.
@@ -112,6 +113,7 @@ Common tool endpoints:
 `./open-talon start` brings up the full local infrastructure stack and then starts the supported local processes for:
 
 - `gateway-edge`
+- `agent-task-worker`
 - `agent-loop-worker`
 - `tool-worker`
 - `reconciler`
@@ -119,6 +121,7 @@ Common tool endpoints:
 Local services:
 
 - `gateway-edge`: primary local API gateway for REST, SSE, WebSocket, collaboration, and admin APIs
+- `agent-task-worker`: local worker that claims durable `tasks`, creates `runs`, and resolves the target LLM engine
 - `agent-loop-worker`: local worker that executes agent model steps from durable `run_steps`
 - `tool-worker`: local worker that executes isolated tool invocations from durable `tool_calls`
 - `reconciler`: local worker that requeues expired leases and republishes wakeups
@@ -208,10 +211,15 @@ The compose stack currently pins pgAdmin to `dpage/pgadmin4:9.13.0` in [`infrast
 
 ## Persistence Design
 
-Data persistence relies purely on strictly scoped host bind-mounts mapped recursively into `infrastructure/data/...`
-Standard container operations or isolated unit tests can freely execute `docker compose down -v` across the infrastructure securely deleting the environment without affecting native AI parameters, databases blocks, or Kafka volumes hosted locally safely on the host physical drive.
+Local persistence uses host bind mounts under `infrastructure/data/...`.
 
-> **Note**: Do not commit the `infrastructure/data/` payloads directly. It contains multi-gigabyte neural weight matrices specifically blocked via the repository `.gitignore` configuration.
+That means:
+
+- `./open-talon stop` and `docker compose down` stop containers without wiping local data
+- `docker compose down -v` only removes Docker-managed volumes; it does not remove these bind-mounted directories
+- OpenBao secrets, Postgres state, Ollama model data, and other local payloads survive normal restarts until you remove the matching `infrastructure/data/...` directory yourself
+
+> **Note**: Do not commit `infrastructure/data/`. It contains local databases, secret storage, model artifacts, and other large runtime data already excluded by `.gitignore`.
 
 ## Python Environment
 
@@ -232,6 +240,141 @@ That root environment installs:
 - repo-level test dependencies for gateway and infrastructure suites
 
 `services/gateway-edge` is the only supported local gateway path for day-to-day development.
+
+## OpenAI Engine
+
+LLM provider and engine definitions are persistent system resources. They are managed through the `llm-providers` API and stored in Postgres, not defined from environment variables.
+
+The local migrations seed two default providers:
+
+- `local-ollama`
+- `openai-responses`
+
+They also seed a sample system agent:
+
+- `Reasoning Planner`
+- `agent_id`: `33333333-3333-3333-3333-333333333333`
+- `engine_id`: `openai-responses`
+
+For local secret handling, prefer an ignored repo-local file that only carries secret access, not provider definitions:
+
+```bash
+mkdir -p .run
+cat > .run/openai.env <<'EOF'
+OPEN_TALON_OPENBAO_TOKEN=root
+EOF
+```
+
+`gateway-edge` and `agent-runtime` load `.run/openai.env` automatically if it exists.
+
+If you want the `openai-responses` provider to resolve credentials from OpenBao, store the key in KV v2:
+
+```bash
+curl -X POST http://127.0.0.1:8200/v1/secret/data/open-talon/llm/openai \
+  -H 'X-Vault-Token: root' \
+  -H 'Content-Type: application/json' \
+  -d '{"data":{"api_key":"sk-..."}}'
+```
+
+The local OpenBao container now uses persistent file storage, so secrets survive `./open-talon stop` and `docker compose down`. To fully reset the local secret store, remove `infrastructure/data/openbao` before starting the stack again.
+
+The runtime secret provider will then try `env` first and `openbao` second by default.
+
+Common provider endpoints:
+
+- `GET /v1/llm-providers`
+- `POST /v1/llm-providers`
+- `PATCH /v1/llm-providers/{provider_id}`
+- `DELETE /v1/llm-providers/{provider_id}`
+- `POST /v1/llm-providers/{provider_id}/health-check`
+- `POST /v1/llm-providers/validate`
+- `GET /v1/llm-engines`
+
+Other providers follow the same pattern: the runtime resolves secrets from an ordered provider chain, and engine metadata can advertise one or more secret references. The supported reference shape today is:
+
+```json
+{
+  "env": { "name": "PROVIDER_API_KEY" },
+  "openbao": {
+    "mount": "secret",
+    "path": "open-talon/llm/provider-name",
+    "field": "api_key"
+  }
+}
+```
+
+That lets a provider try local env for development and OpenBao KV for shared or longer-lived setups without changing executor code.
+
+Example system agent targeting the OpenAI engine:
+
+```json
+{
+  "actor": {
+    "participant_id": "00000000-0000-0000-0000-000000000001",
+    "participant_type": "user",
+    "display_name": "Admin"
+  },
+  "display_name": "Reasoning Planner",
+  "description": "Plans multi-step work with cloud reasoning.",
+  "role": "planning agent",
+  "capabilities": ["planning", "triage", "reasoning"],
+  "endpoint": {
+    "kind": "remote",
+    "engine_id": "openai-responses",
+    "provider": "openai"
+  },
+  "system_prompt": "You plan carefully and explain tradeoffs clearly.",
+  "definition": {
+    "runtime": {
+      "engine_id": "openai-responses",
+      "preferred_capabilities": ["reasoning", "tool_calling"],
+      "preferred_locality": "cloud"
+    }
+  }
+}
+```
+
+Example LLM provider definition for `POST /v1/llm-providers`:
+
+```json
+{
+  "actor": {
+    "participant_id": "00000000-0000-0000-0000-000000000001",
+    "participant_type": "user",
+    "display_name": "Admin"
+  },
+  "engine_id": "openai-responses",
+  "display_name": "OpenAI Responses",
+  "description": "Cloud OpenAI Responses API provider.",
+  "provider": "openai",
+  "endpoint_kind": "remote",
+  "url": "https://api.openai.com/v1/responses",
+  "default_model": "gpt-5.4-mini",
+  "capabilities": ["chat", "completion", "tool_calling", "reasoning"],
+  "locality": "cloud",
+  "priority": 220,
+  "enabled": true,
+  "secret_config": {
+    "env": { "name": "OPENAI_API_KEY" },
+    "openbao": {
+      "mount": "secret",
+      "path": "open-talon/llm/openai",
+      "field": "api_key"
+    }
+  }
+}
+```
+
+## Adding Another LLM Provider
+
+To add another hosted or network LLM provider cleanly:
+
+1. Create or validate the provider through `POST /v1/llm-providers` or `POST /v1/llm-providers/validate` with a unique `engine_id`, endpoint details, capabilities, locality, and `secret_config`.
+2. Store the provider secret in OpenBao, or point `secret_config.env` at an environment variable for local-only development.
+3. If the provider uses a provider-specific wire protocol, add an execution branch in [runtime.py](/Users/nikolay.kvasov/Development/open-talon-1/services/agent-runtime/agent_runtime/runtime.py), similar to the OpenAI path.
+4. If the new provider needs a new secret backend instead of `env` or `openbao`, add a new `SecretProvider` implementation in [secrets.py](/Users/nikolay.kvasov/Development/open-talon-1/services/agent-runtime/agent_runtime/secrets.py) and register it in `build_default_secret_resolver()`.
+
+For most API-key-based providers, the persistence and secret wiring should not require executor changes beyond the provider-specific request/response format.
 
 ## Quickstart
 

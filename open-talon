@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_DIR="${ROOT_DIR}/.run"
 GATEWAY_PID_FILE="${RUN_DIR}/gateway-edge.pid"
 GATEWAY_LOG_FILE="${RUN_DIR}/gateway-edge.log"
+AGENT_TASK_PID_FILE="${RUN_DIR}/agent-task-worker.pid"
+AGENT_TASK_LOG_FILE="${RUN_DIR}/agent-task-worker.log"
 AGENT_LOOP_PID_FILE="${RUN_DIR}/agent-loop-worker.pid"
 AGENT_LOOP_LOG_FILE="${RUN_DIR}/agent-loop-worker.log"
 TOOL_WORKER_PID_FILE="${RUN_DIR}/tool-worker.pid"
@@ -182,6 +184,7 @@ start_cmd() {
       kafka \
       valkey \
       openbao \
+      openbao-init \
       keycloak \
       keycloak-init \
       ollama \
@@ -248,6 +251,12 @@ PY
     sleep 1
     if gateway_supports_current_api "${pythonpath}"; then
       start_python_module \
+        "agent-task-worker" \
+        "agent_runtime.agent_task_worker" \
+        "${AGENT_TASK_PID_FILE}" \
+        "${AGENT_TASK_LOG_FILE}" \
+        "${pythonpath}"
+      start_python_module \
         "agent-loop-worker" \
         "agent_runtime.agent_loop_worker" \
         "${AGENT_LOOP_PID_FILE}" \
@@ -284,6 +293,7 @@ stop_cmd() {
   stop_pid_file "reconciler" "${RECONCILER_PID_FILE}"
   stop_pid_file "tool-worker" "${TOOL_WORKER_PID_FILE}"
   stop_pid_file "agent-loop-worker" "${AGENT_LOOP_PID_FILE}"
+  stop_pid_file "agent-task-worker" "${AGENT_TASK_PID_FILE}"
   stop_pid_file "gateway-edge" "${GATEWAY_PID_FILE}"
 
   echo "Stopping infrastructure services..."

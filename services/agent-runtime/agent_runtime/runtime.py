@@ -25,6 +25,21 @@ from open_talon_contracts.models import (  # noqa: E402
     AgentRunResult,
     EventEnvelope,
 )
+from open_talon_contracts.llm_engines import (  # noqa: E402
+    LlmEngineRegistry,
+    llm_engine_descriptor_from_provider_definition,
+)
+
+from .llm_engines import (  # noqa: E402
+    build_default_llm_engine_registry,
+    resolve_llm_engine_for_context,
+)
+from .secrets import (  # noqa: E402
+    SecretReference,
+    SecretResolver,
+    build_default_secret_resolver,
+    secret_references_from_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +162,8 @@ class LangfuseRuntimeObserver:
 class RuntimeKernel(Protocol):
     async def list_system_agents(self) -> list[AgentDefinition]: ...
 
+    async def list_llm_providers(self) -> list[Any]: ...
+
     async def list_pending_tasks_for_system_agent(
         self,
         system_agent_id: UUID,
@@ -197,6 +214,7 @@ class LocalOllamaExecutor:
     async def execute(self, context: AgentExecutionContext) -> AgentRunResult:
         endpoint = context.system_agent.endpoint
         url = endpoint.url or DEFAULT_OLLAMA_URL
+        provider = endpoint.provider or "ollama"
         model = (
             endpoint.model
             or _definition_runtime_value(context, "model")
@@ -220,7 +238,7 @@ class LocalOllamaExecutor:
             name="local-ollama-generate",
             model=model,
             input=request_payload,
-            metadata=_langfuse_metadata(context, endpoint_url=url, provider="ollama"),
+            metadata=_langfuse_metadata(context, endpoint_url=url, provider=provider),
         ) as observation:
             async with httpx.AsyncClient(
                 timeout=self._timeout_seconds,
@@ -239,7 +257,7 @@ class LocalOllamaExecutor:
             model=model,
             usage_details=usage_details or None,
             metadata={
-                "provider": "ollama",
+                "provider": provider,
                 "endpoint_kind": endpoint.kind,
                 "done": payload.get("done"),
                 "done_reason": payload.get("done_reason"),
@@ -250,7 +268,7 @@ class LocalOllamaExecutor:
             message=message,
             summary="Completed with local Ollama",
             metadata={
-                "provider": "ollama",
+                "provider": provider,
                 "model": model,
                 "endpoint_kind": endpoint.kind,
             },
@@ -264,13 +282,16 @@ class HttpEndpointExecutor:
         timeout_seconds: float = 60.0,
         endpoint_scope: str = "remote",
         observability: RuntimeObservability | None = None,
+        secret_resolver: SecretResolver | None = None,
     ) -> None:
         self._timeout_seconds = timeout_seconds
         self._endpoint_scope = endpoint_scope
         self._observability = observability or LangfuseRuntimeObserver()
+        self._secret_resolver = secret_resolver or build_default_secret_resolver()
 
     async def execute(self, context: AgentExecutionContext) -> AgentRunResult:
         endpoint = context.system_agent.endpoint
+        provider = endpoint.provider or self._endpoint_scope
         if not endpoint.url:
             raise ValueError(
                 f"{self._endpoint_scope.capitalize()} agent {context.system_agent.agent_id} is missing an endpoint URL"
@@ -282,6 +303,8 @@ class HttpEndpointExecutor:
             endpoint.url,
             context.thread.thread_id,
         )
+        if provider == "openai":
+            return await self._execute_openai(context, provider=provider)
         request_payload = {
             "agent": context.system_agent.model_dump(mode="json"),
             "participant": context.participant.model_dump(mode="json"),
@@ -303,7 +326,7 @@ class HttpEndpointExecutor:
             "metadata": _langfuse_metadata(
                 context,
                 endpoint_url=endpoint.url,
-                provider=self._endpoint_scope,
+                provider=provider,
             ),
         }
         if use_generation:
@@ -323,7 +346,68 @@ class HttpEndpointExecutor:
             observation.update(
                 output=payload,
                 metadata={
-                    "provider": self._endpoint_scope,
+                    "provider": provider,
+                    "endpoint_kind": endpoint.kind,
+                    "status_code": response.status_code,
+                },
+            )
+        return _coerce_run_result(payload, context=context)
+
+    async def _execute_openai(
+        self,
+        context: AgentExecutionContext,
+        *,
+        provider: str,
+    ) -> AgentRunResult:
+        endpoint = context.system_agent.endpoint
+        if not endpoint.url:
+            raise ValueError(
+                f"{self._endpoint_scope.capitalize()} agent {context.system_agent.agent_id} is missing an endpoint URL"
+            )
+        if not endpoint.model:
+            raise ValueError(
+                f"{self._endpoint_scope.capitalize()} OpenAI agent {context.system_agent.agent_id} is missing a model"
+            )
+        api_key = await self._secret_resolver.resolve(
+            _openai_api_key_references(context),
+            label="OpenAI API key",
+        )
+
+        request_payload = {
+            "model": endpoint.model,
+            "instructions": context.system_agent.system_prompt,
+            "input": render_prompt(context),
+        }
+        _debug_prompt_payload("openai-responses", context, request_payload)
+        with self._observability.start_generation(
+            name=f"{self._endpoint_scope}-openai-responses",
+            model=endpoint.model,
+            input=request_payload,
+            metadata=_langfuse_metadata(
+                context,
+                endpoint_url=endpoint.url,
+                provider=provider,
+            ),
+        ) as observation:
+            async with httpx.AsyncClient(
+                timeout=self._timeout_seconds,
+                trust_env=False,
+            ) as client:
+                response = await client.post(
+                    endpoint.url,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=request_payload,
+                )
+                response.raise_for_status()
+                payload = response.json()
+            observation.update(
+                output=payload,
+                usage_details=_openai_usage_details(payload) or None,
+                metadata={
+                    "provider": provider,
                     "endpoint_kind": endpoint.kind,
                     "status_code": response.status_code,
                 },
@@ -343,6 +427,8 @@ class AgentTaskRuntime:
         model_timeout_seconds: float = 60.0,
         executors: dict[str, AgentExecutor] | None = None,
         observability: RuntimeObservability | None = None,
+        engine_registry: LlmEngineRegistry | None = None,
+        secret_resolver: SecretResolver | None = None,
     ) -> None:
         self._kernel = kernel
         self._publish_events = publish_events
@@ -352,6 +438,8 @@ class AgentTaskRuntime:
         self._loop_task: asyncio.Task[None] | None = None
         self._processing_tasks: dict[UUID, asyncio.Task[None]] = {}
         self._observability = observability or LangfuseRuntimeObserver.from_env()
+        self._engine_registry = engine_registry or build_default_llm_engine_registry()
+        self._secret_resolver = secret_resolver or build_default_secret_resolver()
         self._executors = executors or {
             "local": LocalOllamaExecutor(
                 timeout_seconds=model_timeout_seconds,
@@ -361,11 +449,13 @@ class AgentTaskRuntime:
                 timeout_seconds=model_timeout_seconds,
                 endpoint_scope="remote",
                 observability=self._observability,
+                secret_resolver=self._secret_resolver,
             ),
             "system": HttpEndpointExecutor(
                 timeout_seconds=model_timeout_seconds,
                 endpoint_scope="system",
                 observability=self._observability,
+                secret_resolver=self._secret_resolver,
             ),
         }
 
@@ -442,7 +532,7 @@ class AgentTaskRuntime:
                     f"Task {task_id} did not produce a run/context during claim"
                 )
             run_id = claim.run.run_id
-            context = claim.context
+            context = await self._resolve_execution_context(claim.context)
             with self._observability.start_span(
                 name="agent-task-run",
                 input={
@@ -499,6 +589,29 @@ class AgentTaskRuntime:
             return self._executors[kind]
         except KeyError as exc:  # pragma: no cover - defensive
             raise ValueError(f"No executor configured for endpoint kind {kind!r}") from exc
+
+    async def _resolve_execution_context(
+        self,
+        context: AgentExecutionContext,
+    ) -> AgentExecutionContext:
+        managed = [
+            llm_engine_descriptor_from_provider_definition(item)
+            for item in await self._kernel.list_llm_providers()
+        ]
+        registry = LlmEngineRegistry.merged(self._engine_registry.list(), managed)
+        resolved = resolve_llm_engine_for_context(context, registry)
+        metadata = dict(context.system_agent.metadata)
+        if resolved.descriptor is not None:
+            metadata["_resolved_llm_engine"] = resolved.descriptor.model_dump(mode="json")
+        if (
+            resolved.endpoint == context.system_agent.endpoint
+            and metadata == context.system_agent.metadata
+        ):
+            return context
+        system_agent = context.system_agent.model_copy(
+            update={"endpoint": resolved.endpoint, "metadata": metadata}
+        )
+        return context.model_copy(update={"system_agent": system_agent})
 
 
 def render_prompt(context: AgentExecutionContext) -> str:
@@ -621,6 +734,64 @@ def _definition_runtime_value(context: AgentExecutionContext, key: str) -> Any:
     if isinstance(runtime, dict):
         return runtime.get(key)
     return None
+
+
+def _openai_api_key_references(context: AgentExecutionContext) -> list[SecretReference]:
+    references: list[SecretReference] = []
+    engine = _resolved_llm_engine(context)
+    metadata = engine.get("metadata")
+    if isinstance(metadata, dict):
+        references.extend(
+            secret_references_from_config(metadata.get("api_key_secret"))
+        )
+        references.extend(
+            secret_references_from_config(metadata.get("secret_config"))
+        )
+        env_name = metadata.get("auth_env_var")
+        if isinstance(env_name, str) and env_name:
+            references.append(SecretReference(provider="env", name=env_name))
+    if not references:
+        references.append(SecretReference(provider="env", name="OPENAI_API_KEY"))
+        references.append(
+            SecretReference(
+                provider="openbao",
+                mount=os.getenv("OPEN_TALON_OPENBAO_KV_MOUNT", "secret"),
+                path=os.getenv(
+                    "OPEN_TALON_OPENAI_OPENBAO_PATH",
+                    "open-talon/llm/openai",
+                ),
+                field_name=os.getenv(
+                    "OPEN_TALON_OPENAI_OPENBAO_FIELD",
+                    "api_key",
+                ),
+            )
+        )
+    return _dedupe_secret_references(references)
+
+
+def _resolved_llm_engine(context: AgentExecutionContext) -> dict[str, Any]:
+    value = context.system_agent.metadata.get("_resolved_llm_engine")
+    return value if isinstance(value, dict) else {}
+
+
+def _dedupe_secret_references(
+    references: list[SecretReference],
+) -> list[SecretReference]:
+    seen: set[tuple[str, str | None, str | None, str | None, str | None]] = set()
+    unique: list[SecretReference] = []
+    for reference in references:
+        key = (
+            reference.provider,
+            reference.name,
+            reference.mount,
+            reference.path,
+            reference.field_name,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(reference)
+    return unique
 
 
 def _extract_text_response(payload: Any) -> str:
@@ -765,6 +936,30 @@ def _ollama_usage_details(payload: Any) -> dict[str, int]:
     if usage:
         usage["total_tokens"] = usage.get("prompt_tokens", 0) + usage.get(
             "completion_tokens", 0
+        )
+    return usage
+
+
+def _openai_usage_details(payload: Any) -> dict[str, int]:
+    if not isinstance(payload, dict):
+        return {}
+    usage_payload = payload.get("usage")
+    if not isinstance(usage_payload, dict):
+        return {}
+    input_tokens = usage_payload.get("input_tokens")
+    output_tokens = usage_payload.get("output_tokens")
+    total_tokens = usage_payload.get("total_tokens")
+    usage: dict[str, int] = {}
+    if isinstance(input_tokens, int):
+        usage["prompt_tokens"] = input_tokens
+    if isinstance(output_tokens, int):
+        usage["completion_tokens"] = output_tokens
+    if isinstance(total_tokens, int):
+        usage["total_tokens"] = total_tokens
+    elif usage:
+        usage["total_tokens"] = usage.get("prompt_tokens", 0) + usage.get(
+            "completion_tokens",
+            0,
         )
     return usage
 

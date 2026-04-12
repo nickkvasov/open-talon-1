@@ -26,8 +26,11 @@ from open_talon_contracts.models import (  # noqa: E402
     AgentDefinition,
     AgentEndpoint,
     ArtifactRef,
+    CreateLlmProviderRequest,
     EventEnvelope,
     ExecutionSpec,
+    DeleteLlmProviderRequest,
+    LlmProviderDefinition,
     MemoryEntry,
     ParticipantProfile,
     Run,
@@ -40,6 +43,7 @@ from open_talon_contracts.models import (  # noqa: E402
     Task,
     Thread,
     TimelineMessage,
+    UpdateLlmProviderRequest,
     Workspace,
     WorkspaceTool,
 )
@@ -87,6 +91,7 @@ class FakeRepository:
         self._memory_entries = {}
         self._messages = {}
         self._system_tools = {}
+        self._llm_providers = {}
         self._workspace_tools = {}
         self._tool_calls = {}
 
@@ -95,6 +100,23 @@ class FakeRepository:
 
     async def list_system_agents(self) -> list[AgentDefinition]:
         return list(self._agents.values())
+
+    async def list_system_agents_referencing_llm_engine(self, engine_id: str) -> list[AgentDefinition]:
+        referenced: list[AgentDefinition] = []
+        for agent in self._agents.values():
+            if agent.endpoint.engine_id == engine_id:
+                referenced.append(agent)
+                continue
+            runtime = agent.definition.get("runtime")
+            if not isinstance(runtime, dict):
+                continue
+            if runtime.get("engine_id") == engine_id:
+                referenced.append(agent)
+                continue
+            preferred_engine_ids = runtime.get("preferred_engine_ids")
+            if isinstance(preferred_engine_ids, list) and engine_id in preferred_engine_ids:
+                referenced.append(agent)
+        return referenced
 
     async def upsert_system_agent(self, conn, agent: AgentDefinition) -> None:
         self._agents[agent.agent_id] = agent
@@ -154,6 +176,12 @@ class FakeRepository:
     async def fetch_system_tool(self, tool_id):
         return self._system_tools.get(tool_id)
 
+    async def list_llm_providers(self):
+        return list(self._llm_providers.values())
+
+    async def fetch_llm_provider(self, provider_id):
+        return self._llm_providers.get(provider_id)
+
     async def list_workspace_tools(self, workspace_id):
         return list(self._workspace_tools.get(workspace_id, []))
 
@@ -179,6 +207,12 @@ class FakeRepository:
             for tool_call in self._tool_calls.get(run_id, [])
             if tool_call.status in {"completed", "failed"}
         ]
+
+    async def upsert_llm_provider(self, conn, provider: LlmProviderDefinition) -> None:
+        self._llm_providers[provider.provider_id] = provider
+
+    async def delete_llm_provider(self, conn, *, provider_id):
+        return self._llm_providers.pop(provider_id, None) is not None
 
 
 def _actor() -> ParticipantInput:
@@ -235,6 +269,170 @@ async def test_kernel_resolve_authenticated_user_actor_reuses_workspace_particip
 
     assert actor.user_id == user_id
     assert actor.participant_id == participant_id
+
+
+@pytest.mark.asyncio
+async def test_kernel_can_create_list_update_and_delete_llm_provider():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    actor = _actor()
+
+    created = await kernel.create_llm_provider(
+        CreateLlmProviderRequest(
+            actor=actor,
+            engine_id="anthropic-sonnet",
+            display_name="Anthropic Sonnet",
+            description="Reasoning-focused cloud provider.",
+            provider="anthropic",
+            endpoint_kind="remote",
+            url="https://api.anthropic.example/v1/messages",
+            default_model="claude-sonnet-4-5",
+            capabilities=["chat", "reasoning"],
+            locality="cloud",
+            priority=180,
+            enabled=True,
+            secret_config={"env": {"name": "ANTHROPIC_API_KEY"}},
+            metadata={"protocol": "anthropic-messages"},
+        )
+    )
+
+    assert created.provider is not None
+    provider_id = created.provider.provider_id
+
+    listed = await kernel.list_llm_providers()
+    assert [item.engine_id for item in listed] == ["anthropic-sonnet"]
+
+    updated = await kernel.update_llm_provider(
+        provider_id,
+        UpdateLlmProviderRequest(
+            actor=actor,
+            display_name="Anthropic Sonnet Updated",
+            priority=240,
+            enabled=False,
+            capabilities=[],
+            metadata={"owner": "platform"},
+        ),
+    )
+
+    assert updated.provider is not None
+    assert updated.provider.display_name == "Anthropic Sonnet Updated"
+    assert updated.provider.priority == 240
+    assert updated.provider.enabled is False
+    assert updated.provider.capabilities == []
+    assert updated.provider.metadata == {
+        "protocol": "anthropic-messages",
+        "owner": "platform",
+    }
+
+    deleted = await kernel.delete_llm_provider(
+        provider_id,
+        DeleteLlmProviderRequest(actor=actor),
+    )
+
+    assert deleted == {"deleted": True, "provider_id": str(provider_id)}
+    assert await kernel.list_llm_providers() == []
+
+
+@pytest.mark.asyncio
+async def test_kernel_prevents_disabling_or_deleting_referenced_llm_provider():
+    now = datetime.now(timezone.utc)
+    repository = FakeRepository(
+        agents=[
+            AgentDefinition(
+                agent_id=uuid4(),
+                display_name="Planner Agent",
+                description="Plans work using a managed engine.",
+                role="planner",
+                capabilities=["planning"],
+                endpoint=AgentEndpoint(kind="remote", engine_id="openai-responses"),
+                system_prompt="Plan carefully.",
+                created_by=uuid4(),
+                created_at=now,
+                updated_at=now,
+            )
+        ]
+    )
+    kernel = CollaborationKernel(repository)
+    actor = _actor()
+    created = await kernel.create_llm_provider(
+        CreateLlmProviderRequest(
+            actor=actor,
+            engine_id="openai-responses",
+            display_name="OpenAI Responses",
+            description="Cloud responses endpoint.",
+            provider="openai",
+            endpoint_kind="remote",
+            url="https://api.openai.com/v1/responses",
+            default_model="gpt-5.4-mini",
+        )
+    )
+    provider_id = created.provider.provider_id
+
+    with pytest.raises(ValueError, match="Cannot disable LLM provider"):
+        await kernel.update_llm_provider(
+            provider_id,
+            UpdateLlmProviderRequest(
+                actor=actor,
+                enabled=False,
+            ),
+        )
+
+    with pytest.raises(ValueError, match="Cannot rename LLM provider engine_id"):
+        await kernel.update_llm_provider(
+            provider_id,
+            UpdateLlmProviderRequest(
+                actor=actor,
+                engine_id="openai-responses-v2",
+            ),
+        )
+
+    with pytest.raises(ValueError, match="Cannot delete LLM provider"):
+        await kernel.delete_llm_provider(
+            provider_id,
+            DeleteLlmProviderRequest(actor=actor),
+        )
+
+
+@pytest.mark.asyncio
+async def test_kernel_detects_runtime_preferred_engine_id_references_for_llm_provider():
+    now = datetime.now(timezone.utc)
+    repository = FakeRepository(
+        agents=[
+            AgentDefinition(
+                agent_id=uuid4(),
+                display_name="Research Agent",
+                description="Uses preferred engine ids for selection.",
+                role="researcher",
+                capabilities=["research"],
+                endpoint=AgentEndpoint(kind="remote"),
+                system_prompt="Research carefully.",
+                definition={"runtime": {"preferred_engine_ids": ["anthropic-sonnet"]}},
+                created_by=uuid4(),
+                created_at=now,
+                updated_at=now,
+            )
+        ]
+    )
+    kernel = CollaborationKernel(repository)
+    actor = _actor()
+    created = await kernel.create_llm_provider(
+        CreateLlmProviderRequest(
+            actor=actor,
+            engine_id="anthropic-sonnet",
+            display_name="Anthropic Sonnet",
+            description="Reasoning cloud provider.",
+            provider="anthropic",
+            endpoint_kind="remote",
+            url="https://api.anthropic.example/v1/messages",
+            default_model="claude-sonnet-4-5",
+        )
+    )
+
+    with pytest.raises(ValueError, match="Research Agent"):
+        await kernel.delete_llm_provider(
+            created.provider.provider_id,
+            DeleteLlmProviderRequest(actor=actor),
+        )
 
 
 def test_participant_from_row_falls_back_when_user_display_name_is_missing():

@@ -17,6 +17,10 @@ if _CORE_COLLAB_DIR.is_dir():
         sys.path.insert(0, collab_path)
 
 from core_collab import CollaborationKernel, CollaborationRepository  # noqa: E402
+from open_talon_contracts.llm_engines import (  # noqa: E402
+    LlmEngineRegistry,
+    llm_engine_descriptor_from_provider_definition,
+)
 from open_talon_contracts.models import ExecutionSpec  # noqa: E402
 
 from .config import RuntimeWorkerSettings
@@ -32,6 +36,11 @@ from .runtime import (
     LangfuseRuntimeObserver,
     LocalOllamaExecutor,
 )
+from .llm_engines import (
+    build_default_llm_engine_registry,
+    resolve_llm_engine_for_context,
+)
+from .secrets import build_default_secret_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -78,11 +87,15 @@ class AgentLoopWorker:
         kernel: CollaborationKernel,
         publisher: KafkaEventPublisher,
         settings: RuntimeWorkerSettings,
+        engine_registry=None,
+        secret_resolver=None,
     ) -> None:
         self._kernel = kernel
         self._publisher = publisher
         self._settings = settings
         self._observability = LangfuseRuntimeObserver.from_env()
+        self._engine_registry = engine_registry or build_default_llm_engine_registry()
+        self._secret_resolver = secret_resolver or build_default_secret_resolver()
         self._executors = {
             "local": LocalOllamaExecutor(
                 timeout_seconds=settings.model_timeout_seconds,
@@ -92,11 +105,13 @@ class AgentLoopWorker:
                 timeout_seconds=settings.model_timeout_seconds,
                 endpoint_scope="remote",
                 observability=self._observability,
+                secret_resolver=self._secret_resolver,
             ),
             "system": HttpEndpointExecutor(
                 timeout_seconds=settings.model_timeout_seconds,
                 endpoint_scope="system",
                 observability=self._observability,
+                secret_resolver=self._secret_resolver,
             ),
         }
         self._processing: dict[UUID, asyncio.Task[None]] = {}
@@ -181,8 +196,9 @@ class AgentLoopWorker:
                 f"Executing {context.system_agent.display_name}",
             )
             await self._publisher.publish(progress.events)
-            executor = self._executors[context.system_agent.endpoint.kind]
-            result = await executor.execute(context)
+            resolved_context = await self._resolve_execution_context(context)
+            executor = self._executors[resolved_context.system_agent.endpoint.kind]
+            result = await executor.execute(resolved_context)
             if result.tool_calls:
                 queued = await self._kernel.queue_tool_calls_for_run_step(
                     step_id,
@@ -214,6 +230,26 @@ class AgentLoopWorker:
         assert self._wake_consumer is not None
         async for _event in self._wake_consumer.events():
             self._wake.set()
+
+    async def _resolve_execution_context(self, context):
+        managed = [
+            llm_engine_descriptor_from_provider_definition(item)
+            for item in await self._kernel.list_llm_providers()
+        ]
+        registry = LlmEngineRegistry.merged(self._engine_registry.list(), managed)
+        resolved = resolve_llm_engine_for_context(context, registry)
+        metadata = dict(context.system_agent.metadata)
+        if resolved.descriptor is not None:
+            metadata["_resolved_llm_engine"] = resolved.descriptor.model_dump(mode="json")
+        if (
+            resolved.endpoint == context.system_agent.endpoint
+            and metadata == context.system_agent.metadata
+        ):
+            return context
+        system_agent = context.system_agent.model_copy(
+            update={"endpoint": resolved.endpoint, "metadata": metadata}
+        )
+        return context.model_copy(update={"system_agent": system_agent})
 
 
 class ToolWorker:

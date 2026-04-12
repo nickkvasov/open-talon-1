@@ -29,6 +29,11 @@ from agent_runtime.runtime import (
     LocalOllamaExecutor,
     render_prompt,
 )
+from agent_runtime.secrets import (
+    OpenBaoSecretProvider,
+    SecretReference,
+    SecretResolver,
+)
 from open_talon_contracts.models import (
     ActorRef,
     AgentDefinition,
@@ -40,6 +45,7 @@ from open_talon_contracts.models import (
     AgentTaskRouting,
     EventEnvelope,
     MemoryEntry,
+    LlmProviderDefinition,
     ParticipantProfile,
     RoleDefinition,
     Run,
@@ -49,6 +55,10 @@ from open_talon_contracts.models import (
     TimelineMessage,
     Workspace,
     WorkspaceTool,
+)
+from open_talon_contracts.llm_engines import (
+    LlmEngineDescriptor,
+    LlmEngineRegistry,
 )
 
 
@@ -65,6 +75,7 @@ class FakeKernel:
     progress_events: list[EventEnvelope]
     completion_events: list[EventEnvelope]
     failure_events: list[EventEnvelope]
+    llm_providers: list[object] | None = None
 
     def __post_init__(self) -> None:
         self.progress_calls: list[str] = []
@@ -74,6 +85,9 @@ class FakeKernel:
 
     async def list_system_agents(self) -> list[AgentDefinition]:
         return [self.system_agent]
+
+    async def list_llm_providers(self) -> list[object]:
+        return list(self.llm_providers or [])
 
     async def list_pending_tasks_for_system_agent(
         self,
@@ -576,6 +590,221 @@ async def test_agent_runtime_uses_thread_reply_template_from_interaction_contrac
     assert "Summary: Validation finished." in message
 
 
+@pytest.mark.asyncio
+async def test_agent_runtime_selects_best_registered_engine_from_runtime_preferences():
+    kernel = _build_fixture_context(endpoint_kind="remote")
+    kernel.context = kernel.context.model_copy(
+        update={
+            "system_agent": kernel.context.system_agent.model_copy(
+                update={
+                    "endpoint": AgentEndpoint(kind="remote"),
+                    "definition": {
+                        "runtime": {
+                            "required_capabilities": ["chat"],
+                            "preferred_capabilities": ["tool_calling", "reasoning"],
+                            "preferred_locality": "cloud",
+                        }
+                    },
+                }
+            )
+        }
+    )
+
+    class InspectingExecutor:
+        def __init__(self) -> None:
+            self.endpoint: AgentEndpoint | None = None
+
+        async def execute(self, context: AgentExecutionContext) -> AgentRunResult:
+            self.endpoint = context.system_agent.endpoint
+            return AgentRunResult(
+                stop_reason="completed",
+                message="Summary: done.",
+                summary="ok",
+            )
+
+    inspector = InspectingExecutor()
+
+    async def publish(events: list[EventEnvelope]) -> None:
+        return None
+
+    runtime = AgentTaskRuntime(
+        kernel=kernel,
+        publish_events=publish,
+        poll_interval_seconds=0.01,
+        engine_registry=LlmEngineRegistry(
+            [
+                LlmEngineDescriptor(
+                    engine_id="lan-llama",
+                    display_name="LAN Llama",
+                    description="Local network inference endpoint.",
+                    endpoint_kind="remote",
+                    provider="ollama-proxy",
+                    url="http://10.0.0.4:11434/api/generate",
+                    default_model="llama3.2:latest",
+                    capabilities=["chat"],
+                    locality="lan",
+                    priority=100,
+                ),
+                LlmEngineDescriptor(
+                    engine_id="cloud-gpt",
+                    display_name="Cloud GPT",
+                    description="Cloud engine with stronger reasoning and tool calling.",
+                    endpoint_kind="remote",
+                    provider="openai",
+                    url="https://api.example.com/v1/responses",
+                    default_model="gpt-5.4-mini",
+                    capabilities=["chat", "tool_calling", "reasoning"],
+                    locality="cloud",
+                    priority=150,
+                ),
+            ]
+        ),
+        executors={
+            "local": inspector,
+            "remote": inspector,
+            "system": inspector,
+        },
+    )
+
+    await runtime._run_iteration()
+    await asyncio.gather(*kernel_safe_processing_tasks(runtime))
+
+    assert inspector.endpoint is not None
+    assert inspector.endpoint.engine_id == "cloud-gpt"
+    assert inspector.endpoint.provider == "openai"
+    assert inspector.endpoint.url == "https://api.example.com/v1/responses"
+    assert inspector.endpoint.model == "gpt-5.4-mini"
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_can_resolve_managed_llm_provider_from_kernel():
+    kernel = _build_fixture_context(endpoint_kind="remote")
+    kernel.context = kernel.context.model_copy(
+        update={
+            "system_agent": kernel.context.system_agent.model_copy(
+                update={
+                    "endpoint": AgentEndpoint(
+                        kind="remote",
+                        engine_id="managed-openai",
+                        provider="openai",
+                    )
+                }
+            )
+        }
+    )
+    kernel.llm_providers = [
+        LlmProviderDefinition(
+            provider_id=uuid4(),
+            engine_id="managed-openai",
+            display_name="Managed OpenAI",
+            description="Managed provider from kernel storage.",
+            provider="openai",
+            endpoint_kind="remote",
+            url="https://api.openai.com/v1/responses",
+            default_model="gpt-5.4-mini",
+            capabilities=["chat", "reasoning"],
+            locality="cloud",
+            priority=250,
+            enabled=True,
+            secret_config={
+                "openbao": {
+                    "mount": "secret",
+                    "path": "open-talon/llm/openai",
+                    "field": "api_key",
+                }
+            },
+            created_by=uuid4(),
+            updated_by=uuid4(),
+        )
+    ]
+
+    class InspectingExecutor:
+        def __init__(self) -> None:
+            self.endpoint: AgentEndpoint | None = None
+            self.metadata: dict[str, object] | None = None
+
+        async def execute(self, context: AgentExecutionContext) -> AgentRunResult:
+            self.endpoint = context.system_agent.endpoint
+            self.metadata = context.system_agent.metadata
+            return AgentRunResult(stop_reason="completed", message="Summary: done.", summary="ok")
+
+    inspector = InspectingExecutor()
+
+    async def publish(events: list[EventEnvelope]) -> None:
+        return None
+
+    runtime = AgentTaskRuntime(
+        kernel=kernel,
+        publish_events=publish,
+        poll_interval_seconds=0.01,
+        executors={
+            "local": inspector,
+            "remote": inspector,
+            "system": inspector,
+        },
+    )
+
+    await runtime._run_iteration()
+    await asyncio.gather(*kernel_safe_processing_tasks(runtime))
+
+    assert inspector.endpoint is not None
+    assert inspector.endpoint.url == "https://api.openai.com/v1/responses"
+    assert inspector.endpoint.model == "gpt-5.4-mini"
+    assert inspector.metadata is not None
+    assert inspector.metadata["_resolved_llm_engine"]["metadata"]["managed"] is True
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_rejects_disabled_managed_llm_provider():
+    kernel = _build_fixture_context(endpoint_kind="remote")
+    kernel.context = kernel.context.model_copy(
+        update={
+            "system_agent": kernel.context.system_agent.model_copy(
+                update={
+                    "endpoint": AgentEndpoint(
+                        kind="remote",
+                        engine_id="managed-openai",
+                        provider="openai",
+                    )
+                }
+            )
+        }
+    )
+    kernel.llm_providers = [
+        LlmProviderDefinition(
+            provider_id=uuid4(),
+            engine_id="managed-openai",
+            display_name="Managed OpenAI",
+            description="Managed provider from kernel storage.",
+            provider="openai",
+            endpoint_kind="remote",
+            url="https://api.openai.com/v1/responses",
+            default_model="gpt-5.4-mini",
+            capabilities=["chat", "reasoning"],
+            locality="cloud",
+            priority=250,
+            enabled=False,
+            secret_config={},
+            created_by=uuid4(),
+            updated_by=uuid4(),
+        )
+    ]
+
+    runtime = AgentTaskRuntime(
+        kernel=kernel,
+        publish_events=lambda events: asyncio.sleep(0),
+        poll_interval_seconds=0.01,
+        executors={
+            "local": SimpleNamespace(),
+            "remote": SimpleNamespace(),
+            "system": SimpleNamespace(),
+        },
+    )
+
+    with pytest.raises(ValueError, match="disabled"):
+        await runtime._resolve_execution_context(kernel.context)
+
+
 def test_render_prompt_includes_participants_memory_and_thread_context():
     kernel = _build_fixture_context(endpoint_kind="system")
     prompt = render_prompt(kernel.context)
@@ -766,6 +995,227 @@ async def test_http_executor_emits_generation_when_model_present(monkeypatch):
     assert observer.records[0]["kind"] == "generation"
     assert observer.records[0]["name"] == "remote-agent-execute"
     assert observer.records[0]["input"]["prompt"] == render_prompt(kernel.context)
+
+
+@pytest.mark.asyncio
+async def test_http_executor_calls_openai_responses_with_api_key(monkeypatch):
+    kernel = _build_fixture_context(endpoint_kind="remote")
+    kernel.context = kernel.context.model_copy(
+        update={
+            "system_agent": kernel.context.system_agent.model_copy(
+                update={
+                    "endpoint": AgentEndpoint(
+                        kind="remote",
+                        url="https://api.openai.com/v1/responses",
+                        model="gpt-5.4-mini",
+                        provider="openai",
+                        engine_id="openai-responses",
+                    )
+                }
+            )
+        }
+    )
+    observer = RecordingObserver()
+    request_log: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "output_text": "OpenAI validation complete.",
+                "usage": {
+                    "input_tokens": 21,
+                    "output_tokens": 9,
+                    "total_tokens": 30,
+                },
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            request_log["url"] = url
+            request_log["headers"] = headers
+            request_log["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-test")
+    monkeypatch.setattr("agent_runtime.runtime.httpx.AsyncClient", FakeAsyncClient)
+
+    executor = HttpEndpointExecutor(
+        timeout_seconds=1.0,
+        endpoint_scope="remote",
+        observability=observer,
+    )
+    result = await executor.execute(kernel.context)
+
+    assert "Testing Agent (testing agent)" in (result.message or "")
+    assert request_log["url"] == "https://api.openai.com/v1/responses"
+    assert request_log["headers"]["Authorization"] == "Bearer sk-openai-test"
+    assert request_log["json"]["model"] == "gpt-5.4-mini"
+    assert request_log["json"]["input"] == render_prompt(kernel.context)
+    assert observer.records[0]["name"] == "remote-openai-responses"
+    update = observer.records[0]["updates"][0]
+    assert update["usage_details"] == {
+        "prompt_tokens": 21,
+        "completion_tokens": 9,
+        "total_tokens": 30,
+    }
+
+
+@pytest.mark.asyncio
+async def test_openbao_secret_provider_reads_kv_v2_value(monkeypatch):
+    request_log: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "data": {
+                    "data": {
+                        "api_key": "sk-from-openbao",
+                    }
+                }
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None):
+            request_log["url"] = url
+            request_log["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr("agent_runtime.secrets.httpx.AsyncClient", FakeAsyncClient)
+
+    provider = OpenBaoSecretProvider(
+        address="http://localhost:8200",
+        token="root-token",
+        default_mount="secret",
+    )
+    value = await provider.get_secret(
+        SecretReference(
+            provider="openbao",
+            path="open-talon/llm/openai",
+            field_name="api_key",
+        )
+    )
+
+    assert value == "sk-from-openbao"
+    assert request_log["url"] == "http://localhost:8200/v1/secret/data/open-talon/llm/openai"
+    assert request_log["headers"]["X-Vault-Token"] == "root-token"
+
+
+@pytest.mark.asyncio
+async def test_http_executor_can_resolve_openai_api_key_from_openbao(monkeypatch):
+    kernel = _build_fixture_context(endpoint_kind="remote")
+    kernel.context = kernel.context.model_copy(
+        update={
+            "system_agent": kernel.context.system_agent.model_copy(
+                update={
+                    "endpoint": AgentEndpoint(
+                        kind="remote",
+                        url="https://api.openai.com/v1/responses",
+                        model="gpt-5.4-mini",
+                        provider="openai",
+                        engine_id="openai-responses",
+                    ),
+                    "metadata": {
+                        "_resolved_llm_engine": {
+                            "engine_id": "openai-responses",
+                            "metadata": {
+                                "api_key_secret": {
+                                    "openbao": {
+                                        "mount": "secret",
+                                        "path": "open-talon/llm/openai",
+                                        "field": "api_key",
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            )
+        }
+    )
+    request_log: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"output_text": "OpenAI validation complete."}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            request_log["url"] = url
+            request_log["headers"] = headers
+            request_log["json"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr("agent_runtime.runtime.httpx.AsyncClient", FakeAsyncClient)
+
+    resolver = SecretResolver(
+        [
+            OpenBaoSecretProvider(
+                address="http://localhost:8200",
+                token="root-token",
+                default_mount="secret",
+            )
+        ]
+    )
+
+    async def fake_get_secret(reference):
+        assert reference.provider == "openbao"
+        assert reference.path == "open-talon/llm/openai"
+        return "sk-openbao-test"
+
+    resolver._providers["openbao"].get_secret = fake_get_secret  # type: ignore[attr-defined]
+
+    executor = HttpEndpointExecutor(
+        timeout_seconds=1.0,
+        endpoint_scope="remote",
+        observability=RecordingObserver(),
+        secret_resolver=resolver,
+    )
+    result = await executor.execute(kernel.context)
+
+    assert "Testing Agent (testing agent)" in (result.message or "")
+    assert request_log["headers"]["Authorization"] == "Bearer sk-openbao-test"
 
 
 def test_langfuse_runtime_observer_uses_observation_api_for_generation():
