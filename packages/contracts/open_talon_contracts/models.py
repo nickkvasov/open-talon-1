@@ -65,6 +65,7 @@ class TargetRef(BaseModel):
 class ParticipantInput(BaseModel):
     participant_id: UUID
     participant_type: ParticipantType
+    user_id: UUID | None = None
     display_name: str
     description: str | None = None
     roles: list[str] = Field(default_factory=list)

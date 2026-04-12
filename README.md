@@ -12,6 +12,7 @@ At a high level:
 
 - `services/gateway-edge` is the main entrypoint for clients and developer tools
 - `apps/tui` provides a terminal UI that talks to the gateway
+  - `tui2` is the recommended scrollback-first terminal client for reliable mouse copy/select and terminal-native link handling
 - `services/core-collab` manages shared collaboration concepts like workspaces, threads, participants, presence, and timelines across both humans and agents
 - `services/agent-runtime` runs stateless background workers for agent loops, tool execution, and lease reconciliation
 - `packages/contracts` defines shared models and contracts used across services
@@ -25,6 +26,23 @@ The typical flow is:
 4. Stateless `agent-runtime` workers claim runnable work, execute model turns or tool calls, and publish events back into Kafka.
 5. The gateway streams results back to clients over HTTP, SSE, or WebSocket.
 6. Langfuse captures observability data for prompts, traces, and evaluations.
+
+## Identity And Auth
+
+Open Talon now separates:
+
+- `users`: stable human identity records
+- `auth_identities`: external IdP mappings for authenticated humans
+- `participants`: workspace-local materializations of a human or agent inside a workspace
+
+Human authentication is handled through **Keycloak** over OIDC. `gateway-edge` validates bearer tokens, maps `(issuer, subject)` to a local `users.user_id`, and then resolves or creates the caller's workspace participant server-side.
+
+Important implications:
+
+- client apps should not treat `participant_id` as a global human identity
+- authenticated human requests may still include an `actor` object for compatibility, but the gateway derives the effective human actor from the bearer token
+- OpenBao remains part of the local stack for secrets and other internal uses, not as the primary end-user login system
+- the local Keycloak dev setup is intended to allow HTTP during development; `keycloak-init` normalizes `sslRequired=none` for both `master` and `open-talon`, and you can re-apply that with `docker compose up -d keycloak keycloak-init`
 
 ## Tools Model
 
@@ -82,7 +100,8 @@ Common tool endpoints:
 
 - **PostgreSQL**: Deployed via `pgvector/pgvector:pg16` directly supporting native `JSONB` properties alongside algorithmic embeddings operations for Vector Similarity Searching natively in the engine.
 - **Kafka**: Deployed using `apache/kafka:3.8.0` utilizing `KRaft` mode (omitting Zookeeper), configured natively on mapped loops using high level partition assignments.
-- **OpenBao**: Open-source fork of Hashicorp Vault running securely in Development mode tracking explicit Version 2 isolated secrets.
+- **OpenBao**: Open-source fork of Hashicorp Vault running in local development for secrets-oriented workflows.
+- **Keycloak**: Local identity provider for registration, login, OIDC token issuance, and device/browser flows.
 - **Valkey**: Drop-in compatible Redis equivalent caching infrastructure configured to handle immediate TTL caching.
 - **Langfuse**: Self-hosted LLM observability stack for traces, prompts, and evaluations, deployed with Langfuse Web/Worker plus ClickHouse and MinIO.
 - **Ollama AI**: Serves dynamic generative model orchestration natively mapped across standard REST.
@@ -107,6 +126,7 @@ Local services:
 - `pgadmin`: pgAdmin 4 web UI for inspecting and querying the local Postgres instance
 - `kafka`: event bus for chat, collaboration, and agent-runtime traffic
 - `openbao`: local secret store and token-validation backend
+- `keycloak`: local identity provider for user registration, browser login, and device login
 - `valkey`: session store, API-key cache, and short-lived gateway state
 - `langfuse-web`: Langfuse UI and API surface
 - `langfuse-worker`: Langfuse background processing
@@ -125,6 +145,9 @@ Common local endpoints:
 - `langfuse-web`: [http://localhost:3000](http://localhost:3000)
 - `pgadmin`: [http://localhost:5050](http://localhost:5050)
 - `openbao`: [http://localhost:8200](http://localhost:8200)
+- `keycloak`: [http://localhost:8081](http://localhost:8081)
+  default local login: `admin` / `admin`
+  default realm: `open-talon`
 - `ollama`: [http://localhost:11434](http://localhost:11434)
 - `clickhouse HTTP`: [http://localhost:8123](http://localhost:8123)
 - `minio API`: [http://localhost:9090](http://localhost:9090)
@@ -158,6 +181,13 @@ Default local development credentials:
   password: `langfuse-dev-secret`
 - `OpenBao`
   root token: `root`
+- `Keycloak`
+  URL: [http://localhost:8081](http://localhost:8081)
+  admin username: `admin`
+  admin password: `admin`
+  default realm: `open-talon`
+  realm users:
+  `admin` / `admin123`, `supervisor` / `supervisor123`, `user1` / `user12345`, `user2` / `user22345`
 - `Langfuse UI`
   URL: [http://localhost:3000](http://localhost:3000)
   email: `admin@example.com`
@@ -203,9 +233,42 @@ That root environment installs:
 
 `services/gateway-edge` is the only supported local gateway path for day-to-day development.
 
+## Quickstart
+
+For the shortest end-to-end local setup flow, see [`docs/system-quickstart.md`](/Users/nikolay.kvasov/Development/open-talon-1/docs/system-quickstart.md).
+
 ## TUI
 
 For TUI setup, usage, and slash command documentation, see [`apps/tui/README.md`](/Users/nikolay.kvasov/Development/open-talon-1/apps/tui/README.md).
+
+In the current auth model, the TUI is a **multi-profile** client:
+
+- each local profile lives under `~/.open-talon/profiles/<profile>/`
+- each profile stores separate workspace/thread state and bearer tokens
+- human login is designed around Keycloak device flow
+- two users on the same device should use different TUI profiles rather than sharing one local participant identity
+
+For terminal-first usage, prefer `tui2`:
+
+```bash
+./open-talon tui2 --profile admin
+```
+
+`tui2` runs in normal terminal scrollback instead of a full-screen widget layout, so mouse selection works like a regular shell session and raw URLs remain easy to copy or open.
+
+Useful local flows:
+
+```bash
+./open-talon tui2 --profile admin
+./open-talon tui2 auth login --profile admin
+```
+
+Inside `tui2`, the minimum auth path is:
+
+```text
+/auth login
+/account whoami
+```
 
 ## Database Migrations
 

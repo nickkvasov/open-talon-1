@@ -20,6 +20,7 @@ from core_collab import CollaborationKernel, CollaborationRepository  # noqa: E4
 
 from gateway_edge.db.postgres import get_pool
 from gateway_edge.models import (
+    AuthContext,
     AssumeParticipantRoleRequest,
     AgentDefinition,
     AttachWorkspaceToolRequest,
@@ -92,6 +93,36 @@ class CollaborationService:
         await self._publish_events(result.events)
         assert result.detail is not None
         return result.detail
+
+    async def resolve_authenticated_user_actor(
+        self,
+        *,
+        workspace_id: UUID,
+        auth_context: AuthContext,
+        auto_create: bool = True,
+    ) -> ParticipantInput:
+        if auth_context.user_id is None or not auth_context.display_name:
+            raise ValueError("Authenticated OIDC user context is incomplete")
+        return await self._require_kernel().resolve_authenticated_user_actor(
+            workspace_id,
+            user_id=auth_context.user_id,
+            display_name=auth_context.display_name,
+            auto_create=auto_create,
+        )
+
+    async def resolve_authenticated_thread_actor(
+        self,
+        *,
+        thread_id: UUID,
+        auth_context: AuthContext,
+        auto_create: bool = True,
+    ) -> ParticipantInput:
+        thread = await self._require_kernel().get_thread_detail(thread_id)
+        return await self.resolve_authenticated_user_actor(
+            workspace_id=thread.thread.workspace_id,
+            auth_context=auth_context,
+            auto_create=auto_create,
+        )
 
     async def list_workspaces(self) -> list[Workspace]:
         return await self._require_kernel().list_workspaces()

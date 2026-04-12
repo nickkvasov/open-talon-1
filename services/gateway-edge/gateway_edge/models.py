@@ -135,6 +135,27 @@ class KafkaChatResponse(BaseModel):
     error: str | None = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
+
+class AuthContext(BaseModel):
+    kind: Literal["oidc", "api_key"]
+    user_id: UUID | None = None
+    issuer: str | None = None
+    subject: str | None = None
+    email: str | None = None
+    display_name: str | None = None
+    roles: list[str] = Field(default_factory=list)
+    claims: dict[str, Any] = Field(default_factory=dict)
+
+
+class MeResponse(BaseModel):
+    user_id: UUID
+    issuer: str
+    subject: str
+    email: str | None = None
+    display_name: str
+    roles: list[str] = Field(default_factory=list)
+    claims: dict[str, Any] = Field(default_factory=dict)
+
 __all__ = [
     "ActorRef",
     "AgentArtifactDraft",
@@ -206,6 +227,8 @@ __all__ = [
     "KafkaChatRequest",
     "KafkaChatResponse",
     "Message",
+    "AuthContext",
+    "MeResponse",
     "Workspace",
     "WorkspaceDetail",
     "WorkspaceTool",

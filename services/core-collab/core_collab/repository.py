@@ -49,6 +49,27 @@ class UserRecord:
         self.created_at = created_at
         self.updated_at = updated_at
         self.metadata = metadata or {}
+
+
+class AuthIdentityRecord:
+    def __init__(
+        self,
+        *,
+        user_id: UUID,
+        issuer: str,
+        subject: str,
+        email: str | None,
+        display_name: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.user_id = user_id
+        self.issuer = issuer
+        self.subject = subject
+        self.email = email
+        self.display_name = display_name
+        self.metadata = metadata or {}
+
+
 class CollaborationRepository:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
@@ -166,7 +187,7 @@ class CollaborationRepository:
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (user_id) DO UPDATE
                 SET display_name = EXCLUDED.display_name,
-                    metadata = EXCLUDED.metadata,
+                    metadata = users.metadata || EXCLUDED.metadata,
                     updated_at = EXCLUDED.updated_at
             """,
             user.user_id,
@@ -174,6 +195,49 @@ class CollaborationRepository:
             self._json_dumps(user.metadata),
             user.created_at,
             user.updated_at,
+        )
+
+    async def fetch_auth_identity(
+        self,
+        issuer: str,
+        subject: str,
+    ) -> AuthIdentityRecord | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT user_id, issuer, subject, email, display_name, metadata
+            FROM auth_identities
+            WHERE issuer = $1
+              AND subject = $2
+            """,
+            issuer,
+            subject,
+        )
+        return self._auth_identity_from_row(row) if row else None
+
+    async def upsert_auth_identity(
+        self,
+        conn: asyncpg.Connection,
+        identity: AuthIdentityRecord,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO auth_identities (
+                user_id, issuer, subject, email, display_name, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (issuer, subject) DO UPDATE
+                SET user_id = EXCLUDED.user_id,
+                    email = EXCLUDED.email,
+                    display_name = EXCLUDED.display_name,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = NOW()
+            """,
+            identity.user_id,
+            identity.issuer,
+            identity.subject,
+            identity.email,
+            identity.display_name,
+            self._json_dumps(identity.metadata),
         )
 
     async def upsert_system_agent(
@@ -922,6 +986,38 @@ class CollaborationRepository:
         )
         return self._participant_from_row(row) if row else None
 
+    async def fetch_user_participant(
+        self,
+        workspace_id: UUID,
+        user_id: UUID,
+    ) -> ParticipantProfile | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT p.participant_id, p.workspace_id, p.participant_type, p.user_id, p.system_agent_id,
+                   p.description, p.roles, p.capabilities, p.status, p.visibility_scope,
+                   p.created_at, p.updated_at, p.metadata,
+                   u.display_name AS user_display_name,
+                   sa.display_name AS agent_display_name,
+                   sa.description AS agent_description,
+                   sa.role AS agent_role,
+                   sa.capabilities AS agent_capabilities,
+                   sa.endpoint AS agent_endpoint,
+                   sa.system_prompt AS agent_system_prompt,
+                   sa.definition AS agent_definition
+            FROM participants p
+            LEFT JOIN users u ON p.user_id = u.user_id
+            LEFT JOIN system_agents sa ON p.system_agent_id = sa.agent_id
+            WHERE p.workspace_id = $1
+              AND p.participant_type = 'user'
+              AND p.user_id = $2
+            ORDER BY p.created_at ASC
+            LIMIT 1
+            """,
+            workspace_id,
+            user_id,
+        )
+        return self._participant_from_row(row) if row else None
+
     async def list_participants(self, workspace_id: UUID) -> list[ParticipantProfile]:
         rows = await self._pool.fetch(
             """
@@ -1578,6 +1674,8 @@ class CollaborationRepository:
             if participant_type == "agent"
             else row["user_display_name"]
         )
+        if not display_name:
+            display_name = metadata.get("display_name") or str(row["participant_id"])
         description = (
             row["agent_description"]
             if participant_type == "agent"
@@ -1620,6 +1718,17 @@ class CollaborationRepository:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             metadata=metadata,
+        )
+
+    @staticmethod
+    def _auth_identity_from_row(row: asyncpg.Record) -> AuthIdentityRecord:
+        return AuthIdentityRecord(
+            user_id=row["user_id"],
+            issuer=row["issuer"],
+            subject=row["subject"],
+            email=row["email"],
+            display_name=row["display_name"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
         )
 
     @staticmethod

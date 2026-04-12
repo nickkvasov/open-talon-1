@@ -11,8 +11,10 @@ import asyncio
 import json
 import logging
 import os
+import re
+import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from urllib.parse import urlencode
@@ -31,10 +33,17 @@ from textual.suggester import SuggestFromList, Suggester
 from textual.widgets import Footer, Header, Input, RichLog, Static
 
 _CFG_DIR = Path.home() / ".open-talon"
-_STATE_FILE = _CFG_DIR / "collaboration.json"
+_PROFILES_DIR = _CFG_DIR / "profiles"
 _LOG_FILE = _CFG_DIR / "tui.log"
+_EMPTY_UUID = "00000000-0000-0000-0000-000000000000"
+_STATE_VERSION = 2
+_TOKEN_STATE_VERSION = 2
+_DEFAULT_OIDC_ISSUER_URL = "http://127.0.0.1:8081/realms/open-talon"
+_DEFAULT_OIDC_CLIENT_ID = "open-talon-tui"
+_URL_PATTERN = re.compile(r"https?://[^\s<>()]+")
 
 _CFG_DIR.mkdir(parents=True, exist_ok=True)
+_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=os.getenv("OPEN_TALON_TUI_LOG_LEVEL", "DEBUG").upper(),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -53,38 +62,314 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ClientState:
-    participant_id: str
+    participant_id: str | None
+    user_id: str | None
     display_name: str
     participant_type: str
     workspace_id: str | None = None
     thread_id: str | None = None
     last_sequence: int = 0
+    version: int = _STATE_VERSION
 
 
-def load_state(display_name: str, participant_type: str) -> ClientState:
+@dataclass
+class TokenState:
+    access_token: str
+    refresh_token: str | None
+    expires_at: str | None
+    issuer: str
+    client_id: str
+    version: int = _TOKEN_STATE_VERSION
+
+
+def _profile_dir(profile: str) -> Path:
+    return _PROFILES_DIR / profile
+
+
+def _profile_state_file(profile: str) -> Path:
+    return _profile_dir(profile) / "state.json"
+
+
+def _profile_tokens_file(profile: str) -> Path:
+    return _profile_dir(profile) / "tokens.json"
+
+
+def _ensure_private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
     try:
-        data = json.loads(_STATE_FILE.read_text())
+        path.chmod(0o700)
+    except OSError:
+        pass
+
+
+def _write_private_json(path: Path, payload: dict) -> None:
+    _ensure_private_dir(path.parent)
+    path.write_text(json.dumps(payload, indent=2))
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _cleanup_profile_dir(profile: str) -> None:
+    profile_dir = _profile_dir(profile)
+    try:
+        if any(profile_dir.iterdir()):
+            return
+        profile_dir.rmdir()
+    except OSError:
+        pass
+
+
+def list_profiles() -> list[str]:
+    profiles: list[str] = []
+    for item in sorted(_PROFILES_DIR.iterdir()):
+        if not item.is_dir():
+            continue
+        profile = item.name
+        state_file = _profile_state_file(profile)
+        tokens_file = _profile_tokens_file(profile)
+        if state_file.exists():
+            try:
+                state_data = json.loads(state_file.read_text())
+                if state_data.get("version") != _STATE_VERSION:
+                    state_file.unlink(missing_ok=True)
+            except Exception:
+                state_file.unlink(missing_ok=True)
+        if tokens_file.exists():
+            try:
+                token_data = json.loads(tokens_file.read_text())
+                if token_data.get("version") != _TOKEN_STATE_VERSION:
+                    tokens_file.unlink(missing_ok=True)
+            except Exception:
+                tokens_file.unlink(missing_ok=True)
+        _cleanup_profile_dir(profile)
+        if item.exists() and (state_file.exists() or tokens_file.exists()):
+            profiles.append(profile)
+    return profiles
+
+
+def resolve_startup_profile(
+    explicit_profile: str | None,
+    *,
+    oidc_enabled: bool,
+    prompt=input,
+) -> str:
+    if explicit_profile is not None:
+        return explicit_profile
+
+    profiles = list_profiles()
+    if oidc_enabled:
+        print("Select a TUI profile for this Keycloak account:")
+        if profiles:
+            for index, existing in enumerate(profiles, start=1):
+                print(f"  {index}. {existing}")
+            choice = prompt("Profile number or new name: ").strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(profiles):
+                return profiles[int(choice) - 1]
+            if choice:
+                return choice
+        else:
+            choice = prompt("Create a local profile name: ").strip()
+            if choice:
+                return choice
+        raise SystemExit("A profile is required for Keycloak login. Re-run with --profile <name>.")
+
+    if len(profiles) == 1:
+        return profiles[0]
+    if len(profiles) > 1:
+        print("Select a TUI profile:")
+        for index, existing in enumerate(profiles, start=1):
+            print(f"  {index}. {existing}")
+        choice = prompt("Profile number or new name: ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(profiles):
+            return profiles[int(choice) - 1]
+        if choice:
+            return choice
+        raise SystemExit("A profile is required. Re-run with --profile <name>.")
+    choice = prompt("Create a local profile name: ").strip()
+    if choice:
+        return choice
+    raise SystemExit("A profile is required. Re-run with --profile <name>.")
+
+
+def load_state(profile: str, display_name: str, participant_type: str) -> ClientState:
+    state_file = _profile_state_file(profile)
+    try:
+        data = json.loads(state_file.read_text())
+        if data.get("version") != _STATE_VERSION:
+            state_file.unlink(missing_ok=True)
+            _cleanup_profile_dir(profile)
+            raise ValueError("legacy state version")
         return ClientState(
-            participant_id=data["participant_id"],
+            participant_id=data.get("participant_id"),
+            user_id=data.get("user_id"),
             display_name=data.get("display_name", display_name),
             participant_type=data.get("participant_type", participant_type),
             workspace_id=data.get("workspace_id"),
             thread_id=data.get("thread_id"),
             last_sequence=data.get("last_sequence", 0),
+            version=data.get("version", _STATE_VERSION),
         )
     except Exception:
         state = ClientState(
-            participant_id=str(uuid4()),
+            participant_id=None,
+            user_id=None,
             display_name=display_name,
             participant_type=participant_type,
         )
-        save_state(state)
+        save_state(profile, state)
         return state
 
 
-def save_state(state: ClientState) -> None:
-    _CFG_DIR.mkdir(parents=True, exist_ok=True)
-    _STATE_FILE.write_text(json.dumps(asdict(state), indent=2))
+def save_state(profile: str, state: ClientState) -> None:
+    _write_private_json(_profile_state_file(profile), asdict(state))
+
+
+def reset_profile_session_state(
+    profile: str,
+    *,
+    display_name: str,
+    participant_type: str,
+) -> ClientState:
+    state = ClientState(
+        participant_id=None,
+        user_id=None,
+        display_name=display_name,
+        participant_type=participant_type,
+        workspace_id=None,
+        thread_id=None,
+        last_sequence=0,
+    )
+    save_state(profile, state)
+    return state
+
+
+def load_tokens(profile: str) -> TokenState | None:
+    token_file = _profile_tokens_file(profile)
+    try:
+        data = json.loads(token_file.read_text())
+        if data.get("version") != _TOKEN_STATE_VERSION:
+            token_file.unlink(missing_ok=True)
+            return None
+        return TokenState(**data)
+    except Exception:
+        return None
+
+
+def save_tokens(profile: str, tokens: TokenState | None) -> None:
+    token_file = _profile_tokens_file(profile)
+    if tokens is None:
+        token_file.unlink(missing_ok=True)
+        _cleanup_profile_dir(profile)
+        return
+    _write_private_json(token_file, asdict(tokens))
+
+
+async def discover_oidc(issuer_url: str) -> dict:
+    normalized_issuer = issuer_url.rstrip("/")
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+        response = await client.get(
+            f"{normalized_issuer}/.well-known/openid-configuration"
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+async def run_device_login(
+    *,
+    issuer_url: str,
+    client_id: str,
+    write_line,
+) -> TokenState:
+    discovery = await discover_oidc(issuer_url)
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+        response = await client.post(
+            discovery["device_authorization_endpoint"],
+            data={
+                "client_id": client_id,
+                "scope": "openid profile email",
+            },
+        )
+        response.raise_for_status()
+        body = response.json()
+        write_line(
+            body.get("verification_uri_complete") or body.get("verification_uri")
+        )
+        write_line(f"user code: {body['user_code']}")
+        interval = int(body.get("interval", 5))
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=body.get("expires_in", 600))
+        while datetime.now(timezone.utc) < deadline:
+            await asyncio.sleep(interval)
+            token_response = await client.post(
+                discovery["token_endpoint"],
+                data={
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                    "client_id": client_id,
+                    "device_code": body["device_code"],
+                },
+            )
+            if token_response.status_code == 200:
+                token_body = token_response.json()
+                expires_at = datetime.now(timezone.utc) + timedelta(
+                    seconds=token_body.get("expires_in", 300)
+                )
+                return TokenState(
+                    access_token=token_body["access_token"],
+                    refresh_token=token_body.get("refresh_token"),
+                    expires_at=expires_at.isoformat(),
+                    issuer=issuer_url.rstrip("/"),
+                    client_id=client_id,
+                )
+            error = token_response.json().get("error")
+            if error in {"authorization_pending", "slow_down"}:
+                if error == "slow_down":
+                    interval += 1
+                continue
+            raise RuntimeError(f"OIDC device login failed: {error}")
+    raise RuntimeError("OIDC device login timed out")
+
+
+async def fetch_current_user(
+    *,
+    gateway: str,
+    access_token: str,
+) -> dict:
+    async with httpx.AsyncClient(
+        timeout=10,
+        trust_env=False,
+        headers={"Authorization": f"Bearer {access_token}"},
+    ) as client:
+        response = await client.get(f"{gateway.rstrip('/')}/v1/me")
+        response.raise_for_status()
+        return response.json()
+
+
+async def run_auth_login(
+    *,
+    gateway: str,
+    profile: str,
+    oidc_issuer_url: str,
+    oidc_client_id: str,
+    display_name: str,
+    write_line=print,
+) -> dict:
+    tokens = await run_device_login(
+        issuer_url=oidc_issuer_url,
+        client_id=oidc_client_id,
+        write_line=write_line,
+    )
+    save_tokens(profile, tokens)
+    current_user = await fetch_current_user(
+        gateway=gateway,
+        access_token=tokens.access_token,
+    )
+    state = load_state(profile, display_name, "user")
+    state.user_id = current_user["user_id"]
+    state.display_name = current_user["display_name"]
+    state.participant_type = "user"
+    save_state(profile, state)
+    return current_user
 
 
 class WorkspaceCommandSuggester(Suggester):
@@ -209,9 +494,9 @@ class CollaborationApp(App):
     SUB_TITLE = "Collaboration TUI"
     CSS = CSS
     BINDINGS = [
-        Binding("ctrl+n", "new_thread", "New Thread"),
-        Binding("ctrl+q", "quit", "Quit"),
-        Binding("ctrl+l", "clear", "Clear"),
+        Binding("ctrl+n", "new_thread", "New Thread", priority=True),
+        Binding("ctrl+q", "quit", "Quit", priority=True),
+        Binding("ctrl+l", "clear", "Clear", priority=True),
     ]
 
     status: reactive[str] = reactive("Connecting...")
@@ -221,8 +506,11 @@ class CollaborationApp(App):
         self,
         *,
         gateway: str,
+        profile: str,
         api_key: str | None,
         openbao_token: str | None,
+        oidc_issuer_url: str | None,
+        oidc_client_id: str | None,
         display_name: str,
         workspace_name: str,
         thread_title: str,
@@ -239,15 +527,43 @@ class CollaborationApp(App):
                 "ws://localhost", "ws://127.0.0.1", 1
             )
         self.gateway = normalized_gateway
+        self.profile = profile
         self.api_key = api_key
         self.openbao_token = openbao_token
+        self.oidc_issuer_url = oidc_issuer_url.rstrip("/") if oidc_issuer_url else None
+        self.oidc_client_id = oidc_client_id
+        if participant_type == "user" and not (self.oidc_issuer_url and self.oidc_client_id):
+            raise RuntimeError("Human TUI users must authenticate with Keycloak OIDC.")
+        if participant_type == "user" and (api_key or openbao_token):
+            raise RuntimeError("Human TUI users cannot use API key or OpenBao auth; use Keycloak login.")
         self.workspace_name = workspace_name
         self.default_thread_title = thread_title
-        self.state = load_state(display_name, participant_type)
+        self.state = load_state(profile, display_name, participant_type)
+        self.tokens = load_tokens(profile)
+        if participant_type == "user" and self.tokens is None:
+            self.state = reset_profile_session_state(
+                profile,
+                display_name=display_name,
+                participant_type=participant_type,
+            )
+        self.current_user: dict | None = None
+        self._fallback_actor_id = str(uuid4())
         self._ws = None
         self._seen_message_ids: set[str] = set()
         self._http_client: httpx.AsyncClient | None = None
         self._slash_commands = [
+            "/quit",
+            "/clear",
+            "/copy",
+            "/links",
+            "/open ",
+            "/auth login",
+            "/auth logout",
+            "/account login",
+            "/account whoami",
+            "/account list",
+            "/account switch ",
+            "/account logout",
             "/agent create local ",
             "/tool attached",
             "/tool detach ",
@@ -276,21 +592,26 @@ class CollaborationApp(App):
         self._thread_suggestions: list[dict[str, str]] = []
         self._role_suggestions: list[str] = []
         self._tool_suggestions: list[dict[str, str]] = []
+        self._timeline_lines: list[str] = []
+        self._detected_links: list[str] = []
 
     @property
     def _auth_headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
         if self.api_key:
             headers["X-API-Key"] = self.api_key
-        if self.openbao_token:
-            headers["Authorization"] = f"Bearer {self.openbao_token}"
+        bearer_token = self.tokens.access_token if self.tokens is not None else self.openbao_token
+        if bearer_token:
+            headers["Authorization"] = f"Bearer {bearer_token}"
         return headers
 
     @property
-    def actor_payload(self) -> dict[str, str]:
+    def actor_payload(self) -> dict[str, str | None]:
+        participant_id = self.state.participant_id or self.state.user_id or self._fallback_actor_id
         return {
-            "participant_id": self.state.participant_id,
+            "participant_id": participant_id,
             "participant_type": self.state.participant_type,
+            "user_id": self.state.user_id,
             "display_name": self.state.display_name,
         }
 
@@ -342,6 +663,140 @@ class CollaborationApp(App):
                     targets.append(candidate)
         return targets
 
+    @property
+    def _oidc_enabled(self) -> bool:
+        return bool(self.oidc_issuer_url and self.oidc_client_id)
+
+    def _sync_http_auth(self) -> None:
+        if self._http_client is None:
+            return
+        self._http_client.headers.clear()
+        self._http_client.headers.update(self._auth_headers)
+
+    @property
+    def _is_authenticated(self) -> bool:
+        return self.tokens is not None and self.current_user is not None
+
+    @staticmethod
+    def _token_expiring_soon(tokens: TokenState | None, *, skew_seconds: int = 30) -> bool:
+        if tokens is None or not tokens.expires_at:
+            return False
+        try:
+            expires_at = datetime.fromisoformat(tokens.expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return expires_at <= datetime.now(timezone.utc) + timedelta(seconds=skew_seconds)
+
+    async def _discover_oidc(self) -> dict:
+        if not self._oidc_enabled or self.oidc_issuer_url is None:
+            raise RuntimeError("OIDC issuer URL and client ID must be configured")
+        return await discover_oidc(self.oidc_issuer_url)
+
+    async def _refresh_oidc_tokens(self) -> bool:
+        if not self._oidc_enabled or self.tokens is None or not self.tokens.refresh_token:
+            return False
+        discovery = await self._discover_oidc()
+        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+            response = await client.post(
+                discovery["token_endpoint"],
+                data={
+                    "grant_type": "refresh_token",
+                    "client_id": self.oidc_client_id,
+                    "refresh_token": self.tokens.refresh_token,
+                },
+            )
+        if response.status_code >= 400:
+            return False
+        body = response.json()
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=body.get("expires_in", 300))
+        self.tokens = TokenState(
+            access_token=body["access_token"],
+            refresh_token=body.get("refresh_token", self.tokens.refresh_token),
+            expires_at=expires_at.isoformat(),
+            issuer=self.oidc_issuer_url or self.tokens.issuer,
+            client_id=self.oidc_client_id or self.tokens.client_id,
+        )
+        save_tokens(self.profile, self.tokens)
+        self._sync_http_auth()
+        return True
+
+    async def _device_login(self) -> None:
+        if not self._oidc_enabled:
+            raise RuntimeError("OIDC issuer URL and client ID must be configured")
+        self.tokens = await run_device_login(
+            issuer_url=self.oidc_issuer_url or "",
+            client_id=self.oidc_client_id or "",
+            write_line=lambda message: self._write_system(
+                message,
+                style="cyan" if message.startswith("http") else "yellow",
+            ),
+        )
+        save_tokens(self.profile, self.tokens)
+        self._sync_http_auth()
+
+    async def _ensure_bearer_token(self) -> None:
+        if self._token_expiring_soon(self.tokens):
+            refreshed = await self._refresh_oidc_tokens()
+            if not refreshed:
+                self._write_system("token refresh failed; starting device login", style="yellow")
+                await self._device_login()
+
+    async def _load_current_user(self) -> None:
+        if self._http_client is None or self.tokens is None:
+            return
+        response = await self._http_client.get(f"{self.gateway}/v1/me")
+        response.raise_for_status()
+        self.current_user = response.json()
+        self.state.user_id = self.current_user["user_id"]
+        self.state.display_name = self.current_user["display_name"]
+        self.state.participant_type = "user"
+        save_state(self.profile, self.state)
+
+    def _set_current_participant(self, participants: list[dict]) -> None:
+        current: dict | None = None
+        if self.state.user_id:
+            current = next(
+                (
+                    participant
+                    for participant in participants
+                    if participant.get("user_id") == self.state.user_id
+                ),
+                None,
+            )
+        if current is None and self.state.participant_id:
+            current = next(
+                (
+                    participant
+                    for participant in participants
+                    if participant.get("participant_id") == self.state.participant_id
+                ),
+                None,
+            )
+        if current is not None:
+            self.state.participant_id = current.get("participant_id")
+            self.state.display_name = current.get("display_name", self.state.display_name)
+
+    async def _switch_profile(self, profile: str) -> None:
+        self.profile = profile
+        self.state = load_state(profile, self.state.display_name, self.state.participant_type)
+        self.tokens = load_tokens(profile)
+        if self.tokens is None:
+            self.state = reset_profile_session_state(
+                profile,
+                display_name=self.state.display_name,
+                participant_type=self.state.participant_type,
+            )
+        self.current_user = None
+        self._seen_message_ids.clear()
+        self._sync_http_auth()
+
+    def _require_authenticated_session(self) -> bool:
+        if self._is_authenticated:
+            return True
+        self._write_system("sign in first with /auth login", style="yellow")
+        self._update_status("wait", "Sign in required")
+        return False
+
     async def _list_workspaces(self) -> list[dict]:
         assert self._http_client is not None
         response = await self._http_client.get(f"{self.gateway}/v1/workspaces")
@@ -371,6 +826,8 @@ class CollaborationApp(App):
         response = await self._http_client.get(f"{self.gateway}/v1/workspaces/{workspace_id}")
         response.raise_for_status()
         detail = response.json()
+        self._set_current_participant(detail.get("participants", []))
+        save_state(self.profile, self.state)
         self._role_suggestions = [
             role_definition["name"]
             for role_definition in detail.get("role_definitions", [])
@@ -384,6 +841,8 @@ class CollaborationApp(App):
         )
         response.raise_for_status()
         participants = response.json()
+        self._set_current_participant(participants)
+        save_state(self.profile, self.state)
         self._participant_suggestions = [
             {
                 "participant_id": item["participant_id"],
@@ -439,7 +898,7 @@ class CollaborationApp(App):
         yield Header()
         with Vertical(id="body"):
             yield Static("", id="context-info")
-            yield RichLog(id="timeline", markup=True, highlight=False, wrap=True)
+            yield RichLog(id="timeline", markup=False, highlight=False, wrap=True)
             yield Static(" Connecting...", id="status-bar")
             yield Static(" Commands: /workspace list, /participant list, /thread list", id="suggestion-bar")
             with Horizontal(id="composer"):
@@ -452,6 +911,7 @@ class CollaborationApp(App):
 
     def on_mount(self) -> None:
         self._update_context_info()
+        self._focus_input_soon()
         self._initialize()
 
     @work(thread=False)
@@ -461,15 +921,32 @@ class CollaborationApp(App):
             timeout=10,
             trust_env=False,
         )
-        logger.debug("TUI initialize gateway=%s participant_id=%s", self.gateway, self.state.participant_id)
+        logger.debug(
+            "TUI initialize gateway=%s profile=%s participant_id=%s",
+            self.gateway,
+            self.profile,
+            self.state.participant_id,
+        )
         try:
-            await self._ensure_context()
-            await self._load_timeline()
-            self._connect_ws()
+            await self._ensure_bearer_token()
+            self._sync_http_auth()
+            if self.tokens is not None:
+                await self._load_current_user()
+                await self._ensure_context()
+                await self._load_timeline()
+                self._connect_ws()
+                self._update_status("ok", "Connected")
+            else:
+                self.current_user = None
+                self._update_status("wait", "Signed out")
+                self._write_system("sign in with /auth login", style="yellow")
+                self._update_context_info()
         except Exception as exc:
             logger.exception("TUI startup failed")
             self._write_system(f"Startup failed: {exc}", style="red")
             self._update_status("err", "Startup failed")
+        finally:
+            self._focus_input_soon()
 
     async def _ensure_context(self) -> None:
         assert self._http_client is not None
@@ -486,6 +963,8 @@ class CollaborationApp(App):
                     response.text,
                 )
                 self.state.workspace_id = None
+            else:
+                self._set_current_participant(response.json().get("participants", []))
 
         if self.state.workspace_id is None:
             logger.debug("TUI creating workspace name=%r", self.workspace_name)
@@ -498,9 +977,11 @@ class CollaborationApp(App):
                 },
             )
             response.raise_for_status()
-            self.state.workspace_id = response.json()["workspace"]["workspace_id"]
+            body = response.json()
+            self.state.workspace_id = body["workspace"]["workspace_id"]
+            self._set_current_participant(body.get("participants", []))
             logger.debug("TUI created workspace workspace_id=%s", self.state.workspace_id)
-            save_state(self.state)
+            save_state(self.profile, self.state)
 
         thread_id = self.state.thread_id
         if thread_id:
@@ -519,7 +1000,7 @@ class CollaborationApp(App):
         if self.state.thread_id is None:
             await self._create_thread(self.default_thread_title)
 
-        save_state(self.state)
+        save_state(self.profile, self.state)
         self._update_context_info()
 
     async def _create_thread(self, title: str) -> None:
@@ -538,10 +1019,13 @@ class CollaborationApp(App):
         response.raise_for_status()
         body = response.json()
         self.state.thread_id = body["thread"]["thread_id"]
+        memberships = body.get("memberships", [])
+        if memberships:
+            self.state.participant_id = memberships[0]["participant_id"]
         self.state.last_sequence = 0
         self._seen_message_ids.clear()
         logger.debug("TUI created thread thread_id=%s", self.state.thread_id)
-        save_state(self.state)
+        save_state(self.profile, self.state)
         self._update_context_info()
 
     async def _delete_workspace(self, workspace_id: str) -> None:
@@ -576,7 +1060,7 @@ class CollaborationApp(App):
             )
         else:
             await self._create_thread(self.default_thread_title)
-        save_state(self.state)
+        save_state(self.profile, self.state)
         self._update_context_info()
         await self._load_timeline()
         self._connect_ws()
@@ -588,7 +1072,7 @@ class CollaborationApp(App):
         self.state.thread_id = thread_id
         self.state.last_sequence = 0
         self._seen_message_ids.clear()
-        save_state(self.state)
+        save_state(self.profile, self.state)
         self._update_context_info()
         await self._load_timeline()
         self._connect_ws()
@@ -604,7 +1088,9 @@ class CollaborationApp(App):
             },
         )
         response.raise_for_status()
-        workspace_id = response.json()["workspace"]["workspace_id"]
+        body = response.json()
+        workspace_id = body["workspace"]["workspace_id"]
+        self._set_current_participant(body.get("participants", []))
         await self._switch_workspace(workspace_id)
         self._write_system(f"workspace created: {name} ({workspace_id[:8]})")
 
@@ -706,6 +1192,102 @@ class CollaborationApp(App):
         )
         response.raise_for_status()
         return response.json()
+
+    async def _handle_account_command(self, command: str) -> None:
+        parts = command.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            self._write_system(
+                "account commands: /account login | /account whoami | /account list | /account switch <profile> | /account logout",
+                style="yellow",
+            )
+            return
+
+        action = parts[1].lower()
+        if action == "login":
+            await self._device_login()
+            await self._load_current_user()
+            await self._ensure_context()
+            await self._load_timeline()
+            if self._ws:
+                await self._ws.close()
+            self._connect_ws()
+            self._update_context_info()
+            self._write_system(f"signed in as {self.state.display_name}", style="green")
+            return
+        if action == "whoami":
+            if self.current_user is None and self.tokens is not None:
+                await self._load_current_user()
+            if self.current_user is None:
+                self._write_system(f"profile: {self.profile}", style="dim")
+                self._write_system("not signed in", style="yellow")
+                return
+            self._write_system(f"profile: {self.profile}", style="dim")
+            self._write_system(f"user: {self.current_user['display_name']}", style="cyan")
+            self._write_system(f"user id: {self.current_user['user_id']}", style="dim")
+            if self.current_user.get("email"):
+                self._write_system(f"email: {self.current_user['email']}", style="dim")
+            return
+        if action == "list":
+            self._write_system("profiles:", style="dim")
+            for profile in list_profiles():
+                marker = "*" if profile == self.profile else "-"
+                self._write_system(f"{marker} {profile}", style="cyan" if marker == "*" else "dim")
+            return
+        if action == "switch":
+            target = parts[2].strip() if len(parts) > 2 else ""
+            if not target:
+                self._write_system("usage: /account switch <profile>", style="yellow")
+                return
+            await self._switch_profile(target)
+            if self._ws:
+                await self._ws.close()
+            await self._ensure_bearer_token()
+            self._sync_http_auth()
+            await self._load_current_user()
+            await self._ensure_context()
+            if self.state.thread_id:
+                await self._load_timeline()
+                self._connect_ws()
+            self._update_context_info()
+            self._write_system(f"switched profile: {target}", style="green")
+            return
+        if action == "logout":
+            if self._ws:
+                await self._ws.close()
+            self.tokens = None
+            self.current_user = None
+            self.state = reset_profile_session_state(
+                self.profile,
+                display_name=self.state.display_name,
+                participant_type=self.state.participant_type,
+            )
+            save_tokens(self.profile, None)
+            self._sync_http_auth()
+            self._update_context_info()
+            self._write_system(f"signed out profile: {self.profile}", style="yellow")
+            self._update_status("wait", "Signed out")
+            return
+
+        self._write_system(f"unknown account action: {action}", style="yellow")
+
+    async def _handle_auth_command(self, command: str) -> None:
+        parts = command.strip().split(maxsplit=1)
+        if len(parts) < 2:
+            self._write_system(
+                "auth commands: /auth login | /auth logout",
+                style="yellow",
+            )
+            return
+
+        action = parts[1].strip().lower()
+        if action == "login":
+            await self._handle_account_command("/account login")
+            return
+        if action == "logout":
+            await self._handle_account_command("/account logout")
+            return
+
+        self._write_system("auth commands: /auth login | /auth logout", style="yellow")
 
     async def _handle_agent_command(self, command: str) -> None:
         if not self.state.workspace_id:
@@ -1319,9 +1901,15 @@ class CollaborationApp(App):
             ]
             if matches:
                 return " Suggestions: " + " | ".join(matches[:3])
-            return " Slash commands: /workspace list | /participant list | /thread list | /tool list"
+            return " Slash commands: /auth login | /auth logout | /copy | /open <n>"
 
         lowered = stripped.lower()
+        if "auth" in lowered or "account" in lowered or "login" in lowered or "profile" in lowered:
+            return " Tip: /auth login | /auth logout | /account whoami | /account switch <profile>"
+        if "copy" in lowered or "clipboard" in lowered:
+            return " Tip: /copy copies the full timeline"
+        if "link" in lowered or "url" in lowered or "open" in lowered:
+            return " Tip: /links lists detected URLs | /open <n> opens one"
         if "workspace" in lowered:
             return " Tip: /workspace list | /workspace show | /workspace use <id|name>"
         if "agent" in lowered:
@@ -1340,7 +1928,7 @@ class CollaborationApp(App):
             return " Tip: /workspace create <name>"
         if lowered.startswith("delete") or lowered.startswith("remove"):
             return " Tip: /workspace delete <id|name|current>"
-        return " Enter sends a message. Use /agent, /workspace, /participant, /thread, /role, or /tool commands."
+        return " Enter sends a message. Use /auth, /account, /agent, /workspace, /participant, /thread, /role, /tool, /copy, or /open commands."
 
     async def _load_timeline(self) -> None:
         assert self._http_client is not None
@@ -1356,6 +1944,8 @@ class CollaborationApp(App):
             self.state.thread_id,
             len(timeline.get("messages", [])),
         )
+        self._timeline_lines = []
+        self._detected_links = []
         log = self.query_one("#timeline", RichLog)
         log.clear()
         for message in timeline.get("messages", []):
@@ -1363,7 +1953,7 @@ class CollaborationApp(App):
             self.state.last_sequence = max(
                 self.state.last_sequence, message.get("sequence", 0)
             )
-        save_state(self.state)
+        save_state(self.profile, self.state)
         if timeline.get("messages"):
             self._write_system("history loaded", style="dim")
 
@@ -1371,14 +1961,16 @@ class CollaborationApp(App):
     async def _connect_ws(self) -> None:
         assert self.state.thread_id is not None
         ws_base = self.gateway.replace("http://", "ws://").replace("https://", "wss://")
-        query = urlencode(
-            {
-                "participant_id": self.state.participant_id,
-                "display_name": self.state.display_name,
-                "participant_type": self.state.participant_type,
-                "after_sequence": self.state.last_sequence,
-            }
-        )
+        query_payload: dict[str, str | int] = {"after_sequence": self.state.last_sequence}
+        if self.tokens is None:
+            query_payload.update(
+                {
+                    "participant_id": self.state.participant_id or self._fallback_actor_id,
+                    "display_name": self.state.display_name,
+                    "participant_type": self.state.participant_type,
+                }
+            )
+        query = urlencode(query_payload)
         url = f"{ws_base}/v1/threads/{self.state.thread_id}/ws?{query}"
         extra_headers = list(self._auth_headers.items())
         logger.debug(
@@ -1423,7 +2015,7 @@ class CollaborationApp(App):
 
         sequence = event.get("sequence") or 0
         self.state.last_sequence = max(self.state.last_sequence, sequence)
-        save_state(self.state)
+        save_state(self.profile, self.state)
 
         event_type = event.get("event_type")
         payload = event.get("payload", {})
@@ -1464,15 +2056,19 @@ class CollaborationApp(App):
         actor = message.get("actor", {})
         actor_id = actor.get("id", "")
         prefix = "You" if actor_id == self.state.participant_id else f"Peer {actor_id[:8]}"
-        colour = "cyan" if actor_id == self.state.participant_id else "magenta"
         content = message.get("content", "")
         time_mark = self._format_message_time(message)
-        self.query_one("#timeline", RichLog).write(
-            f"[dim]{time_mark}[/dim] [bold {colour}]{prefix}:[/bold {colour}] {content}"
-        )
+        self._append_timeline_line(f"{time_mark} {prefix}: {content}")
 
     def _write_system(self, content: str, *, style: str = "dim") -> None:
-        self.query_one("#timeline", RichLog).write(f"[{style}]-- {content} --[/{style}]")
+        self._append_timeline_line(f"-- {content} --")
+
+    def _append_timeline_line(self, line: str) -> None:
+        self._timeline_lines.append(line)
+        for url in _URL_PATTERN.findall(line):
+            if url not in self._detected_links:
+                self._detected_links.append(url)
+        self.query_one("#timeline", RichLog).write(line)
 
     def _update_status(self, state: str, label: str) -> None:
         icons = {"ok": "●", "err": "✖", "wait": "⟳"}
@@ -1488,78 +2084,171 @@ class CollaborationApp(App):
     def _update_context_info(self) -> None:
         workspace = self.state.workspace_id[:8] if self.state.workspace_id else "pending"
         thread = self.state.thread_id[:8] if self.state.thread_id else "pending"
+        if self._oidc_enabled and self.tokens is None and self.current_user is None:
+            account = f"signed out ({self.profile})"
+        else:
+            account = f"{self.state.display_name} ({self.profile})"
         self.query_one("#context-info", Static).update(
             " Workspace: [bold]"
             f"{workspace}[/bold]  |  Thread: [bold]{thread}[/bold]  |  "
-            f"Participant: [bold]{self.state.display_name}[/bold]"
+            f"Account: [bold]{account}[/bold]"
         )
+
+    def _focus_input(self) -> None:
+        try:
+            self.query_one("#msg-input", Input).focus()
+        except Exception:
+            pass
+
+    def _focus_input_soon(self) -> None:
+        self.call_after_refresh(self._focus_input)
+
+    def _show_links(self) -> None:
+        if not self._detected_links:
+            self._write_system("no links detected yet", style="yellow")
+            return
+        self._write_system("detected links:", style="dim")
+        for index, url in enumerate(self._detected_links, start=1):
+            self._write_system(f"{index}. {url}", style="cyan")
+
+    def _open_link(self, target: str) -> None:
+        normalized = target.strip()
+        if not normalized:
+            self._write_system("usage: /open <number|url|last>", style="yellow")
+            return
+        url: str | None = None
+        if normalized == "last":
+            if self._detected_links:
+                url = self._detected_links[-1]
+        elif normalized.isdigit():
+            index = int(normalized) - 1
+            if 0 <= index < len(self._detected_links):
+                url = self._detected_links[index]
+        elif normalized.startswith("http://") or normalized.startswith("https://"):
+            url = normalized
+
+        if url is None:
+            self._write_system(f"link not found: {normalized}", style="red")
+            return
+        self.open_url(url)
+        self._write_system(f"opened link: {url}", style="green")
 
     @on(Input.Submitted, "#msg-input")
     async def on_submit(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         if not text:
+            self._focus_input_soon()
             return
         event.input.clear()
-        if text.startswith("/workspace ") or text == "/workspace":
-            try:
-                await self._handle_workspace_command(text)
-                self._update_status("ok", "Connected")
-            except Exception as exc:
-                logger.exception("TUI workspace command failed")
-                self._write_system(f"workspace command failed: {exc}", style="red")
-                self._update_status("err", "Workspace failed")
-            return
-        if text == "/agent" or text.startswith("/agent "):
-            try:
-                await self._handle_agent_command(text)
-                self._update_status("ok", "Connected")
-            except Exception as exc:
-                logger.exception("TUI agent command failed")
-                self._write_system(f"agent command failed: {exc}", style="red")
-                self._update_status("err", "Agent failed")
-            return
-        if text == "/participant" or text.startswith("/participant "):
-            try:
-                await self._handle_participant_command(text)
-                self._update_status("ok", "Connected")
-            except Exception as exc:
-                logger.exception("TUI participant command failed")
-                self._write_system(f"participant command failed: {exc}", style="red")
-                self._update_status("err", "Participant failed")
-            return
-        if text == "/tool" or text.startswith("/tool "):
-            try:
-                await self._handle_tool_command(text)
-                self._update_status("ok", "Connected")
-            except Exception as exc:
-                logger.exception("TUI tool command failed")
-                self._write_system(f"tool command failed: {exc}", style="red")
-                self._update_status("err", "Tool failed")
-            return
-        if text == "/thread" or text.startswith("/thread "):
-            try:
-                await self._handle_thread_command(text)
-                self._update_status("ok", "Connected")
-            except Exception as exc:
-                logger.exception("TUI thread command failed")
-                self._write_system(f"thread command failed: {exc}", style="red")
-                self._update_status("err", "Thread failed")
-            return
-        if text == "/role" or text.startswith("/role "):
-            try:
-                await self._handle_role_command(text)
-                self._update_status("ok", "Connected")
-            except Exception as exc:
-                logger.exception("TUI role command failed")
-                self._write_system(f"role command failed: {exc}", style="red")
-                self._update_status("err", "Role failed")
-            return
-        if not self.state.thread_id:
-            self._write_system("thread not ready yet", style="red")
-            return
-
-        self._update_status("wait", "Sending...")
         try:
+            if text == "/quit":
+                self.exit()
+                return
+            if text == "/clear":
+                self.action_clear()
+                return
+            if text == "/copy":
+                self.action_copy_timeline()
+                return
+            if text == "/links":
+                self._show_links()
+                return
+            if text.startswith("/open "):
+                self._open_link(text[len("/open ") :])
+                return
+            if text.startswith("/workspace ") or text == "/workspace":
+                if not self._require_authenticated_session():
+                    return
+                try:
+                    await self._handle_workspace_command(text)
+                    self._update_status("ok", "Connected")
+                except Exception as exc:
+                    logger.exception("TUI workspace command failed")
+                    self._write_system(f"workspace command failed: {exc}", style="red")
+                    self._update_status("err", "Workspace failed")
+                return
+            if text == "/account" or text.startswith("/account "):
+                try:
+                    await self._handle_account_command(text)
+                    self._update_status("ok", "Connected")
+                except Exception as exc:
+                    logger.exception("TUI account command failed")
+                    self._write_system(f"account command failed: {exc}", style="red")
+                    self._update_status("err", "Account failed")
+                return
+            if text == "/auth" or text.startswith("/auth "):
+                try:
+                    await self._handle_auth_command(text)
+                    self._update_status("ok", "Connected")
+                except Exception as exc:
+                    logger.exception("TUI auth command failed")
+                    self._write_system(f"auth command failed: {exc}", style="red")
+                    self._update_status("err", "Auth failed")
+                return
+            if text == "/agent" or text.startswith("/agent "):
+                if not self._require_authenticated_session():
+                    return
+                try:
+                    await self._handle_agent_command(text)
+                    self._update_status("ok", "Connected")
+                except Exception as exc:
+                    logger.exception("TUI agent command failed")
+                    self._write_system(f"agent command failed: {exc}", style="red")
+                    self._update_status("err", "Agent failed")
+                return
+            if text == "/participant" or text.startswith("/participant "):
+                if not self._require_authenticated_session():
+                    return
+                try:
+                    await self._handle_participant_command(text)
+                    self._update_status("ok", "Connected")
+                except Exception as exc:
+                    logger.exception("TUI participant command failed")
+                    self._write_system(f"participant command failed: {exc}", style="red")
+                    self._update_status("err", "Participant failed")
+                return
+            if text == "/tool" or text.startswith("/tool "):
+                if not self._require_authenticated_session():
+                    return
+                try:
+                    await self._handle_tool_command(text)
+                    self._update_status("ok", "Connected")
+                except Exception as exc:
+                    logger.exception("TUI tool command failed")
+                    self._write_system(f"tool command failed: {exc}", style="red")
+                    self._update_status("err", "Tool failed")
+                return
+            if text == "/thread" or text.startswith("/thread "):
+                if not self._require_authenticated_session():
+                    return
+                try:
+                    await self._handle_thread_command(text)
+                    self._update_status("ok", "Connected")
+                except Exception as exc:
+                    logger.exception("TUI thread command failed")
+                    self._write_system(f"thread command failed: {exc}", style="red")
+                    self._update_status("err", "Thread failed")
+                return
+            if text == "/role" or text.startswith("/role "):
+                if not self._require_authenticated_session():
+                    return
+                try:
+                    await self._handle_role_command(text)
+                    self._update_status("ok", "Connected")
+                except Exception as exc:
+                    logger.exception("TUI role command failed")
+                    self._write_system(f"role command failed: {exc}", style="red")
+                    self._update_status("err", "Role failed")
+                return
+            if not self.state.thread_id:
+                if not self._require_authenticated_session():
+                    return
+                self._write_system("thread not ready yet", style="red")
+                return
+            if not self._require_authenticated_session():
+                return
+
+            self._update_status("wait", "Sending...")
             assert self._http_client is not None
             logger.debug(
                 "TUI posting message thread_id=%s participant_id=%s content_len=%s",
@@ -1587,6 +2276,8 @@ class CollaborationApp(App):
             logger.exception("TUI send failed")
             self._write_system(f"send failed: {exc}", style="red")
             self._update_status("err", "Send failed")
+        finally:
+            self._focus_input_soon()
 
     @on(Input.Changed, "#msg-input")
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -1608,22 +2299,38 @@ class CollaborationApp(App):
 
         asyncio.create_task(_reset_thread())
 
+    def action_copy_timeline(self) -> None:
+        copied = "\n".join(self._timeline_lines)
+        self.app.copy_to_clipboard(copied)
+        self._write_system("copied full timeline", style="green")
+
     def action_clear(self) -> None:
+        self._timeline_lines = []
+        self._detected_links = []
         self.query_one("#timeline", RichLog).clear()
 
 
-def main() -> None:
+def _build_tui_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Open Talon collaboration terminal UI",
+        description="Open Talon collaboration terminal UI for Keycloak-authenticated human users",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--gateway", default="http://127.0.0.1:8000", help="Gateway base URL")
-    parser.add_argument("--api-key", default=None, help="X-API-Key value")
-    parser.add_argument("--openbao-token", default=None, help="OpenBao Bearer token")
+    parser.add_argument("--profile", default=None, help="Named local TUI profile")
+    parser.add_argument(
+        "--oidc-issuer-url",
+        default=os.getenv("OPEN_TALON_OIDC_ISSUER_URL", _DEFAULT_OIDC_ISSUER_URL),
+        help="Keycloak OIDC issuer URL for device login",
+    )
+    parser.add_argument(
+        "--oidc-client-id",
+        default=os.getenv("OPEN_TALON_OIDC_CLIENT_ID", _DEFAULT_OIDC_CLIENT_ID),
+        help="Keycloak OIDC client id for the TUI device-flow login",
+    )
     parser.add_argument(
         "--display-name",
         default=os.getenv("USER", "operator"),
-        help="Display name used for the local participant",
+        help="Fallback local display label shown before Keycloak identity is loaded",
     )
     parser.add_argument(
         "--workspace-name",
@@ -1635,22 +2342,86 @@ def main() -> None:
         default="General",
         help="Default thread title when bootstrapping state",
     )
-    parser.add_argument(
-        "--participant-type",
-        default="user",
-        choices=["user", "agent"],
-        help="Participant type for the local TUI client",
+    return parser
+
+
+def _build_auth_login_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Trigger TUI Keycloak device login for a local profile",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    args = parser.parse_args()
+    parser.add_argument("--gateway", default="http://127.0.0.1:8000", help="Gateway base URL")
+    parser.add_argument("--profile", default=None, help="Named local TUI profile")
+    parser.add_argument(
+        "--oidc-issuer-url",
+        default=os.getenv("OPEN_TALON_OIDC_ISSUER_URL", _DEFAULT_OIDC_ISSUER_URL),
+        help="Keycloak OIDC issuer URL for device login",
+    )
+    parser.add_argument(
+        "--oidc-client-id",
+        default=os.getenv("OPEN_TALON_OIDC_CLIENT_ID", _DEFAULT_OIDC_CLIENT_ID),
+        help="Keycloak OIDC client id for the TUI device-flow login",
+    )
+    parser.add_argument(
+        "--display-name",
+        default=os.getenv("USER", "operator"),
+        help="Fallback local display label shown before Keycloak identity is loaded",
+    )
+    return parser
+
+
+def _run_auth_login_cli(args: argparse.Namespace) -> None:
+    if not (args.oidc_issuer_url and args.oidc_client_id):
+        raise SystemExit(
+            "The TUI auth login command requires Keycloak OIDC. Pass --oidc-issuer-url and --oidc-client-id."
+        )
+    profile = resolve_startup_profile(
+        args.profile,
+        oidc_enabled=True,
+    )
+    current_user = asyncio.run(
+        run_auth_login(
+            gateway=args.gateway,
+            profile=profile,
+            oidc_issuer_url=args.oidc_issuer_url,
+            oidc_client_id=args.oidc_client_id,
+            display_name=args.display_name,
+        )
+    )
+    print(f"Signed in profile: {profile}")
+    print(f"User: {current_user['display_name']}")
+    print(f"User ID: {current_user['user_id']}")
+
+
+def main(argv: list[str] | None = None) -> None:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:2] == ["auth", "login"]:
+        parser = _build_auth_login_parser()
+        args = parser.parse_args(argv[2:])
+        _run_auth_login_cli(args)
+        return
+
+    parser = _build_tui_parser()
+    args = parser.parse_args(argv)
+
+    if not (args.oidc_issuer_url and args.oidc_client_id):
+        raise SystemExit("The TUI requires Keycloak OIDC for human users. Pass --oidc-issuer-url and --oidc-client-id.")
+    profile = resolve_startup_profile(
+        args.profile,
+        oidc_enabled=bool(args.oidc_issuer_url and args.oidc_client_id),
+    )
 
     app = CollaborationApp(
         gateway=args.gateway,
-        api_key=args.api_key,
-        openbao_token=args.openbao_token,
+        profile=profile,
+        api_key=None,
+        openbao_token=None,
+        oidc_issuer_url=args.oidc_issuer_url,
+        oidc_client_id=args.oidc_client_id,
         display_name=args.display_name,
         workspace_name=args.workspace_name,
         thread_title=args.thread_title,
-        participant_type=args.participant_type,
+        participant_type="user",
     )
     app.run()
 

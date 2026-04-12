@@ -13,6 +13,7 @@ Main components:
 - `services/agent-runtime`: stateless workers for agent-loop execution, tool execution, and lease reconciliation
 - `packages/contracts`: shared Pydantic contracts used across services
 - `apps/tui`: terminal UI client for workspace/thread collaboration
+  - `open_talon_tui.tui2` is the preferred human terminal client when copy/select/link behavior matters
 - `infrastructure`: local Docker-based backing services
 - `db/migrations`: source of truth for database schema changes
 
@@ -32,11 +33,14 @@ Primary local flow:
 - Do not move agent loop execution back into `gateway-edge`.
 - `participants` is a workspace-scoped attachment/state table.
 - Human identity lives in `users`.
+- External identity mappings live in `auth_identities`.
 - Agent identity/configuration lives in `system_agents`.
 - `participants.user_id` and `participants.system_agent_id` are the normalized references.
+- Keep `users.user_id` distinct from `participants.participant_id` for human users.
 - Do not duplicate agent profile/config data back into `participants`.
 - Keep workspace-local state on `participants`: status, visibility scope, roles, capabilities, timestamps, and metadata.
 - Keep execution-side workspace materialization separate from collaboration `Workspace` models. Use `ExecutionWorkspaceRef` for executor payloads.
+- Authenticated human identity should be derived in `gateway-edge` from OIDC auth context, not trusted from client-provided actor fields.
 
 ## Database Rules
 
@@ -62,6 +66,10 @@ source .venv/bin/activate
   - database: `app_db`
   - user: `admin`
   - password: `password`
+- Default local Keycloak:
+  - base URL: `http://127.0.0.1:8081`
+  - realm: `open-talon`
+  - TUI client: `open-talon-tui`
 - Local infrastructure defaults are documented in `infrastructure/.env.example`.
 
 ## Testing Expectations
@@ -84,6 +92,12 @@ If a change touches schema, repository, participant hydration, routing, or migra
 - run relevant `gateway-edge` tests
 - run full `pytest -q` when feasible
 
+If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
+
+- run relevant `gateway-edge` auth tests
+- run `tests/tui`
+- verify docs and env defaults stay aligned with the actual login flow
+
 ## Code Change Rules
 
 - Preserve the normalized participant model.
@@ -103,16 +117,23 @@ If a change touches schema, repository, participant hydration, routing, or migra
   - command handling
   - suggestion/help text
   - tests when behavior is nontrivial
+- The TUI is profile-based, not single-user-per-device.
+- Do not reintroduce a single global local participant identity file for human users.
+- Human TUI sessions should authenticate with bearer tokens and rely on server-derived participant identity.
+- Keep `tui2` resilient: network/auth failures should degrade to readable system messages, not tracebacks.
+- When changing collaboration bootstrap or response parsing, keep `main.py` and `tui2.py` aligned on gateway contract shapes.
+- Prefer `tui2` guidance in docs when the goal is reliable mouse copy or link interaction in the terminal.
 
 ## Recommended Workflow For Agents
 
 1. Read the relevant service, repository, and contract files first.
 2. Check whether the change requires a migration.
 3. If schema changes are involved, add a new file in `db/migrations`.
-4. If execution behavior changes, inspect `services/agent-runtime`, `services/core-collab`, and gateway event fanout together.
-5. Update code to match the migrated schema.
-6. Run targeted tests.
-7. Run broader tests if the change affects shared contracts or persistence.
+4. If auth or identity behavior changes, inspect `services/gateway-edge`, `services/core-collab`, `packages/contracts`, and TUI flows together.
+5. If execution behavior changes, inspect `services/agent-runtime`, `services/core-collab`, and gateway event fanout together.
+6. Update code to match the migrated schema.
+7. Run targeted tests.
+8. Run broader tests if the change affects shared contracts or persistence.
 
 ## Key Files
 
@@ -124,9 +145,11 @@ If a change touches schema, repository, participant hydration, routing, or migra
 - `services/agent-runtime/agent_runtime/workers.py`
 - `services/agent-runtime/agent_runtime/execution/`
 - `services/gateway-edge/gateway_edge/services/collaboration.py`
+- `services/gateway-edge/gateway_edge/auth/`
 - `services/gateway-edge/gateway_edge/services/events.py`
 - `services/gateway-edge/gateway_edge/db/postgres.py`
 - `apps/tui/open_talon_tui/main.py`
+- `apps/tui/open_talon_tui/tui2.py`
 
 ## When In Doubt
 

@@ -32,7 +32,7 @@ PYTHONPATH="packages/contracts:services/core-collab:services/gateway-edge:servic
   uvicorn gateway_edge.main:app --host 0.0.0.0 --port 8000
 ```
 
-The service expects local Postgres, Kafka, Valkey, OpenBao, and Ollama endpoints to be available. For the standard dev setup, use `./open-talon start`.
+The service expects local Postgres, Kafka, Valkey, OpenBao, Keycloak, and Ollama endpoints to be available. For the standard dev setup, use `./open-talon start`.
 
 ## Tests
 

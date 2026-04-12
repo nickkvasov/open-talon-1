@@ -44,6 +44,7 @@ from open_talon_contracts.models import (  # noqa: E402
     WorkspaceTool,
 )
 from core_collab.kernel import CollaborationKernel  # noqa: E402
+from core_collab.repository import CollaborationRepository  # noqa: E402
 
 
 class _FakeTransaction:
@@ -127,6 +128,16 @@ class FakeRepository:
                 return participant
         return None
 
+    async def fetch_user_participant(self, workspace_id, user_id):
+        for participant in self._participants.values():
+            if (
+                participant.workspace_id == workspace_id
+                and participant.participant_type == "user"
+                and participant.user_id == user_id
+            ):
+                return participant
+        return None
+
     async def list_participants(self, workspace_id):
         return [
             participant
@@ -176,6 +187,86 @@ def _actor() -> ParticipantInput:
         participant_type="user",
         display_name="Nikolay",
     )
+
+
+@pytest.mark.asyncio
+async def test_kernel_participant_profile_preserves_distinct_user_id():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    workspace_id = uuid4()
+    user_id = uuid4()
+    participant_id = uuid4()
+
+    participant = kernel._participant_profile(  # noqa: SLF001
+        workspace_id=workspace_id,
+        actor=ParticipantInput(
+            participant_id=participant_id,
+            participant_type="user",
+            user_id=user_id,
+            display_name="Nikolay",
+        ),
+        now=datetime.now(timezone.utc),
+    )
+
+    assert participant.participant_id == participant_id
+    assert participant.user_id == user_id
+
+
+@pytest.mark.asyncio
+async def test_kernel_resolve_authenticated_user_actor_reuses_workspace_participant():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    workspace_id = uuid4()
+    user_id = uuid4()
+    participant_id = uuid4()
+    repository._participants[(workspace_id, participant_id)] = ParticipantProfile(
+        participant_id=participant_id,
+        workspace_id=workspace_id,
+        participant_type="user",
+        user_id=user_id,
+        display_name="Nikolay",
+    )
+
+    actor = await kernel.resolve_authenticated_user_actor(
+        workspace_id,
+        user_id=user_id,
+        display_name="Nikolay",
+    )
+
+    assert actor.user_id == user_id
+    assert actor.participant_id == participant_id
+
+
+def test_participant_from_row_falls_back_when_user_display_name_is_missing():
+    participant_id = uuid4()
+    workspace_id = uuid4()
+    row = {
+        "participant_id": participant_id,
+        "workspace_id": workspace_id,
+        "participant_type": "user",
+        "user_id": uuid4(),
+        "system_agent_id": None,
+        "description": None,
+        "roles": [],
+        "capabilities": [],
+        "status": "active",
+        "visibility_scope": "workspace",
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+        "metadata": {},
+        "user_display_name": None,
+        "agent_display_name": None,
+        "agent_description": None,
+        "agent_role": None,
+        "agent_capabilities": [],
+        "agent_endpoint": None,
+        "agent_system_prompt": None,
+        "agent_definition": None,
+    }
+
+    participant = CollaborationRepository._participant_from_row(row)  # noqa: SLF001
+
+    assert participant.display_name == str(participant_id)
 
 
 def test_build_default_interaction_contract_reflects_testing_role():
