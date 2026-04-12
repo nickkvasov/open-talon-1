@@ -10,11 +10,14 @@ import argparse
 import asyncio
 import json
 import os
+import shlex
+import shutil
 import sys
+import termios
 import threading
+import tty
 import webbrowser
 from datetime import datetime, timedelta, timezone
-from typing import Callable
 from urllib.parse import urlencode
 from uuid import uuid4
 
@@ -64,7 +67,58 @@ def _format_timestamp(raw_timestamp: str | None) -> str:
         return "--:--"
 
 
+def _reset_terminal_mode() -> None:
+    if not sys.stdin.isatty() or not hasattr(sys.stdin, "fileno"):
+        return
+    try:
+        fd = sys.stdin.fileno()
+        attrs = termios.tcgetattr(fd)
+    except Exception:
+        return
+
+    attrs[0] |= getattr(termios, "BRKINT", 0)
+    attrs[0] |= getattr(termios, "ICRNL", 0)
+    attrs[0] |= getattr(termios, "IXON", 0)
+    attrs[0] &= ~getattr(termios, "IGNBRK", 0)
+    attrs[0] &= ~getattr(termios, "INLCR", 0)
+    attrs[0] &= ~getattr(termios, "IGNCR", 0)
+    attrs[1] |= getattr(termios, "OPOST", 0)
+    attrs[1] |= getattr(termios, "ONLCR", 0)
+    attrs[3] |= termios.ECHO | termios.ICANON | termios.ISIG
+    attrs[3] |= getattr(termios, "IEXTEN", 0)
+    attrs[6][termios.VMIN] = 1
+    attrs[6][termios.VTIME] = 0
+    try:
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    except Exception:
+        return
+
+
 class ScrollbackTUI2:
+    _STATUS_PANEL_HEIGHT = 10
+    _USER_VALIDATION_INTERVAL_SECONDS = 60
+    _COMMAND_SUGGESTIONS = [
+        "/help",
+        "/auth login",
+        "/auth logout",
+        "/account whoami",
+        "/account list",
+        "/account switch",
+        "/workspace list",
+        "/workspace show",
+        "/workspace create",
+        "/workspace use",
+        "/thread list",
+        "/thread show",
+        "/thread create",
+        "/thread use",
+        "/links",
+        "/open",
+        "/copy",
+        "/clear",
+        "/quit",
+    ]
+
     def __init__(
         self,
         *,
@@ -100,6 +154,63 @@ class ScrollbackTUI2:
         self._detected_links: list[str] = []
         self._stop = False
         self._stdout_lock = threading.Lock()
+        self._status_initialized = False
+        self._status_region_start = self._STATUS_PANEL_HEIGHT + 1
+        self._connection_status = "offline"
+        self._last_status_lines: tuple[str, ...] = ()
+        self._input_history: list[str] = []
+        self._history_index: int | None = None
+        self._history_saved_buffer = ""
+        self._prompt_active = False
+        self._prompt_buffer = ""
+        self._prompt_cursor = 0
+        self._recent_activity: list[str] = []
+        self._last_user_validation_at: datetime | None = None
+
+    def _command_suggestions(self, buffer: str) -> list[str]:
+        stripped = buffer.lstrip()
+        if not stripped.startswith("/"):
+            return []
+        if not stripped or stripped == "/":
+            return list(self._COMMAND_SUGGESTIONS)
+
+        leading_space = buffer[: len(buffer) - len(stripped)]
+        if buffer.endswith(" "):
+            try:
+                parts = shlex.split(stripped)
+            except ValueError:
+                parts = stripped.split()
+            prefix = ""
+        else:
+            try:
+                parts = shlex.split(stripped)
+            except ValueError:
+                parts = stripped.split()
+            prefix = parts.pop() if parts else stripped
+
+        suggestions: list[str] = []
+        if not parts:
+            suggestions = [
+                command
+                for command in self._COMMAND_SUGGESTIONS
+                if command.startswith(prefix)
+            ]
+        elif parts[0] == "/account" and len(parts) == 2 and parts[1] == "switch":
+            suggestions = [
+                f"/account switch {profile}"
+                for profile in list_profiles()
+                if f"/account switch {profile}".startswith(stripped.rstrip())
+            ]
+        elif parts[0] == "/open" and len(parts) == 1:
+            link_targets = [str(index) for index in range(1, len(self._detected_links) + 1)]
+            if self._detected_links:
+                link_targets.append("last")
+            suggestions = [
+                f"/open {target}"
+                for target in link_targets
+                if f"/open {target}".startswith(stripped.rstrip())
+            ]
+        return [f"{leading_space}{suggestion}" for suggestion in suggestions]
 
     @staticmethod
     def _http_status_code(exc: Exception) -> int | None:
@@ -169,20 +280,276 @@ class ScrollbackTUI2:
     def _is_authenticated(self) -> bool:
         return self.tokens is not None and self.current_user is not None
 
+    @staticmethod
+    def _truncate(text: str, width: int) -> str:
+        if width <= 0:
+            return ""
+        if len(text) <= width:
+            return text
+        if width == 1:
+            return text[:1]
+        return text[: width - 1] + "…"
+
+    def _push_recent_activity(self, text: str) -> None:
+        normalized = " ".join(text.strip().split())
+        if not normalized:
+            return
+        self._recent_activity.append(normalized)
+        self._recent_activity = self._recent_activity[-2:]
+
+    def _status_lines(self, width: int | None = None) -> list[str]:
+        terminal_width = width or shutil.get_terminal_size((100, 24)).columns
+        total_width = max(terminal_width, 72)
+        body_width = total_width - 2
+        separator = " │ "
+        left_width = max(28, min(42, (body_width - len(separator)) // 2))
+        right_width = body_width - len(separator) - left_width
+
+        display_name = self.state.display_name if self._is_authenticated else self.profile
+        auth = self.state.display_name if self._is_authenticated else "signed out"
+        workspace = self.state.workspace_id[:8] if self._is_authenticated and self.state.workspace_id else "--"
+        thread = self.state.thread_id[:8] if self._is_authenticated and self.state.thread_id else "--"
+        participant = (
+            self.state.participant_id[:8]
+            if self._is_authenticated and self.state.participant_id
+            else "--"
+        )
+        gateway_label = self.gateway.replace("http://", "").replace("https://", "")
+        recent_one = self._recent_activity[-1] if self._recent_activity else "No recent activity yet"
+        recent_two = self._recent_activity[-2] if len(self._recent_activity) > 1 else ""
+
+        rows = [
+            (f"Welcome back, {display_name}!", "Tips"),
+            (f"Profile: {self.profile}", "Up/Down recalls command history"),
+            (f"Auth: {auth}", "Tab fills the first matching slash command"),
+            (f"Conn: {self._connection_status} | Links: {len(self._detected_links)}", "/help shows the command list"),
+            (f"Workspace: {workspace}", "/workspace list and /thread list are handy starts"),
+            (f"Thread: {thread}", "Recent activity"),
+            (f"Participant: {participant}", recent_one),
+            (f"Gateway: {gateway_label}", recent_two),
+        ]
+
+        lines = [f"┌─ {'Open Talon TUI2':<{body_width - 2}} ─┐"]
+        for left, right in rows:
+            left_text = self._truncate(left, left_width)
+            right_text = self._truncate(right, right_width)
+            body = f"{left_text:<{left_width}}{separator}{right_text:<{right_width}}"
+            lines.append(f"│{body}│")
+        lines.append(f"└{'─' * body_width}┘")
+        return lines
+
+    def _render_status_panel(self) -> None:
+        if not sys.stdout.isatty():
+            return
+        terminal_size = shutil.get_terminal_size((100, 24))
+        terminal_rows = terminal_size.lines
+        terminal_cols = terminal_size.columns
+        region_start = self._STATUS_PANEL_HEIGHT + 1
+        if terminal_rows <= region_start:
+            return
+        raw_status_lines = tuple(self._status_lines(width=terminal_cols))
+        if self._status_initialized and raw_status_lines == self._last_status_lines:
+            return
+        status_lines = [_render_terminal_links(line) for line in raw_status_lines]
+        with self._stdout_lock:
+            if not self._status_initialized:
+                sys.stdout.write("\033[2J")
+                sys.stdout.write(f"\033[{region_start};{terminal_rows}r")
+                sys.stdout.write(f"\033[{region_start};1H")
+                self._status_initialized = True
+                self._status_region_start = region_start
+            sys.stdout.write("\033[s")
+            sys.stdout.write("\033[H")
+            for line in status_lines:
+                sys.stdout.write("\033[2K")
+                sys.stdout.write(line)
+                sys.stdout.write("\n")
+            sys.stdout.write("\033[2K")
+            sys.stdout.write("\033[u")
+            sys.stdout.flush()
+        self._last_status_lines = raw_status_lines
+        if self._prompt_active:
+            self._render_prompt(self._prompt_buffer, self._prompt_cursor)
+
+    def _restore_terminal(self) -> None:
+        if not self._status_initialized or not sys.stdout.isatty():
+            return
+        with self._stdout_lock:
+            sys.stdout.write("\033[r")
+            terminal_rows = shutil.get_terminal_size((80, 24)).lines
+            sys.stdout.write(f"\033[{terminal_rows};1H")
+            sys.stdout.flush()
+        self._status_initialized = False
+        self._last_status_lines = ()
+
     def _print_line(self, text: str = "") -> None:
         with self._stdout_lock:
+            if sys.stdout.isatty():
+                sys.stdout.write("\r")
+                sys.stdout.write("\033[2K")
             sys.stdout.write(_render_terminal_links(text) + "\n")
+            if self._prompt_active:
+                self._write_prompt_locked(self._prompt_buffer, self._prompt_cursor)
             sys.stdout.flush()
+
+    def _prompt_label(self) -> str:
+        return "▸ "
+
+    def _current_completion(self, buffer: str) -> str | None:
+        suggestions = self._command_suggestions(buffer)
+        if not suggestions:
+            return None
+        suggestion = suggestions[0]
+        if suggestion == buffer:
+            return None
+        return suggestion
+
+    def _write_prompt_locked(self, buffer: str, cursor: int) -> None:
+        if not sys.stdout.isatty() or not self._status_initialized:
+            return
+        terminal_cols = shutil.get_terminal_size((100, 24)).columns
+        prompt = self._prompt_label()
+        suggestion = self._current_completion(buffer)
+        suffix = ""
+        if suggestion is not None and suggestion.startswith(buffer):
+            suffix = suggestion[len(buffer) :]
+        sys.stdout.write("\r")
+        sys.stdout.write("\033[2K")
+        sys.stdout.write("\033[48;5;236m\033[1;37m")
+        sys.stdout.write(prompt)
+        sys.stdout.write(_render_terminal_links(buffer))
+        if suffix:
+            sys.stdout.write("\033[2;37m")
+            sys.stdout.write(_render_terminal_links(suffix))
+            sys.stdout.write("\033[1;37m")
+        consumed = len(prompt) + len(buffer) + len(suffix)
+        if consumed < terminal_cols:
+            sys.stdout.write(" " * (terminal_cols - consumed))
+        sys.stdout.write("\033[0m")
+        trailing = max(0, terminal_cols - (len(prompt) + cursor))
+        if trailing > 0:
+            sys.stdout.write(f"\033[{trailing}D")
+
+    def _render_prompt(self, buffer: str, cursor: int) -> None:
+        self._prompt_buffer = buffer
+        self._prompt_cursor = cursor
+        with self._stdout_lock:
+            self._write_prompt_locked(buffer, cursor)
+            sys.stdout.flush()
+
+    def _supports_tty_prompt(self) -> bool:
+        return bool(sys.stdin.isatty() and hasattr(sys.stdin, "fileno"))
+
+    def _remember_input(self, raw: str) -> None:
+        if raw:
+            self._input_history.append(raw)
+        self._history_index = None
+        self._history_saved_buffer = ""
+
+    def _history_previous(self, current_buffer: str) -> str:
+        if not self._input_history:
+            return current_buffer
+        if self._history_index is None:
+            self._history_saved_buffer = current_buffer
+            self._history_index = len(self._input_history) - 1
+        elif self._history_index > 0:
+            self._history_index -= 1
+        return self._input_history[self._history_index]
+
+    def _history_next(self) -> str:
+        if self._history_index is None:
+            return self._history_saved_buffer
+        if self._history_index < len(self._input_history) - 1:
+            self._history_index += 1
+            return self._input_history[self._history_index]
+        self._history_index = None
+        return self._history_saved_buffer
+
+    async def _prompt_with_terminal_editor(self) -> str | None:
+        fd = sys.stdin.fileno()
+        previous = termios.tcgetattr(fd)
+        buffer = ""
+        cursor = 0
+        pending = b""
+        self._history_index = None
+        self._history_saved_buffer = ""
+        self._prompt_active = True
+        self._render_prompt(buffer, cursor)
+        tty.setcbreak(fd)
+        try:
+            while True:
+                pending += await asyncio.to_thread(os.read, fd, 16)
+                if not pending:
+                    return None
+                while pending:
+                    if pending.startswith(b"\x1b"):
+                        if len(pending) < 3:
+                            break
+                        sequence = pending[:3]
+                        pending = pending[3:]
+                        if sequence == b"\x1b[A":
+                            buffer = self._history_previous(buffer)
+                            cursor = len(buffer)
+                        elif sequence == b"\x1b[B":
+                            buffer = self._history_next()
+                            cursor = len(buffer)
+                        elif sequence == b"\x1b[C":
+                            cursor = min(cursor + 1, len(buffer))
+                        elif sequence == b"\x1b[D":
+                            cursor = max(cursor - 1, 0)
+                        self._render_prompt(buffer, cursor)
+                        continue
+
+                    byte = pending[0]
+                    pending = pending[1:]
+
+                    if byte in {10, 13}:
+                        self._prompt_active = False
+                        self._prompt_buffer = ""
+                        self._prompt_cursor = 0
+                        with self._stdout_lock:
+                            sys.stdout.write("\r")
+                            sys.stdout.write("\033[2K")
+                            sys.stdout.flush()
+                        return buffer
+                    if byte == 3:
+                        raise KeyboardInterrupt
+                    if byte == 4 and not buffer:
+                        self._prompt_active = False
+                        return None
+                    if byte in {8, 127}:
+                        if cursor > 0:
+                            buffer = buffer[: cursor - 1] + buffer[cursor:]
+                            cursor -= 1
+                            self._history_index = None
+                    elif byte == 9:
+                        suggestion = self._current_completion(buffer)
+                        if suggestion is not None:
+                            buffer = suggestion
+                            cursor = len(buffer)
+                    elif 32 <= byte <= 126:
+                        character = chr(byte)
+                        buffer = buffer[:cursor] + character + buffer[cursor:]
+                        cursor += 1
+                        self._history_index = None
+                    self._render_prompt(buffer, cursor)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+            self._prompt_active = False
 
     def _record_line(self, text: str) -> None:
         self._history_lines.append(text)
+        links_before = len(self._detected_links)
         for url in _URL_PATTERN.findall(text):
             if url not in self._detected_links:
                 self._detected_links.append(url)
         self._print_line(text)
+        if len(self._detected_links) != links_before:
+            self._render_status_panel()
 
     def _write_system(self, text: str) -> None:
-        self._record_line(f"-- {text} --")
+        self._push_recent_activity(text)
+        self._record_line(f"  └ {text}")
 
     def _sync_http_auth(self) -> None:
         if self._http_client is None:
@@ -190,9 +557,14 @@ class ScrollbackTUI2:
         self._http_client.headers.clear()
         self._http_client.headers.update(self._auth_headers)
 
+    def _set_connection_status(self, status: str) -> None:
+        self._connection_status = status
+        self._render_status_panel()
+
     def _invalidate_saved_session(self, reason: str) -> None:
         self.tokens = None
         self.current_user = None
+        self._set_connection_status("offline")
         self.state = reset_profile_session_state(
             self.profile,
             display_name=self.state.display_name,
@@ -248,10 +620,32 @@ class ScrollbackTUI2:
             refreshed = await self._refresh_oidc_tokens()
             if not refreshed:
                 self._invalidate_saved_session("token refresh failed; run /auth login")
+                return
+            await self._validate_current_user_session(force=True)
+
+    async def _validate_current_user_session(self, *, force: bool = False) -> None:
+        if self.tokens is None:
+            self.current_user = None
+            self._last_user_validation_at = None
+            return
+        if not force and self._last_user_validation_at is not None:
+            if self._last_user_validation_at >= datetime.now(timezone.utc) - timedelta(
+                seconds=self._USER_VALIDATION_INTERVAL_SECONDS
+            ):
+                return
+        try:
+            await self._load_current_user()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {401, 403}:
+                self._invalidate_saved_session("authenticated session is no longer valid; run /auth login")
+                return
+            raise
+        self._last_user_validation_at = datetime.now(timezone.utc)
 
     async def _load_current_user(self) -> None:
         if self.tokens is None:
             self.current_user = None
+            self._last_user_validation_at = None
             return
         try:
             self.current_user = await fetch_current_user(
@@ -266,6 +660,7 @@ class ScrollbackTUI2:
         self.state.user_id = self.current_user["user_id"]
         self.state.display_name = self.current_user["display_name"]
         self.state.participant_type = "user"
+        self._last_user_validation_at = datetime.now(timezone.utc)
         save_state(self.profile, self.state)
 
     def _set_current_participant(self, participants: list[dict]) -> None:
@@ -476,6 +871,7 @@ class ScrollbackTUI2:
             return
         if self._ws_task is not None:
             self._ws_task.cancel()
+        self._set_connection_status("connecting")
         self._ws_task = asyncio.create_task(self._ws_loop())
 
     async def _ws_loop(self) -> None:
@@ -483,6 +879,7 @@ class ScrollbackTUI2:
         ws_base = self.gateway.replace("http://", "ws://").replace("https://", "wss://")
         while True:
             await self._ensure_bearer_token()
+            await self._validate_current_user_session()
             if not self._is_authenticated:
                 return
             query = urlencode({"after_sequence": self.state.last_sequence})
@@ -491,33 +888,39 @@ class ScrollbackTUI2:
             try:
                 async with websockets.connect(url, additional_headers=headers) as ws:
                     self._ws = ws
+                    self._set_connection_status("connected")
                     async for raw in ws:
                         self._handle_event(json.loads(raw))
             except asyncio.CancelledError:
                 raise
             except websockets.exceptions.ConnectionClosed:
-                pass
+                self._set_connection_status("reconnecting")
             except websockets.exceptions.InvalidStatus as exc:
                 status_code = self._http_status_code(exc)
                 if status_code in {401, 403}:
                     self._invalidate_saved_session("websocket session expired; run /auth login")
                     return
+                self._set_connection_status("reconnecting")
                 self._write_system(f"websocket error: {self._describe_exception(exc)}")
             except Exception as exc:
+                self._set_connection_status("reconnecting")
                 self._write_system(f"websocket error: {self._describe_exception(exc)}")
             finally:
                 self._ws = None
             await asyncio.sleep(3)
 
     async def _activate_profile_session(self) -> None:
+        self._set_connection_status("connecting")
         try:
             await self._ensure_bearer_token()
+            await self._validate_current_user_session(force=True)
         except Exception as exc:
             self._handle_runtime_error(exc, context="unable to refresh login")
             return
         self._sync_http_auth()
         if self.tokens is None:
             self.current_user = None
+            self._set_connection_status("offline")
             self._write_system(f"signed out ({self.profile}); run /auth login")
             return
         try:
@@ -526,6 +929,7 @@ class ScrollbackTUI2:
             self._handle_runtime_error(exc, context="unable to load current user")
             return
         if self.current_user is None or self.tokens is None:
+            self._set_connection_status("offline")
             self._write_system(f"signed out ({self.profile}); run /auth login")
             return
         try:
@@ -535,6 +939,7 @@ class ScrollbackTUI2:
             self._handle_runtime_error(exc, context="unable to load workspace context")
             return
         self._start_ws()
+        self._set_connection_status("ready")
         self._write_system(
             f"profile {self.profile} ready as {self.state.display_name} in workspace {self.state.workspace_id[:8]} thread {self.state.thread_id[:8]}"
         )
@@ -557,6 +962,7 @@ class ScrollbackTUI2:
         await self._close_ws()
         self.tokens = None
         self.current_user = None
+        self._set_connection_status("offline")
         self.state = reset_profile_session_state(
             self.profile,
             display_name=self.state.display_name,
@@ -585,6 +991,10 @@ class ScrollbackTUI2:
     async def _send_message(self, text: str) -> None:
         if not self._is_authenticated:
             self._write_system("sign in first with /auth login")
+            return
+        await self._ensure_bearer_token()
+        await self._validate_current_user_session()
+        if not self._is_authenticated:
             return
         if not self.state.thread_id:
             self._write_system("thread not ready yet")
@@ -815,8 +1225,8 @@ class ScrollbackTUI2:
             return
         if text == "/clear":
             if sys.stdout.isatty():
-                sys.stdout.write("\033[2J\033[H")
-                sys.stdout.flush()
+                self._restore_terminal()
+                self._render_status_panel()
             return
         if text == "/copy":
             self._copy_history()
@@ -850,9 +1260,9 @@ class ScrollbackTUI2:
             timeout=10,
             trust_env=False,
         )
-        self._print_line("Open Talon TUI2")
-        self._print_line("Scrollback-first mode. Mouse selection should work normally in your terminal.")
-        self._print_line("Type /help for commands.")
+        self._render_status_panel()
+        self._record_line("Scrollback-first mode. Mouse selection should work normally in your terminal.")
+        self._record_line("Type /help for commands. Use Up/Down for history and Tab for command completion.")
         try:
             try:
                 await self._activate_profile_session()
@@ -860,7 +1270,12 @@ class ScrollbackTUI2:
                 self._handle_runtime_error(exc, context="startup error", invalidate_auth=False)
             while not self._stop:
                 try:
-                    raw = await asyncio.to_thread(input, f"{self.profile}> ")
+                    if self._supports_tty_prompt():
+                        raw = await self._prompt_with_terminal_editor()
+                        if raw is None:
+                            break
+                    else:
+                        raw = await asyncio.to_thread(input, f"{self.profile}> ")
                 except EOFError:
                     break
                 except KeyboardInterrupt:
@@ -869,14 +1284,18 @@ class ScrollbackTUI2:
                 text = raw.strip()
                 if not text:
                     continue
+                self._remember_input(raw)
                 try:
                     if text.startswith("/"):
+                        self._push_recent_activity(text)
+                        self._record_line(f"▸ {text}")
                         await self._handle_command(text)
                     else:
                         await self._send_message(text)
                 except Exception as exc:
                     self._handle_runtime_error(exc, context="command failed")
         finally:
+            self._restore_terminal()
             await self._close_ws()
             if self._http_client is not None:
                 await self._http_client.aclose()
@@ -919,6 +1338,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
+    _reset_terminal_mode()
     if argv[:2] == ["auth", "login"]:
         parser = _build_parser()
         args = parser.parse_args(argv[2:])

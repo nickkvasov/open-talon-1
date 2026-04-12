@@ -174,6 +174,8 @@ Current built-in agent flow:
 
 `tui2` is the recommended terminal client when copy/paste and mouse link interaction matter more than full-screen UI layout.
 
+It also keeps a fixed dashboard-style top panel in tty mode, while `Up`/`Down` recall previous entries and `Tab` completes supported slash commands.
+
 Useful commands in `tui2`:
 
 ```text

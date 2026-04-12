@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -26,9 +27,28 @@ from open_talon_tui.main import TokenState
 class _DummyStdout:
     def __init__(self, *, tty: bool) -> None:
         self._tty = tty
+        self.buffer = ""
 
     def isatty(self) -> bool:
         return self._tty
+
+    def write(self, value: str) -> int:
+        self.buffer += value
+        return len(value)
+
+    def flush(self) -> None:
+        return None
+
+
+class _DummyStdin:
+    def __init__(self, *, tty: bool) -> None:
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+    def fileno(self) -> int:
+        return 0
 
 
 class _FakeResponse:
@@ -72,6 +92,232 @@ def test_render_terminal_links_wraps_urls_for_tty(monkeypatch):
     assert rendered.endswith("\033]8;;\033\\")
 
 
+def test_tui2_main_resets_terminal_before_startup_profile(monkeypatch):
+    calls: list[str] = []
+
+    monkeypatch.setattr(tui2, "_reset_terminal_mode", lambda: calls.append("reset"))
+    monkeypatch.setattr(
+        tui2,
+        "resolve_startup_profile",
+        lambda explicit_profile, oidc_enabled=True: calls.append("profile") or "admin",
+    )
+
+    class _FakeClient:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        async def start(self) -> None:
+            calls.append("start")
+
+    monkeypatch.setattr(tui2, "ScrollbackTUI2", _FakeClient)
+
+    def _run(coro) -> None:
+        calls.append("run")
+        coro.close()
+
+    monkeypatch.setattr(tui2.asyncio, "run", _run)
+
+    tui2.main(["--profile", "admin"])
+
+    assert calls[:2] == ["reset", "profile"]
+
+
+def test_tui2_status_lines_reflect_current_context(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+    client.current_user = {"user_id": "user-123", "display_name": "Alice Example"}
+    client.tokens = TokenState(
+        access_token="token",
+        refresh_token=None,
+        expires_at=None,
+        issuer="http://127.0.0.1:8081/realms/open-talon",
+        client_id="open-talon-tui",
+    )
+    client.state.workspace_id = "workspace-1234"
+    client.state.thread_id = "thread-5678"
+    client.state.participant_id = "participant-9012"
+    client.state.display_name = "Alice Example"
+    client._detected_links = ["https://example.com/docs", "https://example.com/guide"]
+    client._connection_status = "connected"
+    client._recent_activity = ["history loaded", "profile ready"]
+
+    lines = client._status_lines()
+
+    assert lines[0].startswith("┌─ Open Talon TUI2")
+    assert any("Profile: alice" in line for line in lines)
+    assert any("Auth: Alice Example" in line for line in lines)
+    assert any("Conn: connected | Links: 2" in line for line in lines)
+    assert any("Workspace: workspac" in line for line in lines)
+    assert any("Thread: thread-5" in line for line in lines)
+    assert any("Participant: particip" in line for line in lines)
+    assert any("Recent activity" in line for line in lines)
+    assert any("profile ready" in line for line in lines)
+
+
+def test_tui2_render_status_panel_writes_fixed_header(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+    stdout = _DummyStdout(tty=True)
+    monkeypatch.setattr(tui2.sys, "stdout", stdout)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+
+    client._render_status_panel()
+
+    assert "Open Talon TUI2" in stdout.buffer
+    assert "Profile: alice" in stdout.buffer
+    assert "\033[H" in stdout.buffer
+    assert "\033[11;24r" in stdout.buffer
+    assert client._status_initialized is True
+
+
+def test_tui2_render_status_panel_skips_unchanged_redraw(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+    stdout = _DummyStdout(tty=True)
+    monkeypatch.setattr(tui2.sys, "stdout", stdout)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+
+    client._render_status_panel()
+    stdout.buffer = ""
+    client._render_status_panel()
+
+    assert stdout.buffer == ""
+
+
+def test_tui2_restore_terminal_resets_scroll_region(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+    stdout = _DummyStdout(tty=True)
+    monkeypatch.setattr(tui2.sys, "stdout", stdout)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+    client._render_status_panel()
+
+    stdout.buffer = ""
+    client._restore_terminal()
+
+    assert "\033[r" in stdout.buffer
+    assert client._status_initialized is False
+
+
+def test_tui2_set_connection_status_updates_header_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(client, "_render_status_panel", lambda: calls.append("render"))
+
+    client._set_connection_status("reconnecting")
+
+    assert client._connection_status == "reconnecting"
+    assert calls == ["render"]
+
+
+def test_tui2_history_navigation_tracks_saved_buffer(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+    client._remember_input("/workspace list")
+    client._remember_input("/thread list")
+
+    previous = client._history_previous("/wo")
+    oldest = client._history_previous(previous)
+    forward = client._history_next()
+    restored = client._history_next()
+
+    assert previous == "/thread list"
+    assert oldest == "/workspace list"
+    assert forward == "/thread list"
+    assert restored == "/wo"
+
+
+def test_tui2_current_completion_returns_first_fill_candidate(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+
+    completion = client._current_completion("/wo")
+
+    assert completion == "/workspace list"
+
+
+def test_tui2_write_system_formats_nested_result(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+    lines: list[str] = []
+    monkeypatch.setattr(client, "_record_line", lambda text: lines.append(text))
+
+    client._write_system("status dialog dismissed")
+
+    assert lines == ["  └ status dialog dismissed"]
+    assert client._recent_activity == ["status dialog dismissed"]
+
+
 def test_open_link_by_index_uses_browser(tmp_path, monkeypatch):
     monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
 
@@ -94,6 +340,58 @@ def test_open_link_by_index_uses_browser(tmp_path, monkeypatch):
 
     assert opened == ["https://example.com/docs"]
     assert writes == ["opened link: https://example.com/docs"]
+
+
+def test_tui2_command_suggestions_cover_supported_commands(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+
+    suggestions = client._command_suggestions("/wo")
+
+    assert "/workspace list" in suggestions
+    assert "/workspace show" in suggestions
+    assert "/workspace create" in suggestions
+    assert "/workspace use" in suggestions
+
+
+def test_tui2_command_suggestions_include_profiles_and_links(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+    tui_main.save_state(
+        "bob",
+        tui_main.ClientState(
+            participant_id=None,
+            user_id=None,
+            display_name="Bob",
+            participant_type="user",
+        ),
+    )
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+    client._detected_links = ["https://example.com/docs"]
+
+    account_suggestions = client._command_suggestions("/account switch ")
+    open_suggestions = client._command_suggestions("/open ")
+
+    assert "/account switch bob" in account_suggestions
+    assert "/open 1" in open_suggestions
+    assert "/open last" in open_suggestions
 
 
 def test_tui2_auth_login_cli_triggers_shared_auth_workflow(tmp_path, monkeypatch, capsys):
@@ -170,6 +468,88 @@ async def test_tui2_invalid_saved_token_falls_back_to_signed_out(tmp_path, monke
     assert client.current_user is None
     assert any("token refresh failed; run /auth login" in line for line in writes)
     assert any("signed out (admin); run /auth login" in line for line in writes)
+
+
+@pytest.mark.asyncio
+async def test_tui2_refresh_revalidates_authenticated_user(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="admin",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Admin",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+    client.tokens = TokenState(
+        access_token="stale-token",
+        refresh_token="refresh-token",
+        expires_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
+        issuer="http://127.0.0.1:8081/realms/open-talon",
+        client_id="open-talon-tui",
+    )
+    validations: list[bool] = []
+
+    async def _refresh_oidc_tokens() -> bool:
+        client.tokens = TokenState(
+            access_token="fresh-token",
+            refresh_token="refresh-token",
+            expires_at=(datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+            issuer="http://127.0.0.1:8081/realms/open-talon",
+            client_id="open-talon-tui",
+        )
+        return True
+
+    async def _validate_current_user_session(*, force: bool = False) -> None:
+        validations.append(force)
+
+    monkeypatch.setattr(client, "_refresh_oidc_tokens", _refresh_oidc_tokens)
+    monkeypatch.setattr(client, "_validate_current_user_session", _validate_current_user_session)
+
+    await client._ensure_bearer_token()
+
+    assert validations == [True]
+
+
+@pytest.mark.asyncio
+async def test_tui2_periodic_user_validation_invalidates_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="admin",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Admin",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+    client.tokens = TokenState(
+        access_token="token",
+        refresh_token="refresh-token",
+        expires_at=(datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+        issuer="http://127.0.0.1:8081/realms/open-talon",
+        client_id="open-talon-tui",
+    )
+    client.current_user = {"user_id": "user-123", "display_name": "Admin"}
+    writes: list[str] = []
+    monkeypatch.setattr(client, "_write_system", lambda text: writes.append(text))
+
+    request = httpx.Request("GET", "http://127.0.0.1:8000/v1/me")
+    response = httpx.Response(401, request=request, json={"detail": "OIDC authentication required"})
+
+    async def _load_current_user() -> None:
+        raise httpx.HTTPStatusError("401 unauthorized", request=request, response=response)
+
+    monkeypatch.setattr(client, "_load_current_user", _load_current_user)
+
+    await client._validate_current_user_session(force=True)
+
+    assert client.tokens is None
+    assert client.current_user is None
+    assert any("authenticated session is no longer valid; run /auth login" in line for line in writes)
 
 
 @pytest.mark.asyncio
@@ -321,3 +701,41 @@ async def test_tui2_start_survives_failing_command_and_invalidates_auth(tmp_path
 
     assert client.tokens is None
     assert any("authentication expired; run /auth login" in line for line in writes)
+
+
+@pytest.mark.asyncio
+async def test_tui2_start_adds_prompt_entries_to_input_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="admin",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Admin",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+
+    async def _activate_profile_session() -> None:
+        return None
+
+    async def _handle_command(_text: str) -> None:
+        client._stop = True
+
+    commands = iter(["/help"])
+
+    def _input(_prompt: str = "") -> str:
+        try:
+            return next(commands)
+        except StopIteration as exc:  # pragma: no cover - defensive
+            raise EOFError from exc
+
+    monkeypatch.setattr(client, "_activate_profile_session", _activate_profile_session)
+    monkeypatch.setattr(client, "_handle_command", _handle_command)
+    monkeypatch.setattr(client, "_supports_tty_prompt", lambda: False)
+    monkeypatch.setattr(builtins, "input", _input)
+
+    await client.start()
+
+    assert client._input_history == ["/help"]
