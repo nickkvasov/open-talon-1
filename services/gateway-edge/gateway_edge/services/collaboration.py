@@ -19,11 +19,15 @@ if _CORE_COLLAB_DIR.is_dir():
 from core_collab import CollaborationKernel, CollaborationRepository  # noqa: E402
 
 from gateway_edge.db.postgres import get_pool
+from gateway_edge.config import settings
 from gateway_edge.models import (
     AuthContext,
+    ActivateAssetVersionRequest,
     AssumeParticipantRoleRequest,
     AgentDefinition,
     AttachWorkspaceToolRequest,
+    AssetLink,
+    CreateGitRepositoryRequest,
     CreateAgentParticipantRequest,
     CreateLlmProviderRequest,
     CreateSystemAgentRequest,
@@ -37,10 +41,14 @@ from gateway_edge.models import (
     DeleteWorkspaceToolRequest,
     DeleteWorkspaceRequest,
     EventEnvelope,
+    GitRepository,
+    LinkAssetRequest,
     MemoryEntry,
     LlmProviderDefinition,
     ParticipantInput,
     RoleDefinition,
+    PublishAssetFromGitRequest,
+    ResolvedAssetBinding,
     SystemToolDefinition,
     Thread,
     ThreadDetail,
@@ -54,9 +62,13 @@ from gateway_edge.models import (
     UpdateMemoryEntryRequest,
     UpdateWorkspaceToolRequest,
     Workspace,
+    WorkspaceAsset,
+    WorkspaceAssetVersion,
     WorkspaceDetail,
     WorkspaceTool,
 )
+from gateway_edge.services.git_publish import GitPublishService
+from gateway_edge.services.object_storage import MinioObjectStorage
 from gateway_edge.services.events import event_service
 from gateway_edge.services.session import (
     register_thread_connection,
@@ -71,6 +83,15 @@ class CollaborationService:
     def __init__(self) -> None:
         self._kernel: CollaborationKernel | None = None
         self._subscriptions: dict[str, set[asyncio.Queue[EventEnvelope]]] = defaultdict(set)
+        self._git_publish = GitPublishService()
+        self._storage = MinioObjectStorage(
+            endpoint=settings.asset_storage_endpoint,
+            bucket=settings.asset_storage_bucket,
+            access_key=settings.asset_storage_access_key,
+            secret_key=settings.asset_storage_secret_key,
+            region=settings.asset_storage_region,
+            force_path_style=settings.asset_storage_force_path_style,
+        )
 
     async def start(self) -> None:
         pool = await get_pool()
@@ -223,6 +244,158 @@ class CollaborationService:
         result = await self._require_kernel().update_system_agent(agent_id, payload)
         assert result.agent is not None
         return result.agent
+
+    async def create_git_repository(
+        self,
+        *,
+        scope: str,
+        workspace_id: UUID | None,
+        payload: CreateGitRepositoryRequest,
+    ) -> GitRepository:
+        await self._git_publish.validate_repository(payload.local_path)
+        result = await self._require_kernel().create_git_repository(
+            scope=scope,
+            workspace_id=workspace_id,
+            payload=payload,
+        )
+        assert result.repository is not None
+        return result.repository
+
+    async def list_git_repositories(
+        self,
+        *,
+        scope: str,
+        workspace_id: UUID | None = None,
+    ) -> list[GitRepository]:
+        return await self._require_kernel().list_git_repositories(
+            scope=scope,
+            workspace_id=workspace_id,
+        )
+
+    async def publish_asset_from_git(
+        self,
+        *,
+        scope: str,
+        workspace_id: UUID | None,
+        payload: PublishAssetFromGitRequest,
+    ) -> WorkspaceAssetVersion:
+        repository = await self._require_kernel().get_git_repository(payload.repository_id)
+        if repository is None:
+            raise KeyError(f"Git repository {payload.repository_id} not found")
+        content, resolved_revision = await self._git_publish.read_file(
+            repository.local_path,
+            payload.revision or repository.default_branch,
+            payload.git_path,
+        )
+        content_type = payload.content_type or self._content_type_for_path(payload.git_path)
+        object_key = self._asset_object_key(
+            scope=scope,
+            workspace_id=workspace_id,
+            logical_name=payload.logical_name,
+            git_path=payload.git_path,
+            revision=resolved_revision,
+        )
+        stored = await self._storage.put_object(
+            object_key=object_key,
+            payload=content,
+            content_type=content_type,
+        )
+        result = await self._require_kernel().publish_asset_from_git(
+            scope=scope,
+            workspace_id=workspace_id,
+            payload=payload.model_copy(update={"revision": resolved_revision}),
+            storage_backend="minio",
+            bucket=stored.bucket,
+            object_key=stored.object_key,
+            size_bytes=stored.size_bytes,
+            sha256=stored.sha256,
+            content_type=stored.content_type,
+        )
+        assert result.version is not None
+        return result.version
+
+    async def list_workspace_assets(
+        self,
+        *,
+        scope: str | None = None,
+        workspace_id: UUID | None = None,
+    ) -> list[WorkspaceAsset]:
+        return await self._require_kernel().list_workspace_assets(
+            scope=scope,
+            workspace_id=workspace_id,
+        )
+
+    async def list_workspace_asset_versions(
+        self,
+        asset_id: UUID,
+    ) -> list[WorkspaceAssetVersion]:
+        return await self._require_kernel().list_workspace_asset_versions(asset_id)
+
+    async def activate_asset_version(
+        self,
+        asset_id: UUID,
+        payload: ActivateAssetVersionRequest,
+    ) -> AssetLink:
+        result = await self._require_kernel().activate_asset_version(asset_id, payload)
+        assert result.link is not None
+        return result.link
+
+    async def link_asset_version(
+        self,
+        asset_id: UUID,
+        payload: LinkAssetRequest,
+    ) -> AssetLink:
+        result = await self._require_kernel().link_asset_version(asset_id, payload)
+        assert result.link is not None
+        return result.link
+
+    async def get_asset_download_url(
+        self,
+        asset_id: UUID,
+        *,
+        asset_version_id: UUID | None = None,
+    ) -> str:
+        asset = await self._require_kernel().get_workspace_asset(asset_id)
+        if asset is None:
+            raise KeyError(f"Workspace asset {asset_id} not found")
+        version = None
+        if asset_version_id is not None:
+            version = await self._require_kernel().get_workspace_asset_version(asset_version_id)
+            if version is None or version.asset_id != asset_id:
+                raise KeyError(
+                    f"Asset version {asset_version_id} does not belong to asset {asset_id}"
+                )
+        else:
+            versions = await self._require_kernel().list_workspace_asset_versions(asset_id)
+            if not versions:
+                raise KeyError(f"Workspace asset {asset_id} has no published versions")
+            version = versions[-1]
+        return self._storage.presign_get(
+            object_key=version.object_key,
+            expires_seconds=settings.asset_storage_presign_expiry_seconds,
+        )
+
+    async def list_resolved_agent_assets(
+        self,
+        *,
+        agent_id: UUID,
+        workspace_id: UUID | None = None,
+    ) -> list[ResolvedAssetBinding]:
+        return await self._require_kernel().list_resolved_agent_assets(
+            agent_id=agent_id,
+            workspace_id=workspace_id,
+        )
+
+    async def list_resolved_tool_assets(
+        self,
+        *,
+        tool_id: UUID,
+        workspace_id: UUID | None = None,
+    ) -> list[ResolvedAssetBinding]:
+        return await self._require_kernel().list_resolved_tool_assets(
+            tool_id=tool_id,
+            workspace_id=workspace_id,
+        )
 
     async def delete_llm_provider(
         self,
@@ -630,6 +803,33 @@ class CollaborationService:
         if self._kernel is None:
             raise RuntimeError("Collaboration service is not started")
         return self._kernel
+
+    @staticmethod
+    def _content_type_for_path(path: str) -> str:
+        lowered = path.lower()
+        if lowered.endswith(".md"):
+            return "text/markdown"
+        if lowered.endswith(".json"):
+            return "application/json"
+        if lowered.endswith(".yaml") or lowered.endswith(".yml"):
+            return "application/yaml"
+        if lowered.endswith(".txt"):
+            return "text/plain"
+        return "application/octet-stream"
+
+    @staticmethod
+    def _asset_object_key(
+        *,
+        scope: str,
+        workspace_id: UUID | None,
+        logical_name: str,
+        git_path: str,
+        revision: str,
+    ) -> str:
+        normalized_name = logical_name.replace("/", "_")
+        file_name = git_path.rsplit("/", 1)[-1]
+        prefix = "global" if workspace_id is None else f"workspaces/{workspace_id}"
+        return f"{prefix}/assets/{normalized_name}/{revision}/{file_name}"
 
     @staticmethod
     def _event_visible_to_viewer(

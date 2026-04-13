@@ -190,6 +190,9 @@ start_cmd() {
       ollama \
       clickhouse \
       minio \
+      minio-init \
+      forgejo \
+      forgejo-init \
       langfuse-db-init \
       langfuse-worker \
       langfuse-web

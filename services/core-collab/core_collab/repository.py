@@ -14,11 +14,14 @@ from .contracts import (
     AgentEndpoint,
     AgentInteractionContract,
     Artifact,
+    AssetLink,
     EventEnvelope,
+    GitRepository,
     Membership,
     MemoryEntry,
     LlmProviderDefinition,
     ParticipantProfile,
+    ResolvedAssetBinding,
     Run,
     RunStep,
     SystemToolDefinition,
@@ -30,6 +33,8 @@ from .contracts import (
     Thread,
     TimelineMessage,
     Workspace,
+    WorkspaceAsset,
+    WorkspaceAssetVersion,
     WorkspaceTool,
 )
 from .migrations import apply_pending_migrations
@@ -368,6 +373,187 @@ class CollaborationRepository:
             provider.updated_by,
             provider.updated_at,
             self._json_dumps(provider.metadata),
+        )
+
+    async def upsert_git_repository(
+        self, conn: asyncpg.Connection, repository: GitRepository
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO git_repositories (
+                repo_id, workspace_id, scope, name, forgejo_url, clone_url, local_path,
+                default_branch, created_by, created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (repo_id) DO UPDATE
+                SET workspace_id = EXCLUDED.workspace_id,
+                    scope = EXCLUDED.scope,
+                    name = EXCLUDED.name,
+                    forgejo_url = EXCLUDED.forgejo_url,
+                    clone_url = EXCLUDED.clone_url,
+                    local_path = EXCLUDED.local_path,
+                    default_branch = EXCLUDED.default_branch,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            repository.repo_id,
+            repository.workspace_id,
+            repository.scope,
+            repository.name,
+            repository.forgejo_url,
+            repository.clone_url,
+            repository.local_path,
+            repository.default_branch,
+            repository.created_by,
+            repository.created_at,
+            repository.updated_at,
+            self._json_dumps(repository.metadata),
+        )
+
+    async def upsert_workspace_asset(
+        self, conn: asyncpg.Connection, asset: WorkspaceAsset
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO workspace_assets (
+                asset_id, workspace_id, scope, asset_type, logical_name, logical_path,
+                title, description, created_by, created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (asset_id) DO UPDATE
+                SET workspace_id = EXCLUDED.workspace_id,
+                    scope = EXCLUDED.scope,
+                    asset_type = EXCLUDED.asset_type,
+                    logical_name = EXCLUDED.logical_name,
+                    logical_path = EXCLUDED.logical_path,
+                    title = EXCLUDED.title,
+                    description = EXCLUDED.description,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            asset.asset_id,
+            asset.workspace_id,
+            asset.scope,
+            asset.asset_type,
+            asset.logical_name,
+            asset.logical_path,
+            asset.title,
+            asset.description,
+            asset.created_by,
+            asset.created_at,
+            asset.updated_at,
+            self._json_dumps(asset.metadata),
+        )
+
+    async def upsert_workspace_asset_version(
+        self, conn: asyncpg.Connection, version: WorkspaceAssetVersion
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO workspace_asset_versions (
+                asset_version_id, asset_id, version, source_kind, git_repository_id,
+                git_revision, git_path, storage_backend, bucket, object_key, content_type,
+                size_bytes, sha256, created_by, created_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9, $10, $11,
+                $12, $13, $14, $15, $16
+            )
+            ON CONFLICT (asset_version_id) DO UPDATE
+                SET version = EXCLUDED.version,
+                    source_kind = EXCLUDED.source_kind,
+                    git_repository_id = EXCLUDED.git_repository_id,
+                    git_revision = EXCLUDED.git_revision,
+                    git_path = EXCLUDED.git_path,
+                    storage_backend = EXCLUDED.storage_backend,
+                    bucket = EXCLUDED.bucket,
+                    object_key = EXCLUDED.object_key,
+                    content_type = EXCLUDED.content_type,
+                    size_bytes = EXCLUDED.size_bytes,
+                    sha256 = EXCLUDED.sha256,
+                    metadata = EXCLUDED.metadata
+            """,
+            version.asset_version_id,
+            version.asset_id,
+            version.version,
+            version.source_kind,
+            version.git_repository_id,
+            version.git_revision,
+            version.git_path,
+            version.storage_backend,
+            version.bucket,
+            version.object_key,
+            version.content_type,
+            version.size_bytes,
+            version.sha256,
+            version.created_by,
+            version.created_at,
+            self._json_dumps(version.metadata),
+        )
+
+    async def upsert_asset_link(
+        self, conn: asyncpg.Connection, link: AssetLink
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO asset_links (
+                link_id, asset_id, asset_version_id, workspace_id, target_type, target_id,
+                purpose, active, created_by, created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (link_id) DO UPDATE
+                SET asset_id = EXCLUDED.asset_id,
+                    asset_version_id = EXCLUDED.asset_version_id,
+                    workspace_id = EXCLUDED.workspace_id,
+                    target_type = EXCLUDED.target_type,
+                    target_id = EXCLUDED.target_id,
+                    purpose = EXCLUDED.purpose,
+                    active = EXCLUDED.active,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            link.link_id,
+            link.asset_id,
+            link.asset_version_id,
+            link.workspace_id,
+            link.target_type,
+            link.target_id,
+            link.purpose,
+            link.active,
+            link.created_by,
+            link.created_at,
+            link.updated_at,
+            self._json_dumps(link.metadata),
+        )
+
+    async def deactivate_asset_links(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        workspace_id: UUID | None,
+        target_type: str,
+        target_id: UUID,
+        purpose: str,
+    ) -> None:
+        await conn.execute(
+            """
+            UPDATE asset_links
+            SET active = FALSE,
+                updated_at = NOW()
+            WHERE (
+                    ($1::uuid IS NULL AND workspace_id IS NULL)
+                 OR workspace_id = $1
+            )
+              AND target_type = $2
+              AND target_id = $3
+              AND purpose = $4
+              AND active = TRUE
+            """,
+            workspace_id,
+            target_type,
+            target_id,
+            purpose,
         )
 
     async def upsert_workspace_tool(
@@ -1021,6 +1207,195 @@ class CollaborationRepository:
             provider_id,
         )
         return self._llm_provider_from_row(row) if row else None
+
+    async def list_git_repositories(
+        self,
+        *,
+        scope: str,
+        workspace_id: UUID | None = None,
+    ) -> list[GitRepository]:
+        rows = await self._pool.fetch(
+            """
+            SELECT repo_id, workspace_id, scope, name, forgejo_url, clone_url, local_path,
+                   default_branch, created_by, created_at, updated_at, metadata
+            FROM git_repositories
+            WHERE scope = $1
+              AND (
+                    ($2::uuid IS NULL AND workspace_id IS NULL)
+                 OR workspace_id = $2
+              )
+            ORDER BY created_at ASC
+            """,
+            scope,
+            workspace_id,
+        )
+        return [self._git_repository_from_row(row) for row in rows]
+
+    async def fetch_git_repository(self, repo_id: UUID) -> GitRepository | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT repo_id, workspace_id, scope, name, forgejo_url, clone_url, local_path,
+                   default_branch, created_by, created_at, updated_at, metadata
+            FROM git_repositories
+            WHERE repo_id = $1
+            """,
+            repo_id,
+        )
+        return self._git_repository_from_row(row) if row else None
+
+    async def fetch_workspace_asset(self, asset_id: UUID) -> WorkspaceAsset | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT asset_id, workspace_id, scope, asset_type, logical_name, logical_path,
+                   title, description, created_by, created_at, updated_at, metadata
+            FROM workspace_assets
+            WHERE asset_id = $1
+            """,
+            asset_id,
+        )
+        return self._workspace_asset_from_row(row) if row else None
+
+    async def fetch_workspace_asset_by_logical_name(
+        self,
+        *,
+        scope: str,
+        workspace_id: UUID | None,
+        logical_name: str,
+    ) -> WorkspaceAsset | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT asset_id, workspace_id, scope, asset_type, logical_name, logical_path,
+                   title, description, created_by, created_at, updated_at, metadata
+            FROM workspace_assets
+            WHERE scope = $1
+              AND (
+                    ($2::uuid IS NULL AND workspace_id IS NULL)
+                 OR workspace_id = $2
+              )
+              AND logical_name = $3
+            """,
+            scope,
+            workspace_id,
+            logical_name,
+        )
+        return self._workspace_asset_from_row(row) if row else None
+
+    async def list_workspace_assets(
+        self,
+        *,
+        scope: str | None = None,
+        workspace_id: UUID | None = None,
+    ) -> list[WorkspaceAsset]:
+        rows = await self._pool.fetch(
+            """
+            SELECT asset_id, workspace_id, scope, asset_type, logical_name, logical_path,
+                   title, description, created_by, created_at, updated_at, metadata
+            FROM workspace_assets
+            WHERE ($1::text IS NULL OR scope = $1)
+              AND (
+                    $2::uuid IS NULL
+                 OR workspace_id = $2
+                 OR (scope = 'global' AND workspace_id IS NULL)
+              )
+            ORDER BY created_at ASC
+            """,
+            scope,
+            workspace_id,
+        )
+        return [self._workspace_asset_from_row(row) for row in rows]
+
+    async def list_workspace_asset_versions(self, asset_id: UUID) -> list[WorkspaceAssetVersion]:
+        rows = await self._pool.fetch(
+            """
+            SELECT asset_version_id, asset_id, version, source_kind, git_repository_id,
+                   git_revision, git_path, storage_backend, bucket, object_key, content_type,
+                   size_bytes, sha256, created_by, created_at, metadata
+            FROM workspace_asset_versions
+            WHERE asset_id = $1
+            ORDER BY version ASC
+            """,
+            asset_id,
+        )
+        return [self._workspace_asset_version_from_row(row) for row in rows]
+
+    async def fetch_workspace_asset_version(
+        self, asset_version_id: UUID
+    ) -> WorkspaceAssetVersion | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT asset_version_id, asset_id, version, source_kind, git_repository_id,
+                   git_revision, git_path, storage_backend, bucket, object_key, content_type,
+                   size_bytes, sha256, created_by, created_at, metadata
+            FROM workspace_asset_versions
+            WHERE asset_version_id = $1
+            """,
+            asset_version_id,
+        )
+        return self._workspace_asset_version_from_row(row) if row else None
+
+    async def next_workspace_asset_version(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        asset_id: UUID,
+    ) -> int:
+        return await conn.fetchval(
+            """
+            SELECT COALESCE(MAX(version), 0) + 1
+            FROM workspace_asset_versions
+            WHERE asset_id = $1
+            """,
+            asset_id,
+        )
+
+    async def list_asset_links_for_target(
+        self,
+        *,
+        target_type: str,
+        target_id: UUID,
+        workspace_id: UUID | None = None,
+    ) -> list[ResolvedAssetBinding]:
+        rows = await self._pool.fetch(
+            """
+            SELECT
+                al.link_id, al.asset_id AS link_asset_id, al.asset_version_id AS link_asset_version_id,
+                al.workspace_id AS link_workspace_id, al.target_type, al.target_id, al.purpose,
+                al.active, al.created_by AS link_created_by, al.created_at AS link_created_at,
+                al.updated_at AS link_updated_at, al.metadata AS link_metadata,
+                wa.asset_id, wa.workspace_id AS asset_workspace_id, wa.scope, wa.asset_type,
+                wa.logical_name, wa.logical_path, wa.title, wa.description, wa.created_by AS asset_created_by,
+                wa.created_at AS asset_created_at, wa.updated_at AS asset_updated_at, wa.metadata AS asset_metadata,
+                wav.asset_version_id, wav.version, wav.source_kind, wav.git_repository_id, wav.git_revision,
+                wav.git_path, wav.storage_backend, wav.bucket, wav.object_key, wav.content_type,
+                wav.size_bytes, wav.sha256, wav.created_by AS version_created_by,
+                wav.created_at AS version_created_at, wav.metadata AS version_metadata
+            FROM asset_links al
+            JOIN workspace_assets wa ON wa.asset_id = al.asset_id
+            JOIN workspace_asset_versions wav ON wav.asset_version_id = al.asset_version_id
+            WHERE al.target_type = $1
+              AND al.target_id = $2
+              AND al.active = TRUE
+              AND (
+                    ($3::uuid IS NULL AND al.workspace_id IS NULL)
+                 OR al.workspace_id = $3
+                 OR ($3::uuid IS NOT NULL AND al.workspace_id IS NULL)
+              )
+            ORDER BY al.updated_at DESC
+            """,
+            target_type,
+            target_id,
+            workspace_id,
+        )
+        by_purpose: dict[str, ResolvedAssetBinding] = {}
+        for row in rows:
+            binding = self._resolved_asset_binding_from_row(row)
+            existing = by_purpose.get(binding.purpose)
+            if existing is None:
+                by_purpose[binding.purpose] = binding
+                continue
+            if existing.workspace_id is None and binding.workspace_id is not None:
+                by_purpose[binding.purpose] = binding
+        return list(by_purpose.values())
 
     async def list_workspace_tools(self, workspace_id: UUID) -> list[WorkspaceTool]:
         rows = await self._pool.fetch(
@@ -1963,6 +2338,118 @@ class CollaborationRepository:
             attached_at=row["attached_at"],
             updated_at=row["updated_at"],
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _git_repository_from_row(row: asyncpg.Record) -> GitRepository:
+        return GitRepository(
+            repo_id=row["repo_id"],
+            workspace_id=row["workspace_id"],
+            scope=row["scope"],
+            name=row["name"],
+            forgejo_url=row["forgejo_url"],
+            clone_url=row["clone_url"],
+            local_path=row["local_path"],
+            default_branch=row["default_branch"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _workspace_asset_from_row(row: asyncpg.Record) -> WorkspaceAsset:
+        return WorkspaceAsset(
+            asset_id=row["asset_id"],
+            workspace_id=row["workspace_id"],
+            scope=row["scope"],
+            asset_type=row["asset_type"],
+            logical_name=row["logical_name"],
+            logical_path=row["logical_path"],
+            title=row["title"],
+            description=row["description"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _workspace_asset_version_from_row(row: asyncpg.Record) -> WorkspaceAssetVersion:
+        return WorkspaceAssetVersion(
+            asset_version_id=row["asset_version_id"],
+            asset_id=row["asset_id"],
+            version=row["version"],
+            source_kind=row["source_kind"],
+            git_repository_id=row["git_repository_id"],
+            git_revision=row["git_revision"],
+            git_path=row["git_path"],
+            storage_backend=row["storage_backend"],
+            bucket=row["bucket"],
+            object_key=row["object_key"],
+            content_type=row["content_type"],
+            size_bytes=row["size_bytes"],
+            sha256=row["sha256"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _asset_link_from_alias_row(row: asyncpg.Record) -> AssetLink:
+        return AssetLink(
+            link_id=row["link_id"],
+            asset_id=row["link_asset_id"],
+            asset_version_id=row["link_asset_version_id"],
+            workspace_id=row["link_workspace_id"],
+            target_type=row["target_type"],
+            target_id=row["target_id"],
+            purpose=row["purpose"],
+            active=row["active"],
+            created_by=row["link_created_by"],
+            created_at=row["link_created_at"],
+            updated_at=row["link_updated_at"],
+            metadata=CollaborationRepository._json_value(row["link_metadata"], default={}),
+        )
+
+    @staticmethod
+    def _resolved_asset_binding_from_row(row: asyncpg.Record) -> ResolvedAssetBinding:
+        return ResolvedAssetBinding(
+            purpose=row["purpose"],
+            workspace_id=row["link_workspace_id"],
+            asset=WorkspaceAsset(
+                asset_id=row["asset_id"],
+                workspace_id=row["asset_workspace_id"],
+                scope=row["scope"],
+                asset_type=row["asset_type"],
+                logical_name=row["logical_name"],
+                logical_path=row["logical_path"],
+                title=row["title"],
+                description=row["description"],
+                created_by=row["asset_created_by"],
+                created_at=row["asset_created_at"],
+                updated_at=row["asset_updated_at"],
+                metadata=CollaborationRepository._json_value(row["asset_metadata"], default={}),
+            ),
+            version=WorkspaceAssetVersion(
+                asset_version_id=row["asset_version_id"],
+                asset_id=row["asset_id"],
+                version=row["version"],
+                source_kind=row["source_kind"],
+                git_repository_id=row["git_repository_id"],
+                git_revision=row["git_revision"],
+                git_path=row["git_path"],
+                storage_backend=row["storage_backend"],
+                bucket=row["bucket"],
+                object_key=row["object_key"],
+                content_type=row["content_type"],
+                size_bytes=row["size_bytes"],
+                sha256=row["sha256"],
+                created_by=row["version_created_by"],
+                created_at=row["version_created_at"],
+                metadata=CollaborationRepository._json_value(row["version_metadata"], default={}),
+            ),
+            link=CollaborationRepository._asset_link_from_alias_row(row),
         )
 
     @staticmethod

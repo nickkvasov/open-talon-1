@@ -199,7 +199,67 @@ services:
     environment:
       MC_HOST_local: http://${LANGFUSE_MINIO_ROOT_USER:-minio}:${LANGFUSE_MINIO_ROOT_PASSWORD:-miniosecret}@minio:9000
       LANGFUSE_S3_BUCKET: ${LANGFUSE_S3_BUCKET:-langfuse}
-    command: ["mb", "--ignore-existing", "local/${LANGFUSE_S3_BUCKET:-langfuse}"]
+      OPEN_TALON_ASSET_BUCKET: ${ASSET_STORAGE_BUCKET:-open-talon-assets}
+    command:
+      - /bin/sh
+      - -c
+      - |
+        mc mb --ignore-existing "local/${LANGFUSE_S3_BUCKET:-langfuse}"
+        mc mb --ignore-existing "local/${OPEN_TALON_ASSET_BUCKET:-open-talon-assets}"
+    restart: "no"
+
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:13
+    container_name: forgejo
+    environment:
+      USER_UID: ${FORGEJO_UID:-1000}
+      USER_GID: ${FORGEJO_GID:-1000}
+      FORGEJO__database__DB_TYPE: sqlite3
+      FORGEJO__database__PATH: /data/forgejo.db
+      FORGEJO__server__DOMAIN: localhost
+      FORGEJO__server__ROOT_URL: ${FORGEJO_ROOT_URL:-http://localhost:3001/}
+      FORGEJO__server__SSH_DOMAIN: localhost
+      FORGEJO__server__SSH_PORT: ${FORGEJO_SSH_PORT:-2222}
+      FORGEJO__server__START_SSH_SERVER: "true"
+      FORGEJO__service__DISABLE_REGISTRATION: "false"
+      FORGEJO__security__INSTALL_LOCK: "true"
+    ports:
+      - "${FORGEJO_HTTP_PORT:-3001}:3000"
+      - "${FORGEJO_SSH_PORT:-2222}:22"
+    volumes:
+      - ./data/forgejo:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  forgejo-init:
+    image: codeberg.org/forgejo/forgejo:13
+    container_name: forgejo-init
+    depends_on:
+      - forgejo
+    environment:
+      FORGEJO_ADMIN_USER: ${FORGEJO_ADMIN_USER:-forgejo}
+      FORGEJO_ADMIN_PASSWORD: ${FORGEJO_ADMIN_PASSWORD:-forgejo123}
+      FORGEJO_ADMIN_EMAIL: ${FORGEJO_ADMIN_EMAIL:-admin@local.dev}
+    volumes:
+      - ./data/forgejo:/data
+    command:
+      - /bin/sh
+      - -c
+      - |
+        sleep 10
+        forgejo admin user list --config /data/gitea/conf/app.ini >/dev/null 2>&1 || exit 0
+        forgejo admin user list --config /data/gitea/conf/app.ini | grep -q "${FORGEJO_ADMIN_USER:-forgejo}" || \
+          forgejo admin user create \
+            --config /data/gitea/conf/app.ini \
+            --admin \
+            --username "${FORGEJO_ADMIN_USER:-forgejo}" \
+            --password "${FORGEJO_ADMIN_PASSWORD:-forgejo123}" \
+            --email "${FORGEJO_ADMIN_EMAIL:-admin@local.dev}"
     restart: "no"
 
   langfuse-worker:

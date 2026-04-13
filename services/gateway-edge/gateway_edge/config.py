@@ -95,6 +95,16 @@ class Settings(BaseSettings):
     # Root / admin token used by the gateway itself (for API-key management)
     openbao_admin_token: str = "root"
 
+    # ── Asset publishing / MinIO ─────────────────────────────────────────────
+    asset_storage_endpoint: str = "http://127.0.0.1:9090"
+    asset_storage_bucket: str = "open-talon-assets"
+    asset_storage_access_key: str = "minio"
+    asset_storage_secret_key: str = "miniosecret"
+    asset_storage_region: str = "auto"
+    asset_storage_force_path_style: bool = True
+    asset_storage_presign_expiry_seconds: int = 900
+    forgejo_base_url: str = "http://127.0.0.1:3001"
+
     # ── Dev helpers ──────────────────────────────────────────────────────────
     # When True, an in-process echo consumer answers chat requests so you can
     # test the full flow before agents/ is implemented.

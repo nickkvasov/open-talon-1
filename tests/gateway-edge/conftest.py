@@ -55,6 +55,10 @@ class MockCollaborationService:
         self.workspace_sequences = {}
         self.thread_sequences = {}
         self.subscriptions = {}
+        self.git_repositories = {}
+        self.assets = {}
+        self.asset_versions = {}
+        self.asset_links = {}
 
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
@@ -378,6 +382,187 @@ class MockCollaborationService:
             )
         self.system_agents[str(agent_id)] = updated
         return updated
+
+    async def create_git_repository(self, *, scope: str, workspace_id: UUID | None, payload):
+        from gateway_edge.models import GitRepository
+
+        now = datetime.now(timezone.utc)
+        if scope == "workspace" and workspace_id is not None and str(workspace_id) not in self.workspaces:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        repository = GitRepository(
+            repo_id=uuid4(),
+            workspace_id=workspace_id,
+            scope=scope,
+            name=payload.name,
+            forgejo_url=payload.forgejo_url,
+            clone_url=payload.clone_url,
+            local_path=payload.local_path,
+            default_branch=payload.default_branch,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        self.git_repositories[str(repository.repo_id)] = repository
+        return repository
+
+    async def list_git_repositories(self, *, scope: str, workspace_id: UUID | None = None):
+        repos = list(self.git_repositories.values())
+        return [
+            repo
+            for repo in repos
+            if repo.scope == scope and repo.workspace_id == workspace_id
+        ]
+
+    async def publish_asset_from_git(self, *, scope: str, workspace_id: UUID | None, payload):
+        from gateway_edge.models import WorkspaceAsset, WorkspaceAssetVersion
+
+        now = datetime.now(timezone.utc)
+        asset = next(
+            (
+                item
+                for item in self.assets.values()
+                if item.scope == scope
+                and item.workspace_id == workspace_id
+                and item.logical_name == payload.logical_name
+            ),
+            None,
+        )
+        if asset is None:
+            asset = WorkspaceAsset(
+                asset_id=uuid4(),
+                workspace_id=workspace_id,
+                scope=scope,
+                asset_type=payload.asset_type,
+                logical_name=payload.logical_name,
+                logical_path=payload.logical_path,
+                title=payload.title,
+                description=payload.description,
+                created_by=payload.actor.participant_id,
+                created_at=now,
+                updated_at=now,
+                metadata=payload.metadata,
+            )
+            self.assets[str(asset.asset_id)] = asset
+        versions = self.asset_versions.setdefault(str(asset.asset_id), [])
+        version = WorkspaceAssetVersion(
+            asset_version_id=uuid4(),
+            asset_id=asset.asset_id,
+            version=len(versions) + 1,
+            source_kind="git_publish",
+            git_repository_id=payload.repository_id,
+            git_revision=payload.revision or "HEAD",
+            git_path=payload.git_path,
+            storage_backend="minio",
+            bucket="open-talon-assets",
+            object_key=f"mock/{payload.logical_name}/{payload.git_path}",
+            content_type=payload.content_type or "text/markdown",
+            size_bytes=128,
+            sha256="deadbeef",
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            metadata=payload.metadata,
+        )
+        versions.append(version)
+        return version
+
+    async def list_workspace_assets(self, *, scope: str | None = None, workspace_id: UUID | None = None):
+        assets = list(self.assets.values())
+        return [
+            asset
+            for asset in assets
+            if (scope is None or asset.scope == scope)
+            and (workspace_id is None or asset.workspace_id in {None, workspace_id})
+        ]
+
+    async def list_workspace_asset_versions(self, asset_id: UUID):
+        if str(asset_id) not in self.assets:
+            raise KeyError(f"Workspace asset {asset_id} not found")
+        return list(self.asset_versions.get(str(asset_id), []))
+
+    async def activate_asset_version(self, asset_id: UUID, payload):
+        from gateway_edge.models import AssetLink
+
+        if str(asset_id) not in self.assets:
+            raise KeyError(f"Workspace asset {asset_id} not found")
+        now = datetime.now(timezone.utc)
+        link = AssetLink(
+            link_id=uuid4(),
+            asset_id=asset_id,
+            asset_version_id=payload.asset_version_id,
+            workspace_id=payload.workspace_id,
+            target_type=payload.target_type,
+            target_id=payload.target_id,
+            purpose=payload.purpose,
+            active=True,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        key = (payload.target_type, str(payload.target_id), payload.purpose, str(payload.workspace_id))
+        self.asset_links[key] = link
+        return link
+
+    async def link_asset_version(self, asset_id: UUID, payload):
+        return await self.activate_asset_version(asset_id, payload)
+
+    async def get_asset_download_url(self, asset_id: UUID, *, asset_version_id: UUID | None = None):
+        if str(asset_id) not in self.assets:
+            raise KeyError(f"Workspace asset {asset_id} not found")
+        return f"http://localhost/mock-assets/{asset_id}/{asset_version_id or 'latest'}"
+
+    async def list_resolved_agent_assets(self, *, agent_id: UUID, workspace_id: UUID | None = None):
+        from gateway_edge.models import ResolvedAssetBinding
+
+        bindings = []
+        for link in self.asset_links.values():
+            if link.target_type != "system_agent" or link.target_id != agent_id:
+                continue
+            if link.workspace_id not in {None, workspace_id}:
+                continue
+            asset = self.assets[str(link.asset_id)]
+            version = next(
+                version
+                for version in self.asset_versions.get(str(link.asset_id), [])
+                if version.asset_version_id == link.asset_version_id
+            )
+            bindings.append(
+                ResolvedAssetBinding(
+                    purpose=link.purpose,
+                    workspace_id=link.workspace_id,
+                    asset=asset,
+                    version=version,
+                    link=link,
+                )
+            )
+        return bindings
+
+    async def list_resolved_tool_assets(self, *, tool_id: UUID, workspace_id: UUID | None = None):
+        from gateway_edge.models import ResolvedAssetBinding
+
+        bindings = []
+        for link in self.asset_links.values():
+            if link.target_type != "system_tool" or link.target_id != tool_id:
+                continue
+            if link.workspace_id not in {None, workspace_id}:
+                continue
+            asset = self.assets[str(link.asset_id)]
+            version = next(
+                version
+                for version in self.asset_versions.get(str(link.asset_id), [])
+                if version.asset_version_id == link.asset_version_id
+            )
+            bindings.append(
+                ResolvedAssetBinding(
+                    purpose=link.purpose,
+                    workspace_id=link.workspace_id,
+                    asset=asset,
+                    version=version,
+                    link=link,
+                )
+            )
+        return bindings
 
     async def update_llm_provider(self, provider_id: UUID, payload):
         provider = self.llm_providers.get(str(provider_id))
