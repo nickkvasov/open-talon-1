@@ -26,6 +26,9 @@ NetworkPolicy = Literal["none", "full"]
 WorkspaceAccessMode = Literal["none", "read_only", "read_write"]
 ExecutionInvocationKind = Literal["tool_call"]
 ExecutionStatus = Literal["queued", "running", "completed", "failed", "cancelled", "timed_out"]
+AssetScope = Literal["global", "workspace"]
+AssetStorageBackend = Literal["minio"]
+AssetTargetType = Literal["system_agent", "system_tool", "workspace", "workspace_tool"]
 StopReason = Literal[
     "completed",
     "needs_user_input",
@@ -291,6 +294,78 @@ class WorkspaceTool(BaseModel):
     attached_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GitRepository(BaseModel):
+    repo_id: UUID
+    workspace_id: UUID | None = None
+    scope: AssetScope = "global"
+    name: str
+    forgejo_url: str | None = None
+    clone_url: str | None = None
+    local_path: str
+    default_branch: str | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceAsset(BaseModel):
+    asset_id: UUID
+    workspace_id: UUID | None = None
+    scope: AssetScope = "global"
+    asset_type: str
+    logical_name: str
+    logical_path: str | None = None
+    title: str
+    description: str | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceAssetVersion(BaseModel):
+    asset_version_id: UUID
+    asset_id: UUID
+    version: int
+    source_kind: str
+    git_repository_id: UUID | None = None
+    git_revision: str | None = None
+    git_path: str | None = None
+    storage_backend: AssetStorageBackend = "minio"
+    bucket: str
+    object_key: str
+    content_type: str | None = None
+    size_bytes: int = 0
+    sha256: str
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssetLink(BaseModel):
+    link_id: UUID
+    asset_id: UUID
+    asset_version_id: UUID
+    workspace_id: UUID | None = None
+    target_type: AssetTargetType
+    target_id: UUID
+    purpose: str
+    active: bool = True
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResolvedAssetBinding(BaseModel):
+    purpose: str
+    workspace_id: UUID | None = None
+    asset: WorkspaceAsset
+    version: WorkspaceAssetVersion
+    link: AssetLink
 
 
 class Membership(BaseModel):
@@ -710,6 +785,50 @@ class UpdateSystemAgentRequest(BaseModel):
     interaction_contract: AgentInteractionContract | None = None
     definition: dict[str, Any] | None = None
     metadata: dict[str, Any] | None = None
+
+
+class CreateGitRepositoryRequest(BaseModel):
+    actor: ParticipantInput
+    name: str
+    local_path: str
+    forgejo_url: str | None = None
+    clone_url: str | None = None
+    default_branch: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PublishAssetFromGitRequest(BaseModel):
+    actor: ParticipantInput
+    repository_id: UUID
+    asset_type: str
+    logical_name: str
+    logical_path: str | None = None
+    title: str
+    description: str | None = None
+    git_path: str
+    revision: str | None = None
+    content_type: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LinkAssetRequest(BaseModel):
+    actor: ParticipantInput
+    asset_version_id: UUID
+    target_type: AssetTargetType
+    target_id: UUID
+    purpose: str
+    workspace_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ActivateAssetVersionRequest(BaseModel):
+    actor: ParticipantInput
+    asset_version_id: UUID
+    target_type: AssetTargetType
+    target_id: UUID
+    purpose: str
+    workspace_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class CreateThreadRequest(BaseModel):

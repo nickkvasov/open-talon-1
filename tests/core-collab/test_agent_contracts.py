@@ -27,6 +27,7 @@ from open_talon_contracts.models import (  # noqa: E402
     AgentEndpoint,
     ArtifactRef,
     CreateLlmProviderRequest,
+    CreateSystemToolRequest,
     EventEnvelope,
     ExecutionSpec,
     DeleteLlmProviderRequest,
@@ -38,6 +39,7 @@ from open_talon_contracts.models import (  # noqa: E402
     ToolCall,
     ToolCallResult,
     SystemToolDefinition,
+    ToolExecutionBinding,
     CreateSystemAgentRequest,
     ParticipantInput,
     Task,
@@ -175,6 +177,9 @@ class FakeRepository:
 
     async def fetch_system_tool(self, tool_id):
         return self._system_tools.get(tool_id)
+
+    async def upsert_system_tool(self, conn, tool: SystemToolDefinition) -> None:
+        self._system_tools[tool.tool_id] = tool
 
     async def list_llm_providers(self):
         return list(self._llm_providers.values())
@@ -526,6 +531,27 @@ async def test_kernel_create_system_agent_fills_missing_interaction_contract():
     assert result.agent is not None
     assert not interaction_contract_is_empty(result.agent.interaction_contract)
     assert result.agent.interaction_contract.response_contract.required_sections
+
+
+@pytest.mark.asyncio
+async def test_kernel_create_system_tool_rejects_read_write_workspace_access_for_untrusted_tool():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+
+    with pytest.raises(ValueError, match="read_write workspace access requires trust_level='trusted'"):
+        await kernel.create_system_tool(
+            CreateSystemToolRequest(
+                actor=_actor(),
+                name="repo_write",
+                description="Writes into a mounted workspace.",
+                execution=ToolExecutionBinding(
+                    backend_kind="docker",
+                    handler_ref="repo_write",
+                    execution_profile={"workspace_access": "read_write"},
+                    trust_level="sandboxed",
+                ),
+            )
+        )
 
 
 @pytest.mark.asyncio

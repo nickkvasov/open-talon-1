@@ -14,10 +14,13 @@ from gateway_edge.auth.openbao import validate_openbao_token
 from gateway_edge.authz import require_admin_access
 from gateway_edge.config import settings
 from gateway_edge.models import (
+    ActivateAssetVersionRequest,
     AuthContext,
     AssumeParticipantRoleRequest,
     AgentDefinition,
     AttachWorkspaceToolRequest,
+    AssetLink,
+    CreateGitRepositoryRequest,
     CreateAgentParticipantRequest,
     CreateLlmProviderRequest,
     CreateSystemAgentRequest,
@@ -34,8 +37,12 @@ from gateway_edge.models import (
     LlmEngineDescriptor,
     LlmProviderDefinition,
     LlmProviderHealthReport,
+    GitRepository,
+    LinkAssetRequest,
     ParticipantInput,
     ParticipantProfile,
+    PublishAssetFromGitRequest,
+    ResolvedAssetBinding,
     RoleDefinition,
     SystemToolDefinition,
     Thread,
@@ -50,6 +57,8 @@ from gateway_edge.models import (
     UpdateMemoryEntryRequest,
     UpdateWorkspaceToolRequest,
     Workspace,
+    WorkspaceAsset,
+    WorkspaceAssetVersion,
     WorkspaceDetail,
     WorkspaceTool,
 )
@@ -646,6 +655,211 @@ async def update_system_agent(
 
 
 @router.post(
+    "/git-repositories",
+    response_model=GitRepository,
+    summary="Register a global Git repository for authored definitions or code",
+)
+async def create_global_git_repository(
+    request: Request,
+    payload: CreateGitRepositoryRequest,
+) -> GitRepository:
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    logger.debug(
+        "HTTP create_global_git_repository actor=%s name=%r local_path=%s",
+        _actor_log(payload.actor),
+        payload.name,
+        payload.local_path,
+    )
+    try:
+        return await collab_svc.collaboration_service.create_git_repository(
+            scope="global",
+            workspace_id=None,
+            payload=payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/git-repositories",
+    response_model=list[GitRepository],
+    summary="List globally registered Git repositories",
+)
+async def list_global_git_repositories() -> list[GitRepository]:
+    logger.debug("HTTP list_global_git_repositories")
+    try:
+        return await collab_svc.collaboration_service.list_git_repositories(scope="global")
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/assets/publish-from-git",
+    response_model=WorkspaceAssetVersion,
+    summary="Publish a global immutable asset version from a registered Git repository",
+)
+async def publish_global_asset_from_git(
+    request: Request,
+    payload: PublishAssetFromGitRequest,
+) -> WorkspaceAssetVersion:
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    logger.debug(
+        "HTTP publish_global_asset_from_git actor=%s repository_id=%s logical_name=%r path=%s",
+        _actor_log(payload.actor),
+        payload.repository_id,
+        payload.logical_name,
+        payload.git_path,
+    )
+    try:
+        return await collab_svc.collaboration_service.publish_asset_from_git(
+            scope="global",
+            workspace_id=None,
+            payload=payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/assets",
+    response_model=list[WorkspaceAsset],
+    summary="List published assets with optional workspace scoping",
+)
+async def list_assets(
+    workspace_id: UUID | None = Query(default=None),
+    scope: str | None = Query(default=None),
+) -> list[WorkspaceAsset]:
+    logger.debug("HTTP list_assets workspace_id=%s scope=%s", workspace_id, scope)
+    try:
+        return await collab_svc.collaboration_service.list_workspace_assets(
+            scope=scope,
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/assets/{asset_id}/versions",
+    response_model=list[WorkspaceAssetVersion],
+    summary="List immutable versions for a published asset",
+)
+async def list_asset_versions(asset_id: UUID) -> list[WorkspaceAssetVersion]:
+    logger.debug("HTTP list_asset_versions asset_id=%s", asset_id)
+    try:
+        return await collab_svc.collaboration_service.list_workspace_asset_versions(asset_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/assets/{asset_id}/links",
+    response_model=AssetLink,
+    summary="Link an asset version to an agent, tool, workspace, or workspace tool",
+)
+async def link_asset_version(
+    request: Request,
+    asset_id: UUID,
+    payload: LinkAssetRequest,
+) -> AssetLink:
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    logger.debug(
+        "HTTP link_asset_version asset_id=%s target_type=%s target_id=%s purpose=%s actor=%s",
+        asset_id,
+        payload.target_type,
+        payload.target_id,
+        payload.purpose,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.link_asset_version(asset_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/assets/{asset_id}/activate",
+    response_model=AssetLink,
+    summary="Activate an asset version for a target and purpose",
+)
+async def activate_asset_version(
+    request: Request,
+    asset_id: UUID,
+    payload: ActivateAssetVersionRequest,
+) -> AssetLink:
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    logger.debug(
+        "HTTP activate_asset_version asset_id=%s target_type=%s target_id=%s purpose=%s actor=%s",
+        asset_id,
+        payload.target_type,
+        payload.target_id,
+        payload.purpose,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.activate_asset_version(asset_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/assets/{asset_id}/download",
+    response_model=str,
+    summary="Generate a presigned download URL for a published asset version",
+)
+async def get_asset_download_url(
+    asset_id: UUID,
+    asset_version_id: UUID | None = Query(default=None),
+) -> str:
+    logger.debug("HTTP get_asset_download_url asset_id=%s asset_version_id=%s", asset_id, asset_version_id)
+    try:
+        return await collab_svc.collaboration_service.get_asset_download_url(
+            asset_id,
+            asset_version_id=asset_version_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/agents/{agent_id}/assets",
+    response_model=list[ResolvedAssetBinding],
+    summary="Resolve active global and workspace asset bindings for a system agent",
+)
+async def list_resolved_agent_assets(
+    agent_id: UUID,
+    workspace_id: UUID | None = Query(default=None),
+) -> list[ResolvedAssetBinding]:
+    logger.debug("HTTP list_resolved_agent_assets agent_id=%s workspace_id=%s", agent_id, workspace_id)
+    try:
+        return await collab_svc.collaboration_service.list_resolved_agent_assets(
+            agent_id=agent_id,
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/tools/{tool_id}/assets",
+    response_model=list[ResolvedAssetBinding],
+    summary="Resolve active global and workspace asset bindings for a system tool",
+)
+async def list_resolved_tool_assets(
+    tool_id: UUID,
+    workspace_id: UUID | None = Query(default=None),
+) -> list[ResolvedAssetBinding]:
+    logger.debug("HTTP list_resolved_tool_assets tool_id=%s workspace_id=%s", tool_id, workspace_id)
+    try:
+        return await collab_svc.collaboration_service.list_resolved_tool_assets(
+            tool_id=tool_id,
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
     "/workspaces/{workspace_id}/agents",
     response_model=ParticipantProfile,
     summary="Attach a system-level agent to a workspace",
@@ -761,6 +975,97 @@ async def list_workspace_tools(workspace_id: UUID) -> list[WorkspaceTool]:
     logger.debug("HTTP list_workspace_tools workspace_id=%s", workspace_id)
     try:
         return await collab_svc.collaboration_service.list_workspace_tools(workspace_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/workspaces/{workspace_id}/git-repositories",
+    response_model=GitRepository,
+    summary="Register a workspace-scoped Git repository",
+)
+async def create_workspace_git_repository(
+    request: Request,
+    workspace_id: UUID,
+    payload: CreateGitRepositoryRequest,
+) -> GitRepository:
+    payload = payload.model_copy(
+        update={
+            "actor": await _resolve_workspace_actor(
+                request,
+                payload.actor,
+                workspace_id=workspace_id,
+                auto_create=False,
+            )
+        }
+    )
+    logger.debug(
+        "HTTP create_workspace_git_repository workspace_id=%s actor=%s name=%r local_path=%s",
+        workspace_id,
+        _actor_log(payload.actor),
+        payload.name,
+        payload.local_path,
+    )
+    try:
+        return await collab_svc.collaboration_service.create_git_repository(
+            scope="workspace",
+            workspace_id=workspace_id,
+            payload=payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/workspaces/{workspace_id}/git-repositories",
+    response_model=list[GitRepository],
+    summary="List workspace-scoped Git repositories",
+)
+async def list_workspace_git_repositories(workspace_id: UUID) -> list[GitRepository]:
+    logger.debug("HTTP list_workspace_git_repositories workspace_id=%s", workspace_id)
+    try:
+        return await collab_svc.collaboration_service.list_git_repositories(
+            scope="workspace",
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/workspaces/{workspace_id}/assets/publish-from-git",
+    response_model=WorkspaceAssetVersion,
+    summary="Publish a workspace-scoped immutable asset version from a registered Git repository",
+)
+async def publish_workspace_asset_from_git(
+    request: Request,
+    workspace_id: UUID,
+    payload: PublishAssetFromGitRequest,
+) -> WorkspaceAssetVersion:
+    payload = payload.model_copy(
+        update={
+            "actor": await _resolve_workspace_actor(
+                request,
+                payload.actor,
+                workspace_id=workspace_id,
+                auto_create=False,
+            )
+        }
+    )
+    logger.debug(
+        "HTTP publish_workspace_asset_from_git workspace_id=%s actor=%s repository_id=%s logical_name=%r path=%s",
+        workspace_id,
+        _actor_log(payload.actor),
+        payload.repository_id,
+        payload.logical_name,
+        payload.git_path,
+    )
+    try:
+        return await collab_svc.collaboration_service.publish_asset_from_git(
+            scope="workspace",
+            workspace_id=workspace_id,
+            payload=payload,
+        )
     except Exception as exc:
         raise _http_error(exc) from exc
 

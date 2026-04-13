@@ -19,7 +19,10 @@ from .contracts import (
     AttachWorkspaceToolRequest,
     AssumeParticipantRoleRequest,
     Artifact,
+    AssetLink,
+    ActivateAssetVersionRequest,
     CreateAgentParticipantRequest,
+    CreateGitRepositoryRequest,
     CreateLlmProviderRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
@@ -38,7 +41,9 @@ from .contracts import (
     LlmProviderDefinition,
     ParticipantInput,
     ParticipantProfile,
+    PublishAssetFromGitRequest,
     PresenceState,
+    ResolvedAssetBinding,
     RoleDefinition,
     SystemToolDefinition,
     RunStep,
@@ -55,6 +60,7 @@ from .contracts import (
     ToolCall,
     ToolCallResult,
     UpdateSystemAgentRequest,
+    LinkAssetRequest,
     UpdateLlmProviderRequest,
     UpsertRoleDefinitionRequest,
     UpdateSystemToolRequest,
@@ -64,8 +70,11 @@ from .contracts import (
     UpdateMemoryEntryRequest,
     UpdateWorkspaceToolRequest,
     Workspace,
+    WorkspaceAsset,
+    WorkspaceAssetVersion,
     WorkspaceDetail,
     WorkspaceTool,
+    GitRepository,
 )
 from .repository import CollaborationRepository, UserRecord
 
@@ -127,6 +136,19 @@ class AgentDefinitionCommandResult(CommandResult):
 @dataclass
 class LlmProviderCommandResult(CommandResult):
     provider: LlmProviderDefinition | None = None
+
+
+@dataclass
+class GitRepositoryCommandResult(CommandResult):
+    repository: GitRepository | None = None
+
+
+@dataclass
+class WorkspaceAssetCommandResult(CommandResult):
+    asset: WorkspaceAsset | None = None
+    version: WorkspaceAssetVersion | None = None
+    link: AssetLink | None = None
+    bindings: list[ResolvedAssetBinding] = field(default_factory=list)
 
 
 @dataclass
@@ -380,6 +402,7 @@ class CollaborationKernel:
         execution = payload.execution.model_copy(
             update={"handler_ref": payload.execution.handler_ref or payload.name}
         )
+        self._validate_tool_execution_binding(execution)
         tool = SystemToolDefinition(
             tool_id=uuid4(),
             name=payload.name,
@@ -476,6 +499,7 @@ class CollaborationKernel:
                 ),
             }
         )
+        self._validate_tool_execution_binding(updated.execution)
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 await self._repository.upsert_system_tool(conn, updated)
@@ -578,6 +602,273 @@ class CollaborationKernel:
             async with conn.transaction():
                 await self._repository.upsert_system_agent(conn, updated)
         return AgentDefinitionCommandResult(agent=updated)
+
+    async def create_git_repository(
+        self,
+        *,
+        scope: str,
+        workspace_id: UUID | None,
+        payload: CreateGitRepositoryRequest,
+    ) -> GitRepositoryCommandResult:
+        self._validate_asset_scope(scope=scope, workspace_id=workspace_id)
+        if workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+        now = self._now()
+        repository = GitRepository(
+            repo_id=uuid4(),
+            workspace_id=workspace_id,
+            scope=scope,
+            name=payload.name,
+            forgejo_url=payload.forgejo_url,
+            clone_url=payload.clone_url,
+            local_path=payload.local_path,
+            default_branch=payload.default_branch,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_git_repository(conn, repository)
+        return GitRepositoryCommandResult(repository=repository)
+
+    async def list_git_repositories(
+        self,
+        *,
+        scope: str,
+        workspace_id: UUID | None = None,
+    ) -> list[GitRepository]:
+        self._validate_asset_scope(scope=scope, workspace_id=workspace_id)
+        if workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+        return await self._repository.list_git_repositories(scope=scope, workspace_id=workspace_id)
+
+    async def get_git_repository(self, repo_id: UUID) -> GitRepository | None:
+        return await self._repository.fetch_git_repository(repo_id)
+
+    async def publish_asset_from_git(
+        self,
+        *,
+        scope: str,
+        workspace_id: UUID | None,
+        payload: PublishAssetFromGitRequest,
+        storage_backend: str,
+        bucket: str,
+        object_key: str,
+        size_bytes: int,
+        sha256: str,
+        content_type: str | None,
+    ) -> WorkspaceAssetCommandResult:
+        self._validate_asset_scope(scope=scope, workspace_id=workspace_id)
+        if workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+        repository = await self._repository.fetch_git_repository(payload.repository_id)
+        if repository is None:
+            raise KeyError(f"Git repository {payload.repository_id} not found")
+        if repository.scope != scope:
+            raise ValueError(
+                f"Repository {repository.repo_id} scope {repository.scope!r} does not match asset scope {scope!r}"
+            )
+        if repository.workspace_id != workspace_id:
+            raise ValueError(
+                f"Repository {repository.repo_id} workspace binding does not match asset workspace scope"
+            )
+        now = self._now()
+        asset = await self._repository.fetch_workspace_asset_by_logical_name(
+            scope=scope,
+            workspace_id=workspace_id,
+            logical_name=payload.logical_name,
+        )
+        if asset is None:
+            asset = WorkspaceAsset(
+                asset_id=uuid4(),
+                workspace_id=workspace_id,
+                scope=scope,
+                asset_type=payload.asset_type,
+                logical_name=payload.logical_name,
+                logical_path=payload.logical_path,
+                title=payload.title,
+                description=payload.description,
+                created_by=payload.actor.participant_id,
+                created_at=now,
+                updated_at=now,
+                metadata=payload.metadata,
+            )
+        else:
+            asset = asset.model_copy(
+                update={
+                    "asset_type": payload.asset_type,
+                    "logical_path": payload.logical_path,
+                    "title": payload.title,
+                    "description": payload.description,
+                    "updated_at": now,
+                    "metadata": {**asset.metadata, **payload.metadata},
+                }
+            )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_workspace_asset(conn, asset)
+                version_number = await self._repository.next_workspace_asset_version(
+                    conn,
+                    asset_id=asset.asset_id,
+                )
+                version = WorkspaceAssetVersion(
+                    asset_version_id=uuid4(),
+                    asset_id=asset.asset_id,
+                    version=version_number,
+                    source_kind="git_publish",
+                    git_repository_id=repository.repo_id,
+                    git_revision=payload.revision,
+                    git_path=payload.git_path,
+                    storage_backend=storage_backend,
+                    bucket=bucket,
+                    object_key=object_key,
+                    content_type=content_type,
+                    size_bytes=size_bytes,
+                    sha256=sha256,
+                    created_by=payload.actor.participant_id,
+                    created_at=now,
+                    metadata={
+                        **payload.metadata,
+                        "repository_name": repository.name,
+                    },
+                )
+                await self._repository.upsert_workspace_asset_version(conn, version)
+        return WorkspaceAssetCommandResult(asset=asset, version=version)
+
+    async def list_workspace_assets(
+        self,
+        *,
+        scope: str | None = None,
+        workspace_id: UUID | None = None,
+    ) -> list[WorkspaceAsset]:
+        if scope is not None:
+            self._validate_asset_scope(scope=scope, workspace_id=workspace_id)
+        if workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+        return await self._repository.list_workspace_assets(scope=scope, workspace_id=workspace_id)
+
+    async def list_workspace_asset_versions(
+        self,
+        asset_id: UUID,
+    ) -> list[WorkspaceAssetVersion]:
+        asset = await self._repository.fetch_workspace_asset(asset_id)
+        if asset is None:
+            raise KeyError(f"Workspace asset {asset_id} not found")
+        return await self._repository.list_workspace_asset_versions(asset_id)
+
+    async def get_workspace_asset(self, asset_id: UUID) -> WorkspaceAsset | None:
+        return await self._repository.fetch_workspace_asset(asset_id)
+
+    async def get_workspace_asset_version(
+        self,
+        asset_version_id: UUID,
+    ) -> WorkspaceAssetVersion | None:
+        return await self._repository.fetch_workspace_asset_version(asset_version_id)
+
+    async def activate_asset_version(
+        self,
+        asset_id: UUID,
+        payload: ActivateAssetVersionRequest,
+    ) -> WorkspaceAssetCommandResult:
+        asset = await self._repository.fetch_workspace_asset(asset_id)
+        if asset is None:
+            raise KeyError(f"Workspace asset {asset_id} not found")
+        version = await self._repository.fetch_workspace_asset_version(payload.asset_version_id)
+        if version is None or version.asset_id != asset_id:
+            raise KeyError(
+                f"Asset version {payload.asset_version_id} does not belong to asset {asset_id}"
+            )
+        await self._validate_asset_link_target(
+            target_type=payload.target_type,
+            target_id=payload.target_id,
+            workspace_id=payload.workspace_id,
+        )
+        if payload.workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(payload.workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {payload.workspace_id} not found")
+        now = self._now()
+        link = AssetLink(
+            link_id=uuid4(),
+            asset_id=asset_id,
+            asset_version_id=payload.asset_version_id,
+            workspace_id=payload.workspace_id,
+            target_type=payload.target_type,
+            target_id=payload.target_id,
+            purpose=payload.purpose,
+            active=True,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.deactivate_asset_links(
+                    conn,
+                    workspace_id=payload.workspace_id,
+                    target_type=payload.target_type,
+                    target_id=payload.target_id,
+                    purpose=payload.purpose,
+                )
+                await self._repository.upsert_asset_link(conn, link)
+        return WorkspaceAssetCommandResult(asset=asset, version=version, link=link)
+
+    async def link_asset_version(
+        self,
+        asset_id: UUID,
+        payload: LinkAssetRequest,
+    ) -> WorkspaceAssetCommandResult:
+        activation = ActivateAssetVersionRequest.model_validate(payload.model_dump(mode="json"))
+        return await self.activate_asset_version(asset_id, activation)
+
+    async def list_resolved_agent_assets(
+        self,
+        *,
+        agent_id: UUID,
+        workspace_id: UUID | None = None,
+    ) -> list[ResolvedAssetBinding]:
+        agent = await self._repository.fetch_system_agent(agent_id)
+        if agent is None:
+            raise KeyError(f"System agent {agent_id} not found")
+        if workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+        return await self._repository.list_asset_links_for_target(
+            target_type="system_agent",
+            target_id=agent_id,
+            workspace_id=workspace_id,
+        )
+
+    async def list_resolved_tool_assets(
+        self,
+        *,
+        tool_id: UUID,
+        workspace_id: UUID | None = None,
+    ) -> list[ResolvedAssetBinding]:
+        tool = await self._repository.fetch_system_tool(tool_id)
+        if tool is None:
+            raise KeyError(f"System tool {tool_id} not found")
+        if workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+        return await self._repository.list_asset_links_for_target(
+            target_type="system_tool",
+            target_id=tool_id,
+            workspace_id=workspace_id,
+        )
 
     async def delete_llm_provider(
         self, provider_id: UUID, payload: DeleteLlmProviderRequest
@@ -2769,6 +3060,10 @@ class CollaborationKernel:
         workspace_id: UUID,
     ) -> ExecutionSpec:
         profile = dict(tool.execution.execution_profile)
+        if profile.get("workspace_access", "read_only") == "read_write" and tool.execution.trust_level != "trusted":
+            raise ValueError(
+                f"Tool {tool.name!r} requests read_write workspace access but is not marked trusted"
+            )
         return ExecutionSpec(
             invocation_id=uuid4(),
             handler_ref=tool.execution.handler_ref or tool.name,
@@ -2996,6 +3291,48 @@ class CollaborationKernel:
         if isinstance(raw, list):
             return [RoleDefinition.model_validate(item) for item in raw]
         return []
+
+    @staticmethod
+    def _validate_asset_scope(*, scope: str, workspace_id: UUID | None) -> None:
+        if scope not in {"global", "workspace"}:
+            raise ValueError(f"Unsupported asset scope {scope!r}")
+        if scope == "global" and workspace_id is not None:
+            raise ValueError("Global scope resources cannot include a workspace_id")
+        if scope == "workspace" and workspace_id is None:
+            raise ValueError("Workspace scope resources require a workspace_id")
+
+    @staticmethod
+    def _validate_tool_execution_binding(execution) -> None:
+        workspace_access = execution.execution_profile.get("workspace_access", "read_only")
+        if workspace_access == "read_write" and execution.trust_level != "trusted":
+            raise ValueError("read_write workspace access requires trust_level='trusted'")
+
+    async def _validate_asset_link_target(
+        self,
+        *,
+        target_type: str,
+        target_id: UUID,
+        workspace_id: UUID | None,
+    ) -> None:
+        if target_type == "system_agent":
+            if await self._repository.fetch_system_agent(target_id) is None:
+                raise KeyError(f"System agent {target_id} not found")
+            return
+        if target_type == "system_tool":
+            if await self._repository.fetch_system_tool(target_id) is None:
+                raise KeyError(f"System tool {target_id} not found")
+            return
+        if target_type == "workspace":
+            if await self._repository.fetch_workspace(target_id) is None:
+                raise KeyError(f"Workspace {target_id} not found")
+            return
+        if target_type == "workspace_tool":
+            if workspace_id is None:
+                raise ValueError("workspace_tool asset links require a workspace_id override scope")
+            if await self._repository.fetch_workspace_tool(workspace_id, target_id) is None:
+                raise KeyError(f"Workspace tool {target_id} not found in workspace {workspace_id}")
+            return
+        raise ValueError(f"Unsupported asset link target type {target_type!r}")
 
     @staticmethod
     def _advertised_agent_capabilities(

@@ -100,6 +100,129 @@ async def test_list_llm_engines_returns_registered_engines(client, actor_payload
     assert engines["openai-responses"]["metadata"]["secret_config"]["openbao"]["path"] == "open-talon/llm/openai"
 
 
+async def test_git_repositories_and_asset_publish_flow_support_global_agent_bindings(client, actor_payload):
+    create_agent = await client.post(
+        "/v1/agents",
+        json={
+            "actor": actor_payload,
+            "display_name": "Admin Agent",
+            "description": "Coordinates subsidiary agents.",
+            "role": "system admin",
+            "capabilities": ["coding", "orchestration"],
+            "endpoint": {"kind": "remote", "model": "gpt-5.4"},
+            "system_prompt": "Manage agents and their published definitions safely.",
+        },
+    )
+    assert create_agent.status_code == 200
+    agent_id = create_agent.json()["agent_id"]
+
+    create_repo = await client.post(
+        "/v1/git-repositories",
+        json={
+            "actor": actor_payload,
+            "name": "agent-definitions",
+            "local_path": "/tmp/agent-definitions",
+            "forgejo_url": "http://localhost:3001/open-talon/agent-definitions",
+            "clone_url": "ssh://git@localhost:2222/open-talon/agent-definitions.git",
+        },
+    )
+    assert create_repo.status_code == 200
+    repository_id = create_repo.json()["repo_id"]
+
+    publish = await client.post(
+        "/v1/assets/publish-from-git",
+        json={
+            "actor": actor_payload,
+            "repository_id": repository_id,
+            "asset_type": "agent_instruction",
+            "logical_name": "admin-agent-md",
+            "title": "Admin Agent Instructions",
+            "git_path": "agents/admin/AGENT.md",
+            "revision": "HEAD",
+            "content_type": "text/markdown",
+        },
+    )
+    assert publish.status_code == 200
+    version = publish.json()
+
+    assets = await client.get("/v1/assets")
+    assert assets.status_code == 200
+    asset = next(item for item in assets.json() if item["logical_name"] == "admin-agent-md")
+
+    activate = await client.post(
+        f"/v1/assets/{asset['asset_id']}/activate",
+        json={
+            "actor": actor_payload,
+            "asset_version_id": version["asset_version_id"],
+            "target_type": "system_agent",
+            "target_id": agent_id,
+            "purpose": "agent_md",
+        },
+    )
+    assert activate.status_code == 200
+
+    resolved = await client.get(f"/v1/agents/{agent_id}/assets")
+    assert resolved.status_code == 200
+    assert resolved.json()[0]["purpose"] == "agent_md"
+    assert resolved.json()[0]["version"]["asset_version_id"] == version["asset_version_id"]
+
+
+async def test_workspace_git_repository_publish_and_versions_are_listed(client, actor_payload):
+    workspace = await client.post(
+        "/v1/workspaces",
+        json={"name": "Workspace Assets", "actor": actor_payload},
+    )
+    assert workspace.status_code == 200
+    workspace_id = workspace.json()["workspace"]["workspace_id"]
+
+    repo = await client.post(
+        f"/v1/workspaces/{workspace_id}/git-repositories",
+        json={
+            "actor": actor_payload,
+            "name": "workspace-playbooks",
+            "local_path": "/tmp/workspace-playbooks",
+            "forgejo_url": "http://localhost:3001/workspace/playbooks",
+        },
+    )
+    assert repo.status_code == 200
+    repository_id = repo.json()["repo_id"]
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/assets/publish-from-git",
+        json={
+            "actor": actor_payload,
+            "repository_id": repository_id,
+            "asset_type": "agent_instruction",
+            "logical_name": "workspace-agent-md",
+            "title": "Workspace Agent Instructions",
+            "git_path": "agents/research/AGENT.md",
+        },
+    )
+    assert first.status_code == 200
+
+    second = await client.post(
+        f"/v1/workspaces/{workspace_id}/assets/publish-from-git",
+        json={
+            "actor": actor_payload,
+            "repository_id": repository_id,
+            "asset_type": "agent_instruction",
+            "logical_name": "workspace-agent-md",
+            "title": "Workspace Agent Instructions",
+            "git_path": "agents/research/AGENT.md",
+            "revision": "HEAD~1",
+        },
+    )
+    assert second.status_code == 200
+
+    assets = await client.get(f"/v1/assets?workspace_id={workspace_id}")
+    assert assets.status_code == 200
+    asset = next(item for item in assets.json() if item["logical_name"] == "workspace-agent-md")
+
+    versions = await client.get(f"/v1/assets/{asset['asset_id']}/versions")
+    assert versions.status_code == 200
+    assert [item["version"] for item in versions.json()] == [1, 2]
+
+
 async def test_llm_providers_can_be_created_listed_updated_and_deleted(client, actor_payload):
     create_resp = await client.post(
         "/v1/llm-providers",

@@ -134,7 +134,8 @@ Local services:
 - `langfuse-web`: Langfuse UI and API surface
 - `langfuse-worker`: Langfuse background processing
 - `clickhouse`: Langfuse analytics/event store
-- `minio`: Langfuse object storage for uploads and media
+- `minio`: object storage for Langfuse and Open Talon published assets
+- `forgejo`: local Git forge for live repo workflows and authored agent/tool definitions
 - `ollama`: local model serving endpoint
 
 ## Endpoints
@@ -155,6 +156,7 @@ Common local endpoints:
 - `clickhouse HTTP`: [http://localhost:8123](http://localhost:8123)
 - `minio API`: [http://localhost:9090](http://localhost:9090)
 - `minio console`: [http://localhost:9091](http://localhost:9091)
+- `forgejo`: [http://localhost:3001](http://localhost:3001)
 
 Ports and protocols:
 
@@ -163,6 +165,7 @@ Ports and protocols:
 - `valkey`: `localhost:6379`
 - `clickhouse native`: `localhost:9000`
 - `langfuse-worker`: `localhost:3030`
+- `forgejo ssh`: `localhost:2222`
 
 ## Credentials
 
@@ -199,6 +202,10 @@ Default local development credentials:
   console: [http://localhost:9091](http://localhost:9091)
   username: `minio`
   password: `miniosecret`
+- `Forgejo`
+  URL: [http://localhost:3001](http://localhost:3001)
+  admin username: `forgejo`
+  admin password: `forgejo123`
 - `ClickHouse`
   username: `langfuse`
   password: `langfuse`
@@ -217,7 +224,7 @@ That means:
 
 - `./open-talon stop` and `docker compose down` stop containers without wiping local data
 - `docker compose down -v` only removes Docker-managed volumes; it does not remove these bind-mounted directories
-- OpenBao secrets, Postgres state, Ollama model data, and other local payloads survive normal restarts until you remove the matching `infrastructure/data/...` directory yourself
+- OpenBao secrets, Postgres state, Forgejo repositories, Ollama model data, and other local payloads survive normal restarts until you remove the matching `infrastructure/data/...` directory yourself
 
 > **Note**: Do not commit `infrastructure/data/`. It contains local databases, secret storage, model artifacts, and other large runtime data already excluded by `.gitignore`.
 
@@ -460,14 +467,15 @@ The local compose stack now includes a self-hosted Langfuse deployment:
 - `langfuse-worker` on port `3030`
 - `clickhouse` on ports `8123` and `9000`
 - `minio` on ports `9090` and `9091`
+- `forgejo` on `http://localhost:3001` with SSH on port `2222`
 
 This setup reuses the repository Postgres server and Valkey container, but Langfuse now uses its own Postgres database (`LANGFUSE_POSTGRES_DB`) so Prisma migrations do not collide with the application schema. Defaults live in `infrastructure/.env.example`.
 
 Infra defaults are defined in `infrastructure/.env.example`, including:
 
-- core ports for Postgres, Kafka, OpenBao, Valkey, Ollama, and Langfuse
+- core ports for Postgres, Kafka, OpenBao, Valkey, Ollama, Forgejo, and Langfuse
 - Langfuse database name and bootstrap credentials
-- ClickHouse, MinIO, and Valkey credentials used by Langfuse
+- ClickHouse, MinIO, Forgejo, and Valkey credentials used by the local stack
 - the required Ollama model list for local startup
 - worker scaling and lease settings such as `AGENT_STEP_WORKER_CONCURRENCY`, `TOOL_WORKER_CONCURRENCY`, `LEASE_TTL_SECONDS`, and `RECONCILE_INTERVAL_SECONDS`
 

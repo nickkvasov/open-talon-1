@@ -30,6 +30,7 @@ KAFKA_PORT = os.getenv("KAFKA_PORT", "9092")
 
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
 OLLAMA_MODELS = [m.strip() for m in os.getenv("REQUIRED_MODELS", "gemma4:31b,gemma4:e4b").split(',') if m.strip()]
+FORGEJO_HTTP_PORT = os.getenv("FORGEJO_HTTP_PORT", "3001")
 LANGFUSE_PORT = os.getenv("LANGFUSE_PORT", "3000")
 LANGFUSE_CLICKHOUSE_HTTP_PORT = os.getenv("LANGFUSE_CLICKHOUSE_HTTP_PORT", "8123")
 LANGFUSE_MINIO_API_PORT = os.getenv("LANGFUSE_MINIO_API_PORT", "9090")
@@ -85,6 +86,13 @@ def infrastructure():
             return response.status == 200
 
     wait_for_service(check_minio, "MinIO")
+
+    def check_forgejo():
+        req = urllib.request.Request(f"http://localhost:{FORGEJO_HTTP_PORT}/")
+        with urllib.request.urlopen(req) as response:
+            return response.status in {200, 302}
+
+    wait_for_service(check_forgejo, "Forgejo")
 
     def check_langfuse():
         req = urllib.request.Request(f"http://localhost:{LANGFUSE_PORT}")
