@@ -17,7 +17,7 @@ for path in (_CONTRACTS_DIR, _WORKSPACE_MEMORY_DIR):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from open_talon_contracts.models import MemoryProviderDefinition  # noqa: E402
+from open_talon_contracts.models import MemoryEntry, MemoryProviderDefinition  # noqa: E402
 from workspace_memory.providers import Mem0MemoryProvider  # noqa: E402
 
 
@@ -41,9 +41,28 @@ def _provider_definition(*, config: dict | None = None) -> MemoryProviderDefinit
     )
 
 
+def _memory_entry() -> MemoryEntry:
+    now = datetime.now(timezone.utc)
+    actor_id = uuid4()
+    return MemoryEntry(
+        memory_entry_id=uuid4(),
+        scope="thread",
+        state="confirmed",
+        workspace_id=uuid4(),
+        thread_id=uuid4(),
+        entry_type="decision",
+        content="Core-collab remains canonical.",
+        summary="Canonical ownership",
+        created_by=actor_id,
+        updated_by=actor_id,
+        visibility="workspace",
+        created_at=now,
+        updated_at=now,
+    )
+
+
 @pytest.mark.asyncio
 async def test_mem0_provider_defaults_to_pgvector_without_graph(monkeypatch):
-    monkeypatch.delenv("OPEN_TALON_MEM0_ENABLE_GRAPH", raising=False)
     monkeypatch.setenv("POSTGRES_HOST", "db.local")
     monkeypatch.setenv("POSTGRES_PORT", "5544")
     monkeypatch.setenv("POSTGRES_USER", "vector_user")
@@ -68,15 +87,14 @@ async def test_mem0_provider_defaults_to_pgvector_without_graph(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_mem0_provider_can_enable_graph_from_env(monkeypatch):
-    monkeypatch.setenv("OPEN_TALON_MEM0_ENABLE_GRAPH", "true")
+async def test_mem0_provider_can_enable_graph_from_definition_config(monkeypatch):
     monkeypatch.setenv("OPEN_TALON_MEMGRAPH_URL", "bolt://localhost:7688")
     monkeypatch.setenv("OPEN_TALON_MEMGRAPH_USER", "memgraph")
     monkeypatch.setenv("OPEN_TALON_MEMGRAPH_PASSWORD", "topsecret")
 
     provider = Mem0MemoryProvider()
     config = await provider._resolved_config(  # noqa: SLF001
-        _provider_definition(config={"enable_graph": False})
+        _provider_definition(config={"enable_graph": True})
     )
 
     assert config["enable_graph"] is True
@@ -86,3 +104,100 @@ async def test_mem0_provider_can_enable_graph_from_env(monkeypatch):
         "username": "memgraph",
         "password": "topsecret",
     }
+
+
+@pytest.mark.asyncio
+async def test_mem0_provider_ignores_legacy_graph_env_toggle(monkeypatch):
+    monkeypatch.setenv("OPEN_TALON_MEM0_ENABLE_GRAPH", "true")
+    monkeypatch.setenv("OPEN_TALON_MEMGRAPH_URL", "bolt://localhost:7688")
+
+    provider = Mem0MemoryProvider()
+    config = await provider._resolved_config(  # noqa: SLF001
+        _provider_definition(config={"enable_graph": False})
+    )
+
+    assert config.get("enable_graph", False) is False
+    assert "graph_store" not in config
+
+
+@pytest.mark.asyncio
+async def test_mem0_search_omits_relations_when_graph_not_requested(monkeypatch):
+    class FakeClient:
+        async def search(self, **kwargs):
+            _ = kwargs
+            return {
+                "results": [
+                    {
+                        "id": "mem-1",
+                        "score": 0.91,
+                        "metadata": {"memory_entry_id": str(entry.memory_entry_id)},
+                    }
+                ],
+                "relations": [
+                    {"source": "A", "relation": "depends_on", "target": "B"},
+                ],
+            }
+
+    entry = _memory_entry()
+    provider = Mem0MemoryProvider()
+
+    async def fake_client_for_config(config):
+        _ = config
+        return FakeClient()
+
+    monkeypatch.setattr(provider, "_client_for_config", fake_client_for_config)
+    result = await provider.search(
+        _provider_definition(
+            config={
+                "enable_graph": True,
+                "graph_store": {"provider": "memgraph", "config": {}},
+            }
+        ),
+        scope="thread",
+        workspace_id=entry.workspace_id,
+        thread_id=entry.thread_id,
+        run_id=None,
+        query="canonical",
+        limit=5,
+        include_graph=False,
+    )
+
+    assert result.metadata["graph_enabled"] is True
+    assert result.metadata["graph_included"] is False
+    assert result.metadata["graph_store_provider"] == "memgraph"
+    assert len(result.hits) == 1
+    assert result.hits[0].relations == []
+
+
+@pytest.mark.asyncio
+async def test_mem0_health_report_surfaces_memgraph_backend(monkeypatch):
+    class FakeClient:
+        async def search(self, **kwargs):
+            _ = kwargs
+            return {"results": [], "relations": []}
+
+    provider = Mem0MemoryProvider()
+
+    async def fake_client_for_config(config):
+        _ = config
+        return FakeClient()
+
+    monkeypatch.setattr(provider, "_client_for_config", fake_client_for_config)
+    report = await provider.health_check(
+        _provider_definition(
+            config={
+                "enable_graph": True,
+                "vector_store": {"provider": "pgvector", "config": {}},
+                "graph_store": {"provider": "memgraph", "config": {}},
+            }
+        )
+    )
+
+    assert report.status == "healthy"
+    assert report.metadata["graph_enabled"] is True
+    assert report.metadata["vector_store_provider"] == "pgvector"
+    assert report.metadata["graph_store_provider"] == "memgraph"
+    checks = {check.name: check for check in report.checks}
+    assert checks["vector_store"].status == "ok"
+    assert checks["graph_store"].status == "ok"
+    assert "memgraph" in checks["graph_store"].detail.lower()

@@ -97,6 +97,134 @@ Common tool endpoints:
 - `PATCH /v1/workspaces/{workspace_id}/tools/{tool_id}`: update workspace attachment state
 - `DELETE /v1/workspaces/{workspace_id}/tools/{tool_id}`: detach a tool from a workspace
 
+## Layered Memory
+
+Open Talon now uses a layered memory model with a single canonical store and optional derived providers.
+
+Memory layers:
+
+- `run` memory: per-run scratch memory written during agent execution
+- `thread` memory: shared collaboration memory for all users and agents participating in a thread
+- `workspace` memory: confirmed cross-thread memory for a workspace
+
+Storage model:
+
+- Postgres `memory_entries` is the source of truth
+- external memory systems are projections, not authoritative stores
+- projection state is tracked in `memory_provider_records`
+
+Default provider shape:
+
+- canonical provider: Postgres
+- semantic provider: Mem0
+- optional graph backend for Mem0: Memgraph
+
+This intentionally means there is physical duplication between canonical rows and derived provider indexes. The duplication is deliberate:
+
+- Postgres owns correctness, visibility, confirmation state, lifecycle, and auditability
+- Mem0 and optional graph backends own semantic or relational retrieval
+
+The provider abstraction lives in [services/workspace-memory/workspace_memory/providers.py](/Users/nikolay.kvasov/Development/open-talon-1/services/workspace-memory/workspace_memory/providers.py). `core-collab` always writes canonical memory first and then syncs enabled providers through the common provider interface.
+
+Common memory endpoints:
+
+- `GET /v1/workspaces/{workspace_id}/memory`
+- `POST /v1/workspaces/{workspace_id}/memory`
+- `POST /v1/workspaces/{workspace_id}/memory/confirm`
+- `GET /v1/threads/{thread_id}/memory`
+- `POST /v1/threads/{thread_id}/memory`
+- `POST /v1/threads/{thread_id}/memory/search`
+- `POST /v1/memory-providers`
+- `POST /v1/memory-providers/validate`
+- `GET /v1/memory-providers`
+- `PATCH /v1/memory-providers/{provider_id}`
+- `DELETE /v1/memory-providers/{provider_id}`
+- `POST /v1/memory-providers/{provider_id}/health-check`
+
+## Extending Memory Providers
+
+Open Talon is abstracted so additional memory providers can be added without changing the memory domain model.
+
+Current built-in providers:
+
+- `PostgresMemoryProvider`
+- `Mem0MemoryProvider`
+
+To add another provider:
+
+1. Implement the `MemoryProvider` protocol in [services/workspace-memory/workspace_memory/providers.py](/Users/nikolay.kvasov/Development/open-talon-1/services/workspace-memory/workspace_memory/providers.py).
+2. Register it in `build_provider_index(...)`.
+3. Add a provider definition through the memory-provider admin API or seed it in a migration.
+4. Reuse the shared secret resolution helpers in [services/workspace-memory/workspace_memory/secrets.py](/Users/nikolay.kvasov/Development/open-talon-1/services/workspace-memory/workspace_memory/secrets.py).
+5. Add route, health, and provider-level tests.
+
+The provider contract is intentionally small:
+
+- `upsert(...)`
+- `delete(...)`
+- `search(...)`
+- `health_check(...)`
+
+### Provider Sketch
+
+Example shape for another provider:
+
+```python
+from workspace_memory.providers import (
+    MemoryProvider,
+    ProviderSearchHit,
+    ProviderSearchResult,
+    ProviderSyncResult,
+)
+
+
+class ExampleMemoryProvider:
+    provider_name = "example"
+
+    async def upsert(self, definition, entry, *, external_id=None):
+        # Persist or update the provider-side representation.
+        return ProviderSyncResult(
+            external_id=external_id or "provider-generated-id",
+            metadata={"provider": self.provider_name},
+        )
+
+    async def delete(self, definition, entry, *, external_id=None):
+        # Remove the provider-side projection.
+        return None
+
+    async def search(
+        self,
+        definition,
+        *,
+        scope,
+        workspace_id,
+        thread_id,
+        run_id,
+        query,
+        limit,
+        include_graph=True,
+        metadata_filters=None,
+    ):
+        return ProviderSearchResult(
+            provider=self.provider_name,
+            hits=[
+                ProviderSearchHit(
+                    memory_entry_id=entry_id,
+                    external_id="provider-hit-id",
+                    score=0.9,
+                    relations=[],
+                    metadata={"scope": scope},
+                )
+            ],
+            metadata={"graph_enabled": False},
+        )
+
+    async def health_check(self, definition):
+        ...
+```
+
+That provider can then be exposed by registering it in `build_provider_index(...)` and persisting a matching `memory_providers.provider` value such as `"example"`.
+
 ## Architecture Stack
 
 - **PostgreSQL**: Deployed via `pgvector/pgvector:pg16` directly supporting native `JSONB` properties alongside algorithmic embeddings operations for Vector Similarity Searching natively in the engine.
@@ -137,6 +265,7 @@ Local services:
 - `minio`: object storage for Langfuse and Open Talon published assets
 - `forgejo`: local Git forge for live repo workflows and authored agent/tool definitions
 - `ollama`: local model serving endpoint
+- `memgraph`: optional local graph backend for Mem0 graph memory when started with `./open-talon start --memgraph`
 
 ## Endpoints
 

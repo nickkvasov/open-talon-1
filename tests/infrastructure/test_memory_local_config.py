@@ -19,8 +19,12 @@ def test_mem0_graph_local_config_uses_optional_memgraph_service():
     assert "- mem0-graph" in compose
     assert '${MEMGRAPH_BOLT_PORT:-7688}:7687' in compose
     assert '${MEMGRAPH_HTTP_PORT:-7444}:7444' in compose
-    assert "OPEN_TALON_MEM0_ENABLE_GRAPH=false" in env_example
     assert "OPEN_TALON_MEMGRAPH_URL=bolt://localhost:7688" in env_example
     assert "OPEN_TALON_MEM0_COLLECTION=open_talon_memories" in env_example
-    assert 'if [[ "${OPEN_TALON_MEM0_ENABLE_GRAPH:-false}" == "true" ]]; then' in launcher
+    assert "Usage:" in launcher
+    assert "./open-talon start [--memgraph]" in launcher
+    assert 'case "$1" in' in launcher
+    assert "--memgraph)" in launcher
+    assert "enable_memgraph=1" in launcher
+    assert "if ((enable_memgraph)); then" in launcher
     assert "services+=(memgraph)" in launcher

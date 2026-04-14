@@ -255,8 +255,10 @@ class Mem0MemoryProvider:
         include_graph: bool = True,
         metadata_filters: dict[str, Any] | None = None,
     ) -> ProviderSearchResult:
-        _ = include_graph
-        client = await self._client_for_definition(definition)
+        config = await self._resolved_config(definition)
+        client = await self._client_for_config(config)
+        graph_enabled = bool(config.get("enable_graph", False))
+        graph_included = bool(include_graph and graph_enabled)
         payload = await client.search(
             query=query,
             user_id=_scope_owner(
@@ -287,14 +289,22 @@ class Mem0MemoryProvider:
                     memory_entry_id=parsed_memory_entry_id,
                     external_id=_result_external_id(item),
                     score=_float_or_none(item.get("score")),
-                    relations=[item for item in relations or [] if isinstance(item, dict)],
+                    relations=(
+                        [item for item in relations or [] if isinstance(item, dict)]
+                        if graph_included
+                        else []
+                    ),
                     metadata=metadata,
                 )
             )
         return ProviderSearchResult(
             provider=self.provider_name,
             hits=hits,
-            metadata={"graph_enabled": bool(definition.config.get("enable_graph", False))},
+            metadata={
+                "graph_enabled": graph_enabled,
+                "graph_included": graph_included,
+                **_backend_metadata(config),
+            },
         )
 
     async def health_check(
@@ -302,8 +312,10 @@ class Mem0MemoryProvider:
         definition: MemoryProviderDefinition,
     ) -> MemoryProviderHealthReport:
         checks: list[MemoryProviderHealthCheck] = []
+        config: dict[str, Any] | None = None
         try:
-            client = await self._client_for_definition(definition)
+            config = await self._resolved_config(definition)
+            backend_metadata = _backend_metadata(config)
             checks.append(
                 MemoryProviderHealthCheck(
                     name="config",
@@ -311,6 +323,42 @@ class Mem0MemoryProvider:
                     detail="Mem0 configuration loaded successfully.",
                 )
             )
+            checks.append(
+                MemoryProviderHealthCheck(
+                    name="vector_store",
+                    status="ok",
+                    detail=(
+                        "Vector store configured as "
+                        f"{backend_metadata['vector_store_provider']}."
+                    ),
+                    metadata={
+                        "provider": backend_metadata["vector_store_provider"],
+                    },
+                )
+            )
+            if backend_metadata["graph_enabled"]:
+                checks.append(
+                    MemoryProviderHealthCheck(
+                        name="graph_store",
+                        status="ok",
+                        detail=(
+                            "Graph memory enabled with backend "
+                            f"{backend_metadata['graph_store_provider']}."
+                        ),
+                        metadata={
+                            "provider": backend_metadata["graph_store_provider"],
+                        },
+                    )
+                )
+            else:
+                checks.append(
+                    MemoryProviderHealthCheck(
+                        name="graph_store",
+                        status="ok",
+                        detail="Graph memory is disabled for this provider.",
+                    )
+                )
+            client = await self._client_for_config(config)
             await client.search(query="health", user_id="open-talon-healthcheck", limit=1)
             checks.append(
                 MemoryProviderHealthCheck(
@@ -347,17 +395,23 @@ class Mem0MemoryProvider:
             provider_key=definition.provider_key,
             status=status,
             checks=checks,
-            metadata={"provider": definition.provider},
+            metadata={
+                "provider": definition.provider,
+                **(_backend_metadata(config) if config is not None else {}),
+            },
         )
 
     async def _client_for_definition(self, definition: MemoryProviderDefinition) -> Any:
+        config = await self._resolved_config(definition)
+        return await self._client_for_config(config)
+
+    async def _client_for_config(self, config: dict[str, Any]) -> Any:
         try:
             from mem0 import AsyncMemory
         except ImportError as exc:  # pragma: no cover - depends on external package
             raise ImportError(
                 "Mem0 support requires the 'mem0ai' package to be installed."
             ) from exc
-        config = await self._resolved_config(definition)
         factory = getattr(AsyncMemory, "from_config", None)
         if callable(factory):
             client = factory(config)
@@ -371,14 +425,6 @@ class Mem0MemoryProvider:
         definition: MemoryProviderDefinition,
     ) -> dict[str, Any]:
         config = dict(definition.config)
-        env_enable_graph = os.getenv("OPEN_TALON_MEM0_ENABLE_GRAPH")
-        if env_enable_graph is not None:
-            config["enable_graph"] = env_enable_graph.strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
         vector_store = dict(config.get("vector_store") or {})
         vector_store.setdefault("provider", "pgvector")
         vector_store_config = dict(vector_store.get("config") or {})
@@ -507,3 +553,14 @@ def _float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _backend_metadata(config: dict[str, Any]) -> dict[str, Any]:
+    vector_store = dict(config.get("vector_store") or {})
+    graph_store = dict(config.get("graph_store") or {})
+    graph_enabled = bool(config.get("enable_graph", False))
+    return {
+        "graph_enabled": graph_enabled,
+        "vector_store_provider": vector_store.get("provider"),
+        "graph_store_provider": graph_store.get("provider") if graph_enabled else None,
+    }

@@ -282,6 +282,306 @@ async def test_llm_providers_can_be_created_listed_updated_and_deleted(client, a
     assert delete_resp.json()["deleted"] is True
 
 
+async def test_memory_providers_can_be_created_listed_updated_and_deleted(client, actor_payload):
+    create_resp = await client.post(
+        "/v1/memory-providers",
+        json={
+            "actor": actor_payload,
+            "provider_key": "mem0-primary",
+            "display_name": "Mem0 Primary",
+            "description": "Graph-aware semantic memory provider.",
+            "provider": "mem0",
+            "enabled": True,
+            "config": {
+                "enable_graph": True,
+                "vector_store": {"provider": "pgvector", "config": {"collection_name": "workspace_memories"}},
+                "graph_store": {"provider": "memgraph", "config": {"url": "bolt://memgraph:7687"}},
+            },
+            "secret_config": {"env": {"name": "OPENAI_API_KEY"}},
+            "metadata": {"tier": "primary"},
+        },
+    )
+
+    assert create_resp.status_code == 200
+    provider_id = create_resp.json()["provider_id"]
+    assert create_resp.json()["config"]["graph_store"]["provider"] == "memgraph"
+
+    list_resp = await client.get("/v1/memory-providers")
+    assert list_resp.status_code == 200
+    assert list_resp.json()[0]["provider_key"] == "mem0-primary"
+
+    update_resp = await client.patch(
+        f"/v1/memory-providers/{provider_id}",
+        json={
+            "actor": actor_payload,
+            "display_name": "Mem0 Primary Updated",
+            "enabled": False,
+            "config": {
+                "enable_graph": False,
+                "vector_store": {"provider": "pgvector", "config": {"collection_name": "workspace_memories_v2"}},
+            },
+        },
+    )
+    assert update_resp.status_code == 200
+    assert update_resp.json()["display_name"] == "Mem0 Primary Updated"
+    assert update_resp.json()["enabled"] is False
+    assert update_resp.json()["config"]["enable_graph"] is False
+
+    delete_resp = await client.request(
+        "DELETE",
+        f"/v1/memory-providers/{provider_id}",
+        json={"actor": actor_payload},
+    )
+    assert delete_resp.status_code == 200
+    assert delete_resp.json()["deleted"] is True
+
+
+async def test_validate_memory_provider_graph_mode_returns_health_without_persisting(
+    client,
+    actor_payload,
+    monkeypatch,
+):
+    async def fake_check(provider):
+        from gateway_edge.models import MemoryProviderHealthCheck, MemoryProviderHealthReport
+
+        assert provider.provider == "mem0"
+        assert provider.config["enable_graph"] is True
+        assert provider.config["graph_store"]["provider"] == "memgraph"
+        return MemoryProviderHealthReport(
+            provider_id=provider.provider_id,
+            provider_key=provider.provider_key,
+            status="healthy",
+            checks=[
+                MemoryProviderHealthCheck(
+                    name="graph_store",
+                    status="ok",
+                    detail="Graph memory enabled with backend memgraph.",
+                    metadata={"provider": "memgraph"},
+                )
+            ],
+            metadata={
+                "provider": provider.provider,
+                "graph_enabled": True,
+                "vector_store_provider": "pgvector",
+                "graph_store_provider": "memgraph",
+            },
+        )
+
+    monkeypatch.setattr("gateway_edge.routers.collaboration.check_memory_provider_health", fake_check)
+
+    validate_resp = await client.post(
+        "/v1/memory-providers/validate",
+        json={
+            "actor": actor_payload,
+            "provider_key": "mem0-graph",
+            "display_name": "Mem0 Graph",
+            "description": "Dry-run graph provider validation.",
+            "provider": "mem0",
+            "enabled": True,
+            "config": {
+                "enable_graph": True,
+                "vector_store": {"provider": "pgvector", "config": {}},
+                "graph_store": {"provider": "memgraph", "config": {"url": "bolt://memgraph:7687"}},
+            },
+        },
+    )
+    list_resp = await client.get("/v1/memory-providers")
+
+    assert validate_resp.status_code == 200
+    body = validate_resp.json()
+    assert body["status"] == "healthy"
+    assert body["metadata"]["graph_enabled"] is True
+    assert body["metadata"]["graph_store_provider"] == "memgraph"
+    assert body["checks"][0]["name"] == "graph_store"
+    assert list_resp.status_code == 200
+    assert list_resp.json() == []
+
+
+async def test_memory_provider_health_check_reports_memgraph_backend(
+    client,
+    actor_payload,
+    monkeypatch,
+):
+    create_resp = await client.post(
+        "/v1/memory-providers",
+        json={
+            "actor": actor_payload,
+            "provider_key": "mem0-graph",
+            "display_name": "Mem0 Graph",
+            "description": "Stored graph-aware memory provider.",
+            "provider": "mem0",
+            "enabled": True,
+            "config": {
+                "enable_graph": True,
+                "vector_store": {"provider": "pgvector", "config": {}},
+                "graph_store": {"provider": "memgraph", "config": {"url": "bolt://memgraph:7687"}},
+            },
+        },
+    )
+    assert create_resp.status_code == 200
+    provider_id = create_resp.json()["provider_id"]
+
+    async def fake_check(provider):
+        from gateway_edge.models import MemoryProviderHealthCheck, MemoryProviderHealthReport
+
+        return MemoryProviderHealthReport(
+            provider_id=provider.provider_id,
+            provider_key=provider.provider_key,
+            status="healthy",
+            checks=[
+                MemoryProviderHealthCheck(
+                    name="vector_store",
+                    status="ok",
+                    detail="Vector store configured as pgvector.",
+                    metadata={"provider": "pgvector"},
+                ),
+                MemoryProviderHealthCheck(
+                    name="graph_store",
+                    status="ok",
+                    detail="Graph memory enabled with backend memgraph.",
+                    metadata={"provider": "memgraph"},
+                ),
+            ],
+            metadata={
+                "provider": provider.provider,
+                "graph_enabled": True,
+                "vector_store_provider": "pgvector",
+                "graph_store_provider": "memgraph",
+            },
+        )
+
+    monkeypatch.setattr("gateway_edge.routers.collaboration.check_memory_provider_health", fake_check)
+
+    health_resp = await client.post(f"/v1/memory-providers/{provider_id}/health-check")
+
+    assert health_resp.status_code == 200
+    body = health_resp.json()
+    assert body["status"] == "healthy"
+    checks = {check["name"]: check for check in body["checks"]}
+    assert checks["vector_store"]["status"] == "ok"
+    assert checks["graph_store"]["status"] == "ok"
+    assert checks["graph_store"]["metadata"]["provider"] == "memgraph"
+    assert body["metadata"]["graph_enabled"] is True
+    assert body["metadata"]["graph_store_provider"] == "memgraph"
+
+
+async def test_memory_provider_management_requires_admin_role_in_oidc_mode(
+    client,
+    actor_payload,
+    monkeypatch,
+):
+    auth_context = _oidc_context(roles=["workspace-user"])
+    monkeypatch.setattr(settings, "auth_mode", "oidc")
+
+    async def _validate(token: str):
+        assert token == "good-token"
+        return auth_context
+
+    async def _sync(context):
+        return context
+
+    monkeypatch.setattr("gateway_edge.auth.middleware.validate_oidc_token", _validate)
+    monkeypatch.setattr("gateway_edge.auth.middleware.sync_oidc_auth_context", _sync)
+
+    create_resp = await client.post(
+        "/v1/memory-providers",
+        headers={"Authorization": "Bearer good-token"},
+        json={
+            "actor": actor_payload,
+            "provider_key": "guarded-mem0",
+            "display_name": "Guarded Mem0",
+            "description": "Should require admin access.",
+            "provider": "mem0",
+            "config": {"enable_graph": False},
+        },
+    )
+    list_resp = await client.get(
+        "/v1/memory-providers",
+        headers={"Authorization": "Bearer good-token"},
+    )
+
+    assert create_resp.status_code == 403
+    assert create_resp.json()["detail"] == "Admin access required"
+    assert list_resp.status_code == 403
+    assert list_resp.json()["detail"] == "Admin access required"
+
+
+async def test_validate_memory_provider_requires_admin_role_in_oidc_mode(
+    client,
+    actor_payload,
+    monkeypatch,
+):
+    auth_context = _oidc_context(roles=["workspace-user"])
+    monkeypatch.setattr(settings, "auth_mode", "oidc")
+
+    async def _validate(token: str):
+        assert token == "good-token"
+        return auth_context
+
+    async def _sync(context):
+        return context
+
+    monkeypatch.setattr("gateway_edge.auth.middleware.validate_oidc_token", _validate)
+    monkeypatch.setattr("gateway_edge.auth.middleware.sync_oidc_auth_context", _sync)
+
+    response = await client.post(
+        "/v1/memory-providers/validate",
+        headers={"Authorization": "Bearer good-token"},
+        json={
+            "actor": actor_payload,
+            "provider_key": "dry-run-mem0",
+            "display_name": "Dry Run Mem0",
+            "description": "Dry-run provider validation.",
+            "provider": "mem0",
+            "config": {"enable_graph": True},
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Admin access required"
+
+
+async def test_memory_provider_health_check_requires_admin_role_in_oidc_mode(
+    client,
+    actor_payload,
+    monkeypatch,
+):
+    create_resp = await client.post(
+        "/v1/memory-providers",
+        json={
+            "actor": actor_payload,
+            "provider_key": "stored-mem0",
+            "display_name": "Stored Mem0",
+            "description": "Stored provider for auth check.",
+            "provider": "mem0",
+            "config": {"enable_graph": False},
+        },
+    )
+    assert create_resp.status_code == 200
+    provider_id = create_resp.json()["provider_id"]
+
+    auth_context = _oidc_context(roles=["workspace-user"])
+    monkeypatch.setattr(settings, "auth_mode", "oidc")
+
+    async def _validate(token: str):
+        assert token == "good-token"
+        return auth_context
+
+    async def _sync(context):
+        return context
+
+    monkeypatch.setattr("gateway_edge.auth.middleware.validate_oidc_token", _validate)
+    monkeypatch.setattr("gateway_edge.auth.middleware.sync_oidc_auth_context", _sync)
+
+    response = await client.post(
+        f"/v1/memory-providers/{provider_id}/health-check",
+        headers={"Authorization": "Bearer good-token"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Admin access required"
+
+
 async def test_llm_provider_management_requires_admin_role_in_oidc_mode(client, actor_payload, monkeypatch):
     auth_context = _oidc_context(roles=["workspace-user"])
     monkeypatch.setattr(settings, "auth_mode", "oidc")

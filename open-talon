@@ -173,6 +173,20 @@ PY
 start_cmd() {
   ensure_python
   load_local_env
+  local enable_memgraph=0
+  while (($# > 0)); do
+    case "$1" in
+      --memgraph)
+        enable_memgraph=1
+        ;;
+      *)
+        echo "Unknown start option: $1" >&2
+        usage
+        exit 1
+        ;;
+    esac
+    shift
+  done
   local pythonpath
   pythonpath="$(repo_pythonpath)"
 
@@ -198,7 +212,7 @@ start_cmd() {
       langfuse-worker
       langfuse-web
     )
-    if [[ "${OPEN_TALON_MEM0_ENABLE_GRAPH:-false}" == "true" ]]; then
+    if ((enable_memgraph)); then
       services+=(memgraph)
     fi
     docker compose up -d "${services[@]}"
@@ -331,7 +345,7 @@ tui2_cmd() {
 usage() {
   cat <<EOF
 Usage:
-  ./open-talon start
+  ./open-talon start [--memgraph]
   ./open-talon stop
   ./open-talon tui [extra tui args]
   ./open-talon tui auth login [auth args]

@@ -48,6 +48,14 @@ This starts:
 
 `openbao-init` is a local-only helper that initializes and unseals OpenBao, enables the `secret/` KV v2 mount, and recreates the stable local `root` token if needed.
 
+If you want Mem0 graph memory locally, start the system with graph mode enabled:
+
+```bash
+./open-talon start --memgraph
+```
+
+That keeps Postgres as the canonical memory store and adds the optional local `memgraph` service for Mem0 graph retrieval. Graph retrieval itself is still controlled by the persisted memory-provider definition, not by the launcher flag.
+
 ## 3. Check The Main Endpoints
 
 - Gateway: [http://127.0.0.1:8000](http://127.0.0.1:8000)
@@ -57,6 +65,7 @@ This starts:
 - OpenID config: [http://127.0.0.1:8081/realms/open-talon/.well-known/openid-configuration](http://127.0.0.1:8081/realms/open-talon/.well-known/openid-configuration)
 - Langfuse: [http://localhost:3000](http://localhost:3000)
 - pgAdmin: [http://localhost:5050](http://localhost:5050)
+- Memgraph bolt: `localhost:7688` when started with `./open-talon start --memgraph`
 
 ## 4. Default Local Credentials
 
@@ -75,6 +84,13 @@ This starts:
 All local defaults come from [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example).
 
 OpenBao local data is persistent. Secrets survive `./open-talon stop` and `docker compose down` until you remove `infrastructure/data/openbao`.
+
+Relevant layered-memory defaults from [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example):
+
+- `OPEN_TALON_MEM0_COLLECTION=open_talon_memories`
+- `OPEN_TALON_MEMGRAPH_URL=bolt://localhost:7688`
+- `OPEN_TALON_MEMGRAPH_USER=memgraph`
+- `OPEN_TALON_MEMGRAPH_PASSWORD=memgraph`
 
 ## 5. Keycloak Local Auth Model
 
@@ -239,7 +255,48 @@ If you changed schema, auth, routing, or participant identity behavior, run:
 pytest -q
 ```
 
-## 9. Seeded OpenAI Agent Smoke Test
+## 9. Layered Memory Quick Notes
+
+Open Talon uses layered memory with three scopes:
+
+- `run`: scratch memory for a single agent run
+- `thread`: shared memory for thread participants
+- `workspace`: confirmed memory promoted from thread-level work
+
+Canonical memory always lives in Postgres. Mem0 and optional Memgraph are derived retrieval layers.
+
+Useful memory-provider endpoints:
+
+```bash
+curl http://127.0.0.1:8000/v1/memory-providers
+curl -X POST http://127.0.0.1:8000/v1/memory-providers/validate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "actor": {
+      "participant_id": "00000000-0000-0000-0000-000000000001",
+      "participant_type": "user",
+      "display_name": "admin"
+    },
+    "provider_key": "mem0-graph",
+    "display_name": "Mem0 Graph",
+    "description": "Local graph-enabled memory provider",
+    "provider": "mem0",
+    "enabled": true,
+    "config": {
+      "enable_graph": true,
+      "vector_store": {"provider": "pgvector", "config": {}},
+      "graph_store": {"provider": "memgraph", "config": {"url": "bolt://memgraph:7687"}}
+    }
+  }'
+```
+
+If you run Docker Compose directly instead of `./open-talon start`, enable the optional graph service with:
+
+```bash
+docker compose -f infrastructure/docker-compose.yaml --profile mem0-graph up -d
+```
+
+## 10. Seeded OpenAI Agent Smoke Test
 
 The local migrations seed:
 

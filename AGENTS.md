@@ -42,7 +42,9 @@ Primary local flow:
 - Keep execution-side workspace materialization separate from collaboration `Workspace` models. Use `ExecutionWorkspaceRef` for executor payloads.
 - Authenticated human identity should be derived in `gateway-edge` from OIDC auth context, not trusted from client-provided actor fields.
 - LLM providers are persistent records in `llm_providers`; do not reintroduce env-defined engine registries.
+- Memory providers are persistent records in `memory_providers`; do not hardcode provider definitions in application logic after bootstrapping.
 - Local OpenBao now uses persistent file storage under `infrastructure/data/openbao`; do not assume `docker compose down` clears local secrets.
+- Postgres is the canonical memory store. Mem0 and optional graph backends such as Memgraph are derived retrieval projections, not the source of truth.
 
 ## Database Rules
 
@@ -76,6 +78,9 @@ source .venv/bin/activate
   - base URL: `http://127.0.0.1:8200`
   - root token: `root`
   - persistent data dir: `infrastructure/data/openbao`
+- Optional local Memgraph for Mem0 graph mode:
+  - bolt URL: `bolt://127.0.0.1:7688`
+  - start it locally with `./open-talon start --memgraph`
 - Local infrastructure defaults are documented in `infrastructure/.env.example`.
 
 ## Testing Expectations
@@ -98,6 +103,14 @@ If a change touches schema, repository, participant hydration, routing, or migra
 - run relevant `gateway-edge` tests
 - run full `pytest -q` when feasible
 
+If a change touches layered memory, memory providers, Mem0, or graph-memory support:
+
+- inspect `services/workspace-memory`, `services/core-collab`, `services/gateway-edge`, and `packages/contracts` together
+- verify canonical persistence and provider projection both still make sense
+- run relevant `tests/workspace-memory`
+- run relevant memory route tests in `tests/gateway-edge`
+- keep `infrastructure/.env.example`, `infrastructure/docker-compose.yaml`, and `open-talon` aligned if graph mode behavior changes
+
 If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 
 - run relevant `gateway-edge` auth tests
@@ -116,6 +129,8 @@ If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 - When cleaning legacy columns or data, update both code and migration flow together.
 - When changing worker behavior, cover both durable state transitions and emitted Kafka/thread events in tests.
 - When changing provider or secret behavior, keep `gateway-edge`, `core-collab`, `agent-runtime`, and docs aligned on persistent provider definitions and OpenBao-backed secret resolution.
+- When adding a new memory provider, implement the shared `MemoryProvider` protocol in `services/workspace-memory/workspace_memory/providers.py` and register it in `build_provider_index(...)` instead of bypassing the abstraction.
+- When working on memory search behavior, preserve the rule that graph relations are additive context only and not the canonical memory store.
 
 ## TUI Rules
 
@@ -138,10 +153,11 @@ If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 3. If schema changes are involved, add a new file in `db/migrations`.
 4. If auth or identity behavior changes, inspect `services/gateway-edge`, `services/core-collab`, `packages/contracts`, and TUI flows together.
 5. If execution behavior changes, inspect `services/agent-runtime`, `services/core-collab`, and gateway event fanout together.
-6. If LLM provider or secret behavior changes, inspect `llm_providers` migrations, gateway provider routes, runtime secret resolution, and local OpenBao wiring together.
-7. Update code to match the migrated schema.
-8. Run targeted tests.
-9. Run broader tests if the change affects shared contracts or persistence.
+6. If memory behavior changes, inspect `db/migrations`, `services/workspace-memory`, `services/core-collab`, `services/gateway-edge`, and memory-related contracts together.
+7. If LLM provider or secret behavior changes, inspect `llm_providers` migrations, gateway provider routes, runtime secret resolution, and local OpenBao wiring together.
+8. Update code to match the migrated schema.
+9. Run targeted tests.
+10. Run broader tests if the change affects shared contracts or persistence.
 
 ## Key Files
 
@@ -154,7 +170,10 @@ If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 - `services/agent-runtime/agent_runtime/agent_task_worker.py`
 - `services/agent-runtime/agent_runtime/secrets.py`
 - `services/agent-runtime/agent_runtime/execution/`
+- `services/workspace-memory/workspace_memory/providers.py`
+- `services/workspace-memory/workspace_memory/secrets.py`
 - `services/gateway-edge/gateway_edge/services/collaboration.py`
+- `services/gateway-edge/gateway_edge/services/memory_provider_health.py`
 - `services/gateway-edge/gateway_edge/services/llm_provider_health.py`
 - `services/gateway-edge/gateway_edge/auth/`
 - `services/gateway-edge/gateway_edge/services/events.py`
