@@ -170,17 +170,21 @@ class CollaborationRepository:
     ) -> None:
         await conn.execute(
             """
-            INSERT INTO workspaces (workspace_id, name, description, created_at, updated_at, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO workspaces (
+                workspace_id, name, description, owner_user_id, created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (workspace_id) DO UPDATE
                 SET name = EXCLUDED.name,
                     description = EXCLUDED.description,
+                    owner_user_id = EXCLUDED.owner_user_id,
                     updated_at = EXCLUDED.updated_at,
                     metadata = EXCLUDED.metadata
             """,
             workspace.workspace_id,
             workspace.name,
             workspace.description,
+            workspace.owner_user_id,
             workspace.created_at,
             workspace.updated_at,
             self._json_dumps(workspace.metadata),
@@ -1180,7 +1184,7 @@ class CollaborationRepository:
     async def fetch_workspace(self, workspace_id: UUID) -> Workspace | None:
         row = await self._pool.fetchrow(
             """
-            SELECT workspace_id, name, description, created_at, updated_at, metadata
+            SELECT workspace_id, name, description, owner_user_id, created_at, updated_at, metadata
             FROM workspaces
             WHERE workspace_id = $1
             """,
@@ -1191,7 +1195,7 @@ class CollaborationRepository:
     async def list_workspaces(self) -> list[Workspace]:
         rows = await self._pool.fetch(
             """
-            SELECT workspace_id, name, description, created_at, updated_at, metadata
+            SELECT workspace_id, name, description, owner_user_id, created_at, updated_at, metadata
             FROM workspaces
             ORDER BY created_at ASC
             """
@@ -2379,6 +2383,7 @@ class CollaborationRepository:
             workspace_id=row["workspace_id"],
             name=row["name"],
             description=row["description"],
+            owner_user_id=row["owner_user_id"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),

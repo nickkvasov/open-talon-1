@@ -25,6 +25,59 @@ lookup_client_id() {
     | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
 }
 
+lookup_user_id() {
+  username="$1"
+  /opt/keycloak/bin/kcadm.sh get users -r open-talon -q username="${username}" -q exact=true \
+    | tr -d '\n' \
+    | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+ensure_realm_role() {
+  role_name="$1"
+  if ! /opt/keycloak/bin/kcadm.sh get "roles/${role_name}" -r open-talon >/dev/null 2>&1; then
+    /opt/keycloak/bin/kcadm.sh create roles -r open-talon -s "name=${role_name}" >/dev/null
+  fi
+}
+
+ensure_user() {
+  username="$1"
+  password="$2"
+  email="$3"
+  first_name="$4"
+  last_name="$5"
+  realm_role="$6"
+
+  user_id="$(lookup_user_id "${username}")"
+  if [ -z "${user_id}" ]; then
+    /opt/keycloak/bin/kcadm.sh create users -r open-talon \
+      -s "username=${username}" \
+      -s "enabled=true" \
+      -s "email=${email}" \
+      -s "emailVerified=true" \
+      -s "firstName=${first_name}" \
+      -s "lastName=${last_name}" >/dev/null
+    user_id="$(lookup_user_id "${username}")"
+  else
+    /opt/keycloak/bin/kcadm.sh update "users/${user_id}" -r open-talon \
+      -s "email=${email}" \
+      -s "emailVerified=true" \
+      -s "firstName=${first_name}" \
+      -s "lastName=${last_name}" \
+      -s "enabled=true" >/dev/null
+  fi
+
+  /opt/keycloak/bin/kcadm.sh set-password -r open-talon \
+    --username "${username}" \
+    --new-password "${password}" >/dev/null
+  /opt/keycloak/bin/kcadm.sh add-roles -r open-talon \
+    --uusername "${username}" \
+    --rolename "${realm_role}" >/dev/null 2>&1 || true
+}
+
+ensure_realm_role admin
+ensure_realm_role supervisor
+ensure_realm_role user
+
 OPEN_TALON_TUI_ID="$(lookup_client_id open-talon-tui)"
 if [ -n "${OPEN_TALON_TUI_ID}" ]; then
   /opt/keycloak/bin/kcadm.sh update "clients/${OPEN_TALON_TUI_ID}" -r open-talon \
@@ -45,5 +98,12 @@ if [ -n "${OPEN_TALON_WEB_ID}" ]; then
     -s serviceAccountsEnabled=false \
     -s 'attributes."pkce.code.challenge.method"=S256' >/dev/null
 fi
+
+ensure_user admin admin123 admin@local.dev OpenTalon Admin admin
+ensure_user admin2 admin223 admin2@local.dev OpenTalon Admin2 admin
+ensure_user supervisor supervisor123 supervisor@local.dev OpenTalon Supervisor supervisor
+ensure_user supervisor2 supervisor223 supervisor2@local.dev OpenTalon Supervisor2 supervisor
+ensure_user user1 user12345 user1@local.dev OpenTalon User1 user
+ensure_user user2 user22345 user2@local.dev OpenTalon User2 user
 
 echo "Keycloak local dev realms updated."

@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     oidc_audience: str = "open-talon-tui"
     oidc_client_id_tui: str = "open-talon-tui"
     oidc_cache_ttl_seconds: int = 300
-    oidc_admin_role: str = "open-talon-admin"
+    oidc_admin_role: str = "admin"
 
     # ── Postgres ─────────────────────────────────────────────────────────────
     postgres_host: str = "localhost"

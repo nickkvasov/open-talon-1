@@ -132,6 +132,7 @@ class Workspace(BaseModel):
     workspace_id: UUID
     name: str
     description: str | None = None
+    owner_user_id: UUID | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     metadata: dict[str, Any] = Field(default_factory=dict)

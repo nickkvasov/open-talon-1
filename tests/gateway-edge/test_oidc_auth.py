@@ -14,7 +14,7 @@ def _oidc_context() -> AuthContext:
         subject="subject-123",
         email="nikolay@example.com",
         display_name="Nikolay",
-        roles=["open-talon-admin"],
+        roles=["admin"],
         claims={"sub": "subject-123"},
     )
 
@@ -73,6 +73,8 @@ async def test_oidc_create_workspace_ignores_forged_actor_identity(client, monke
     assert body["participants"][0]["participant_id"] != forged_actor["participant_id"]
     assert body["participants"][0]["user_id"] == str(auth_context.user_id)
     assert body["participants"][0]["display_name"] == auth_context.display_name
+    assert body["workspace"]["owner_user_id"] == str(auth_context.user_id)
+    assert body["participants"][0]["roles"] == ["admin"]
 
 
 def test_oidc_websocket_uses_authenticated_user_without_query_identity(sync_client, monkeypatch):

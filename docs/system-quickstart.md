@@ -75,7 +75,9 @@ That keeps Postgres as the canonical memory store and adds the optional local `m
 - Keycloak realm: `open-talon`
 - Keycloak realm users:
   - `admin` / `admin123`
+  - `admin2` / `admin223`
   - `supervisor` / `supervisor123`
+  - `supervisor2` / `supervisor223`
   - `user1` / `user12345`
   - `user2` / `user22345`
 - OpenBao root token: `root`
@@ -113,7 +115,9 @@ If you want to inspect the realm in the Keycloak UI before using the TUI:
 3. Switch to the `open-talon` realm
 4. Open `Users` to inspect the default local users:
    - `admin`
+   - `admin2`
    - `supervisor`
+   - `supervisor2`
    - `user1`
    - `user2`
 
@@ -121,7 +125,7 @@ Important distinction:
 
 - `admin` / `admin` is the Keycloak bootstrap admin account for the admin console
 - `admin` / `admin123` is the default Open Talon realm user in `open-talon`
-- the Open Talon realm user `admin` has the `open-talon-admin` realm role
+- the Open Talon realm user `admin` has the `admin` realm role
 
 ## 7. Use The TUI With A Profile
 

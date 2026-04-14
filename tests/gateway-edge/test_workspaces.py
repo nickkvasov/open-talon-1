@@ -33,7 +33,10 @@ async def test_create_workspace_returns_workspace_and_participants(client, actor
     assert resp.status_code == 200
     body = resp.json()
     assert body["workspace"]["name"] == "Core Platform"
+    assert body["workspace"]["owner_user_id"] is None
     assert body["participants"][0]["participant_id"] == actor_payload["participant_id"]
+    assert body["participants"][0]["roles"] == ["admin"]
+    assert [role["name"] for role in body["role_definitions"]] == ["admin", "supervisor", "user"]
 
 
 async def test_list_workspaces_returns_created_workspace(client, actor_payload):
@@ -620,7 +623,7 @@ async def test_llm_provider_management_requires_admin_role_in_oidc_mode(client, 
 
 
 async def test_llm_provider_management_allows_admin_role_in_oidc_mode(client, actor_payload, monkeypatch):
-    auth_context = _oidc_context(roles=["open-talon-admin"])
+    auth_context = _oidc_context(roles=["admin"])
     monkeypatch.setattr(settings, "auth_mode", "oidc")
 
     async def _validate(token: str):

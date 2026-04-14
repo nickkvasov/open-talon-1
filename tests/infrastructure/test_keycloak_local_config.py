@@ -22,11 +22,20 @@ def test_keycloak_realm_import_has_dev_ssl_and_default_users():
     assert payload["registrationEmailAsUsername"] is False
 
     users = {user["username"]: user for user in payload["users"]}
-    assert set(users) >= {"admin", "supervisor", "user1", "user2"}
-    assert users["admin"]["realmRoles"] == ["open-talon-admin"]
+    assert set(users) >= {"admin", "admin2", "supervisor", "supervisor2", "user1", "user2"}
+    realm_roles = {role["name"] for role in payload["roles"]["realm"]}
+    assert realm_roles >= {"admin", "supervisor", "user"}
+    assert users["admin"]["realmRoles"] == ["admin"]
     assert users["admin"]["credentials"][0]["value"] == "admin123"
+    assert users["admin2"]["realmRoles"] == ["admin"]
+    assert users["admin2"]["credentials"][0]["value"] == "admin223"
+    assert users["supervisor"]["realmRoles"] == ["supervisor"]
     assert users["supervisor"]["credentials"][0]["value"] == "supervisor123"
+    assert users["supervisor2"]["realmRoles"] == ["supervisor"]
+    assert users["supervisor2"]["credentials"][0]["value"] == "supervisor223"
+    assert users["user1"]["realmRoles"] == ["user"]
     assert users["user1"]["credentials"][0]["value"] == "user12345"
+    assert users["user2"]["realmRoles"] == ["user"]
     assert users["user2"]["credentials"][0]["value"] == "user22345"
 
 
@@ -39,6 +48,15 @@ def test_keycloak_init_script_normalizes_local_dev_realms():
     assert 'attributes."oauth2.device.authorization.grant.enabled"=true' in script
     assert 'lookup_client_id open-talon-web' in script
     assert 'attributes."pkce.code.challenge.method"=S256' in script
+    assert "ensure_realm_role admin" in script
+    assert "ensure_realm_role supervisor" in script
+    assert "ensure_realm_role user" in script
+    assert "ensure_user admin admin123" in script
+    assert "ensure_user admin2 admin223" in script
+    assert "ensure_user supervisor supervisor123" in script
+    assert "ensure_user supervisor2 supervisor223" in script
+    assert "ensure_user user1 user12345" in script
+    assert "ensure_user user2 user22345" in script
 
 
 def test_local_startup_includes_keycloak_init_helper():

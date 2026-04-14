@@ -322,7 +322,7 @@ Default local development credentials:
   admin password: `admin`
   default realm: `open-talon`
   realm users:
-  `admin` / `admin123`, `supervisor` / `supervisor123`, `user1` / `user12345`, `user2` / `user22345`
+  `admin` / `admin123`, `admin2` / `admin223`, `supervisor` / `supervisor123`, `supervisor2` / `supervisor223`, `user1` / `user12345`, `user2` / `user22345`
 - `Langfuse UI`
   URL: [http://localhost:3000](http://localhost:3000)
   email: `admin@example.com`

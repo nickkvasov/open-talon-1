@@ -27,6 +27,7 @@ from open_talon_contracts.models import (  # noqa: E402
     AgentEndpoint,
     ArtifactRef,
     CreateLlmProviderRequest,
+    CreateWorkspaceRequest,
     CreateSystemToolRequest,
     EventEnvelope,
     ExecutionSpec,
@@ -87,6 +88,7 @@ class FakeRepository:
         self._pool = _FakePool()
         self.setup_schema_calls = 0
         self.upserted_agents: list[AgentDefinition] = []
+        self.recorded_events: list[EventEnvelope] = []
         self._tasks = {}
         self._runs = {}
         self._workspaces = {}
@@ -96,6 +98,7 @@ class FakeRepository:
         self._messages = {}
         self._system_tools = {}
         self._llm_providers = {}
+        self._workspace_sequences = {}
         now = datetime.now(timezone.utc)
         postgres_provider = MemoryProviderDefinition(
             provider_id=uuid4(),
@@ -155,6 +158,9 @@ class FakeRepository:
 
     async def fetch_workspace(self, workspace_id):
         return self._workspaces.get(workspace_id)
+
+    async def list_workspaces(self):
+        return list(self._workspaces.values())
 
     async def fetch_thread(self, thread_id):
         return self._threads.get(thread_id)
@@ -335,6 +341,23 @@ class FakeRepository:
             if tool_call.status in {"completed", "failed"}
         ]
 
+    async def upsert_workspace(self, conn, workspace: Workspace) -> None:
+        self._workspaces[workspace.workspace_id] = workspace
+
+    async def upsert_user(self, conn, user) -> None:
+        return None
+
+    async def upsert_participant(self, conn, participant: ParticipantProfile) -> None:
+        self._participants[(participant.workspace_id, participant.participant_id)] = participant
+
+    async def next_workspace_sequence(self, conn, workspace_id):
+        next_value = self._workspace_sequences.get(workspace_id, 0) + 1
+        self._workspace_sequences[workspace_id] = next_value
+        return next_value
+
+    async def record_event(self, conn, event: EventEnvelope) -> None:
+        self.recorded_events.append(event)
+
     async def upsert_llm_provider(self, conn, provider: LlmProviderDefinition) -> None:
         self._llm_providers[provider.provider_id] = provider
 
@@ -371,6 +394,35 @@ async def test_kernel_participant_profile_preserves_distinct_user_id():
 
     assert participant.participant_id == participant_id
     assert participant.user_id == user_id
+
+
+@pytest.mark.asyncio
+async def test_kernel_create_workspace_sets_owner_admin_role_and_default_role_catalog():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    user_id = uuid4()
+    participant_id = uuid4()
+
+    result = await kernel.create_workspace(
+        CreateWorkspaceRequest(
+            name="Ownership",
+            description="Workspace ownership coverage",
+            actor=ParticipantInput(
+                participant_id=participant_id,
+                participant_type="user",
+                user_id=user_id,
+                display_name="Nikolay",
+            ),
+        )
+    )
+
+    assert result.workspace is not None
+    assert result.workspace.owner_user_id == user_id
+    assert result.detail is not None
+    assert result.detail.participants[0].roles == ["admin"]
+    role_names = [role.name for role in result.detail.role_definitions]
+    assert role_names == ["admin", "supervisor", "user"]
+    assert repository.recorded_events[0].payload["owner_user_id"] == str(user_id)
 
 
 @pytest.mark.asyncio

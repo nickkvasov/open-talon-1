@@ -66,15 +66,43 @@ class MockCollaborationService:
 
     async def create_workspace(self, payload):
         from gateway_edge.models import Workspace, WorkspaceDetail, ParticipantProfile
+        from open_talon_contracts.models import RoleDefinition
 
         now = datetime.now(timezone.utc)
+        role_definitions = {
+            "admin": RoleDefinition(
+                name="admin",
+                definition="Manages the workspace, participants, tools, and provider configuration.",
+                updated_by=payload.actor.participant_id,
+                updated_at=now,
+            ),
+            "supervisor": RoleDefinition(
+                name="supervisor",
+                definition="Coordinates delivery, reviews work, and guides workspace members without full administrative control.",
+                updated_by=payload.actor.participant_id,
+                updated_at=now,
+            ),
+            "user": RoleDefinition(
+                name="user",
+                definition="Collaborates in the workspace, participates in threads, and uses attached tools.",
+                updated_by=payload.actor.participant_id,
+                updated_at=now,
+            ),
+        }
         workspace = Workspace(
             workspace_id=uuid4(),
             name=payload.name,
             description=payload.description,
+            owner_user_id=payload.actor.user_id,
             created_at=now,
             updated_at=now,
-            metadata=payload.metadata,
+            metadata={
+                **payload.metadata,
+                "role_definitions": {
+                    role.name: role.model_dump(mode="json")
+                    for role in role_definitions.values()
+                },
+            },
         )
         participant = ParticipantProfile(
             participant_id=payload.actor.participant_id,
@@ -83,7 +111,7 @@ class MockCollaborationService:
             user_id=payload.actor.user_id,
             display_name=payload.actor.display_name,
             description=payload.actor.description,
-            roles=payload.actor.roles,
+            roles=list(dict.fromkeys([*payload.actor.roles, "admin"])),
             capabilities=payload.actor.capabilities,
             visibility_scope=payload.actor.visibility_scope,
             created_at=now,
@@ -93,13 +121,15 @@ class MockCollaborationService:
         self.participants.setdefault(str(workspace.workspace_id), {})[
             str(participant.participant_id)
         ] = participant
-        self.role_definitions[str(workspace.workspace_id)] = {}
+        self.role_definitions[str(workspace.workspace_id)] = {
+            role.name: role for role in role_definitions.values()
+        }
         self.workspace_tools[str(workspace.workspace_id)] = {}
         self.workspace_sequences[str(workspace.workspace_id)] = 2
         return WorkspaceDetail(
             workspace=workspace,
             participants=[participant],
-            role_definitions=[],
+            role_definitions=list(role_definitions.values()),
             tools=[],
         )
 

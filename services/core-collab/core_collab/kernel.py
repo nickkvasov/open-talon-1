@@ -95,6 +95,12 @@ from .repository import CollaborationRepository, UserRecord
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_WORKSPACE_ROLE_DEFINITIONS = {
+    "admin": "Manages the workspace, participants, tools, and provider configuration.",
+    "supervisor": "Coordinates delivery, reviews work, and guides workspace members without full administrative control.",
+    "user": "Collaborates in the workspace, participates in threads, and uses attached tools.",
+}
+
 
 @dataclass
 class CommandResult:
@@ -229,20 +235,25 @@ class CollaborationKernel:
             workspace_id=workspace_id,
             name=payload.name,
             description=payload.description,
+            owner_user_id=payload.actor.user_id,
             created_at=now,
             updated_at=now,
-            metadata=payload.metadata,
+            metadata=self._workspace_metadata_for_create(
+                metadata=payload.metadata,
+                updated_by=payload.actor.participant_id,
+                updated_at=now,
+            ),
         )
         actor = self._actor_from_input(payload.actor)
         participant = self._participant_profile(
             workspace_id=workspace_id,
             actor=payload.actor,
             now=now,
-        )
+        ).model_copy(update={"roles": self._workspace_owner_roles(payload.actor.roles)})
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
-                await self._repository.upsert_workspace(conn, workspace)
                 await self._ensure_participant_identity(conn, participant)
+                await self._repository.upsert_workspace(conn, workspace)
                 await self._repository.upsert_participant(conn, participant)
 
                 events = [
@@ -256,6 +267,11 @@ class CollaborationKernel:
                             "workspace_id": str(workspace.workspace_id),
                             "name": workspace.name,
                             "description": workspace.description,
+                            "owner_user_id": (
+                                str(workspace.owner_user_id)
+                                if workspace.owner_user_id is not None
+                                else None
+                            ),
                         },
                         timestamp=now,
                     ),
@@ -3835,11 +3851,7 @@ class CollaborationKernel:
             participant_id=actor.participant_id,
             workspace_id=workspace_id,
             participant_type=actor.participant_type,
-            user_id=(
-                actor.user_id
-                if actor.participant_type == "user"
-                else None
-            ),
+            user_id=(actor.user_id if actor.participant_type == "user" else None),
             display_name=actor.display_name,
             description=actor.description,
             roles=actor.roles,
@@ -3892,6 +3904,51 @@ class CollaborationKernel:
             user_id=user_id,
             display_name=display_name,
         )
+
+    @staticmethod
+    def _workspace_metadata_for_create(
+        *,
+        metadata: dict[str, object],
+        updated_by: UUID,
+        updated_at: datetime,
+    ) -> dict[str, object]:
+        return {
+            **metadata,
+            "role_definitions": CollaborationKernel._merge_workspace_role_definitions(
+                metadata.get("role_definitions"),
+                updated_by=updated_by,
+                updated_at=updated_at,
+            ),
+        }
+
+    @staticmethod
+    def _merge_workspace_role_definitions(
+        raw: object,
+        *,
+        updated_by: UUID,
+        updated_at: datetime,
+    ) -> dict[str, dict[str, object]]:
+        role_map: dict[str, dict[str, object]] = {}
+        for name, definition in _DEFAULT_WORKSPACE_ROLE_DEFINITIONS.items():
+            role_map[name] = RoleDefinition(
+                name=name,
+                definition=definition,
+                updated_by=updated_by,
+                updated_at=updated_at,
+            ).model_dump(mode="json")
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                role_definition = RoleDefinition.model_validate(value)
+                role_map[key] = role_definition.model_dump(mode="json")
+        elif isinstance(raw, list):
+            for value in raw:
+                role_definition = RoleDefinition.model_validate(value)
+                role_map[role_definition.name] = role_definition.model_dump(mode="json")
+        return role_map
+
+    @staticmethod
+    def _workspace_owner_roles(roles: list[str]) -> list[str]:
+        return list(dict.fromkeys([*roles, "admin"]))
 
     @staticmethod
     def _role_definitions_from_workspace(workspace: Workspace) -> list[RoleDefinition]:

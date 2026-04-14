@@ -49,7 +49,13 @@
   "roles": {
     "realm": [
       {
-        "name": "open-talon-admin"
+        "name": "admin"
+      },
+      {
+        "name": "supervisor"
+      },
+      {
+        "name": "user"
       }
     ]
   },
@@ -61,11 +67,27 @@
       "emailVerified": true,
       "firstName": "OpenTalon",
       "lastName": "Admin",
-      "realmRoles": ["open-talon-admin"],
+      "realmRoles": ["admin"],
       "credentials": [
         {
           "type": "password",
           "value": "admin123",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "admin2",
+      "enabled": true,
+      "email": "admin2@local.dev",
+      "emailVerified": true,
+      "firstName": "OpenTalon",
+      "lastName": "Admin2",
+      "realmRoles": ["admin"],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin223",
           "temporary": false
         }
       ]
@@ -77,10 +99,27 @@
       "emailVerified": true,
       "firstName": "OpenTalon",
       "lastName": "Supervisor",
+      "realmRoles": ["supervisor"],
       "credentials": [
         {
           "type": "password",
           "value": "supervisor123",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "supervisor2",
+      "enabled": true,
+      "email": "supervisor2@local.dev",
+      "emailVerified": true,
+      "firstName": "OpenTalon",
+      "lastName": "Supervisor2",
+      "realmRoles": ["supervisor"],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "supervisor223",
           "temporary": false
         }
       ]
@@ -92,6 +131,7 @@
       "emailVerified": true,
       "firstName": "OpenTalon",
       "lastName": "User1",
+      "realmRoles": ["user"],
       "credentials": [
         {
           "type": "password",
@@ -107,6 +147,7 @@
       "emailVerified": true,
       "firstName": "OpenTalon",
       "lastName": "User2",
+      "realmRoles": ["user"],
       "credentials": [
         {
           "type": "password",
