@@ -13,6 +13,8 @@ ParticipantType = Literal["user", "agent"]
 ParticipantStatus = Literal["active", "idle", "busy", "offline"]
 ThreadState = Literal["active", "paused", "resolved", "archived"]
 MessageStatus = Literal["draft", "streaming", "completed", "failed"]
+MemoryScope = Literal["run", "thread", "workspace"]
+MemoryState = Literal["scratch", "candidate", "confirmed", "archived"]
 TaskStatus = Literal["created", "claimed", "released", "completed", "failed"]
 RunStatus = Literal["started", "progressing", "completed", "failed"]
 RunStepStatus = Literal["created", "claimed", "waiting_tools", "completed", "failed"]
@@ -282,6 +284,49 @@ class LlmProviderHealthReport(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class MemoryProviderDefinition(BaseModel):
+    provider_id: UUID
+    provider_key: str
+    display_name: str
+    description: str
+    provider: str
+    enabled: bool = True
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_config: dict[str, Any] = Field(default_factory=dict)
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryProviderHealthCheck(BaseModel):
+    name: str
+    status: Literal["ok", "warn", "fail"]
+    detail: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryProviderHealthReport(BaseModel):
+    provider_id: UUID
+    provider_key: str
+    status: Literal["healthy", "degraded", "unhealthy"]
+    checked_at: datetime = Field(default_factory=utcnow)
+    checks: list[MemoryProviderHealthCheck] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryProviderRecord(BaseModel):
+    provider_record_id: UUID
+    memory_entry_id: UUID
+    provider_id: UUID
+    external_id: str | None = None
+    status: str = "pending"
+    last_synced_at: datetime | None = None
+    last_error: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class WorkspaceTool(BaseModel):
     tool_id: UUID
     name: str
@@ -382,18 +427,38 @@ class Membership(BaseModel):
 
 class MemoryEntry(BaseModel):
     memory_entry_id: UUID
+    scope: MemoryScope
+    state: MemoryState = "confirmed"
     workspace_id: UUID
+    thread_id: UUID | None = None
+    run_id: UUID | None = None
     entry_type: str
-    title: str
     content: str
-    tags: list[str] = Field(default_factory=list)
+    summary: str | None = None
+    source: str | None = None
     created_by: UUID
     updated_by: UUID
+    confirmed_by: UUID | None = None
+    confirmed_at: datetime | None = None
     version: int = 1
     visibility: Visibility = "workspace"
-    linked_thread_ids: list[UUID] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+class MemorySearchHit(BaseModel):
+    entry: MemoryEntry
+    score: float | None = None
+    relations: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MemorySearchResponse(BaseModel):
+    query: str
+    provider: str
+    results: list[MemorySearchHit] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class TimelineMessage(BaseModel):
@@ -709,6 +774,18 @@ class CreateLlmProviderRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class CreateMemoryProviderRequest(BaseModel):
+    actor: ParticipantInput
+    provider_key: str
+    display_name: str
+    description: str
+    provider: str
+    enabled: bool = True
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_config: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class UpdateLlmProviderRequest(BaseModel):
     actor: ParticipantInput
     engine_id: str | None = None
@@ -726,7 +803,23 @@ class UpdateLlmProviderRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class UpdateMemoryProviderRequest(BaseModel):
+    actor: ParticipantInput
+    provider_key: str | None = None
+    display_name: str | None = None
+    description: str | None = None
+    provider: str | None = None
+    enabled: bool | None = None
+    config: dict[str, Any] | None = None
+    secret_config: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+
+
 class DeleteLlmProviderRequest(BaseModel):
+    actor: ParticipantInput
+
+
+class DeleteMemoryProviderRequest(BaseModel):
     actor: ParticipantInput
 
 
@@ -851,20 +944,46 @@ class CreateMessageRequest(BaseModel):
 class CreateMemoryEntryRequest(BaseModel):
     actor: ParticipantInput
     entry_type: str
-    title: str
     content: str
-    tags: list[str] = Field(default_factory=list)
+    summary: str | None = None
     visibility: Visibility = "workspace"
-    linked_thread_ids: list[UUID] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateThreadMemoryRequest(BaseModel):
+    actor: ParticipantInput
+    entry_type: str
+    content: str
+    summary: str | None = None
+    visibility: Visibility = "workspace"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ConfirmWorkspaceMemoryRequest(BaseModel):
+    actor: ParticipantInput
+    source_memory_entry_id: UUID
+    entry_type: str | None = None
+    content: str | None = None
+    summary: str | None = None
+    visibility: Visibility = "workspace"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SearchMemoryRequest(BaseModel):
+    actor: ParticipantInput
+    query: str
+    limit: int = 10
+    use_provider: str | None = None
+    include_graph: bool = True
+    metadata_filters: dict[str, Any] = Field(default_factory=dict)
 
 
 class UpdateMemoryEntryRequest(BaseModel):
     actor: ParticipantInput
-    title: str | None = None
     content: str | None = None
-    tags: list[str] | None = None
+    summary: str | None = None
     visibility: Visibility | None = None
-    linked_thread_ids: list[UUID] | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class WorkspaceDetail(BaseModel):
@@ -897,7 +1016,9 @@ class AgentExecutionContext(BaseModel):
     role_definitions: list[RoleDefinition] = Field(default_factory=list)
     workspace_tools: list[WorkspaceTool] = Field(default_factory=list)
     messages: list[TimelineMessage] = Field(default_factory=list)
-    memory_entries: list[MemoryEntry] = Field(default_factory=list)
+    run_memory: list[MemoryEntry] = Field(default_factory=list)
+    thread_memory: list[MemoryEntry] = Field(default_factory=list)
+    workspace_memory: list[MemoryEntry] = Field(default_factory=list)
     trigger_message: TimelineMessage | None = None
     sequence_ceiling: int = 0
     thread_reply_contract: AgentInteractionContract | None = None

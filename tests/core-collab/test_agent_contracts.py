@@ -33,6 +33,8 @@ from open_talon_contracts.models import (  # noqa: E402
     DeleteLlmProviderRequest,
     LlmProviderDefinition,
     MemoryEntry,
+    MemoryProviderDefinition,
+    MemoryProviderRecord,
     ParticipantProfile,
     Run,
     RunStep,
@@ -94,6 +96,24 @@ class FakeRepository:
         self._messages = {}
         self._system_tools = {}
         self._llm_providers = {}
+        now = datetime.now(timezone.utc)
+        postgres_provider = MemoryProviderDefinition(
+            provider_id=uuid4(),
+            provider_key="postgres",
+            display_name="Postgres",
+            description="Canonical memory provider",
+            provider="postgres",
+            enabled=True,
+            config={},
+            secret_config={},
+            created_by=uuid4(),
+            created_at=now,
+            updated_by=uuid4(),
+            updated_at=now,
+            metadata={},
+        )
+        self._memory_providers = {postgres_provider.provider_id: postgres_provider}
+        self._memory_provider_records = {}
         self._workspace_tools = {}
         self._tool_calls = {}
 
@@ -170,7 +190,75 @@ class FakeRepository:
         ]
 
     async def list_memory_entries(self, workspace_id):
-        return list(self._memory_entries.get(workspace_id, []))
+        return await self.list_memory_entries_for_scope(
+            scope="workspace",
+            workspace_id=workspace_id,
+            state="confirmed",
+        )
+
+    async def list_memory_entries_for_scope(
+        self,
+        *,
+        scope,
+        workspace_id=None,
+        thread_id=None,
+        run_id=None,
+        state=None,
+    ):
+        entries = [
+            entry
+            for workspace_entries in self._memory_entries.values()
+            for entry in workspace_entries
+            if entry.scope == scope
+            and (workspace_id is None or entry.workspace_id == workspace_id)
+            and (thread_id is None or entry.thread_id == thread_id)
+            and (run_id is None or entry.run_id == run_id)
+            and (state is None or entry.state == state)
+        ]
+        return sorted(entries, key=lambda item: item.updated_at, reverse=True)
+
+    async def search_memory_entries(
+        self,
+        *,
+        scope,
+        workspace_id=None,
+        thread_id=None,
+        run_id=None,
+        query,
+        limit,
+        state=None,
+    ):
+        lowered = query.lower()
+        entries = await self.list_memory_entries_for_scope(
+            scope=scope,
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+            run_id=run_id,
+            state=state,
+        )
+        return [
+            entry
+            for entry in entries
+            if lowered in entry.content.lower()
+            or lowered in (entry.summary or "").lower()
+            or lowered in entry.entry_type.lower()
+        ][:limit]
+
+    async def fetch_memory_entry(self, memory_entry_id):
+        for workspace_entries in self._memory_entries.values():
+            for entry in workspace_entries:
+                if entry.memory_entry_id == memory_entry_id:
+                    return entry
+        return None
+
+    async def upsert_memory_entry(self, conn, entry: MemoryEntry) -> None:
+        workspace_entries = self._memory_entries.setdefault(entry.workspace_id, [])
+        for index, existing in enumerate(workspace_entries):
+            if existing.memory_entry_id == entry.memory_entry_id:
+                workspace_entries[index] = entry
+                break
+        else:
+            workspace_entries.append(entry)
 
     async def list_system_tools(self):
         return list(self._system_tools.values())
@@ -186,6 +274,40 @@ class FakeRepository:
 
     async def fetch_llm_provider(self, provider_id):
         return self._llm_providers.get(provider_id)
+
+    async def list_memory_providers(self):
+        return list(self._memory_providers.values())
+
+    async def list_enabled_memory_providers(self):
+        return [provider for provider in self._memory_providers.values() if provider.enabled]
+
+    async def fetch_memory_provider(self, provider_id):
+        return self._memory_providers.get(provider_id)
+
+    async def fetch_memory_provider_by_key(self, provider_key):
+        for provider in self._memory_providers.values():
+            if provider.provider_key == provider_key:
+                return provider
+        return None
+
+    async def upsert_memory_provider(self, conn, provider: MemoryProviderDefinition) -> None:
+        self._memory_providers[provider.provider_id] = provider
+
+    async def delete_memory_provider(self, conn, *, provider_id):
+        return self._memory_providers.pop(provider_id, None) is not None
+
+    async def list_memory_provider_records(self, memory_entry_id):
+        return [
+            record
+            for (entry_id, _provider_id), record in self._memory_provider_records.items()
+            if entry_id == memory_entry_id
+        ]
+
+    async def fetch_memory_provider_record(self, *, memory_entry_id, provider_id):
+        return self._memory_provider_records.get((memory_entry_id, provider_id))
+
+    async def upsert_memory_provider_record(self, conn, record: MemoryProviderRecord) -> None:
+        self._memory_provider_records[(record.memory_entry_id, record.provider_id)] = record
 
     async def list_workspace_tools(self, workspace_id):
         return list(self._workspace_tools.get(workspace_id, []))
@@ -778,10 +900,12 @@ async def test_build_agent_execution_context_filters_messages_and_memory_by_view
     repository._memory_entries[workspace_id] = [
         MemoryEntry(
             memory_entry_id=uuid4(),
+            scope="workspace",
+            state="confirmed",
             workspace_id=workspace_id,
             entry_type="note",
-            title="Workspace note",
             content="Visible to the whole workspace.",
+            summary="Workspace note",
             created_by=actor_id,
             updated_by=actor_id,
             visibility="workspace",
@@ -790,10 +914,12 @@ async def test_build_agent_execution_context_filters_messages_and_memory_by_view
         ),
         MemoryEntry(
             memory_entry_id=uuid4(),
+            scope="workspace",
+            state="confirmed",
             workspace_id=workspace_id,
             entry_type="note",
-            title="Agents note",
             content="Visible to agents.",
+            summary="Agents note",
             created_by=actor_id,
             updated_by=actor_id,
             visibility="agents_only",
@@ -802,10 +928,12 @@ async def test_build_agent_execution_context_filters_messages_and_memory_by_view
         ),
         MemoryEntry(
             memory_entry_id=uuid4(),
+            scope="workspace",
+            state="confirmed",
             workspace_id=workspace_id,
             entry_type="note",
-            title="User private note",
             content="Should not leak to the agent.",
+            summary="User private note",
             created_by=actor_id,
             updated_by=actor_id,
             visibility="private",
@@ -885,10 +1013,12 @@ async def test_build_agent_execution_context_filters_messages_and_memory_by_view
         "Visible agent coordination note",
         "Validate the rollout carefully",
     ]
-    assert [entry.title for entry in context.memory_entries] == [
+    assert [entry.summary for entry in context.workspace_memory] == [
         "Workspace note",
         "Agents note",
     ]
+    assert context.run_memory == []
+    assert context.thread_memory == []
     assert context.trigger_message is not None
     assert context.trigger_message.content == "Validate the rollout carefully"
     assert context.thread_reply_contract == agent.interaction_contract

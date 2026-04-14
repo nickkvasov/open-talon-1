@@ -6,6 +6,11 @@ import logging
 from uuid import UUID, uuid4
 
 import asyncpg
+from workspace_memory import (
+    ProviderSearchResult,
+    build_default_secret_resolver,
+    build_provider_index,
+)
 
 from .contracts import (
     ActorRef,
@@ -24,13 +29,18 @@ from .contracts import (
     CreateAgentParticipantRequest,
     CreateGitRepositoryRequest,
     CreateLlmProviderRequest,
+    CreateMemoryProviderRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
+    ConfirmWorkspaceMemoryRequest,
     CreateMemoryEntryRequest,
+    CreateThreadMemoryRequest,
     CreateMessageRequest,
+    SearchMemoryRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
     DeleteLlmProviderRequest,
+    DeleteMemoryProviderRequest,
     DeleteParticipantRequest,
     DeleteWorkspaceToolRequest,
     DeleteWorkspaceRequest,
@@ -38,6 +48,10 @@ from .contracts import (
     EventEnvelope,
     Membership,
     MemoryEntry,
+    MemoryProviderDefinition,
+    MemoryProviderRecord,
+    MemorySearchHit,
+    MemorySearchResponse,
     LlmProviderDefinition,
     ParticipantInput,
     ParticipantProfile,
@@ -62,6 +76,7 @@ from .contracts import (
     UpdateSystemAgentRequest,
     LinkAssetRequest,
     UpdateLlmProviderRequest,
+    UpdateMemoryProviderRequest,
     UpsertRoleDefinitionRequest,
     UpdateSystemToolRequest,
     build_default_interaction_contract,
@@ -139,6 +154,11 @@ class LlmProviderCommandResult(CommandResult):
 
 
 @dataclass
+class MemoryProviderCommandResult(CommandResult):
+    provider: MemoryProviderDefinition | None = None
+
+
+@dataclass
 class GitRepositoryCommandResult(CommandResult):
     repository: GitRepository | None = None
 
@@ -185,6 +205,11 @@ class RunCommandResult(CommandResult):
 class CollaborationKernel:
     def __init__(self, repository: CollaborationRepository) -> None:
         self._repository = repository
+        self._secret_resolver = build_default_secret_resolver()
+        self._memory_provider_index = build_provider_index(
+            store=repository,
+            secret_resolver=self._secret_resolver,
+        )
 
     async def setup_schema(self) -> None:
         await self._repository.setup_schema()
@@ -450,14 +475,46 @@ class CollaborationKernel:
                 await self._repository.upsert_llm_provider(conn, provider)
         return LlmProviderCommandResult(provider=provider)
 
+    async def create_memory_provider(
+        self, payload: CreateMemoryProviderRequest
+    ) -> MemoryProviderCommandResult:
+        now = self._now()
+        provider = MemoryProviderDefinition(
+            provider_id=uuid4(),
+            provider_key=payload.provider_key,
+            display_name=payload.display_name,
+            description=payload.description,
+            provider=payload.provider,
+            enabled=payload.enabled,
+            config=payload.config,
+            secret_config=payload.secret_config,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_memory_provider(conn, provider)
+        return MemoryProviderCommandResult(provider=provider)
+
     async def list_system_tools(self) -> list[SystemToolDefinition]:
         return await self._repository.list_system_tools()
 
     async def list_llm_providers(self) -> list[LlmProviderDefinition]:
         return await self._repository.list_llm_providers()
 
+    async def list_memory_providers(self) -> list[MemoryProviderDefinition]:
+        return await self._repository.list_memory_providers()
+
     async def get_llm_provider(self, provider_id: UUID) -> LlmProviderDefinition | None:
         return await self._repository.fetch_llm_provider(provider_id)
+
+    async def get_memory_provider(
+        self, provider_id: UUID
+    ) -> MemoryProviderDefinition | None:
+        return await self._repository.fetch_memory_provider(provider_id)
 
     async def update_system_tool(
         self, tool_id: UUID, payload: UpdateSystemToolRequest
@@ -561,6 +618,39 @@ class CollaborationKernel:
             async with conn.transaction():
                 await self._repository.upsert_llm_provider(conn, updated)
         return LlmProviderCommandResult(provider=updated)
+
+    async def update_memory_provider(
+        self, provider_id: UUID, payload: UpdateMemoryProviderRequest
+    ) -> MemoryProviderCommandResult:
+        existing = await self._repository.fetch_memory_provider(provider_id)
+        if existing is None:
+            raise KeyError(f"Memory provider {provider_id} not found")
+        updated = existing.model_copy(
+            update={
+                "provider_key": payload.provider_key or existing.provider_key,
+                "display_name": payload.display_name or existing.display_name,
+                "description": payload.description or existing.description,
+                "provider": payload.provider or existing.provider,
+                "enabled": payload.enabled if payload.enabled is not None else existing.enabled,
+                "config": payload.config if payload.config is not None else existing.config,
+                "secret_config": (
+                    payload.secret_config
+                    if payload.secret_config is not None
+                    else existing.secret_config
+                ),
+                "updated_by": payload.actor.participant_id,
+                "updated_at": self._now(),
+                "metadata": (
+                    {**existing.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else existing.metadata
+                ),
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_memory_provider(conn, updated)
+        return MemoryProviderCommandResult(provider=updated)
 
     async def update_system_agent(
         self, agent_id: UUID, payload: UpdateSystemAgentRequest
@@ -892,8 +982,143 @@ class CollaborationKernel:
             raise KeyError(f"LLM provider {provider_id} not found")
         return {"deleted": True, "provider_id": str(provider_id)}
 
+    async def delete_memory_provider(
+        self, provider_id: UUID, payload: DeleteMemoryProviderRequest
+    ) -> dict[str, bool | str]:
+        _ = payload
+        existing = await self._repository.fetch_memory_provider(provider_id)
+        if existing is None:
+            raise KeyError(f"Memory provider {provider_id} not found")
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                deleted = await self._repository.delete_memory_provider(
+                    conn,
+                    provider_id=provider_id,
+                )
+        if not deleted:
+            raise KeyError(f"Memory provider {provider_id} not found")
+        return {"deleted": True, "provider_id": str(provider_id)}
+
     async def _llm_provider_references(self, engine_id: str) -> list[AgentDefinition]:
         return await self._repository.list_system_agents_referencing_llm_engine(engine_id)
+
+    async def _resolve_search_memory_provider(
+        self,
+        preferred_provider_key: str | None,
+    ) -> MemoryProviderDefinition:
+        providers = await self._repository.list_enabled_memory_providers()
+        if preferred_provider_key:
+            for provider in providers:
+                if provider.provider_key == preferred_provider_key:
+                    return provider
+            raise KeyError(f"Enabled memory provider {preferred_provider_key!r} not found")
+        for provider in providers:
+            if provider.provider == "mem0":
+                return provider
+        for provider in providers:
+            if provider.provider == "postgres":
+                return provider
+        raise ValueError("No enabled memory providers configured")
+
+    async def _sync_memory_entry(self, entry: MemoryEntry) -> None:
+        providers = await self._repository.list_enabled_memory_providers()
+        now = self._now()
+        for definition in providers:
+            provider = self._memory_provider_index.get(definition.provider)
+            if provider is None:
+                continue
+            existing_record = await self._repository.fetch_memory_provider_record(
+                memory_entry_id=entry.memory_entry_id,
+                provider_id=definition.provider_id,
+            )
+            try:
+                result = await provider.upsert(
+                    definition,
+                    entry,
+                    external_id=existing_record.external_id if existing_record else None,
+                )
+                record = MemoryProviderRecord(
+                    provider_record_id=(
+                        existing_record.provider_record_id
+                        if existing_record is not None
+                        else uuid4()
+                    ),
+                    memory_entry_id=entry.memory_entry_id,
+                    provider_id=definition.provider_id,
+                    external_id=(
+                        result.external_id
+                        or (existing_record.external_id if existing_record else None)
+                    ),
+                    status="synced",
+                    last_synced_at=now,
+                    last_error=None,
+                    metadata=result.metadata,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Memory provider sync failed provider=%s memory_entry_id=%s error=%s",
+                    definition.provider_key,
+                    entry.memory_entry_id,
+                    exc,
+                )
+                record = MemoryProviderRecord(
+                    provider_record_id=(
+                        existing_record.provider_record_id
+                        if existing_record is not None
+                        else uuid4()
+                    ),
+                    memory_entry_id=entry.memory_entry_id,
+                    provider_id=definition.provider_id,
+                    external_id=existing_record.external_id if existing_record else None,
+                    status="failed",
+                    last_synced_at=now,
+                    last_error=str(exc),
+                    metadata=existing_record.metadata if existing_record else {},
+                )
+            async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+                async with conn.transaction():
+                    await self._repository.upsert_memory_provider_record(conn, record)
+
+    async def _delete_memory_entry_from_providers(self, entry: MemoryEntry) -> None:
+        records = await self._repository.list_memory_provider_records(entry.memory_entry_id)
+        now = self._now()
+        for record in records:
+            definition = await self._repository.fetch_memory_provider(record.provider_id)
+            if definition is None:
+                continue
+            provider = self._memory_provider_index.get(definition.provider)
+            if provider is None:
+                continue
+            try:
+                await provider.delete(
+                    definition,
+                    entry,
+                    external_id=record.external_id,
+                )
+                updated_record = record.model_copy(
+                    update={
+                        "status": "archived",
+                        "last_synced_at": now,
+                        "last_error": None,
+                    }
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Memory provider delete failed provider=%s memory_entry_id=%s error=%s",
+                    definition.provider_key,
+                    entry.memory_entry_id,
+                    exc,
+                )
+                updated_record = record.model_copy(
+                    update={
+                        "status": "failed",
+                        "last_synced_at": now,
+                        "last_error": str(exc),
+                    }
+                )
+            async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+                async with conn.transaction():
+                    await self._repository.upsert_memory_provider_record(conn, updated_record)
 
     async def _backfill_system_agent_interaction_contracts(self) -> None:
         agents = await self._repository.list_system_agents()
@@ -1600,7 +1825,23 @@ class CollaborationKernel:
             self._advertise_workspace_tools(item, workspace_tools)
             for item in await self._repository.list_participants(task.workspace_id)
         ]
-        memory_entries = await self._repository.list_memory_entries(task.workspace_id)
+        run_memory = await self._repository.list_memory_entries_for_scope(
+            scope="run",
+            workspace_id=task.workspace_id,
+            run_id=run.run_id,
+            state="scratch",
+        )
+        thread_memory = await self._repository.list_memory_entries_for_scope(
+            scope="thread",
+            workspace_id=task.workspace_id,
+            thread_id=task.thread_id,
+            state="confirmed",
+        )
+        workspace_memory = await self._repository.list_memory_entries_for_scope(
+            scope="workspace",
+            workspace_id=task.workspace_id,
+            state="confirmed",
+        )
         messages = await self._repository.list_timeline_messages(task.thread_id)
         trigger_message = (
             await self._repository.fetch_message(routing.trigger_message_id)
@@ -1612,8 +1853,16 @@ class CollaborationKernel:
             viewer=participant,
             sequence_ceiling=routing.sequence_ceiling,
         )
-        visible_memory_entries = self._filter_visible_memory_entries(
-            memory_entries,
+        visible_run_memory = self._filter_visible_memory_entries(
+            run_memory,
+            viewer=participant,
+        )
+        visible_thread_memory = self._filter_visible_memory_entries(
+            thread_memory,
+            viewer=participant,
+        )
+        visible_workspace_memory = self._filter_visible_memory_entries(
+            workspace_memory,
             viewer=participant,
         )
         tool_results = await self._repository.list_completed_tool_calls_for_run(run.run_id)
@@ -1629,7 +1878,9 @@ class CollaborationKernel:
             role_definitions=self._role_definitions_from_workspace(workspace),
             workspace_tools=workspace_tools,
             messages=visible_messages,
-            memory_entries=visible_memory_entries,
+            run_memory=visible_run_memory,
+            thread_memory=visible_thread_memory,
+            workspace_memory=visible_workspace_memory,
             trigger_message=trigger_message,
             sequence_ceiling=routing.sequence_ceiling or 0,
             thread_reply_contract=system_agent.interaction_contract,
@@ -2495,7 +2746,22 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
-        return await self._repository.list_memory_entries(workspace_id)
+        return await self._repository.list_memory_entries_for_scope(
+            scope="workspace",
+            workspace_id=workspace_id,
+            state="confirmed",
+        )
+
+    async def list_thread_memory_entries(self, thread_id: UUID) -> list[MemoryEntry]:
+        thread = await self._repository.fetch_thread(thread_id)
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
+        return await self._repository.list_memory_entries_for_scope(
+            scope="thread",
+            workspace_id=thread.workspace_id,
+            thread_id=thread_id,
+            state="confirmed",
+        )
 
     async def create_memory_entry(
         self, workspace_id: UUID, payload: CreateMemoryEntryRequest
@@ -2512,15 +2778,21 @@ class CollaborationKernel:
         )
         entry = MemoryEntry(
             memory_entry_id=uuid4(),
+            scope="workspace",
+            state="confirmed",
             workspace_id=workspace_id,
+            thread_id=None,
+            run_id=None,
             entry_type=payload.entry_type,
-            title=payload.title,
             content=payload.content,
-            tags=payload.tags,
+            summary=payload.summary,
+            source="manual",
             created_by=payload.actor.participant_id,
             updated_by=payload.actor.participant_id,
+            confirmed_by=payload.actor.participant_id,
+            confirmed_at=now,
             visibility=payload.visibility,
-            linked_thread_ids=payload.linked_thread_ids,
+            metadata=payload.metadata,
             created_at=now,
             updated_at=now,
         )
@@ -2540,6 +2812,121 @@ class CollaborationKernel:
                     timestamp=now,
                 )
                 await self._repository.record_event(conn, event)
+        await self._sync_memory_entry(entry)
+        return MemoryCommandResult(entry=entry, events=[event])
+
+    async def create_thread_memory_entry(
+        self, thread_id: UUID, payload: CreateThreadMemoryRequest
+    ) -> MemoryCommandResult:
+        thread = await self._repository.fetch_thread(thread_id)
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+        participant = self._participant_profile(
+            workspace_id=thread.workspace_id,
+            actor=payload.actor,
+            now=now,
+        )
+        entry = MemoryEntry(
+            memory_entry_id=uuid4(),
+            scope="thread",
+            state="confirmed",
+            workspace_id=thread.workspace_id,
+            thread_id=thread_id,
+            run_id=None,
+            entry_type=payload.entry_type,
+            content=payload.content,
+            summary=payload.summary,
+            source="manual",
+            created_by=payload.actor.participant_id,
+            updated_by=payload.actor.participant_id,
+            confirmed_by=payload.actor.participant_id,
+            confirmed_at=now,
+            visibility=payload.visibility,
+            metadata=payload.metadata,
+            created_at=now,
+            updated_at=now,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._ensure_participant_identity(conn, participant)
+                await self._repository.upsert_participant(conn, participant)
+                await self._repository.upsert_memory_entry(conn, entry)
+                event = await self._build_thread_event(
+                    conn,
+                    thread.workspace_id,
+                    thread_id,
+                    "thread.memory_entry_created",
+                    actor=actor,
+                    target=TargetRef(type="memory_entry", id=entry.memory_entry_id),
+                    visibility=entry.visibility,
+                    payload=entry.model_dump(mode="json"),
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        await self._sync_memory_entry(entry)
+        return MemoryCommandResult(entry=entry, events=[event])
+
+    async def confirm_workspace_memory(
+        self,
+        workspace_id: UUID,
+        payload: ConfirmWorkspaceMemoryRequest,
+    ) -> MemoryCommandResult:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        source_entry = await self._repository.fetch_memory_entry(payload.source_memory_entry_id)
+        if source_entry is None or source_entry.workspace_id != workspace_id:
+            raise KeyError(f"Memory entry {payload.source_memory_entry_id} not found")
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+        participant = self._participant_profile(
+            workspace_id=workspace_id,
+            actor=payload.actor,
+            now=now,
+        )
+        entry = MemoryEntry(
+            memory_entry_id=uuid4(),
+            scope="workspace",
+            state="confirmed",
+            workspace_id=workspace_id,
+            thread_id=None,
+            run_id=None,
+            entry_type=payload.entry_type or source_entry.entry_type,
+            content=payload.content or source_entry.content,
+            summary=payload.summary if payload.summary is not None else source_entry.summary,
+            source=f"confirmed:{source_entry.scope}:{source_entry.memory_entry_id}",
+            created_by=payload.actor.participant_id,
+            updated_by=payload.actor.participant_id,
+            confirmed_by=payload.actor.participant_id,
+            confirmed_at=now,
+            visibility=payload.visibility,
+            metadata={
+                **dict(source_entry.metadata),
+                **payload.metadata,
+                "source_memory_entry_id": str(source_entry.memory_entry_id),
+            },
+            created_at=now,
+            updated_at=now,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._ensure_participant_identity(conn, participant)
+                await self._repository.upsert_participant(conn, participant)
+                await self._repository.upsert_memory_entry(conn, entry)
+                event = await self._build_workspace_event(
+                    conn,
+                    workspace_id,
+                    "workspace.memory_entry_confirmed",
+                    actor=actor,
+                    target=TargetRef(type="memory_entry", id=entry.memory_entry_id),
+                    visibility=entry.visibility,
+                    payload=entry.model_dump(mode="json"),
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        await self._sync_memory_entry(entry)
         return MemoryCommandResult(entry=entry, events=[event])
 
     async def update_memory_entry(
@@ -2549,7 +2936,11 @@ class CollaborationKernel:
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
         existing = await self._repository.fetch_memory_entry(memory_entry_id)
-        if existing is None or existing.workspace_id != workspace_id:
+        if (
+            existing is None
+            or existing.workspace_id != workspace_id
+            or existing.scope != "workspace"
+        ):
             raise KeyError(f"Memory entry {memory_entry_id} not found")
         now = self._now()
         actor = self._actor_from_input(payload.actor)
@@ -2560,13 +2951,14 @@ class CollaborationKernel:
         )
         updated = existing.model_copy(
             update={
-                "title": payload.title if payload.title is not None else existing.title,
                 "content": payload.content if payload.content is not None else existing.content,
-                "tags": payload.tags if payload.tags is not None else existing.tags,
+                "summary": payload.summary if payload.summary is not None else existing.summary,
                 "visibility": payload.visibility if payload.visibility is not None else existing.visibility,
-                "linked_thread_ids": payload.linked_thread_ids
-                if payload.linked_thread_ids is not None
-                else existing.linked_thread_ids,
+                "metadata": (
+                    {**existing.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else existing.metadata
+                ),
                 "updated_by": payload.actor.participant_id,
                 "updated_at": now,
                 "version": existing.version + 1,
@@ -2588,6 +2980,63 @@ class CollaborationKernel:
                     timestamp=now,
                 )
                 await self._repository.record_event(conn, event)
+        await self._sync_memory_entry(updated)
+        return MemoryCommandResult(entry=updated, events=[event])
+
+    async def update_thread_memory_entry(
+        self, thread_id: UUID, memory_entry_id: UUID, payload: UpdateMemoryEntryRequest
+    ) -> MemoryCommandResult:
+        thread = await self._repository.fetch_thread(thread_id)
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
+        existing = await self._repository.fetch_memory_entry(memory_entry_id)
+        if (
+            existing is None
+            or existing.workspace_id != thread.workspace_id
+            or existing.thread_id != thread_id
+            or existing.scope != "thread"
+        ):
+            raise KeyError(f"Memory entry {memory_entry_id} not found")
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+        participant = self._participant_profile(
+            workspace_id=thread.workspace_id,
+            actor=payload.actor,
+            now=now,
+        )
+        updated = existing.model_copy(
+            update={
+                "content": payload.content if payload.content is not None else existing.content,
+                "summary": payload.summary if payload.summary is not None else existing.summary,
+                "visibility": payload.visibility if payload.visibility is not None else existing.visibility,
+                "metadata": (
+                    {**existing.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else existing.metadata
+                ),
+                "updated_by": payload.actor.participant_id,
+                "updated_at": now,
+                "version": existing.version + 1,
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._ensure_participant_identity(conn, participant)
+                await self._repository.upsert_participant(conn, participant)
+                await self._repository.upsert_memory_entry(conn, updated)
+                event = await self._build_thread_event(
+                    conn,
+                    thread.workspace_id,
+                    thread_id,
+                    "thread.memory_entry_updated",
+                    actor=actor,
+                    target=TargetRef(type="memory_entry", id=updated.memory_entry_id),
+                    visibility=updated.visibility,
+                    payload=updated.model_dump(mode="json"),
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        await self._sync_memory_entry(updated)
         return MemoryCommandResult(entry=updated, events=[event])
 
     async def delete_memory_entry(
@@ -2597,7 +3046,11 @@ class CollaborationKernel:
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
         existing = await self._repository.fetch_memory_entry(memory_entry_id)
-        if existing is None or existing.workspace_id != workspace_id:
+        if (
+            existing is None
+            or existing.workspace_id != workspace_id
+            or existing.scope != "workspace"
+        ):
             raise KeyError(f"Memory entry {memory_entry_id} not found")
         now = self._now()
         actor = self._actor_from_input(actor_input)
@@ -2606,11 +3059,19 @@ class CollaborationKernel:
             actor=actor_input,
             now=now,
         )
+        archived = existing.model_copy(
+            update={
+                "state": "archived",
+                "updated_by": actor_input.participant_id,
+                "updated_at": now,
+                "version": existing.version + 1,
+            }
+        )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 await self._ensure_participant_identity(conn, participant)
                 await self._repository.upsert_participant(conn, participant)
-                await self._repository.delete_memory_entry(conn, memory_entry_id)
+                await self._repository.upsert_memory_entry(conn, archived)
                 event = await self._build_workspace_event(
                     conn,
                     workspace_id,
@@ -2622,7 +3083,156 @@ class CollaborationKernel:
                     timestamp=now,
                 )
                 await self._repository.record_event(conn, event)
+        await self._delete_memory_entry_from_providers(existing)
         return [event]
+
+    async def delete_thread_memory_entry(
+        self, thread_id: UUID, memory_entry_id: UUID, actor_input: ParticipantInput
+    ) -> list[EventEnvelope]:
+        thread = await self._repository.fetch_thread(thread_id)
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
+        existing = await self._repository.fetch_memory_entry(memory_entry_id)
+        if (
+            existing is None
+            or existing.workspace_id != thread.workspace_id
+            or existing.thread_id != thread_id
+            or existing.scope != "thread"
+        ):
+            raise KeyError(f"Memory entry {memory_entry_id} not found")
+        now = self._now()
+        actor = self._actor_from_input(actor_input)
+        participant = self._participant_profile(
+            workspace_id=thread.workspace_id,
+            actor=actor_input,
+            now=now,
+        )
+        archived = existing.model_copy(
+            update={
+                "state": "archived",
+                "updated_by": actor_input.participant_id,
+                "updated_at": now,
+                "version": existing.version + 1,
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._ensure_participant_identity(conn, participant)
+                await self._repository.upsert_participant(conn, participant)
+                await self._repository.upsert_memory_entry(conn, archived)
+                event = await self._build_thread_event(
+                    conn,
+                    thread.workspace_id,
+                    thread_id,
+                    "thread.memory_entry_deleted",
+                    actor=actor,
+                    target=TargetRef(type="memory_entry", id=memory_entry_id),
+                    visibility=existing.visibility,
+                    payload={"memory_entry_id": str(memory_entry_id)},
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        await self._delete_memory_entry_from_providers(existing)
+        return [event]
+
+    async def search_thread_memory(
+        self,
+        thread_id: UUID,
+        payload: SearchMemoryRequest,
+    ) -> MemorySearchResponse:
+        thread = await self._repository.fetch_thread(thread_id)
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
+        provider_definition = await self._resolve_search_memory_provider(payload.use_provider)
+        provider = self._memory_provider_index.get(provider_definition.provider)
+        if provider is None:
+            raise ValueError(f"Unsupported memory provider {provider_definition.provider!r}")
+        viewer = self._participant_profile(
+            workspace_id=thread.workspace_id,
+            actor=payload.actor,
+            now=self._now(),
+        )
+        raw_results = await provider.search(
+            provider_definition,
+            scope="thread",
+            workspace_id=thread.workspace_id,
+            thread_id=thread_id,
+            run_id=None,
+            query=payload.query,
+            limit=payload.limit,
+            include_graph=payload.include_graph,
+            metadata_filters=payload.metadata_filters,
+        )
+        hits: list[MemorySearchHit] = []
+        for hit in raw_results.hits:
+            if hit.memory_entry_id is None:
+                continue
+            entry = await self._repository.fetch_memory_entry(hit.memory_entry_id)
+            if entry is None or entry.state == "archived":
+                continue
+            if not self._filter_visible_memory_entries([entry], viewer=viewer):
+                continue
+            hits.append(
+                MemorySearchHit(
+                    entry=entry,
+                    score=hit.score,
+                    relations=hit.relations,
+                    metadata=hit.metadata,
+                )
+            )
+        return MemorySearchResponse(
+            query=payload.query,
+            provider=provider_definition.provider_key,
+            results=hits,
+            metadata=raw_results.metadata,
+        )
+
+    async def append_run_scratch(
+        self,
+        *,
+        run_id: UUID,
+        actor_input: ParticipantInput,
+        entry_type: str,
+        content: str,
+        summary: str | None = None,
+        metadata: dict[str, object] | None = None,
+        visibility: str = "agents_only",
+        source: str = "agent_runtime",
+    ) -> MemoryEntry:
+        run = await self._repository.fetch_run(run_id)
+        if run is None:
+            raise KeyError(f"Run {run_id} not found")
+        now = self._now()
+        participant = self._participant_profile(
+            workspace_id=run.workspace_id,
+            actor=actor_input,
+            now=now,
+        )
+        entry = MemoryEntry(
+            memory_entry_id=uuid4(),
+            scope="run",
+            state="scratch",
+            workspace_id=run.workspace_id,
+            thread_id=run.thread_id,
+            run_id=run_id,
+            entry_type=entry_type,
+            content=content,
+            summary=summary,
+            source=source,
+            created_by=actor_input.participant_id,
+            updated_by=actor_input.participant_id,
+            visibility=visibility,
+            metadata=dict(metadata or {}),
+            created_at=now,
+            updated_at=now,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._ensure_participant_identity(conn, participant)
+                await self._repository.upsert_participant(conn, participant)
+                await self._repository.upsert_memory_entry(conn, entry)
+        await self._sync_memory_entry(entry)
+        return entry
 
     async def publish_presence(
         self,

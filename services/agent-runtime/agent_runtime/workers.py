@@ -21,7 +21,7 @@ from open_talon_contracts.llm_engines import (  # noqa: E402
     LlmEngineRegistry,
     llm_engine_descriptor_from_provider_definition,
 )
-from open_talon_contracts.models import ExecutionSpec  # noqa: E402
+from open_talon_contracts.models import ExecutionSpec, ParticipantInput  # noqa: E402
 
 from .config import RuntimeWorkerSettings
 from .events import KafkaEventPublisher, KafkaWakeConsumer
@@ -199,6 +199,29 @@ class AgentLoopWorker:
             resolved_context = await self._resolve_execution_context(context)
             executor = self._executors[resolved_context.system_agent.endpoint.kind]
             result = await executor.execute(resolved_context)
+            scratch_content = (result.summary or result.message or "").strip()
+            if scratch_content:
+                await self._kernel.append_run_scratch(
+                    run_id=resolved_context.run.run_id,
+                    actor_input=ParticipantInput(
+                        participant_id=resolved_context.participant.participant_id,
+                        participant_type=resolved_context.participant.participant_type,
+                        user_id=resolved_context.participant.user_id,
+                        display_name=resolved_context.participant.display_name,
+                        description=resolved_context.participant.description,
+                        roles=list(resolved_context.participant.roles),
+                        capabilities=list(resolved_context.participant.capabilities),
+                        visibility_scope=resolved_context.participant.visibility_scope,
+                    ),
+                    entry_type="agent_step_summary",
+                    content=scratch_content,
+                    summary=result.summary or "Agent model step summary",
+                    metadata={
+                        "stop_reason": result.stop_reason,
+                        "tool_call_count": len(result.tool_calls),
+                        "source": "agent-loop-worker",
+                    },
+                )
             if result.tool_calls:
                 queued = await self._kernel.queue_tool_calls_for_run_step(
                     step_id,

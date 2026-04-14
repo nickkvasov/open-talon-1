@@ -49,7 +49,9 @@ def test_local_startup_includes_keycloak_init_helper():
     assert 'entrypoint: ["/bin/sh", "/opt/keycloak/data/import/init-dev-realms.sh"]' in compose
     assert "KC_BOOTSTRAP_ADMIN_USERNAME" in compose
     assert "KC_BOOTSTRAP_ADMIN_PASSWORD" in compose
-    assert "keycloak \\\n      keycloak-init \\" in launcher
+    assert "local services=(" in launcher
+    assert "keycloak" in launcher
+    assert "keycloak-init" in launcher
     assert 'AGENT_TASK_PID_FILE="${RUN_DIR}/agent-task-worker.pid"' in launcher
     assert '"agent-task-worker" \\' in launcher
     assert '"agent_runtime.agent_task_worker" \\' in launcher

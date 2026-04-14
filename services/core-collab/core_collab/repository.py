@@ -19,6 +19,8 @@ from .contracts import (
     GitRepository,
     Membership,
     MemoryEntry,
+    MemoryProviderDefinition,
+    MemoryProviderRecord,
     LlmProviderDefinition,
     ParticipantProfile,
     ResolvedAssetBinding,
@@ -797,43 +799,132 @@ class CollaborationRepository:
     ) -> None:
         await conn.execute(
             """
-            INSERT INTO workspace_memory_entries (
-                memory_entry_id, workspace_id, entry_type, title, content, tags,
-                created_by, updated_by, version, visibility, linked_thread_ids, created_at, updated_at
+            INSERT INTO memory_entries (
+                memory_entry_id, scope, state, workspace_id, thread_id, run_id,
+                entry_type, content, summary, source, visibility,
+                created_by, updated_by, confirmed_by, confirmed_at, version,
+                metadata, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11,
+                $12, $13, $14, $15, $16,
+                $17, $18, $19
+            )
             ON CONFLICT (memory_entry_id) DO UPDATE
-                SET entry_type = EXCLUDED.entry_type,
-                    title = EXCLUDED.title,
+                SET scope = EXCLUDED.scope,
+                    state = EXCLUDED.state,
+                    thread_id = EXCLUDED.thread_id,
+                    run_id = EXCLUDED.run_id,
+                    entry_type = EXCLUDED.entry_type,
                     content = EXCLUDED.content,
-                    tags = EXCLUDED.tags,
-                    updated_by = EXCLUDED.updated_by,
-                    version = EXCLUDED.version,
+                    summary = EXCLUDED.summary,
+                    source = EXCLUDED.source,
                     visibility = EXCLUDED.visibility,
-                    linked_thread_ids = EXCLUDED.linked_thread_ids,
+                    updated_by = EXCLUDED.updated_by,
+                    confirmed_by = EXCLUDED.confirmed_by,
+                    confirmed_at = EXCLUDED.confirmed_at,
+                    version = EXCLUDED.version,
+                    metadata = EXCLUDED.metadata,
                     updated_at = EXCLUDED.updated_at
             """,
             entry.memory_entry_id,
+            entry.scope,
+            entry.state,
             entry.workspace_id,
+            entry.thread_id,
+            entry.run_id,
             entry.entry_type,
-            entry.title,
             entry.content,
-            self._json_dumps(entry.tags),
+            entry.summary,
+            entry.source,
+            entry.visibility,
             entry.created_by,
             entry.updated_by,
+            entry.confirmed_by,
+            entry.confirmed_at,
             entry.version,
-            entry.visibility,
-            self._json_dumps(entry.linked_thread_ids),
+            self._json_dumps(entry.metadata),
             entry.created_at,
             entry.updated_at,
         )
 
-    async def delete_memory_entry(
-        self, conn: asyncpg.Connection, memory_entry_id: UUID
+    async def upsert_memory_provider(
+        self, conn: asyncpg.Connection, provider: MemoryProviderDefinition
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO memory_providers (
+                provider_id, provider_key, display_name, description, provider, enabled,
+                config, secret_config, created_by, created_at, updated_by, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11, $12, $13
+            )
+            ON CONFLICT (provider_id) DO UPDATE
+                SET provider_key = EXCLUDED.provider_key,
+                    display_name = EXCLUDED.display_name,
+                    description = EXCLUDED.description,
+                    provider = EXCLUDED.provider,
+                    enabled = EXCLUDED.enabled,
+                    config = EXCLUDED.config,
+                    secret_config = EXCLUDED.secret_config,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            provider.provider_id,
+            provider.provider_key,
+            provider.display_name,
+            provider.description,
+            provider.provider,
+            provider.enabled,
+            self._json_dumps(provider.config),
+            self._json_dumps(provider.secret_config),
+            provider.created_by,
+            provider.created_at,
+            provider.updated_by,
+            provider.updated_at,
+            self._json_dumps(provider.metadata),
+        )
+
+    async def upsert_memory_provider_record(
+        self, conn: asyncpg.Connection, record: MemoryProviderRecord
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO memory_provider_records (
+                provider_record_id, memory_entry_id, provider_id, external_id, status,
+                last_synced_at, last_error, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (memory_entry_id, provider_id) DO UPDATE
+                SET external_id = EXCLUDED.external_id,
+                    status = EXCLUDED.status,
+                    last_synced_at = EXCLUDED.last_synced_at,
+                    last_error = EXCLUDED.last_error,
+                    metadata = EXCLUDED.metadata
+            """,
+            record.provider_record_id,
+            record.memory_entry_id,
+            record.provider_id,
+            record.external_id,
+            record.status,
+            record.last_synced_at,
+            record.last_error,
+            self._json_dumps(record.metadata),
+        )
+
+    async def delete_memory_provider(
+        self, conn: asyncpg.Connection, *, provider_id: UUID
     ) -> bool:
         result = await conn.execute(
-            "DELETE FROM workspace_memory_entries WHERE memory_entry_id = $1",
-            memory_entry_id,
+            """
+            DELETE FROM memory_providers
+            WHERE provider_id = $1
+            """,
+            provider_id,
         )
         return result.endswith("1")
 
@@ -1974,29 +2065,180 @@ class CollaborationRepository:
         return [self._membership_from_row(row) for row in rows]
 
     async def list_memory_entries(self, workspace_id: UUID) -> list[MemoryEntry]:
+        return await self.list_memory_entries_for_scope(
+            scope="workspace",
+            workspace_id=workspace_id,
+            state="confirmed",
+        )
+
+    async def list_memory_entries_for_scope(
+        self,
+        *,
+        scope: str,
+        workspace_id: UUID | None = None,
+        thread_id: UUID | None = None,
+        run_id: UUID | None = None,
+        state: str | None = None,
+    ) -> list[MemoryEntry]:
         rows = await self._pool.fetch(
             """
-            SELECT memory_entry_id, workspace_id, entry_type, title, content, tags,
-                   created_by, updated_by, version, visibility, linked_thread_ids, created_at, updated_at
-            FROM workspace_memory_entries
-            WHERE workspace_id = $1
+            SELECT memory_entry_id, scope, state, workspace_id, thread_id, run_id,
+                   entry_type, content, summary, source, visibility, created_by, updated_by,
+                   confirmed_by, confirmed_at, version, metadata, created_at, updated_at
+            FROM memory_entries
+            WHERE scope = $1
+              AND ($2::uuid IS NULL OR workspace_id = $2)
+              AND ($3::uuid IS NULL OR thread_id = $3)
+              AND ($4::uuid IS NULL OR run_id = $4)
+              AND ($5::text IS NULL OR state = $5)
             ORDER BY updated_at DESC
             """,
+            scope,
             workspace_id,
+            thread_id,
+            run_id,
+            state,
+        )
+        return [self._memory_entry_from_row(row) for row in rows]
+
+    async def search_memory_entries(
+        self,
+        *,
+        scope: str,
+        workspace_id: UUID | None = None,
+        thread_id: UUID | None = None,
+        run_id: UUID | None = None,
+        query: str,
+        limit: int,
+        state: str | None = None,
+    ) -> list[MemoryEntry]:
+        pattern = f"%{query.strip()}%"
+        rows = await self._pool.fetch(
+            """
+            SELECT memory_entry_id, scope, state, workspace_id, thread_id, run_id,
+                   entry_type, content, summary, source, visibility, created_by, updated_by,
+                   confirmed_by, confirmed_at, version, metadata, created_at, updated_at
+            FROM memory_entries
+            WHERE scope = $1
+              AND ($2::uuid IS NULL OR workspace_id = $2)
+              AND ($3::uuid IS NULL OR thread_id = $3)
+              AND ($4::uuid IS NULL OR run_id = $4)
+              AND ($5::text IS NULL OR state = $5)
+              AND (
+                    content ILIKE $6
+                 OR COALESCE(summary, '') ILIKE $6
+                 OR entry_type ILIKE $6
+              )
+            ORDER BY updated_at DESC
+            LIMIT $7
+            """,
+            scope,
+            workspace_id,
+            thread_id,
+            run_id,
+            state,
+            pattern,
+            limit,
         )
         return [self._memory_entry_from_row(row) for row in rows]
 
     async def fetch_memory_entry(self, memory_entry_id: UUID) -> MemoryEntry | None:
         row = await self._pool.fetchrow(
             """
-            SELECT memory_entry_id, workspace_id, entry_type, title, content, tags,
-                   created_by, updated_by, version, visibility, linked_thread_ids, created_at, updated_at
-            FROM workspace_memory_entries
+            SELECT memory_entry_id, scope, state, workspace_id, thread_id, run_id,
+                   entry_type, content, summary, source, visibility, created_by, updated_by,
+                   confirmed_by, confirmed_at, version, metadata, created_at, updated_at
+            FROM memory_entries
             WHERE memory_entry_id = $1
             """,
             memory_entry_id,
         )
         return self._memory_entry_from_row(row) if row else None
+
+    async def list_memory_providers(self) -> list[MemoryProviderDefinition]:
+        rows = await self._pool.fetch(
+            """
+            SELECT provider_id, provider_key, display_name, description, provider, enabled,
+                   config, secret_config, created_by, created_at, updated_by, updated_at, metadata
+            FROM memory_providers
+            ORDER BY created_at ASC
+            """
+        )
+        return [self._memory_provider_from_row(row) for row in rows]
+
+    async def list_enabled_memory_providers(self) -> list[MemoryProviderDefinition]:
+        rows = await self._pool.fetch(
+            """
+            SELECT provider_id, provider_key, display_name, description, provider, enabled,
+                   config, secret_config, created_by, created_at, updated_by, updated_at, metadata
+            FROM memory_providers
+            WHERE enabled = TRUE
+            ORDER BY created_at ASC
+            """
+        )
+        return [self._memory_provider_from_row(row) for row in rows]
+
+    async def fetch_memory_provider(
+        self, provider_id: UUID
+    ) -> MemoryProviderDefinition | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT provider_id, provider_key, display_name, description, provider, enabled,
+                   config, secret_config, created_by, created_at, updated_by, updated_at, metadata
+            FROM memory_providers
+            WHERE provider_id = $1
+            """,
+            provider_id,
+        )
+        return self._memory_provider_from_row(row) if row else None
+
+    async def fetch_memory_provider_by_key(
+        self, provider_key: str
+    ) -> MemoryProviderDefinition | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT provider_id, provider_key, display_name, description, provider, enabled,
+                   config, secret_config, created_by, created_at, updated_by, updated_at, metadata
+            FROM memory_providers
+            WHERE provider_key = $1
+            """,
+            provider_key,
+        )
+        return self._memory_provider_from_row(row) if row else None
+
+    async def list_memory_provider_records(
+        self, memory_entry_id: UUID
+    ) -> list[MemoryProviderRecord]:
+        rows = await self._pool.fetch(
+            """
+            SELECT provider_record_id, memory_entry_id, provider_id, external_id, status,
+                   last_synced_at, last_error, metadata
+            FROM memory_provider_records
+            WHERE memory_entry_id = $1
+            ORDER BY provider_id ASC
+            """,
+            memory_entry_id,
+        )
+        return [self._memory_provider_record_from_row(row) for row in rows]
+
+    async def fetch_memory_provider_record(
+        self,
+        *,
+        memory_entry_id: UUID,
+        provider_id: UUID,
+    ) -> MemoryProviderRecord | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT provider_record_id, memory_entry_id, provider_id, external_id, status,
+                   last_synced_at, last_error, metadata
+            FROM memory_provider_records
+            WHERE memory_entry_id = $1
+              AND provider_id = $2
+            """,
+            memory_entry_id,
+            provider_id,
+        )
+        return self._memory_provider_record_from_row(row) if row else None
 
     async def list_timeline_messages(self, thread_id: UUID) -> list[TimelineMessage]:
         rows = await self._pool.fetch(
@@ -2472,22 +2714,57 @@ class CollaborationRepository:
     def _memory_entry_from_row(row: asyncpg.Record) -> MemoryEntry:
         return MemoryEntry(
             memory_entry_id=row["memory_entry_id"],
+            scope=row["scope"],
+            state=row["state"],
             workspace_id=row["workspace_id"],
+            thread_id=row["thread_id"],
+            run_id=row["run_id"],
             entry_type=row["entry_type"],
-            title=row["title"],
             content=row["content"],
-            tags=list(CollaborationRepository._json_value(row["tags"], default=[])),
+            summary=row["summary"],
+            source=row["source"],
             created_by=row["created_by"],
             updated_by=row["updated_by"],
+            confirmed_by=row["confirmed_by"],
+            confirmed_at=row["confirmed_at"],
             version=row["version"],
             visibility=row["visibility"],
-            linked_thread_ids=list(
-                CollaborationRepository._json_value(
-                    row["linked_thread_ids"], default=[]
-                )
-            ),
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _memory_provider_from_row(row: asyncpg.Record) -> MemoryProviderDefinition:
+        return MemoryProviderDefinition(
+            provider_id=row["provider_id"],
+            provider_key=row["provider_key"],
+            display_name=row["display_name"],
+            description=row["description"],
+            provider=row["provider"],
+            enabled=row["enabled"],
+            config=CollaborationRepository._json_value(row["config"], default={}),
+            secret_config=CollaborationRepository._json_value(
+                row["secret_config"], default={}
+            ),
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_by=row["updated_by"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _memory_provider_record_from_row(row: asyncpg.Record) -> MemoryProviderRecord:
+        return MemoryProviderRecord(
+            provider_record_id=row["provider_record_id"],
+            memory_entry_id=row["memory_entry_id"],
+            provider_id=row["provider_id"],
+            external_id=row["external_id"],
+            status=row["status"],
+            last_synced_at=row["last_synced_at"],
+            last_error=row["last_error"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
         )
 
     @staticmethod

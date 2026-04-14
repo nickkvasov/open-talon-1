@@ -44,6 +44,7 @@ class MockCollaborationService:
         self.system_agents = {}
         self.system_tools = {}
         self.llm_providers = {}
+        self.memory_providers = {}
         self.participants = {}
         self.role_definitions = {}
         self.workspace_tools = {}
@@ -169,7 +170,11 @@ class MockCollaborationService:
             self.events.pop(thread_id, None)
             self.thread_sequences.pop(thread_id, None)
             self.subscriptions.pop(thread_id, None)
-        self.memory_entries.pop(str(workspace_id), None)
+        self.memory_entries = {
+            memory_entry_id: entry
+            for memory_entry_id, entry in self.memory_entries.items()
+            if entry.workspace_id != workspace_id
+        }
         self.workspace_sequences.pop(str(workspace_id), None)
         return {"deleted": True, "workspace_id": str(workspace_id)}
 
@@ -626,6 +631,72 @@ class MockCollaborationService:
         self.llm_providers.pop(str(provider_id), None)
         return {"deleted": True, "provider_id": str(provider_id)}
 
+    async def create_memory_provider(self, payload):
+        from gateway_edge.models import MemoryProviderDefinition
+
+        now = datetime.now(timezone.utc)
+        provider = MemoryProviderDefinition(
+            provider_id=uuid4(),
+            provider_key=payload.provider_key,
+            display_name=payload.display_name,
+            description=payload.description,
+            provider=payload.provider,
+            enabled=payload.enabled,
+            config=payload.config,
+            secret_config=payload.secret_config,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        self.memory_providers[str(provider.provider_id)] = provider
+        return provider
+
+    async def list_memory_providers(self):
+        return list(self.memory_providers.values())
+
+    async def get_memory_provider(self, provider_id: UUID):
+        provider = self.memory_providers.get(str(provider_id))
+        if provider is None:
+            raise KeyError(f"Memory provider {provider_id} not found")
+        return provider
+
+    async def update_memory_provider(self, provider_id: UUID, payload):
+        provider = self.memory_providers.get(str(provider_id))
+        if provider is None:
+            raise KeyError(f"Memory provider {provider_id} not found")
+        updated = provider.model_copy(
+            update={
+                "provider_key": payload.provider_key or provider.provider_key,
+                "display_name": payload.display_name or provider.display_name,
+                "description": payload.description or provider.description,
+                "provider": payload.provider or provider.provider,
+                "enabled": payload.enabled if payload.enabled is not None else provider.enabled,
+                "config": payload.config if payload.config is not None else provider.config,
+                "secret_config": (
+                    payload.secret_config
+                    if payload.secret_config is not None
+                    else provider.secret_config
+                ),
+                "updated_by": payload.actor.participant_id,
+                "updated_at": datetime.now(timezone.utc),
+                "metadata": (
+                    {**provider.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else provider.metadata
+                ),
+            }
+        )
+        self.memory_providers[str(provider_id)] = updated
+        return updated
+
+    async def delete_memory_provider(self, provider_id: UUID, payload):
+        if str(provider_id) not in self.memory_providers:
+            raise KeyError(f"Memory provider {provider_id} not found")
+        self.memory_providers.pop(str(provider_id), None)
+        return {"deleted": True, "provider_id": str(provider_id)}
+
     async def upsert_role_definition(self, workspace_id: UUID, payload):
         from gateway_edge.models import RoleDefinition
 
@@ -942,10 +1013,33 @@ class MockCollaborationService:
             await self._fan_out(thread_id, task_event)
         return message
 
+    def _memory_entry_matches(
+        self,
+        entry,
+        *,
+        scope: str,
+        workspace_id: UUID | None = None,
+        thread_id: UUID | None = None,
+    ) -> bool:
+        return (
+            entry.scope == scope
+            and entry.state != "archived"
+            and (workspace_id is None or entry.workspace_id == workspace_id)
+            and (thread_id is None or entry.thread_id == thread_id)
+        )
+
     async def list_memory_entries(self, workspace_id: UUID):
         if str(workspace_id) not in self.workspaces:
             raise KeyError(f"Workspace {workspace_id} not found")
-        return list(self.memory_entries.get(str(workspace_id), {}).values())
+        return [
+            entry
+            for entry in self.memory_entries.values()
+            if self._memory_entry_matches(
+                entry,
+                scope="workspace",
+                workspace_id=workspace_id,
+            )
+        ]
 
     async def create_memory_entry(self, workspace_id: UUID, payload):
         from gateway_edge.models import MemoryEntry
@@ -955,51 +1049,222 @@ class MockCollaborationService:
         now = datetime.now(timezone.utc)
         entry = MemoryEntry(
             memory_entry_id=uuid4(),
+            scope="workspace",
+            state="confirmed",
             workspace_id=workspace_id,
             entry_type=payload.entry_type,
-            title=payload.title,
             content=payload.content,
-            tags=payload.tags,
+            summary=payload.summary,
+            source="workspace_api",
             created_by=payload.actor.participant_id,
             updated_by=payload.actor.participant_id,
             visibility=payload.visibility,
-            linked_thread_ids=payload.linked_thread_ids,
+            metadata=payload.metadata,
             created_at=now,
             updated_at=now,
         )
-        self.memory_entries.setdefault(str(workspace_id), {})[
-            str(entry.memory_entry_id)
-        ] = entry
+        self.memory_entries[str(entry.memory_entry_id)] = entry
+        return entry
+
+    async def list_thread_memory_entries(self, thread_id: UUID):
+        thread = self.threads.get(str(thread_id))
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
+        return [
+            entry
+            for entry in self.memory_entries.values()
+            if self._memory_entry_matches(
+                entry,
+                scope="thread",
+                workspace_id=thread.workspace_id,
+                thread_id=thread_id,
+            )
+        ]
+
+    async def create_thread_memory_entry(self, thread_id: UUID, payload):
+        from gateway_edge.models import MemoryEntry
+
+        thread = self.threads.get(str(thread_id))
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
+        now = datetime.now(timezone.utc)
+        entry = MemoryEntry(
+            memory_entry_id=uuid4(),
+            scope="thread",
+            state="confirmed",
+            workspace_id=thread.workspace_id,
+            thread_id=thread_id,
+            entry_type=payload.entry_type,
+            content=payload.content,
+            summary=payload.summary,
+            source="thread_api",
+            created_by=payload.actor.participant_id,
+            updated_by=payload.actor.participant_id,
+            visibility=payload.visibility,
+            metadata=payload.metadata,
+            created_at=now,
+            updated_at=now,
+        )
+        self.memory_entries[str(entry.memory_entry_id)] = entry
+        return entry
+
+    async def confirm_workspace_memory(self, workspace_id: UUID, payload):
+        from gateway_edge.models import MemoryEntry
+
+        if str(workspace_id) not in self.workspaces:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        source = self.memory_entries.get(str(payload.source_memory_entry_id))
+        if source is None:
+            raise KeyError(f"Memory entry {payload.source_memory_entry_id} not found")
+        now = datetime.now(timezone.utc)
+        entry = MemoryEntry(
+            memory_entry_id=uuid4(),
+            scope="workspace",
+            state="confirmed",
+            workspace_id=workspace_id,
+            entry_type=payload.entry_type or source.entry_type,
+            content=payload.content or source.content,
+            summary=payload.summary if payload.summary is not None else source.summary,
+            source="thread_confirmation",
+            created_by=source.created_by,
+            updated_by=payload.actor.participant_id,
+            confirmed_by=payload.actor.participant_id,
+            confirmed_at=now,
+            visibility=payload.visibility,
+            metadata={
+                **source.metadata,
+                **payload.metadata,
+                "source_memory_entry_id": str(source.memory_entry_id),
+            },
+            created_at=now,
+            updated_at=now,
+        )
+        self.memory_entries[str(entry.memory_entry_id)] = entry
         return entry
 
     async def update_memory_entry(self, workspace_id: UUID, memory_entry_id: UUID, payload):
-        entries = self.memory_entries.get(str(workspace_id), {})
-        entry = entries.get(str(memory_entry_id))
-        if entry is None:
+        entry = self.memory_entries.get(str(memory_entry_id))
+        if (
+            entry is None
+            or entry.workspace_id != workspace_id
+            or entry.scope != "workspace"
+            or entry.state == "archived"
+        ):
             raise KeyError(f"Memory entry {memory_entry_id} not found")
         updated = entry.model_copy(
             update={
-                "title": payload.title if payload.title is not None else entry.title,
                 "content": payload.content if payload.content is not None else entry.content,
-                "tags": payload.tags if payload.tags is not None else entry.tags,
+                "summary": payload.summary if payload.summary is not None else entry.summary,
                 "visibility": payload.visibility if payload.visibility is not None else entry.visibility,
-                "linked_thread_ids": payload.linked_thread_ids
-                if payload.linked_thread_ids is not None
-                else entry.linked_thread_ids,
+                "metadata": (
+                    {**entry.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else entry.metadata
+                ),
                 "updated_by": payload.actor.participant_id,
                 "updated_at": datetime.now(timezone.utc),
                 "version": entry.version + 1,
             }
         )
-        entries[str(memory_entry_id)] = updated
+        self.memory_entries[str(memory_entry_id)] = updated
+        return updated
+
+    async def update_thread_memory_entry(self, thread_id: UUID, memory_entry_id: UUID, payload):
+        thread = self.threads.get(str(thread_id))
+        entry = self.memory_entries.get(str(memory_entry_id))
+        if (
+            thread is None
+            or entry is None
+            or entry.thread_id != thread_id
+            or entry.workspace_id != thread.workspace_id
+            or entry.scope != "thread"
+            or entry.state == "archived"
+        ):
+            raise KeyError(f"Memory entry {memory_entry_id} not found")
+        updated = entry.model_copy(
+            update={
+                "content": payload.content if payload.content is not None else entry.content,
+                "summary": payload.summary if payload.summary is not None else entry.summary,
+                "visibility": payload.visibility if payload.visibility is not None else entry.visibility,
+                "metadata": (
+                    {**entry.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else entry.metadata
+                ),
+                "updated_by": payload.actor.participant_id,
+                "updated_at": datetime.now(timezone.utc),
+                "version": entry.version + 1,
+            }
+        )
+        self.memory_entries[str(memory_entry_id)] = updated
         return updated
 
     async def delete_memory_entry(self, workspace_id: UUID, memory_entry_id: UUID, actor):
-        entries = self.memory_entries.get(str(workspace_id), {})
-        if str(memory_entry_id) not in entries:
+        entry = self.memory_entries.get(str(memory_entry_id))
+        if (
+            entry is None
+            or entry.workspace_id != workspace_id
+            or entry.scope != "workspace"
+            or entry.state == "archived"
+        ):
             raise KeyError(f"Memory entry {memory_entry_id} not found")
-        entries.pop(str(memory_entry_id))
+        self.memory_entries[str(memory_entry_id)] = entry.model_copy(
+            update={
+                "state": "archived",
+                "updated_by": actor.participant_id,
+                "updated_at": datetime.now(timezone.utc),
+                "version": entry.version + 1,
+            }
+        )
         return {"deleted": True, "memory_entry_id": str(memory_entry_id)}
+
+    async def delete_thread_memory_entry(self, thread_id: UUID, memory_entry_id: UUID, actor):
+        entry = self.memory_entries.get(str(memory_entry_id))
+        if (
+            entry is None
+            or entry.thread_id != thread_id
+            or entry.scope != "thread"
+            or entry.state == "archived"
+        ):
+            raise KeyError(f"Memory entry {memory_entry_id} not found")
+        self.memory_entries[str(memory_entry_id)] = entry.model_copy(
+            update={
+                "state": "archived",
+                "updated_by": actor.participant_id,
+                "updated_at": datetime.now(timezone.utc),
+                "version": entry.version + 1,
+            }
+        )
+        return {"deleted": True, "memory_entry_id": str(memory_entry_id)}
+
+    async def search_thread_memory(self, thread_id: UUID, payload):
+        from gateway_edge.models import MemorySearchHit, MemorySearchResponse
+
+        thread = self.threads.get(str(thread_id))
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
+        lowered = payload.query.lower()
+        matches = []
+        for entry in await self.list_thread_memory_entries(thread_id):
+            if (
+                lowered in entry.content.lower()
+                or lowered in (entry.summary or "").lower()
+                or lowered in entry.entry_type.lower()
+            ):
+                matches.append(
+                    MemorySearchHit(
+                        entry=entry,
+                        score=1.0,
+                        relations=[],
+                        metadata={"provider": payload.use_provider or "postgres"},
+                    )
+                )
+        return MemorySearchResponse(
+            query=payload.query,
+            provider=payload.use_provider or "postgres",
+            results=matches[: payload.limit],
+            metadata={"include_graph": payload.include_graph},
+        )
 
     async def publish_presence(self, *, thread_id: UUID, actor, status: str, connection_id: str | None = None):
         from gateway_edge.models import EventEnvelope, TargetRef, ActorRef

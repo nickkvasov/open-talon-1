@@ -23,17 +23,25 @@ from gateway_edge.models import (
     CreateGitRepositoryRequest,
     CreateAgentParticipantRequest,
     CreateLlmProviderRequest,
+    CreateMemoryProviderRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
+    ConfirmWorkspaceMemoryRequest,
     CreateMemoryEntryRequest,
+    CreateThreadMemoryRequest,
     CreateMessageRequest,
+    SearchMemoryRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
     DeleteLlmProviderRequest,
+    DeleteMemoryProviderRequest,
     DeleteParticipantRequest,
     DeleteWorkspaceToolRequest,
     DeleteWorkspaceRequest,
     MemoryEntry,
+    MemoryProviderDefinition,
+    MemoryProviderHealthReport,
+    MemorySearchResponse,
     LlmEngineDescriptor,
     LlmProviderDefinition,
     LlmProviderHealthReport,
@@ -54,6 +62,7 @@ from gateway_edge.models import (
     UpdateSystemToolRequest,
     UpdateAgentParticipantRequest,
     UpdateLlmProviderRequest,
+    UpdateMemoryProviderRequest,
     UpdateMemoryEntryRequest,
     UpdateWorkspaceToolRequest,
     Workspace,
@@ -64,6 +73,7 @@ from gateway_edge.models import (
 )
 from gateway_edge.services import collaboration as collab_svc
 from gateway_edge.services.llm_provider_health import check_llm_provider_health
+from gateway_edge.services.memory_provider_health import check_memory_provider_health
 from gateway_edge.services.llm_registry import list_registered_llm_engines
 
 router = APIRouter(prefix="/v1", tags=["collaboration"])
@@ -553,6 +563,152 @@ async def health_check_llm_provider(
     try:
         provider = await collab_svc.collaboration_service.get_llm_provider(provider_id)
         return await check_llm_provider_health(provider)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/memory-providers",
+    response_model=MemoryProviderDefinition,
+    summary="Create a system-level memory provider definition",
+)
+async def create_memory_provider(
+    request: Request,
+    payload: CreateMemoryProviderRequest,
+) -> MemoryProviderDefinition:
+    require_admin_access(request)
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    logger.debug(
+        "HTTP create_memory_provider actor=%s provider_key=%r provider=%s",
+        _actor_log(payload.actor),
+        payload.provider_key,
+        payload.provider,
+    )
+    try:
+        return await collab_svc.collaboration_service.create_memory_provider(payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/memory-providers/validate",
+    response_model=MemoryProviderHealthReport,
+    summary="Validate a memory provider definition without persisting it",
+)
+async def validate_memory_provider(
+    request: Request,
+    payload: CreateMemoryProviderRequest,
+) -> MemoryProviderHealthReport:
+    require_admin_access(request)
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    logger.debug(
+        "HTTP validate_memory_provider actor=%s provider_key=%r provider=%s",
+        _actor_log(payload.actor),
+        payload.provider_key,
+        payload.provider,
+    )
+    try:
+        now = datetime.now(timezone.utc)
+        provider = MemoryProviderDefinition(
+            provider_id=uuid4(),
+            provider_key=payload.provider_key,
+            display_name=payload.display_name,
+            description=payload.description,
+            provider=payload.provider,
+            enabled=payload.enabled,
+            config=payload.config,
+            secret_config=payload.secret_config,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        return await check_memory_provider_health(provider)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/memory-providers",
+    response_model=list[MemoryProviderDefinition],
+    summary="List system-level memory provider definitions",
+)
+async def list_memory_providers(request: Request) -> list[MemoryProviderDefinition]:
+    require_admin_access(request)
+    logger.debug("HTTP list_memory_providers")
+    try:
+        return await collab_svc.collaboration_service.list_memory_providers()
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch(
+    "/memory-providers/{provider_id}",
+    response_model=MemoryProviderDefinition,
+    summary="Update a system-level memory provider definition",
+)
+async def update_memory_provider(
+    request: Request,
+    provider_id: UUID,
+    payload: UpdateMemoryProviderRequest,
+) -> MemoryProviderDefinition:
+    require_admin_access(request)
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    logger.debug(
+        "HTTP update_memory_provider provider_id=%s actor=%s",
+        provider_id,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.update_memory_provider(
+            provider_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/memory-providers/{provider_id}",
+    response_model=dict,
+    summary="Delete a system-level memory provider definition",
+)
+async def delete_memory_provider(
+    request: Request,
+    provider_id: UUID,
+    payload: DeleteMemoryProviderRequest = Body(...),
+) -> dict[str, bool | str]:
+    require_admin_access(request)
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    logger.debug(
+        "HTTP delete_memory_provider provider_id=%s actor=%s",
+        provider_id,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.delete_memory_provider(
+            provider_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/memory-providers/{provider_id}/health-check",
+    response_model=MemoryProviderHealthReport,
+    summary="Validate a stored memory provider configuration",
+)
+async def health_check_memory_provider(
+    request: Request,
+    provider_id: UUID,
+) -> MemoryProviderHealthReport:
+    require_admin_access(request)
+    logger.debug("HTTP health_check_memory_provider provider_id=%s", provider_id)
+    try:
+        provider = await collab_svc.collaboration_service.get_memory_provider(provider_id)
+        return await check_memory_provider_health(provider)
     except Exception as exc:
         raise _http_error(exc) from exc
 
@@ -1313,14 +1469,46 @@ async def create_workspace_memory(
         }
     )
     logger.debug(
-        "HTTP create_workspace_memory workspace_id=%s actor=%s entry_type=%s title=%r",
+        "HTTP create_workspace_memory workspace_id=%s actor=%s entry_type=%s",
         workspace_id,
         _actor_log(payload.actor),
         payload.entry_type,
-        payload.title,
     )
     try:
         return await collab_svc.collaboration_service.create_memory_entry(
+            workspace_id, payload
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/workspaces/{workspace_id}/memory/confirm",
+    response_model=MemoryEntry,
+    summary="Confirm a thread or candidate memory into workspace memory",
+)
+async def confirm_workspace_memory(
+    request: Request,
+    workspace_id: UUID,
+    payload: ConfirmWorkspaceMemoryRequest,
+) -> MemoryEntry:
+    payload = payload.model_copy(
+        update={
+            "actor": await _resolve_workspace_actor(
+                request,
+                payload.actor,
+                workspace_id=workspace_id,
+            )
+        }
+    )
+    logger.debug(
+        "HTTP confirm_workspace_memory workspace_id=%s actor=%s source_memory_entry_id=%s",
+        workspace_id,
+        _actor_log(payload.actor),
+        payload.source_memory_entry_id,
+    )
+    try:
+        return await collab_svc.collaboration_service.confirm_workspace_memory(
             workspace_id, payload
         )
     except Exception as exc:
@@ -1390,6 +1578,156 @@ async def delete_workspace_memory(
     try:
         return await collab_svc.collaboration_service.delete_memory_entry(
             workspace_id,
+            memory_entry_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/threads/{thread_id}/memory",
+    response_model=list[MemoryEntry],
+    summary="List confirmed thread memory entries",
+)
+async def list_thread_memory(thread_id: UUID) -> list[MemoryEntry]:
+    logger.debug("HTTP list_thread_memory thread_id=%s", thread_id)
+    try:
+        return await collab_svc.collaboration_service.list_thread_memory_entries(thread_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/threads/{thread_id}/memory",
+    response_model=MemoryEntry,
+    summary="Create a thread memory entry",
+)
+async def create_thread_memory(
+    request: Request, thread_id: UUID, payload: CreateThreadMemoryRequest
+) -> MemoryEntry:
+    payload = payload.model_copy(
+        update={
+            "actor": await _resolve_thread_actor(
+                request,
+                payload.actor,
+                thread_id=thread_id,
+            )
+        }
+    )
+    logger.debug(
+        "HTTP create_thread_memory thread_id=%s actor=%s entry_type=%s",
+        thread_id,
+        _actor_log(payload.actor),
+        payload.entry_type,
+    )
+    try:
+        return await collab_svc.collaboration_service.create_thread_memory_entry(
+            thread_id, payload
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/threads/{thread_id}/memory/search",
+    response_model=MemorySearchResponse,
+    summary="Semantic search across confirmed thread memory",
+)
+async def search_thread_memory(
+    request: Request,
+    thread_id: UUID,
+    payload: SearchMemoryRequest,
+) -> MemorySearchResponse:
+    payload = payload.model_copy(
+        update={
+            "actor": await _resolve_thread_actor(
+                request,
+                payload.actor,
+                thread_id=thread_id,
+                auto_create=False,
+            )
+        }
+    )
+    logger.debug(
+        "HTTP search_thread_memory thread_id=%s actor=%s provider=%s query=%r",
+        thread_id,
+        _actor_log(payload.actor),
+        payload.use_provider,
+        payload.query,
+    )
+    try:
+        return await collab_svc.collaboration_service.search_thread_memory(
+            thread_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch(
+    "/threads/{thread_id}/memory/{memory_entry_id}",
+    response_model=MemoryEntry,
+    summary="Update a thread memory entry",
+)
+async def update_thread_memory(
+    request: Request,
+    thread_id: UUID,
+    memory_entry_id: UUID,
+    payload: UpdateMemoryEntryRequest,
+) -> MemoryEntry:
+    payload = payload.model_copy(
+        update={
+            "actor": await _resolve_thread_actor(
+                request,
+                payload.actor,
+                thread_id=thread_id,
+                auto_create=False,
+            )
+        }
+    )
+    logger.debug(
+        "HTTP update_thread_memory thread_id=%s memory_entry_id=%s actor=%s",
+        thread_id,
+        memory_entry_id,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.update_thread_memory_entry(
+            thread_id,
+            memory_entry_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/threads/{thread_id}/memory/{memory_entry_id}",
+    response_model=dict,
+    summary="Archive a thread memory entry",
+)
+async def delete_thread_memory(
+    request: Request,
+    thread_id: UUID,
+    memory_entry_id: UUID,
+    payload: ParticipantInput = Body(...),
+):
+    payload = await _resolve_thread_actor(
+        request,
+        payload,
+        thread_id=thread_id,
+        auto_create=False,
+    )
+    logger.debug(
+        "HTTP delete_thread_memory thread_id=%s memory_entry_id=%s actor=%s",
+        thread_id,
+        memory_entry_id,
+        _actor_log(payload),
+    )
+    try:
+        return await collab_svc.collaboration_service.delete_thread_memory_entry(
+            thread_id,
             memory_entry_id,
             payload,
         )

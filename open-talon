@@ -53,6 +53,7 @@ repo_pythonpath() {
     "${ROOT_DIR}/services/core-collab"
     "${ROOT_DIR}/services/gateway-edge"
     "${ROOT_DIR}/services/agent-runtime"
+    "${ROOT_DIR}/services/workspace-memory"
     "${ROOT_DIR}/apps/tui"
   )
   local joined
@@ -178,24 +179,29 @@ start_cmd() {
   echo "Starting infrastructure services..."
   (
     cd "${ROOT_DIR}/infrastructure"
-    docker compose up -d \
-      postgres \
-      pgadmin \
-      kafka \
-      valkey \
-      openbao \
-      openbao-init \
-      keycloak \
-      keycloak-init \
-      ollama \
-      clickhouse \
-      minio \
-      minio-init \
-      forgejo \
-      forgejo-init \
-      langfuse-db-init \
-      langfuse-worker \
+    local services=(
+      postgres
+      pgadmin
+      kafka
+      valkey
+      openbao
+      openbao-init
+      keycloak
+      keycloak-init
+      ollama
+      clickhouse
+      minio
+      minio-init
+      forgejo
+      forgejo-init
+      langfuse-db-init
+      langfuse-worker
       langfuse-web
+    )
+    if [[ "${OPEN_TALON_MEM0_ENABLE_GRAPH:-false}" == "true" ]]; then
+      services+=(memgraph)
+    fi
+    docker compose up -d "${services[@]}"
   )
 
   if [[ -f "${GATEWAY_PID_FILE}" ]]; then

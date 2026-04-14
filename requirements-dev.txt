@@ -2,6 +2,7 @@
 -e ./services/core-collab
 -e ./services/agent-runtime
 -e ./services/gateway-edge
+-e ./services/workspace-memory
 -e ./apps/tui
 pytest>=8
 pytest-asyncio>=0.23

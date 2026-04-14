@@ -343,13 +343,50 @@ def _build_fixture_context(*, endpoint_kind: str = "system"):
                 updated_at=now,
             ),
         ],
-        memory_entries=[
+        run_memory=[
             MemoryEntry(
                 memory_entry_id=uuid4(),
+                scope="run",
+                state="scratch",
                 workspace_id=workspace_id,
-                entry_type="note",
-                title="Release checklist",
+                thread_id=thread_id,
+                run_id=run_id,
+                entry_type="agent_step_summary",
+                summary="Reviewed visible context",
+                content="Checked the current request and visible execution state.",
+                created_by=user_id,
+                updated_by=user_id,
+                visibility="agents_only",
+                created_at=now,
+                updated_at=now,
+            )
+        ],
+        thread_memory=[
+            MemoryEntry(
+                memory_entry_id=uuid4(),
+                scope="thread",
+                state="confirmed",
+                workspace_id=workspace_id,
+                thread_id=thread_id,
+                entry_type="decision",
+                summary="Release checklist",
                 content="Run migrations in staging before production.",
+                created_by=user_id,
+                updated_by=user_id,
+                visibility="workspace",
+                created_at=now,
+                updated_at=now,
+            )
+        ],
+        workspace_memory=[
+            MemoryEntry(
+                memory_entry_id=uuid4(),
+                scope="workspace",
+                state="confirmed",
+                workspace_id=workspace_id,
+                entry_type="decision",
+                summary="Canonical sequencing",
+                content="core-collab remains the canonical collaboration store.",
                 created_by=user_id,
                 updated_by=user_id,
                 visibility="workspace",
@@ -811,8 +848,12 @@ def test_render_prompt_includes_participants_memory_and_thread_context():
 
     assert "Workspace participants:" in prompt
     assert "Nikolay (user)" in prompt
+    assert "Run scratch:" in prompt
+    assert "Reviewed visible context" in prompt
+    assert "Thread memory:" in prompt
     assert "Workspace memory:" in prompt
     assert "Release checklist" in prompt
+    assert "Canonical sequencing" in prompt
     assert "Workspace tools:" in prompt
     assert "repo_search | enabled: yes | Searches the current workspace source tree." in prompt
     assert "Visible thread messages:" in prompt

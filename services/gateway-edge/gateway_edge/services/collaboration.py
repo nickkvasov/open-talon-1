@@ -30,13 +30,18 @@ from gateway_edge.models import (
     CreateGitRepositoryRequest,
     CreateAgentParticipantRequest,
     CreateLlmProviderRequest,
+    CreateMemoryProviderRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
+    ConfirmWorkspaceMemoryRequest,
     CreateMemoryEntryRequest,
+    CreateThreadMemoryRequest,
     CreateMessageRequest,
+    SearchMemoryRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
     DeleteLlmProviderRequest,
+    DeleteMemoryProviderRequest,
     DeleteParticipantRequest,
     DeleteWorkspaceToolRequest,
     DeleteWorkspaceRequest,
@@ -44,6 +49,8 @@ from gateway_edge.models import (
     GitRepository,
     LinkAssetRequest,
     MemoryEntry,
+    MemoryProviderDefinition,
+    MemorySearchResponse,
     LlmProviderDefinition,
     ParticipantInput,
     RoleDefinition,
@@ -59,6 +66,7 @@ from gateway_edge.models import (
     UpdateSystemToolRequest,
     UpdateAgentParticipantRequest,
     UpdateLlmProviderRequest,
+    UpdateMemoryProviderRequest,
     UpdateMemoryEntryRequest,
     UpdateWorkspaceToolRequest,
     Workspace,
@@ -202,16 +210,32 @@ class CollaborationService:
         assert result.provider is not None
         return result.provider
 
+    async def create_memory_provider(
+        self, payload: CreateMemoryProviderRequest
+    ) -> MemoryProviderDefinition:
+        result = await self._require_kernel().create_memory_provider(payload)
+        assert result.provider is not None
+        return result.provider
+
     async def list_system_agents(self) -> list[AgentDefinition]:
         return await self._require_kernel().list_system_agents()
 
     async def list_llm_providers(self) -> list[LlmProviderDefinition]:
         return await self._require_kernel().list_llm_providers()
 
+    async def list_memory_providers(self) -> list[MemoryProviderDefinition]:
+        return await self._require_kernel().list_memory_providers()
+
     async def get_llm_provider(self, provider_id: UUID) -> LlmProviderDefinition:
         provider = await self._require_kernel().get_llm_provider(provider_id)
         if provider is None:
             raise KeyError(f"LLM provider {provider_id} not found")
+        return provider
+
+    async def get_memory_provider(self, provider_id: UUID) -> MemoryProviderDefinition:
+        provider = await self._require_kernel().get_memory_provider(provider_id)
+        if provider is None:
+            raise KeyError(f"Memory provider {provider_id} not found")
         return provider
 
     async def create_system_tool(
@@ -235,6 +259,13 @@ class CollaborationService:
         self, provider_id: UUID, payload: UpdateLlmProviderRequest
     ) -> LlmProviderDefinition:
         result = await self._require_kernel().update_llm_provider(provider_id, payload)
+        assert result.provider is not None
+        return result.provider
+
+    async def update_memory_provider(
+        self, provider_id: UUID, payload: UpdateMemoryProviderRequest
+    ) -> MemoryProviderDefinition:
+        result = await self._require_kernel().update_memory_provider(provider_id, payload)
         assert result.provider is not None
         return result.provider
 
@@ -403,6 +434,13 @@ class CollaborationService:
         payload: DeleteLlmProviderRequest,
     ) -> dict[str, bool | str]:
         return await self._require_kernel().delete_llm_provider(provider_id, payload)
+
+    async def delete_memory_provider(
+        self,
+        provider_id: UUID,
+        payload: DeleteMemoryProviderRequest,
+    ) -> dict[str, bool | str]:
+        return await self._require_kernel().delete_memory_provider(provider_id, payload)
 
     async def upsert_role_definition(
         self,
@@ -582,16 +620,48 @@ class CollaborationService:
         logger.debug("Service list_memory_entries workspace_id=%s", workspace_id)
         return await self._require_kernel().list_memory_entries(workspace_id)
 
+    async def list_thread_memory_entries(self, thread_id: UUID) -> list[MemoryEntry]:
+        logger.debug("Service list_thread_memory_entries thread_id=%s", thread_id)
+        return await self._require_kernel().list_thread_memory_entries(thread_id)
+
     async def create_memory_entry(
         self, workspace_id: UUID, payload: CreateMemoryEntryRequest
     ) -> MemoryEntry:
         logger.debug(
-            "Service create_memory_entry workspace_id=%s participant_id=%s title=%r",
+            "Service create_memory_entry workspace_id=%s participant_id=%s entry_type=%s",
             workspace_id,
             payload.actor.participant_id,
-            payload.title,
+            payload.entry_type,
         )
         result = await self._require_kernel().create_memory_entry(workspace_id, payload)
+        await self._publish_events(result.events)
+        assert result.entry is not None
+        return result.entry
+
+    async def create_thread_memory_entry(
+        self, thread_id: UUID, payload: CreateThreadMemoryRequest
+    ) -> MemoryEntry:
+        logger.debug(
+            "Service create_thread_memory_entry thread_id=%s participant_id=%s entry_type=%s",
+            thread_id,
+            payload.actor.participant_id,
+            payload.entry_type,
+        )
+        result = await self._require_kernel().create_thread_memory_entry(thread_id, payload)
+        await self._publish_events(result.events)
+        assert result.entry is not None
+        return result.entry
+
+    async def confirm_workspace_memory(
+        self, workspace_id: UUID, payload: ConfirmWorkspaceMemoryRequest
+    ) -> MemoryEntry:
+        logger.debug(
+            "Service confirm_workspace_memory workspace_id=%s participant_id=%s source_memory_entry_id=%s",
+            workspace_id,
+            payload.actor.participant_id,
+            payload.source_memory_entry_id,
+        )
+        result = await self._require_kernel().confirm_workspace_memory(workspace_id, payload)
         await self._publish_events(result.events)
         assert result.entry is not None
         return result.entry
@@ -615,6 +685,25 @@ class CollaborationService:
         assert result.entry is not None
         return result.entry
 
+    async def update_thread_memory_entry(
+        self,
+        thread_id: UUID,
+        memory_entry_id: UUID,
+        payload: UpdateMemoryEntryRequest,
+    ) -> MemoryEntry:
+        logger.debug(
+            "Service update_thread_memory_entry thread_id=%s memory_entry_id=%s participant_id=%s",
+            thread_id,
+            memory_entry_id,
+            payload.actor.participant_id,
+        )
+        result = await self._require_kernel().update_thread_memory_entry(
+            thread_id, memory_entry_id, payload
+        )
+        await self._publish_events(result.events)
+        assert result.entry is not None
+        return result.entry
+
     async def delete_memory_entry(
         self,
         workspace_id: UUID,
@@ -632,6 +721,37 @@ class CollaborationService:
         )
         await self._publish_events(events)
         return {"deleted": True, "memory_entry_id": str(memory_entry_id)}
+
+    async def delete_thread_memory_entry(
+        self,
+        thread_id: UUID,
+        memory_entry_id: UUID,
+        actor: ParticipantInput,
+    ) -> dict[str, bool | str]:
+        logger.debug(
+            "Service delete_thread_memory_entry thread_id=%s memory_entry_id=%s participant_id=%s",
+            thread_id,
+            memory_entry_id,
+            actor.participant_id,
+        )
+        events = await self._require_kernel().delete_thread_memory_entry(
+            thread_id, memory_entry_id, actor
+        )
+        await self._publish_events(events)
+        return {"deleted": True, "memory_entry_id": str(memory_entry_id)}
+
+    async def search_thread_memory(
+        self,
+        thread_id: UUID,
+        payload: SearchMemoryRequest,
+    ) -> MemorySearchResponse:
+        logger.debug(
+            "Service search_thread_memory thread_id=%s participant_id=%s provider=%s",
+            thread_id,
+            payload.actor.participant_id,
+            payload.use_provider,
+        )
+        return await self._require_kernel().search_thread_memory(thread_id, payload)
 
     async def publish_presence(
         self,

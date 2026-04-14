@@ -629,11 +629,12 @@ def render_prompt(context: AgentExecutionContext) -> str:
             f"roles: {role_text} | capabilities: {capability_text}"
         )
 
-    memory_lines = []
-    for entry in context.memory_entries:
-        memory_lines.append(
-            f"- [{entry.entry_type}] {entry.title}: {entry.content}"
-        )
+    def _memory_lines(entries):
+        lines = []
+        for entry in entries:
+            label = entry.summary or entry.entry_type
+            lines.append(f"- [{entry.entry_type}/{entry.state}] {label}: {entry.content}")
+        return lines
 
     message_lines = []
     for message in context.messages:
@@ -685,8 +686,14 @@ def render_prompt(context: AgentExecutionContext) -> str:
         "Completed tool results:",
         "\n".join(tool_result_lines) or "- none",
         "",
+        "Run scratch:",
+        "\n".join(_memory_lines(context.run_memory)) or "- none",
+        "",
+        "Thread memory:",
+        "\n".join(_memory_lines(context.thread_memory)) or "- none",
+        "",
         "Workspace memory:",
-        "\n".join(memory_lines) or "- none",
+        "\n".join(_memory_lines(context.workspace_memory)) or "- none",
         "",
         "Visible thread messages:",
         "\n".join(message_lines) or "- none",
