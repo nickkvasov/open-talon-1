@@ -79,9 +79,30 @@ class Settings(BaseSettings):
     kafka_agent_tasks_topic: str = "talon.agent.tasks"
     kafka_agent_events_topic: str = "talon.agent.events"
     kafka_presence_topic: str = "talon.presence"
+    kafka_audit_events_topic: str = "talon.audit.events"
     kafka_consumer_group: str = "gateway-edge"
     kafka_startup_timeout_seconds: float = 30.0
     kafka_startup_retry_interval_seconds: float = 1.0
+
+    # ── Audit ────────────────────────────────────────────────────────────────
+    audit_relay_consumer_name: str = "gateway-audit-relay"
+    audit_relay_batch_size: int = 100
+    audit_relay_interval_seconds: float = 1.0
+    audit_clickhouse_enabled: bool = True
+    audit_clickhouse_projector_consumer_name: str = "gateway-audit-projector"
+    audit_clickhouse_replay_batch_size: int = 250
+    audit_clickhouse_replay_interval_seconds: float = 30.0
+    audit_clickhouse_url: str = "http://127.0.0.1:8123"
+    audit_clickhouse_user: str = "langfuse"
+    audit_clickhouse_password: str = "langfuse"
+    audit_clickhouse_db: str = "default"
+    audit_hot_retention_days: int = 90
+    audit_retention_batch_size: int = 500
+    audit_retention_interval_seconds: float = 3600.0
+    audit_clickhouse_retention_days: int = 365
+    audit_checkpoint_bucket_prefix: str = "audit/checkpoints"
+    audit_exports_prefix: str = "audit/exports"
+    audit_retention_prefix: str = "audit/retention"
 
     # ── Agent loop ───────────────────────────────────────────────────────────
     agent_loop_enabled: bool = True

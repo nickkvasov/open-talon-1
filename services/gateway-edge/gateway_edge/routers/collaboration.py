@@ -11,13 +11,18 @@ from gateway_edge.auth.api_key import validate_api_key
 from gateway_edge.auth.identity import sync_oidc_auth_context
 from gateway_edge.auth.oidc import validate_oidc_token
 from gateway_edge.auth.openbao import validate_openbao_token
-from gateway_edge.authz import require_admin_access
+from gateway_edge.authz import has_admin_access, require_admin_access
 from gateway_edge.config import settings
 from gateway_edge.models import (
     ActivateAssetVersionRequest,
     AuthContext,
     AssumeParticipantRoleRequest,
     AgentDefinition,
+    AuditChainVerificationResult,
+    AuditEvent,
+    AuditEventPage,
+    AuditExportRequest,
+    AuditExportResult,
     AttachWorkspaceToolRequest,
     AssetLink,
     CreateGitRepositoryRequest,
@@ -72,6 +77,7 @@ from gateway_edge.models import (
     WorkspaceTool,
 )
 from gateway_edge.services import collaboration as collab_svc
+from gateway_edge.services.audit import audit_service
 from gateway_edge.services.llm_provider_health import check_llm_provider_health
 from gateway_edge.services.memory_provider_health import check_memory_provider_health
 from gateway_edge.services.llm_registry import list_registered_llm_engines
@@ -111,6 +117,33 @@ def _user_auth_context(request: Request) -> AuthContext | None:
     if auth_context is None or auth_context.kind != "oidc":
         return None
     return auth_context
+
+
+async def _require_workspace_audit_access(request: Request, workspace_id: UUID) -> None:
+    if has_admin_access(request):
+        return
+    auth_context = _user_auth_context(request)
+    if auth_context is None:
+        raise HTTPException(status_code=403, detail="Audit access requires admin privileges")
+    actor = await collab_svc.collaboration_service.resolve_authenticated_user_actor(
+        workspace_id=workspace_id,
+        auth_context=auth_context,
+        auto_create=False,
+    )
+    workspace = await collab_svc.collaboration_service.get_workspace(workspace_id)
+    participant = next(
+        (
+            item
+            for item in workspace.participants
+            if item.participant_id == actor.participant_id
+        ),
+        None,
+    )
+    if participant is None or not {"admin", "supervisor"}.intersection(participant.roles):
+        raise HTTPException(
+            status_code=403,
+            detail="Audit access requires workspace admin or supervisor role",
+        )
 
 
 def _resolved_create_workspace_actor(
@@ -223,6 +256,8 @@ async def _ws_authorize(websocket: WebSocket) -> AuthContext | None:
 
 def _http_error(exc: Exception) -> HTTPException:
     logger.exception("Collaboration request failed: %s", exc)
+    if isinstance(exc, HTTPException):
+        return exc
     if isinstance(exc, KeyError):
         return HTTPException(status_code=404, detail=str(exc))
     return HTTPException(status_code=400, detail=str(exc))
@@ -1736,6 +1771,107 @@ async def delete_thread_memory(
 
 
 @router.get(
+    "/audit/events",
+    response_model=AuditEventPage,
+    summary="List audit events",
+)
+async def list_audit_events(
+    request: Request,
+    workspace_id: UUID | None = Query(default=None),
+    thread_id: UUID | None = Query(default=None),
+    actor_user_id: UUID | None = Query(default=None),
+    actor_system_agent_id: UUID | None = Query(default=None),
+    action_prefix: str | None = Query(default=None),
+    outcome: str | None = Query(default=None),
+    target_type: str | None = Query(default=None),
+    target_id: UUID | None = Query(default=None),
+    correlation_id: UUID | None = Query(default=None),
+    request_id: UUID | None = Query(default=None),
+    occurred_after: datetime | None = Query(default=None),
+    occurred_before: datetime | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=1000),
+):
+    try:
+        if workspace_id is None:
+            require_admin_access(request)
+        else:
+            await _require_workspace_audit_access(request, workspace_id)
+        return await audit_service.list_audit_events(
+            AuditExportRequest(
+                workspace_id=workspace_id,
+                thread_id=thread_id,
+                actor_user_id=actor_user_id,
+                actor_system_agent_id=actor_system_agent_id,
+                action_prefix=action_prefix,
+                outcome=outcome,
+                target_type=target_type,
+                target_id=target_id,
+                correlation_id=correlation_id,
+                request_id=request_id,
+                occurred_after=occurred_after,
+                occurred_before=occurred_before,
+                limit=limit,
+            )
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/audit/events/{audit_event_id}",
+    response_model=AuditEvent,
+    summary="Fetch a single audit event",
+)
+async def get_audit_event(request: Request, audit_event_id: UUID):
+    try:
+        event = await audit_service.get_audit_event(audit_event_id)
+        if event is None:
+            raise KeyError(f"Audit event {audit_event_id} not found")
+        if event.workspace_id is None:
+            require_admin_access(request)
+        else:
+            await _require_workspace_audit_access(request, event.workspace_id)
+        return event
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/audit/chains/{chain_partition}/verify",
+    response_model=AuditChainVerificationResult,
+    summary="Verify an audit chain partition",
+)
+async def verify_audit_chain(request: Request, chain_partition: str):
+    try:
+        if chain_partition.startswith("workspace:"):
+            await _require_workspace_audit_access(
+                request,
+                UUID(chain_partition.split(":", 1)[1]),
+            )
+        else:
+            require_admin_access(request)
+        return await audit_service.verify_audit_chain(chain_partition)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/audit/events/export",
+    response_model=AuditExportResult,
+    summary="Export audit events to object storage",
+)
+async def export_audit_events(request: Request, payload: AuditExportRequest = Body(...)):
+    try:
+        if payload.workspace_id is None:
+            require_admin_access(request)
+        else:
+            await _require_workspace_audit_access(request, payload.workspace_id)
+        return await audit_service.export_audit_events(payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
     "/threads/{thread_id}/events/stream",
     summary="Stream thread events via Server-Sent Events",
     response_class=EventSourceResponse,  # type: ignore[arg-type]
@@ -1781,8 +1917,19 @@ async def stream_thread_events_ws(
         participant_type,
         after_sequence,
     )
+    request_id = uuid4()
     auth_context = await _ws_authorize(websocket)
     if settings.auth_mode != "none" and auth_context is None:
+        await audit_service.record_websocket_audit(
+            thread_id=thread_id,
+            workspace_id=None,
+            action_name="auth.login_failed",
+            outcome="denied",
+            actor_type="unknown",
+            request_id=request_id,
+            metadata={"close_code": 4001},
+            error_message="Unauthorized websocket connection",
+        )
         await websocket.close(code=4001, reason="Unauthorized")
         return
 
@@ -1794,6 +1941,16 @@ async def stream_thread_events_ws(
         participant_id = participant.participant_id
     else:
         if participant_id is None or display_name is None:
+            await audit_service.record_websocket_audit(
+                thread_id=thread_id,
+                workspace_id=None,
+                action_name="api.websocket.failed",
+                outcome="failure",
+                actor_type="unknown",
+                request_id=request_id,
+                metadata={"close_code": 4002},
+                error_message="Missing websocket participant identity",
+            )
             await websocket.close(code=4002, reason="Missing participant identity")
             return
         participant = _participant_from_ws(
@@ -1801,8 +1958,25 @@ async def stream_thread_events_ws(
             participant_type=participant_type,
             display_name=display_name,
         )
+    workspace_id = None
+    try:
+        thread_detail = await collab_svc.collaboration_service.get_thread(thread_id)
+        workspace_id = thread_detail.thread.workspace_id
+    except Exception:
+        logger.exception("Failed to resolve websocket thread scope thread_id=%s", thread_id)
     connection_id = str(uuid4())
     await websocket.accept()
+    await audit_service.record_websocket_audit(
+        thread_id=thread_id,
+        workspace_id=workspace_id,
+        action_name="api.websocket.connected",
+        outcome="success",
+        actor_type="user" if auth_context is not None and auth_context.kind == "oidc" else participant.participant_type,
+        actor_id=participant.participant_id,
+        user_id=participant.user_id,
+        request_id=request_id,
+        metadata={"connection_id": connection_id},
+    )
 
     try:
         await collab_svc.collaboration_service.on_thread_connected(
@@ -1836,7 +2010,17 @@ async def stream_thread_events_ws(
             participant_id,
             connection_id,
         )
-        pass
+        await audit_service.record_websocket_audit(
+            thread_id=thread_id,
+            workspace_id=workspace_id,
+            action_name="api.websocket.disconnected",
+            outcome="success",
+            actor_type=participant.participant_type,
+            actor_id=participant.participant_id,
+            user_id=participant.user_id,
+            request_id=request_id,
+            metadata={"connection_id": connection_id},
+        )
     finally:
         try:
             await collab_svc.collaboration_service.on_thread_disconnected(

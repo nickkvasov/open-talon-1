@@ -13,7 +13,13 @@ from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from aiokafka.errors import KafkaConnectionError
 
 from gateway_edge.config import settings
-from gateway_edge.models import EventEnvelope, KafkaChatRequest, KafkaChatResponse, StreamEvent
+from gateway_edge.models import (
+    AuditEvent,
+    EventEnvelope,
+    KafkaChatRequest,
+    KafkaChatResponse,
+    StreamEvent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +120,7 @@ class EventService:
             settings.kafka_agent_tasks_topic,
             settings.kafka_agent_events_topic,
             settings.kafka_presence_topic,
+            settings.kafka_audit_events_topic,
         ]
         missing = [topic for topic in desired if topic not in existing]
         if not missing:
@@ -142,6 +149,16 @@ class EventService:
             value=event.model_dump(mode="json"),
         )
         await self._dispatch_event(event)
+
+    async def publish_audit_event(self, event: AuditEvent) -> None:
+        if self._producer is None:
+            return
+        key = event.chain_partition.encode()
+        await self._producer.send_and_wait(
+            settings.kafka_audit_events_topic,
+            key=key,
+            value=event.model_dump(mode="json"),
+        )
 
     def set_event_handler(
         self,

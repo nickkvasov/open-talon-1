@@ -32,6 +32,7 @@ class RuntimeWorkerSettings:
     kafka_agent_tasks_topic: str
     kafka_agent_events_topic: str
     kafka_presence_topic: str
+    kafka_audit_events_topic: str
     kafka_consumer_group: str
     agent_step_worker_concurrency: int
     tool_worker_concurrency: int
@@ -66,6 +67,7 @@ class RuntimeWorkerSettings:
             kafka_agent_tasks_topic=os.getenv("KAFKA_AGENT_TASKS_TOPIC", "talon.agent.tasks"),
             kafka_agent_events_topic=os.getenv("KAFKA_AGENT_EVENTS_TOPIC", "talon.agent.events"),
             kafka_presence_topic=os.getenv("KAFKA_PRESENCE_TOPIC", "talon.presence"),
+            kafka_audit_events_topic=os.getenv("KAFKA_AUDIT_EVENTS_TOPIC", "talon.audit.events"),
             kafka_consumer_group=os.getenv("KAFKA_CONSUMER_GROUP", "agent-runtime"),
             agent_step_worker_concurrency=_get_int("AGENT_STEP_WORKER_CONCURRENCY", 4),
             tool_worker_concurrency=_get_int("TOOL_WORKER_CONCURRENCY", 8),

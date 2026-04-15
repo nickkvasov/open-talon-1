@@ -9,10 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from gateway_edge.audit_middleware import AuditMiddleware
 from gateway_edge.auth.middleware import AuthMiddleware
 from gateway_edge.config import settings
 from gateway_edge.db.postgres import setup_postgres, teardown_postgres
 from gateway_edge.routers import admin, auth, chat, collaboration, health
+from gateway_edge.services.audit import audit_service
 from gateway_edge.services.collaboration import collaboration_service
 from gateway_edge.services.events import event_service
 from gateway_edge.services.session import setup_valkey, teardown_valkey
@@ -34,10 +36,12 @@ async def lifespan(app: FastAPI):
     await setup_valkey()
     await event_service.start()
     await collaboration_service.start()
+    await audit_service.start()
     logger.info("Gateway ready — auth_mode=%s", settings.auth_mode)
     yield
     # ── Shutdown ─────────────────────────────────────────────────────────────
     logger.info("Shutting down …")
+    await audit_service.stop()
     await collaboration_service.stop()
     await event_service.stop()
     await teardown_valkey()
@@ -74,6 +78,7 @@ def create_app() -> FastAPI:
 
     # ── Auth ─────────────────────────────────────────────────────────────────
     app.add_middleware(AuthMiddleware)
+    app.add_middleware(AuditMiddleware)
 
     # ── Routers ───────────────────────────────────────────────────────────────
     app.include_router(health.router)

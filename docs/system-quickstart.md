@@ -44,6 +44,25 @@ This starts:
 - Ollama
 - Langfuse and its backing services
 
+For audit specifically, the local stack now also provides:
+
+- Postgres as the canonical append-only audit ledger store
+- Kafka topic `talon.audit.events`
+- ClickHouse as the audit query projection store
+- MinIO for audit exports and daily chain checkpoints
+
+If you want a local HyperDX UI plus OTLP intake endpoints, start the optional profile:
+
+```bash
+docker compose -f infrastructure/docker-compose.yaml --profile hyperdx up -d hyperdx
+```
+
+That exposes:
+
+- HyperDX UI on [http://127.0.0.1:8080](http://127.0.0.1:8080)
+- OTLP gRPC on `127.0.0.1:4317`
+- OTLP HTTP on `127.0.0.1:4318`
+
 `keycloak-init` is a local-only helper that normalizes Keycloak for development after the main container boots. It makes sure both the `master` and `open-talon` realms allow local HTTP access.
 
 `openbao-init` is a local-only helper that initializes and unseals OpenBao, enables the `secret/` KV v2 mount, and recreates the stable local `root` token if needed.
@@ -59,18 +78,38 @@ That keeps Postgres as the canonical memory store and adds the optional local `m
 ## 3. Check The Main Endpoints
 
 - Gateway: [http://127.0.0.1:8000](http://127.0.0.1:8000)
+- Gateway health: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+- Gateway ready: [http://127.0.0.1:8000/ready](http://127.0.0.1:8000/ready)
 - API docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- Audit events API: [http://127.0.0.1:8000/v1/audit/events](http://127.0.0.1:8000/v1/audit/events)
+- Audit export API: [http://127.0.0.1:8000/v1/audit/events/export](http://127.0.0.1:8000/v1/audit/events/export)
 - Keycloak: [http://127.0.0.1:8081](http://127.0.0.1:8081)
 - Open Talon realm issuer: [http://127.0.0.1:8081/realms/open-talon](http://127.0.0.1:8081/realms/open-talon)
 - OpenID config: [http://127.0.0.1:8081/realms/open-talon/.well-known/openid-configuration](http://127.0.0.1:8081/realms/open-talon/.well-known/openid-configuration)
+- OpenBao: [http://127.0.0.1:8200](http://127.0.0.1:8200)
 - Langfuse: [http://localhost:3000](http://localhost:3000)
+- Langfuse worker: `localhost:3030`
+- ClickHouse HTTP: [http://127.0.0.1:8123](http://127.0.0.1:8123)
+- ClickHouse native: `localhost:9000`
+- Kafka: `localhost:9092`
+- Valkey: `localhost:6379`
+- MinIO API: [http://127.0.0.1:9090](http://127.0.0.1:9090)
+- MinIO console: [http://127.0.0.1:9091](http://127.0.0.1:9091)
+- Forgejo: [http://127.0.0.1:3001](http://127.0.0.1:3001)
+- Forgejo SSH: `localhost:2222`
+- Ollama: [http://127.0.0.1:11434](http://127.0.0.1:11434)
+- HyperDX UI when started with `--profile hyperdx`: [http://127.0.0.1:8080](http://127.0.0.1:8080)
+- HyperDX OTLP gRPC when started with `--profile hyperdx`: `localhost:4317`
+- HyperDX OTLP HTTP when started with `--profile hyperdx`: `localhost:4318`
 - pgAdmin: [http://localhost:5050](http://localhost:5050)
 - Memgraph bolt: `localhost:7688` when started with `./open-talon start --memgraph`
+- Memgraph HTTP: [http://127.0.0.1:7444](http://127.0.0.1:7444) when started with `./open-talon start --memgraph`
 
 ## 4. Default Local Credentials
 
 - Postgres: `admin` / `password`
 - pgAdmin: `admin@local.dev` / `admin`
+- Langfuse Postgres DB: `langfuse_db`
 - Keycloak admin: `admin` / `admin`
 - Keycloak realm: `open-talon`
 - Keycloak realm users:
@@ -82,6 +121,11 @@ That keeps Postgres as the canonical memory store and adds the optional local `m
   - `user2` / `user22345`
 - OpenBao root token: `root`
 - Langfuse: `admin@example.com` / `admin123456`
+- Valkey password: `langfuse-dev-secret`
+- MinIO: `minio` / `miniosecret`
+- Forgejo: `forgejo` / `forgejo123`
+- ClickHouse: `langfuse` / `langfuse`
+- Memgraph: `memgraph` / `memgraph` when started with `./open-talon start --memgraph`
 
 All local defaults come from [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example).
 
@@ -259,7 +303,57 @@ If you changed schema, auth, routing, or participant identity behavior, run:
 pytest -q
 ```
 
-## 9. Layered Memory Quick Notes
+## 9. Audit Logging Quick Checks
+
+Audit is available as soon as the stack is up.
+
+Current model:
+
+- Postgres `audit_event_ledger` is the source of truth
+- workspace-scoped chains use `workspace:{workspace_id}`
+- global/system audit uses the `global` partition
+- ClickHouse stores the searchable projection in `default.audit_events`
+- MinIO stores exports in `audit/exports/` and chain checkpoints in `audit/checkpoints/`
+- background replay repopulates ClickHouse from the Postgres ledger if the projector falls behind
+- background retention exports old ledger rows to MinIO and prunes the Postgres hot window after snapshotting chain state
+
+Current audit APIs:
+
+```bash
+curl -H "Authorization: Bearer <admin-token>" \
+  "http://127.0.0.1:8000/v1/audit/events?limit=20"
+
+curl -H "Authorization: Bearer <admin-token>" \
+  "http://127.0.0.1:8000/v1/audit/chains/global/verify"
+
+curl -X POST http://127.0.0.1:8000/v1/audit/events/export \
+  -H "Authorization: Bearer <admin-token>" \
+  -H 'Content-Type: application/json' \
+  -d '{"limit":100}'
+```
+
+Current access model:
+
+- system `admin` can query, verify, and export globally
+- workspace `admin` and `supervisor` can read workspace-scoped audit
+- regular `user` cannot read audit
+
+Useful local checks:
+
+```bash
+docker compose -f infrastructure/docker-compose.yaml ps kafka clickhouse minio
+docker compose -f infrastructure/docker-compose.yaml logs --tail=50 kafka clickhouse minio
+pytest tests/gateway-edge/test_audit_api.py -q
+pytest tests/gateway-edge/test_event_service.py -q
+pytest tests/core-collab/test_repository_integration.py -q
+```
+
+Note:
+
+- the current local code writes directly to ClickHouse for the warehouse path
+- HyperDX is available through the optional `hyperdx` compose profile, but the Open Talon API remains the authoritative audit interface
+
+## 10. Layered Memory Quick Notes
 
 Open Talon uses layered memory with three scopes:
 
@@ -300,7 +394,7 @@ If you run Docker Compose directly instead of `./open-talon start`, enable the o
 docker compose -f infrastructure/docker-compose.yaml --profile mem0-graph up -d
 ```
 
-## 10. Seeded OpenAI Agent Smoke Test
+## 11. Seeded OpenAI Agent Smoke Test
 
 The local migrations seed:
 
@@ -401,12 +495,13 @@ Expected result:
 
 - the thread timeline contains your message and at least one reply from `Reasoning Planner`
 - the reply confirms the full path is working: gateway, durable task creation, `agent-task-worker`, `agent-loop-worker`, OpenBao secret resolution, and the OpenAI provider call
+- the same flow should also create correlated boundary, semantic, and runtime audit events for the workspace/thread path
 
 Known current limitation:
 
 - the seeded OpenAI path still posts raw OpenAI response JSON into the final thread message body; execution works, but response formatting is still rough
 
-## 10. Common Keycloak Recovery Commands
+## 12. Common Keycloak Recovery Commands
 
 If the local Keycloak UI says HTTPS is required or the realm state looks stale:
 

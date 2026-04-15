@@ -23,6 +23,7 @@ from open_talon_contracts.models import (  # noqa: E402
     AgentExecutionContext,
     AgentInteractionContract,
     AgentRunResult,
+    AuditEventDraft,
     EventEnvelope,
 )
 from open_talon_contracts.llm_engines import (  # noqa: E402
@@ -44,6 +45,43 @@ from .secrets import (  # noqa: E402
 logger = logging.getLogger(__name__)
 
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+
+
+async def _record_runtime_audit(
+    kernel,
+    *,
+    context: AgentExecutionContext,
+    action_category: str,
+    action_name: str,
+    outcome: str,
+    error: Exception | str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    message = str(error) if error is not None else None
+    try:
+        await kernel.record_audit_event(
+            AuditEventDraft(
+                scope_type="thread",
+                workspace_id=context.workspace.workspace_id,
+                thread_id=context.thread.thread_id,
+                actor_type="agent",
+                actor_id=context.system_agent.agent_id,
+                system_agent_id=context.system_agent.agent_id,
+                source_service="agent-runtime",
+                source_component="runtime",
+                action_category=action_category,
+                action_name=action_name,
+                outcome=outcome,
+                correlation_id=context.run.correlation_id,
+                causation_id=context.run.causation_id,
+                error_class=error.__class__.__name__ if isinstance(error, Exception) else None,
+                error_message_redacted=message[:512] if message else None,
+                metadata=metadata or {},
+                chain_partition=f"workspace:{context.workspace.workspace_id}",
+            )
+        )
+    except Exception:
+        logger.exception("Failed to record runtime audit event action_name=%s", action_name)
 
 
 class RuntimeObservation(Protocol):
@@ -522,6 +560,7 @@ class AgentTaskRuntime:
             system_agent_id,
         )
         run_id: UUID | None = None
+        context: AgentExecutionContext | None = None
         try:
             claim = await self._kernel.claim_task_for_system_agent(task_id, system_agent_id)
             if not claim.events:
@@ -573,6 +612,20 @@ class AgentTaskRuntime:
                 system_agent_id,
                 exc,
             )
+            if run_id is not None and context is not None:
+                await _record_runtime_audit(
+                    self._kernel,
+                    context=context,
+                    action_category="worker",
+                    action_name="worker.exception",
+                    outcome="error",
+                    error=exc,
+                    metadata={
+                        "task_id": str(task_id),
+                        "run_id": str(run_id),
+                        "system_agent_id": str(system_agent_id),
+                    },
+                )
             if run_id is not None:
                 failed = await self._kernel.fail_run(
                     run_id,

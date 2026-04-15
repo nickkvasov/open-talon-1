@@ -14,7 +14,10 @@ _CONTRACTS_DIR = os.path.abspath(
 _CORE_COLLAB_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../../services/core-collab")
 )
-for path in (_CONTRACTS_DIR, _CORE_COLLAB_DIR):
+_WORKSPACE_MEMORY_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../services/workspace-memory")
+)
+for path in (_CONTRACTS_DIR, _CORE_COLLAB_DIR, _WORKSPACE_MEMORY_DIR):
     if path not in sys.path:
         sys.path.insert(0, path)
 
@@ -23,6 +26,7 @@ from open_talon_contracts.models import (
     AgentDefinition,
     AgentEndpoint,
     AssetLink,
+    AuditEventDraft,
     GitRepository,
     LlmProviderDefinition,
     ResolvedAssetBinding,
@@ -341,4 +345,172 @@ async def test_repository_workspace_assets_round_trip_and_resolve_workspace_over
             await conn.execute("DELETE FROM workspace_assets WHERE asset_id IN ($1, $2)", global_asset_id, workspace_asset_id)
             await conn.execute("DELETE FROM git_repositories WHERE repo_id IN ($1, $2)", global_repo_id, workspace_repo_id)
             await conn.execute("DELETE FROM workspaces WHERE workspace_id = $1", workspace_id)
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_repository_appends_and_verifies_audit_chain():
+    try:
+        pool = await asyncpg.create_pool(dsn=_postgres_dsn(), min_size=1, max_size=2)
+    except Exception as exc:  # pragma: no cover - integration environment dependent
+        pytest.skip(f"Postgres not available for repository integration test: {exc}")
+
+    repository = CollaborationRepository(pool)
+    await apply_pending_migrations(pool)
+
+    first_event_id = uuid4()
+    second_event_id = uuid4()
+    chain_partition = f"workspace:{uuid4()}"
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                first = await repository.append_audit_event(
+                    conn,
+                    AuditEventDraft(
+                        audit_event_id=first_event_id,
+                        scope_type="workspace",
+                        actor_type="system",
+                        source_service="integration-test",
+                        source_component="repository",
+                        action_category="workspace",
+                        action_name="workspace.created",
+                        outcome="success",
+                        metadata={"test": "first"},
+                        chain_partition=chain_partition,
+                    ),
+                )
+                second = await repository.append_audit_event(
+                    conn,
+                    AuditEventDraft(
+                        audit_event_id=second_event_id,
+                        scope_type="workspace",
+                        actor_type="system",
+                        source_service="integration-test",
+                        source_component="repository",
+                        action_category="workspace",
+                        action_name="workspace.updated",
+                        outcome="success",
+                        metadata={"test": "second"},
+                        chain_partition=chain_partition,
+                    ),
+                )
+
+        assert first.chain_sequence == 1
+        assert first.prev_hash == "0" * 64
+        assert second.chain_sequence == 2
+        assert second.prev_hash == first.event_hash
+
+        verification = await repository.verify_audit_chain(chain_partition)
+        assert verification.verified is True
+        assert verification.checked_events == 2
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE audit_event_ledger
+                SET event_hash = $2
+                WHERE audit_event_id = $1
+                """,
+                second_event_id,
+                "f" * 64,
+            )
+
+        tampered = await repository.verify_audit_chain(chain_partition)
+        assert tampered.verified is False
+        assert tampered.failing_audit_event_id == second_event_id
+        assert tampered.detail == "Audit chain event hash mismatch"
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM audit_event_ledger WHERE audit_event_id IN ($1, $2)",
+                first_event_id,
+                second_event_id,
+            )
+            await conn.execute(
+                "DELETE FROM audit_chain_heads WHERE chain_partition = $1",
+                chain_partition,
+            )
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_repository_verifies_retained_audit_chain_with_snapshot():
+    try:
+        pool = await asyncpg.create_pool(dsn=_postgres_dsn(), min_size=1, max_size=2)
+    except Exception as exc:  # pragma: no cover - integration environment dependent
+        pytest.skip(f"Postgres not available for repository integration test: {exc}")
+
+    repository = CollaborationRepository(pool)
+    await apply_pending_migrations(pool)
+
+    first_event_id = uuid4()
+    second_event_id = uuid4()
+    chain_partition = f"workspace:{uuid4()}"
+    cutoff = datetime.now(timezone.utc)
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                first = await repository.append_audit_event(
+                    conn,
+                    AuditEventDraft(
+                        audit_event_id=first_event_id,
+                        scope_type="workspace",
+                        actor_type="system",
+                        source_service="integration-test",
+                        source_component="repository",
+                        action_category="workspace",
+                        action_name="workspace.created",
+                        outcome="success",
+                        metadata={"test": "first"},
+                        chain_partition=chain_partition,
+                    ),
+                )
+                second = await repository.append_audit_event(
+                    conn,
+                    AuditEventDraft(
+                        audit_event_id=second_event_id,
+                        scope_type="workspace",
+                        actor_type="system",
+                        source_service="integration-test",
+                        source_component="repository",
+                        action_category="workspace",
+                        action_name="workspace.updated",
+                        outcome="success",
+                        metadata={"test": "second"},
+                        chain_partition=chain_partition,
+                    ),
+                )
+                await repository.record_audit_retention_snapshot(
+                    conn,
+                    chain_partition=chain_partition,
+                    cutoff_recorded_at=cutoff,
+                    last_pruned_sequence=first.chain_sequence,
+                    last_pruned_event_hash=first.event_hash,
+                    object_key="audit/retention/test.jsonl",
+                    metadata={"event_count": 1},
+                )
+                await repository.prune_audit_events(
+                    conn,
+                    chain_partition=chain_partition,
+                    max_ledger_offset=first.ledger_offset,
+                )
+
+        verification = await repository.verify_audit_chain(chain_partition)
+        assert verification.verified is True
+        assert verification.checked_events == 1
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM audit_event_ledger WHERE audit_event_id IN ($1, $2)",
+                first_event_id,
+                second_event_id,
+            )
+            await conn.execute(
+                "DELETE FROM audit_retention_snapshots WHERE chain_partition = $1",
+                chain_partition,
+            )
+            await conn.execute(
+                "DELETE FROM audit_chain_heads WHERE chain_partition = $1",
+                chain_partition,
+            )
         await pool.close()

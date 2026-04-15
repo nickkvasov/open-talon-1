@@ -1389,21 +1389,93 @@ class MockCollaborationService:
         return False
 
 
+class MockAuditService:
+    def __init__(self) -> None:
+        self.http_records = []
+        self.websocket_records = []
+        self.events = []
+
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
+
+    async def record_http_audit(self, *, request, response=None, started_at, error=None) -> None:
+        self.http_records.append(
+            {
+                "path": request.url.path,
+                "method": request.method,
+                "status_code": 500 if error is not None else getattr(response, "status_code", 200),
+                "request_id": getattr(request.state, "request_id", None),
+                "error": None if error is None else str(error),
+            }
+        )
+
+    async def record_websocket_audit(self, **kwargs) -> None:
+        self.websocket_records.append(kwargs)
+
+    async def list_audit_events(self, payload):
+        from gateway_edge.models import AuditEventPage
+
+        filtered = [
+            event
+            for event in self.events
+            if payload.workspace_id is None or event.workspace_id == payload.workspace_id
+        ][: payload.limit]
+        return AuditEventPage(events=filtered, total_count=len(filtered))
+
+    async def get_audit_event(self, audit_event_id):
+        for event in self.events:
+            if event.audit_event_id == audit_event_id:
+                return event
+        return None
+
+    async def verify_audit_chain(self, chain_partition):
+        from gateway_edge.models import AuditChainVerificationResult
+
+        return AuditChainVerificationResult(
+            chain_partition=chain_partition,
+            verified=True,
+            checked_events=len(self.events),
+            detail="mock",
+        )
+
+    async def export_audit_events(self, payload):
+        from gateway_edge.models import AuditExportResult
+
+        return AuditExportResult(
+            object_key="audit/mock.jsonl",
+            bucket="open-talon-assets",
+            event_count=min(len(self.events), payload.limit),
+            size_bytes=0,
+            sha256="0" * 64,
+            presigned_url="http://test/audit/mock.jsonl",
+        )
+
+
 @pytest.fixture
 def mock_collaboration_service():
     return MockCollaborationService()
 
 
 @pytest.fixture
-def patched(monkeypatch, mock_collaboration_service):
+def mock_audit_service():
+    return MockAuditService()
+
+
+@pytest.fixture
+def patched(monkeypatch, mock_collaboration_service, mock_audit_service):
     monkeypatch.setattr("gateway_edge.services.collaboration.collaboration_service", mock_collaboration_service)
     monkeypatch.setattr("gateway_edge.routers.collaboration.collab_svc.collaboration_service", mock_collaboration_service)
+    monkeypatch.setattr("gateway_edge.services.audit.audit_service", mock_audit_service)
+    monkeypatch.setattr("gateway_edge.audit_middleware.audit_service", mock_audit_service)
+    monkeypatch.setattr("gateway_edge.routers.collaboration.audit_service", mock_audit_service)
     monkeypatch.setattr("gateway_edge.db.postgres.setup_postgres", AsyncMock())
     monkeypatch.setattr("gateway_edge.db.postgres.teardown_postgres", AsyncMock())
     monkeypatch.setattr("gateway_edge.services.session.setup_valkey", AsyncMock())
     monkeypatch.setattr("gateway_edge.services.session.teardown_valkey", AsyncMock())
     monkeypatch.setattr("gateway_edge.services.events.event_service.start", AsyncMock())
     monkeypatch.setattr("gateway_edge.services.events.event_service.stop", AsyncMock())
+    monkeypatch.setattr("gateway_edge.services.audit.audit_service.start", AsyncMock())
+    monkeypatch.setattr("gateway_edge.services.audit.audit_service.stop", AsyncMock())
     return mock_collaboration_service
 
 

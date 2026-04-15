@@ -31,6 +31,10 @@ ExecutionStatus = Literal["queued", "running", "completed", "failed", "cancelled
 AssetScope = Literal["global", "workspace"]
 AssetStorageBackend = Literal["minio"]
 AssetTargetType = Literal["system_agent", "system_tool", "workspace", "workspace_tool"]
+AuditScopeType = Literal["global", "workspace", "thread"]
+AuditActorType = Literal["user", "agent", "system", "api_key", "unknown"]
+AuditOutcome = Literal["success", "failure", "denied", "error"]
+AuditPayloadMode = Literal["metadata_only"]
 StopReason = Literal[
     "completed",
     "needs_user_input",
@@ -693,6 +697,88 @@ class EventEnvelope(BaseModel):
     sequence: int | None = None
     timestamp: datetime = Field(default_factory=utcnow)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class AuditEventDraft(BaseModel):
+    audit_event_id: UUID = Field(default_factory=uuid4)
+    occurred_at: datetime = Field(default_factory=utcnow)
+    recorded_at: datetime = Field(default_factory=utcnow)
+    scope_type: AuditScopeType = "global"
+    workspace_id: UUID | None = None
+    thread_id: UUID | None = None
+    actor_type: AuditActorType = "unknown"
+    actor_id: UUID | None = None
+    user_id: UUID | None = None
+    system_agent_id: UUID | None = None
+    source_service: str
+    source_component: str
+    action_category: str
+    action_name: str
+    target_type: str | None = None
+    target_id: UUID | None = None
+    outcome: AuditOutcome
+    correlation_id: UUID | None = None
+    causation_id: UUID | None = None
+    request_id: UUID | None = None
+    trace_id: str | None = None
+    error_code: str | None = None
+    error_class: str | None = None
+    error_message_redacted: str | None = None
+    payload_mode: AuditPayloadMode = "metadata_only"
+    payload_hash: str | None = None
+    payload_ref: str | None = None
+    payload_size_bytes: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    chain_partition: str = "global"
+
+
+class AuditEvent(AuditEventDraft):
+    ledger_offset: int
+    chain_sequence: int
+    prev_hash: str
+    event_hash: str
+
+
+class AuditEventPage(BaseModel):
+    events: list[AuditEvent] = Field(default_factory=list)
+    total_count: int = 0
+
+
+class AuditChainVerificationResult(BaseModel):
+    chain_partition: str
+    verified: bool
+    checked_events: int = 0
+    expected_sequence: int | None = None
+    actual_sequence: int | None = None
+    expected_prev_hash: str | None = None
+    actual_prev_hash: str | None = None
+    failing_audit_event_id: UUID | None = None
+    detail: str | None = None
+
+
+class AuditExportRequest(BaseModel):
+    workspace_id: UUID | None = None
+    thread_id: UUID | None = None
+    actor_user_id: UUID | None = None
+    actor_system_agent_id: UUID | None = None
+    action_prefix: str | None = None
+    outcome: AuditOutcome | None = None
+    target_type: str | None = None
+    target_id: UUID | None = None
+    correlation_id: UUID | None = None
+    request_id: UUID | None = None
+    occurred_after: datetime | None = None
+    occurred_before: datetime | None = None
+    limit: int = 1000
+
+
+class AuditExportResult(BaseModel):
+    object_key: str
+    bucket: str
+    event_count: int
+    size_bytes: int
+    sha256: str
+    presigned_url: str | None = None
 
 
 class CommandEnvelope(BaseModel):

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import hashlib
 import json
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import asyncpg
 
@@ -14,6 +15,10 @@ from .contracts import (
     AgentEndpoint,
     AgentInteractionContract,
     Artifact,
+    AuditChainVerificationResult,
+    AuditEvent,
+    AuditEventDraft,
+    AuditEventPage,
     AssetLink,
     EventEnvelope,
     GitRepository,
@@ -124,7 +129,7 @@ class CollaborationRepository:
             """,
             event.event_id,
         )
-        await conn.execute(
+        result = await conn.execute(
             """
             INSERT INTO collab_event_log (
                 event_id,
@@ -163,6 +168,446 @@ class CollaborationRepository:
             event.sequence,
             self._json_dumps(event.payload),
             event.timestamp,
+        )
+        if result.endswith("1"):
+            draft = await self._audit_draft_from_event(conn, event)
+            await self.append_audit_event(conn, draft)
+
+    async def append_audit_event(
+        self,
+        conn: asyncpg.Connection,
+        draft: AuditEventDraft,
+    ) -> AuditEvent:
+        head_row = await conn.fetchrow(
+            """
+            SELECT last_sequence, last_event_hash
+            FROM audit_chain_heads
+            WHERE chain_partition = $1
+            FOR UPDATE
+            """,
+            draft.chain_partition,
+        )
+        if head_row is None:
+            chain_sequence = 1
+            prev_hash = "0" * 64
+        else:
+            chain_sequence = int(head_row["last_sequence"]) + 1
+            prev_hash = str(head_row["last_event_hash"])
+        event_hash = self._build_audit_event_hash(draft, prev_hash)
+        row = await conn.fetchrow(
+            """
+            INSERT INTO audit_event_ledger (
+                audit_event_id,
+                occurred_at,
+                recorded_at,
+                scope_type,
+                workspace_id,
+                thread_id,
+                actor_type,
+                actor_id,
+                user_id,
+                system_agent_id,
+                source_service,
+                source_component,
+                action_category,
+                action_name,
+                target_type,
+                target_id,
+                outcome,
+                correlation_id,
+                causation_id,
+                request_id,
+                trace_id,
+                error_code,
+                error_class,
+                error_message_redacted,
+                payload_mode,
+                payload_hash,
+                payload_ref,
+                payload_size_bytes,
+                metadata,
+                chain_partition,
+                chain_sequence,
+                prev_hash,
+                event_hash
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
+                $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33
+            )
+            RETURNING *
+            """,
+            draft.audit_event_id,
+            draft.occurred_at,
+            draft.recorded_at,
+            draft.scope_type,
+            draft.workspace_id,
+            draft.thread_id,
+            draft.actor_type,
+            draft.actor_id,
+            draft.user_id,
+            draft.system_agent_id,
+            draft.source_service,
+            draft.source_component,
+            draft.action_category,
+            draft.action_name,
+            draft.target_type,
+            draft.target_id,
+            draft.outcome,
+            draft.correlation_id,
+            draft.causation_id,
+            draft.request_id,
+            draft.trace_id,
+            draft.error_code,
+            draft.error_class,
+            draft.error_message_redacted,
+            draft.payload_mode,
+            draft.payload_hash,
+            draft.payload_ref,
+            draft.payload_size_bytes,
+            self._json_dumps(draft.metadata),
+            draft.chain_partition,
+            chain_sequence,
+            prev_hash,
+            event_hash,
+        )
+        await conn.execute(
+            """
+            INSERT INTO audit_chain_heads (
+                chain_partition,
+                last_sequence,
+                last_event_hash,
+                updated_at
+            )
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (chain_partition) DO UPDATE
+                SET last_sequence = EXCLUDED.last_sequence,
+                    last_event_hash = EXCLUDED.last_event_hash,
+                    updated_at = EXCLUDED.updated_at
+            """,
+            draft.chain_partition,
+            chain_sequence,
+            event_hash,
+        )
+        return self._audit_event_from_row(row)
+
+    async def get_audit_event(self, audit_event_id: UUID) -> AuditEvent | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT *
+            FROM audit_event_ledger
+            WHERE audit_event_id = $1
+            """,
+            audit_event_id,
+        )
+        return self._audit_event_from_row(row) if row else None
+
+    async def list_audit_events(
+        self,
+        *,
+        workspace_id: UUID | None = None,
+        thread_id: UUID | None = None,
+        actor_user_id: UUID | None = None,
+        actor_system_agent_id: UUID | None = None,
+        action_prefix: str | None = None,
+        outcome: str | None = None,
+        target_type: str | None = None,
+        target_id: UUID | None = None,
+        correlation_id: UUID | None = None,
+        request_id: UUID | None = None,
+        occurred_after=None,
+        occurred_before=None,
+        limit: int = 100,
+    ) -> AuditEventPage:
+        rows = await self._pool.fetch(
+            """
+            SELECT *
+            FROM audit_event_ledger
+            WHERE ($1::uuid IS NULL OR workspace_id = $1)
+              AND ($2::uuid IS NULL OR thread_id = $2)
+              AND ($3::uuid IS NULL OR user_id = $3)
+              AND ($4::uuid IS NULL OR system_agent_id = $4)
+              AND ($5::text IS NULL OR action_name LIKE $5 || '%')
+              AND ($6::text IS NULL OR outcome = $6)
+              AND ($7::text IS NULL OR target_type = $7)
+              AND ($8::uuid IS NULL OR target_id = $8)
+              AND ($9::uuid IS NULL OR correlation_id = $9)
+              AND ($10::uuid IS NULL OR request_id = $10)
+              AND ($11::timestamptz IS NULL OR occurred_at >= $11)
+              AND ($12::timestamptz IS NULL OR occurred_at <= $12)
+            ORDER BY recorded_at DESC, ledger_offset DESC
+            LIMIT $13
+            """,
+            workspace_id,
+            thread_id,
+            actor_user_id,
+            actor_system_agent_id,
+            action_prefix,
+            outcome,
+            target_type,
+            target_id,
+            correlation_id,
+            request_id,
+            occurred_after,
+            occurred_before,
+            limit,
+        )
+        events = [self._audit_event_from_row(row) for row in rows]
+        return AuditEventPage(events=events, total_count=len(events))
+
+    async def list_audit_events_pending_export(
+        self,
+        *,
+        consumer_name: str,
+        limit: int = 100,
+    ) -> list[AuditEvent]:
+        rows = await self._pool.fetch(
+            """
+            SELECT ledger.*
+            FROM audit_event_ledger AS ledger
+            LEFT JOIN audit_export_checkpoints AS checkpoint
+              ON checkpoint.consumer_name = $1
+            WHERE ledger.ledger_offset > COALESCE(checkpoint.last_ledger_offset, 0)
+            ORDER BY ledger.ledger_offset ASC
+            LIMIT $2
+            """,
+            consumer_name,
+            limit,
+        )
+        return [self._audit_event_from_row(row) for row in rows]
+
+    async def advance_audit_export_checkpoint(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        consumer_name: str,
+        last_ledger_offset: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO audit_export_checkpoints (
+                consumer_name,
+                last_ledger_offset,
+                last_exported_at,
+                updated_at,
+                metadata
+            )
+            VALUES ($1, $2, NOW(), NOW(), $3)
+            ON CONFLICT (consumer_name) DO UPDATE
+                SET last_ledger_offset = GREATEST(
+                        audit_export_checkpoints.last_ledger_offset,
+                        EXCLUDED.last_ledger_offset
+                    ),
+                    last_exported_at = EXCLUDED.last_exported_at,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = audit_export_checkpoints.metadata || EXCLUDED.metadata
+            """,
+            consumer_name,
+            last_ledger_offset,
+            self._json_dumps(metadata or {}),
+        )
+
+    async def list_audit_chain_heads(self) -> list[dict[str, Any]]:
+        rows = await self._pool.fetch(
+            """
+            SELECT chain_partition, last_sequence, last_event_hash, updated_at
+            FROM audit_chain_heads
+            ORDER BY chain_partition ASC
+            """
+        )
+        return [dict(row) for row in rows]
+
+    async def list_audit_events_for_retention(
+        self,
+        *,
+        chain_partition: str,
+        cutoff_recorded_at,
+        limit: int,
+    ) -> list[AuditEvent]:
+        rows = await self._pool.fetch(
+            """
+            SELECT *
+            FROM audit_event_ledger
+            WHERE chain_partition = $1
+              AND recorded_at < $2
+            ORDER BY ledger_offset ASC
+            LIMIT $3
+            """,
+            chain_partition,
+            cutoff_recorded_at,
+            limit,
+        )
+        return [self._audit_event_from_row(row) for row in rows]
+
+    async def list_audit_retention_candidates(
+        self,
+        *,
+        cutoff_recorded_at,
+    ) -> list[dict[str, Any]]:
+        rows = await self._pool.fetch(
+            """
+            SELECT DISTINCT chain_partition
+            FROM audit_event_ledger
+            WHERE recorded_at < $1
+            ORDER BY chain_partition ASC
+            """,
+            cutoff_recorded_at,
+        )
+        return [dict(row) for row in rows]
+
+    async def record_audit_retention_snapshot(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        chain_partition: str,
+        cutoff_recorded_at,
+        last_pruned_sequence: int,
+        last_pruned_event_hash: str,
+        object_key: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO audit_retention_snapshots (
+                snapshot_id,
+                chain_partition,
+                cutoff_recorded_at,
+                last_pruned_sequence,
+                last_pruned_event_hash,
+                object_key,
+                metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (chain_partition, cutoff_recorded_at) DO UPDATE
+                SET last_pruned_sequence = EXCLUDED.last_pruned_sequence,
+                    last_pruned_event_hash = EXCLUDED.last_pruned_event_hash,
+                    object_key = EXCLUDED.object_key,
+                    metadata = audit_retention_snapshots.metadata || EXCLUDED.metadata,
+                    created_at = NOW()
+            """,
+            uuid4(),
+            chain_partition,
+            cutoff_recorded_at,
+            last_pruned_sequence,
+            last_pruned_event_hash,
+            object_key,
+            self._json_dumps(metadata or {}),
+        )
+
+    async def fetch_latest_audit_retention_snapshot(
+        self,
+        chain_partition: str,
+    ) -> dict[str, Any] | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT chain_partition,
+                   cutoff_recorded_at,
+                   last_pruned_sequence,
+                   last_pruned_event_hash,
+                   object_key,
+                   metadata,
+                   created_at
+            FROM audit_retention_snapshots
+            WHERE chain_partition = $1
+            ORDER BY created_at DESC, cutoff_recorded_at DESC
+            LIMIT 1
+            """,
+            chain_partition,
+        )
+        if row is None:
+            return None
+        data = dict(row)
+        data["metadata"] = self._json_value(row["metadata"], default={})
+        return data
+
+    async def prune_audit_events(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        chain_partition: str,
+        max_ledger_offset: int,
+    ) -> int:
+        result = await conn.execute(
+            """
+            DELETE FROM audit_event_ledger
+            WHERE chain_partition = $1
+              AND ledger_offset <= $2
+            """,
+            chain_partition,
+            max_ledger_offset,
+        )
+        return int(result.split()[-1])
+
+    async def verify_audit_chain(
+        self,
+        chain_partition: str,
+    ) -> AuditChainVerificationResult:
+        snapshot = await self.fetch_latest_audit_retention_snapshot(chain_partition)
+        rows = await self._pool.fetch(
+            """
+            SELECT *
+            FROM audit_event_ledger
+            WHERE chain_partition = $1
+            ORDER BY chain_sequence ASC
+            """,
+            chain_partition,
+        )
+        if snapshot is None:
+            expected_sequence = 1
+            prev_hash = "0" * 64
+        else:
+            expected_sequence = int(snapshot["last_pruned_sequence"]) + 1
+            prev_hash = str(snapshot["last_pruned_event_hash"])
+        checked = 0
+        for row in rows:
+            event = self._audit_event_from_row(row)
+            if event.chain_sequence != expected_sequence:
+                return AuditChainVerificationResult(
+                    chain_partition=chain_partition,
+                    verified=False,
+                    checked_events=checked,
+                    expected_sequence=expected_sequence,
+                    actual_sequence=event.chain_sequence,
+                    expected_prev_hash=prev_hash,
+                    actual_prev_hash=event.prev_hash,
+                    failing_audit_event_id=event.audit_event_id,
+                    detail="Audit chain sequence gap detected",
+                )
+            if event.prev_hash != prev_hash:
+                return AuditChainVerificationResult(
+                    chain_partition=chain_partition,
+                    verified=False,
+                    checked_events=checked,
+                    expected_sequence=expected_sequence,
+                    actual_sequence=event.chain_sequence,
+                    expected_prev_hash=prev_hash,
+                    actual_prev_hash=event.prev_hash,
+                    failing_audit_event_id=event.audit_event_id,
+                    detail="Audit chain previous hash mismatch",
+                )
+            expected_hash = self._build_audit_event_hash(event, prev_hash)
+            if event.event_hash != expected_hash:
+                return AuditChainVerificationResult(
+                    chain_partition=chain_partition,
+                    verified=False,
+                    checked_events=checked,
+                    expected_sequence=expected_sequence,
+                    actual_sequence=event.chain_sequence,
+                    expected_prev_hash=prev_hash,
+                    actual_prev_hash=event.prev_hash,
+                    failing_audit_event_id=event.audit_event_id,
+                    detail="Audit chain event hash mismatch",
+                )
+            checked += 1
+            expected_sequence += 1
+            prev_hash = event.event_hash
+        return AuditChainVerificationResult(
+            chain_partition=chain_partition,
+            verified=True,
+            checked_events=checked,
+            detail="Audit chain verified successfully",
         )
 
     async def upsert_workspace(
@@ -2809,6 +3254,127 @@ class CollaborationRepository:
             timestamp=row["created_at"],
             payload=CollaborationRepository._json_value(row["payload"], default={}),
         )
+
+    @staticmethod
+    def _audit_event_from_row(row: asyncpg.Record) -> AuditEvent:
+        return AuditEvent(
+            audit_event_id=row["audit_event_id"],
+            ledger_offset=row["ledger_offset"],
+            occurred_at=row["occurred_at"],
+            recorded_at=row["recorded_at"],
+            scope_type=row["scope_type"],
+            workspace_id=row["workspace_id"],
+            thread_id=row["thread_id"],
+            actor_type=row["actor_type"],
+            actor_id=row["actor_id"],
+            user_id=row["user_id"],
+            system_agent_id=row["system_agent_id"],
+            source_service=row["source_service"],
+            source_component=row["source_component"],
+            action_category=row["action_category"],
+            action_name=row["action_name"],
+            target_type=row["target_type"],
+            target_id=row["target_id"],
+            outcome=row["outcome"],
+            correlation_id=row["correlation_id"],
+            causation_id=row["causation_id"],
+            request_id=row["request_id"],
+            trace_id=row["trace_id"],
+            error_code=row["error_code"],
+            error_class=row["error_class"],
+            error_message_redacted=row["error_message_redacted"],
+            payload_mode=row["payload_mode"],
+            payload_hash=row["payload_hash"],
+            payload_ref=row["payload_ref"],
+            payload_size_bytes=row["payload_size_bytes"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+            chain_partition=row["chain_partition"],
+            chain_sequence=row["chain_sequence"],
+            prev_hash=row["prev_hash"],
+            event_hash=row["event_hash"],
+        )
+
+    async def _audit_draft_from_event(
+        self,
+        conn: asyncpg.Connection,
+        event: EventEnvelope,
+    ) -> AuditEventDraft:
+        actor_row = await conn.fetchrow(
+            """
+            SELECT user_id, system_agent_id
+            FROM participants
+            WHERE workspace_id = $1
+              AND participant_id = $2
+            """,
+            event.workspace_id,
+            event.actor.id,
+        )
+        action_category = event.event_type.split(".", 1)[0]
+        outcome = self._audit_outcome_for_action(event.event_type)
+        payload_dump = self._canonical_json(event.payload)
+        scope_type = "thread" if event.thread_id is not None else "workspace"
+        return AuditEventDraft(
+            audit_event_id=event.event_id,
+            occurred_at=event.timestamp,
+            recorded_at=event.timestamp,
+            scope_type=scope_type,
+            workspace_id=event.workspace_id,
+            thread_id=event.thread_id,
+            actor_type=event.actor.type,
+            actor_id=event.actor.id,
+            user_id=actor_row["user_id"] if actor_row else None,
+            system_agent_id=actor_row["system_agent_id"] if actor_row else None,
+            source_service="core-collab",
+            source_component="kernel",
+            action_category=action_category,
+            action_name=event.event_type,
+            target_type=event.target.type,
+            target_id=event.target.id,
+            outcome=outcome,
+            correlation_id=event.correlation_id,
+            causation_id=event.causation_id,
+            payload_hash=self._sha256_hex(payload_dump.encode("utf-8")),
+            payload_size_bytes=len(payload_dump.encode("utf-8")),
+            metadata={
+                "visibility": event.visibility,
+                "sequence": event.sequence,
+                "payload_keys": sorted(event.payload.keys()),
+            },
+            chain_partition=self._audit_chain_partition(
+                scope_type=scope_type,
+                workspace_id=event.workspace_id,
+            ),
+        )
+
+    @staticmethod
+    def _audit_chain_partition(*, scope_type: str, workspace_id: UUID | None) -> str:
+        if scope_type in {"workspace", "thread"} and workspace_id is not None:
+            return f"workspace:{workspace_id}"
+        return "global"
+
+    @staticmethod
+    def _audit_outcome_for_action(action_name: str) -> str:
+        if action_name.endswith(".failed"):
+            return "failure"
+        return "success"
+
+    @classmethod
+    def _build_audit_event_hash(
+        cls,
+        event: AuditEventDraft | AuditEvent,
+        prev_hash: str,
+    ) -> str:
+        payload = event.model_dump(mode="json", exclude={"ledger_offset", "chain_sequence", "prev_hash", "event_hash"})
+        canonical_json = cls._canonical_json(payload)
+        return cls._sha256_hex(f"{canonical_json}{prev_hash}".encode("utf-8"))
+
+    @staticmethod
+    def _canonical_json(value: Any) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
+    def _sha256_hex(payload: bytes) -> str:
+        return hashlib.sha256(payload).hexdigest()
 
     @staticmethod
     def _json_dumps(value: Any) -> str:

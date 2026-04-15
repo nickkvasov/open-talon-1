@@ -14,7 +14,15 @@ _CONTRACTS_DIR = os.path.abspath(
 _CORE_COLLAB_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../../services/core-collab")
 )
-for path in (_AGENT_RUNTIME_DIR, _CONTRACTS_DIR, _CORE_COLLAB_DIR):
+_WORKSPACE_MEMORY_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../services/workspace-memory")
+)
+for path in (
+    _AGENT_RUNTIME_DIR,
+    _CONTRACTS_DIR,
+    _CORE_COLLAB_DIR,
+    _WORKSPACE_MEMORY_DIR,
+):
     if path not in sys.path:
         sys.path.insert(0, path)
 
@@ -113,6 +121,7 @@ def _settings() -> RuntimeWorkerSettings:
         kafka_agent_tasks_topic="talon.agent.tasks",
         kafka_agent_events_topic="talon.agent.events",
         kafka_presence_topic="talon.presence",
+        kafka_audit_events_topic="talon.audit.events",
         kafka_consumer_group="agent-runtime",
         agent_step_worker_concurrency=1,
         tool_worker_concurrency=1,

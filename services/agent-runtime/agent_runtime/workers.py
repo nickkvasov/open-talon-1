@@ -21,7 +21,7 @@ from open_talon_contracts.llm_engines import (  # noqa: E402
     LlmEngineRegistry,
     llm_engine_descriptor_from_provider_definition,
 )
-from open_talon_contracts.models import ExecutionSpec, ParticipantInput  # noqa: E402
+from open_talon_contracts.models import AuditEventDraft, ExecutionSpec, ParticipantInput  # noqa: E402
 
 from .config import RuntimeWorkerSettings
 from .events import KafkaEventPublisher, KafkaWakeConsumer
@@ -43,6 +43,43 @@ from .llm_engines import (
 from .secrets import build_default_secret_resolver
 
 logger = logging.getLogger(__name__)
+
+
+async def _record_runtime_audit(
+    kernel: CollaborationKernel,
+    *,
+    workspace_id: UUID,
+    thread_id: UUID,
+    action_category: str,
+    action_name: str,
+    outcome: str,
+    system_agent_id: UUID | None = None,
+    error: Exception | str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    message = str(error) if error is not None else None
+    try:
+        await kernel.record_audit_event(
+            AuditEventDraft(
+                scope_type="thread",
+                workspace_id=workspace_id,
+                thread_id=thread_id,
+                actor_type="agent" if system_agent_id is not None else "system",
+                actor_id=system_agent_id,
+                system_agent_id=system_agent_id,
+                source_service="agent-runtime",
+                source_component="worker",
+                action_category=action_category,
+                action_name=action_name,
+                outcome=outcome,
+                error_class=error.__class__.__name__ if isinstance(error, Exception) else None,
+                error_message_redacted=message[:512] if message else None,
+                metadata=metadata or {},
+                chain_partition=f"workspace:{workspace_id}",
+            )
+        )
+    except Exception:
+        logger.exception("Failed to record runtime audit event action_name=%s", action_name)
 
 
 class _HeartbeatTask:
@@ -240,6 +277,22 @@ class AgentLoopWorker:
             raise
         except Exception as exc:
             logger.exception("Agent loop worker failed step_id=%s", step_id)
+            await _record_runtime_audit(
+                self._kernel,
+                workspace_id=context.workspace.workspace_id,
+                thread_id=context.thread.thread_id,
+                action_category="worker",
+                action_name="worker.exception",
+                outcome="error",
+                system_agent_id=context.system_agent.agent_id,
+                error=exc,
+                metadata={
+                    "step_id": str(step_id),
+                    "run_id": str(context.run.run_id),
+                    "task_id": str(context.task.task_id),
+                    "worker_id": "agent-loop-worker",
+                },
+            )
             failure = await self._kernel.fail_run_step(
                 step_id,
                 "agent-loop-worker",
@@ -430,6 +483,22 @@ class ToolWorker:
             raise
         except Exception as exc:
             logger.exception("Tool worker failed tool_call_id=%s", tool_call_id)
+            await _record_runtime_audit(
+                self._kernel,
+                workspace_id=tool_call.workspace_id,
+                thread_id=tool_call.thread_id,
+                action_category="execution",
+                action_name="execution.backend_failed",
+                outcome="failure",
+                system_agent_id=tool_call.system_agent_id,
+                error=exc,
+                metadata={
+                    "tool_call_id": str(tool_call_id),
+                    "run_id": str(tool_call.run_id),
+                    "task_id": str(tool_call.task_id),
+                    "worker_id": "tool-worker",
+                },
+            )
             failure = await self._kernel.fail_tool_call(
                 tool_call_id,
                 "tool-worker",

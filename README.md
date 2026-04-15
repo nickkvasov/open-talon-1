@@ -44,6 +44,54 @@ Important implications:
 - OpenBao remains part of the local stack for secrets and other internal uses, not as the primary end-user login system
 - the local Keycloak dev setup is intended to allow HTTP during development; `keycloak-init` normalizes `sslRequired=none` for both `master` and `open-talon`, and you can re-apply that with `docker compose up -d keycloak keycloak-init`
 
+## Audit Logging
+
+Open Talon now has a dedicated audit subsystem that is separate from the collaboration domain event stream.
+
+- `collab_event_log` remains the collaboration/event fanout stream
+- `audit_event_ledger` is the canonical append-only audit ledger
+- Kafka topic `talon.audit.events` relays committed audit rows
+- ClickHouse stores the searchable audit projection in `default.audit_events`
+- MinIO stores audit exports and daily chain checkpoints
+
+V1 audit behavior:
+
+- `gateway-edge` emits boundary audit records for HTTP, SSE, and WebSocket activity
+- `core-collab` mirrors semantic workspace/thread/task/run/tool/provider mutations into audit in the same transaction as the business write
+- `agent-runtime` emits audit records for worker exceptions and backend failures
+- outcomes are explicit: `success`, `failure`, `denied`, and `error`
+- payload depth is always `metadata_only`
+
+Security and integrity rules:
+
+- audit rows are append-only in steady-state code
+- workspace-scoped chains use `workspace:{workspace_id}`
+- system/global chains use `global`
+- `prev_hash` and `event_hash` form the tamper-evident chain
+- raw bearer tokens, prompt bodies, tool arguments, and message bodies must not be stored inline in audit metadata
+
+Audit APIs:
+
+- `GET /v1/audit/events`
+- `GET /v1/audit/events/{audit_event_id}`
+- `GET /v1/audit/chains/{partition}/verify`
+- `POST /v1/audit/events/export`
+
+Audit access model:
+
+- system `admin` can query, verify, and export globally
+- workspace `admin` and `supervisor` can access audit within their workspace scope
+- regular `user` cannot read audit data
+
+The current local implementation writes directly into ClickHouse for the audit warehouse path, and the authoritative audit interface remains the Open Talon API backed by Postgres.
+An optional local HyperDX all-in-one profile is now available in Docker Compose for UI and OTLP intake experiments:
+
+```bash
+docker compose -f infrastructure/docker-compose.yaml --profile hyperdx up -d hyperdx
+```
+
+That profile is operational/investigative only. The canonical audit source remains Postgres plus the Open Talon audit APIs.
+
 ## Tools Model
 
 Open Talon models tools in two layers:
@@ -256,13 +304,13 @@ Local services:
 - `postgres`: application database with `pgvector` enabled
 - `pgadmin`: pgAdmin 4 web UI for inspecting and querying the local Postgres instance
 - `kafka`: event bus for chat, collaboration, and agent-runtime traffic
+- `clickhouse`: Langfuse analytics store and audit query projection
+- `minio`: object storage for Langfuse, published assets, audit exports, and chain checkpoints
 - `openbao`: local secret store and token-validation backend
 - `keycloak`: local identity provider for user registration, browser login, and device login
 - `valkey`: session store, API-key cache, and short-lived gateway state
 - `langfuse-web`: Langfuse UI and API surface
 - `langfuse-worker`: Langfuse background processing
-- `clickhouse`: Langfuse analytics/event store
-- `minio`: object storage for Langfuse and Open Talon published assets
 - `forgejo`: local Git forge for live repo workflows and authored agent/tool definitions
 - `ollama`: local model serving endpoint
 - `memgraph`: optional local graph backend for Mem0 graph memory when started with `./open-talon start --memgraph`
@@ -275,17 +323,23 @@ Common local endpoints:
 - `gateway-edge health`: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
 - `gateway-edge readiness`: [http://127.0.0.1:8000/ready](http://127.0.0.1:8000/ready)
 - `gateway-edge docs`: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- `gateway-edge audit list`: [http://127.0.0.1:8000/v1/audit/events](http://127.0.0.1:8000/v1/audit/events)
+- `gateway-edge audit export`: [http://127.0.0.1:8000/v1/audit/events/export](http://127.0.0.1:8000/v1/audit/events/export)
 - `langfuse-web`: [http://localhost:3000](http://localhost:3000)
+- `hyperdx` when started with `--profile hyperdx`: [http://127.0.0.1:8080](http://127.0.0.1:8080)
 - `pgadmin`: [http://localhost:5050](http://localhost:5050)
 - `openbao`: [http://localhost:8200](http://localhost:8200)
 - `keycloak`: [http://localhost:8081](http://localhost:8081)
   default local login: `admin` / `admin`
   default realm: `open-talon`
+- `keycloak issuer`: [http://127.0.0.1:8081/realms/open-talon](http://127.0.0.1:8081/realms/open-talon)
+- `keycloak OpenID config`: [http://127.0.0.1:8081/realms/open-talon/.well-known/openid-configuration](http://127.0.0.1:8081/realms/open-talon/.well-known/openid-configuration)
 - `ollama`: [http://localhost:11434](http://localhost:11434)
 - `clickhouse HTTP`: [http://localhost:8123](http://localhost:8123)
 - `minio API`: [http://localhost:9090](http://localhost:9090)
 - `minio console`: [http://localhost:9091](http://localhost:9091)
 - `forgejo`: [http://localhost:3001](http://localhost:3001)
+- `memgraph HTTP` when started with `./open-talon start --memgraph`: [http://127.0.0.1:7444](http://127.0.0.1:7444)
 
 Ports and protocols:
 
@@ -295,6 +349,9 @@ Ports and protocols:
 - `clickhouse native`: `localhost:9000`
 - `langfuse-worker`: `localhost:3030`
 - `forgejo ssh`: `localhost:2222`
+- `memgraph bolt` when started with `./open-talon start --memgraph`: `localhost:7688`
+- `hyperdx OTLP gRPC` when started with `--profile hyperdx`: `localhost:4317`
+- `hyperdx OTLP HTTP` when started with `--profile hyperdx`: `localhost:4318`
 
 ## Credentials
 
@@ -338,6 +395,12 @@ Default local development credentials:
 - `ClickHouse`
   username: `langfuse`
   password: `langfuse`
+- `Memgraph` when started with `./open-talon start --memgraph`
+  username: `memgraph`
+  password: `memgraph`
+- `HyperDX`
+  URL when started with `--profile hyperdx`: [http://localhost:8080](http://localhost:8080)
+  no repo-pinned bootstrap username/password is currently documented for the all-in-one image
 
 These are local dev defaults from `infrastructure/.env.example`. Override them in your local env before starting the stack if you need different values.
 

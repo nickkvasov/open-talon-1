@@ -21,6 +21,10 @@ from .contracts import (
     AgentRunResult,
     AgentToolCallDraft,
     AgentTaskRouting,
+    AuditChainVerificationResult,
+    AuditEvent,
+    AuditEventDraft,
+    AuditEventPage,
     AttachWorkspaceToolRequest,
     AssumeParticipantRoleRequest,
     Artifact,
@@ -3353,6 +3357,53 @@ class CollaborationKernel:
         return await self._repository.list_thread_events(
             thread_id, after_sequence=after_sequence
         )
+
+    async def record_audit_event(self, draft: AuditEventDraft) -> AuditEvent:
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                return await self._repository.append_audit_event(conn, draft)
+
+    async def get_audit_event(self, audit_event_id: UUID) -> AuditEvent | None:
+        return await self._repository.get_audit_event(audit_event_id)
+
+    async def list_audit_events(
+        self,
+        *,
+        workspace_id: UUID | None = None,
+        thread_id: UUID | None = None,
+        actor_user_id: UUID | None = None,
+        actor_system_agent_id: UUID | None = None,
+        action_prefix: str | None = None,
+        outcome: str | None = None,
+        target_type: str | None = None,
+        target_id: UUID | None = None,
+        correlation_id: UUID | None = None,
+        request_id: UUID | None = None,
+        occurred_after: datetime | None = None,
+        occurred_before: datetime | None = None,
+        limit: int = 100,
+    ) -> AuditEventPage:
+        return await self._repository.list_audit_events(
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+            actor_user_id=actor_user_id,
+            actor_system_agent_id=actor_system_agent_id,
+            action_prefix=action_prefix,
+            outcome=outcome,
+            target_type=target_type,
+            target_id=target_id,
+            correlation_id=correlation_id,
+            request_id=request_id,
+            occurred_after=occurred_after,
+            occurred_before=occurred_before,
+            limit=limit,
+        )
+
+    async def verify_audit_chain(
+        self,
+        chain_partition: str,
+    ) -> AuditChainVerificationResult:
+        return await self._repository.verify_audit_chain(chain_partition)
 
     async def _build_message_tasks(
         self,

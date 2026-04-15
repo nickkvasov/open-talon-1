@@ -14,7 +14,7 @@ for path in (_GW_DIR, _CONTRACTS_DIR):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from gateway_edge.models import ActorRef, EventEnvelope, TargetRef
+from gateway_edge.models import ActorRef, AuditEvent, EventEnvelope, TargetRef
 from gateway_edge.services.events import EventService
 
 
@@ -83,3 +83,62 @@ def test_event_service_routes_requeue_wake_events_to_agent_tasks_topic():
 
     assert EventService._topic_for_event(tool_event).endswith("agent.tasks")
     assert EventService._topic_for_event(step_event).endswith("agent.tasks")
+
+
+def test_event_service_publishes_audit_events_to_audit_topic():
+    import asyncio
+
+    class _Producer:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send_and_wait(self, topic, *, key=None, value=None):
+            self.calls.append({"topic": topic, "key": key, "value": value})
+
+    async def _run():
+        service = EventService()
+        producer = _Producer()
+        service._producer = producer  # noqa: SLF001
+        event = AuditEvent(
+            audit_event_id=uuid4(),
+            ledger_offset=1,
+            occurred_at="2026-01-01T00:00:00Z",
+            recorded_at="2026-01-01T00:00:00Z",
+            scope_type="workspace",
+            workspace_id=uuid4(),
+            thread_id=None,
+            actor_type="user",
+            actor_id=uuid4(),
+            user_id=uuid4(),
+            system_agent_id=None,
+            source_service="gateway-edge",
+            source_component="test",
+            action_category="api",
+            action_name="api.request.completed",
+            target_type="workspace",
+            target_id=uuid4(),
+            outcome="success",
+            correlation_id=uuid4(),
+            causation_id=None,
+            request_id=uuid4(),
+            trace_id=None,
+            error_code=None,
+            error_class=None,
+            error_message_redacted=None,
+            payload_mode="metadata_only",
+            payload_hash=None,
+            payload_ref=None,
+            payload_size_bytes=None,
+            metadata={},
+            chain_partition="workspace:test",
+            chain_sequence=1,
+            prev_hash="0" * 64,
+            event_hash="1" * 64,
+        )
+        await service.publish_audit_event(event)
+        return producer.calls
+
+    calls = asyncio.run(_run())
+    assert len(calls) == 1
+    assert calls[0]["topic"].endswith("audit.events")
+    assert calls[0]["key"] == b"workspace:test"

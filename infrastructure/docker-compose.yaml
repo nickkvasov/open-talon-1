@@ -350,6 +350,20 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  hyperdx:
+    image: docker.hyperdx.io/hyperdx/hyperdx-all-in-one:latest
+    container_name: hyperdx
+    profiles:
+      - hyperdx
+    ports:
+      - "${HYPERDX_PORT:-8080}:8080"
+      - "${HYPERDX_OTLP_GRPC_PORT:-4317}:4317"
+      - "${HYPERDX_OTLP_HTTP_PORT:-4318}:4318"
+    environment:
+      HYPERDX_APP_URL: ${HYPERDX_APP_URL:-http://localhost:8080}
+      USAGE_STATS_ENABLED: "false"
+    restart: unless-stopped
+
   ollama:
     image: ollama/ollama:latest
     container_name: ollama

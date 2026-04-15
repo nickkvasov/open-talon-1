@@ -41,6 +41,10 @@ Primary local flow:
 - Keep workspace-local state on `participants`: status, visibility scope, roles, capabilities, timestamps, and metadata.
 - Keep execution-side workspace materialization separate from collaboration `Workspace` models. Use `ExecutionWorkspaceRef` for executor payloads.
 - Authenticated human identity should be derived in `gateway-edge` from OIDC auth context, not trusted from client-provided actor fields.
+- Treat `collab_event_log` and `audit_event_ledger` as separate concerns: collaboration fanout vs. compliance/investigation.
+- `audit_event_ledger` is append-only in steady-state code; do not add update/delete flows for audit rows.
+- Audit integrity depends on `chain_partition`, `chain_sequence`, `prev_hash`, and `event_hash`; preserve chain semantics when changing audit writes.
+- Audit v1 is metadata-only. Do not store raw bearer tokens, prompt bodies, tool arguments, or message bodies inline in audit metadata.
 - LLM providers are persistent records in `llm_providers`; do not reintroduce env-defined engine registries.
 - Memory providers are persistent records in `memory_providers`; do not hardcode provider definitions in application logic after bootstrapping.
 - Local OpenBao now uses persistent file storage under `infrastructure/data/openbao`; do not assume `docker compose down` clears local secrets.
@@ -83,6 +87,46 @@ source .venv/bin/activate
   - start it locally with `./open-talon start --memgraph`
 - Local infrastructure defaults are documented in `infrastructure/.env.example`.
 
+Useful local endpoints and credentials:
+
+- Gateway: `http://127.0.0.1:8000`
+- Gateway docs: `http://127.0.0.1:8000/docs`
+- Audit API base: `http://127.0.0.1:8000/v1/audit`
+- Kafka: `localhost:9092`
+- Valkey: `localhost:6379`
+- Keycloak: `http://127.0.0.1:8081`
+  - admin console: `admin` / `admin`
+  - realm: `open-talon`
+  - issuer: `http://127.0.0.1:8081/realms/open-talon`
+  - OpenID config: `http://127.0.0.1:8081/realms/open-talon/.well-known/openid-configuration`
+  - realm users: `admin` / `admin123`, `admin2` / `admin223`, `supervisor` / `supervisor123`, `supervisor2` / `supervisor223`, `user1` / `user12345`, `user2` / `user22345`
+- OpenBao: `http://127.0.0.1:8200`
+  - root token: `root`
+- pgAdmin: `http://127.0.0.1:5050`
+  - login: `admin@local.dev` / `admin`
+- Langfuse: `http://127.0.0.1:3000`
+  - login: `admin@example.com` / `admin123456`
+- Langfuse worker: `localhost:3030`
+- Ollama: `http://127.0.0.1:11434`
+- MinIO API: `http://127.0.0.1:9090`
+- MinIO console: `http://127.0.0.1:9091`
+  - login: `minio` / `miniosecret`
+- Forgejo: `http://127.0.0.1:3001`
+  - admin: `forgejo` / `forgejo123`
+- Forgejo SSH: `localhost:2222`
+- ClickHouse HTTP: `http://127.0.0.1:8123`
+- ClickHouse native: `localhost:9000`
+  - login: `langfuse` / `langfuse`
+- Memgraph bolt when started with `./open-talon start --memgraph`: `localhost:7688`
+- Memgraph HTTP when started with `./open-talon start --memgraph`: `http://127.0.0.1:7444`
+- Memgraph credentials when started with `./open-talon start --memgraph`: `memgraph` / `memgraph`
+- Langfuse Postgres DB: `langfuse_db`
+- Valkey password: `langfuse-dev-secret`
+- Optional HyperDX profile:
+  - UI: `http://127.0.0.1:8080`
+  - OTLP gRPC: `127.0.0.1:4317`
+  - OTLP HTTP: `127.0.0.1:4318`
+
 ## Testing Expectations
 
 Before finishing meaningful code changes, run the most relevant tests.
@@ -117,11 +161,20 @@ If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 - run `tests/tui`
 - verify docs and env defaults stay aligned with the actual login flow
 
+If a change touches audit logging, audit APIs, event relays, or runtime failure reporting:
+
+- inspect `packages/contracts`, `services/core-collab`, `services/gateway-edge`, and `services/agent-runtime` together
+- verify Postgres remains the canonical audit store even if Kafka or ClickHouse is unavailable
+- keep relay/projector failures non-blocking for canonical audit writes
+- run at least one gateway audit test and one repository chain-verification test
+- keep MinIO export/checkpoint behavior aligned with docs and env defaults
+
 ## Code Change Rules
 
 - Preserve the normalized participant model.
 - Avoid hidden schema changes in app startup code.
 - Keep gateway routers thin; prefer logic in services/kernel/repository layers.
+- Keep audit capture in dedicated middleware/services instead of scattering ad hoc audit inserts through routers.
 - Keep execution orchestration in Open Talon code and isolate only the backend executor behind the execution interface.
 - Prefer explicit SQL and repository methods for database changes.
 - Keep migration/backfill logic separate from steady-state read/write logic when possible.
@@ -177,6 +230,8 @@ If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 - `services/gateway-edge/gateway_edge/services/llm_provider_health.py`
 - `services/gateway-edge/gateway_edge/auth/`
 - `services/gateway-edge/gateway_edge/services/events.py`
+- `services/gateway-edge/gateway_edge/services/audit.py`
+- `services/gateway-edge/gateway_edge/audit_middleware.py`
 - `services/gateway-edge/gateway_edge/db/postgres.py`
 - `packages/contracts/open_talon_contracts/llm_engines.py`
 - `apps/tui/open_talon_tui/main.py`

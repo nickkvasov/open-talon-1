@@ -13,7 +13,10 @@ _CONTRACTS_DIR = os.path.abspath(
 _CORE_COLLAB_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../../services/core-collab")
 )
-for path in (_CONTRACTS_DIR, _CORE_COLLAB_DIR):
+_WORKSPACE_MEMORY_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../services/workspace-memory")
+)
+for path in (_CONTRACTS_DIR, _CORE_COLLAB_DIR, _WORKSPACE_MEMORY_DIR):
     if path not in sys.path:
         sys.path.insert(0, path)
 
