@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -28,7 +29,9 @@ from open_talon_contracts.models import (  # noqa: E402
     ActorRef,
     AgentDefinition,
     AgentEndpoint,
+    AgentRunResult,
     ArtifactRef,
+    CreateGitRepositoryRequest,
     CreateLlmProviderRequest,
     CreateWorkspaceRequest,
     CreateSystemToolRequest,
@@ -42,6 +45,7 @@ from open_talon_contracts.models import (  # noqa: E402
     ParticipantProfile,
     Run,
     RunStep,
+    TargetRef,
     ToolCall,
     ToolCallResult,
     SystemToolDefinition,
@@ -52,6 +56,7 @@ from open_talon_contracts.models import (  # noqa: E402
     Thread,
     TimelineMessage,
     UpdateLlmProviderRequest,
+    UpsertRoleDefinitionRequest,
     Workspace,
     WorkspaceTool,
 )
@@ -94,6 +99,7 @@ class FakeRepository:
         self.recorded_events: list[EventEnvelope] = []
         self._tasks = {}
         self._runs = {}
+        self._run_steps = {}
         self._workspaces = {}
         self._threads = {}
         self._participants = {}
@@ -101,7 +107,12 @@ class FakeRepository:
         self._messages = {}
         self._system_tools = {}
         self._llm_providers = {}
+        self._git_repositories = {}
         self._workspace_sequences = {}
+        self._thread_sequences = {}
+        self._runtime_queue_stats = {}
+        self._global_token_total = 0
+        self._workspace_token_totals = {}
         now = datetime.now(timezone.utc)
         postgres_provider = MemoryProviderDefinition(
             provider_id=uuid4(),
@@ -159,11 +170,23 @@ class FakeRepository:
     async def fetch_run(self, run_id):
         return self._runs.get(run_id)
 
+    async def fetch_run_step(self, step_id):
+        return self._run_steps.get(step_id)
+
     async def fetch_workspace(self, workspace_id):
         return self._workspaces.get(workspace_id)
 
     async def list_workspaces(self):
         return list(self._workspaces.values())
+
+    async def list_workspaces_for_user(self, user_id):
+        visible = []
+        for workspace in self._workspaces.values():
+            for participant in self._participants.values():
+                if participant.workspace_id == workspace.workspace_id and participant.user_id == user_id:
+                    visible.append(workspace)
+                    break
+        return visible
 
     async def fetch_thread(self, thread_id):
         return self._threads.get(thread_id)
@@ -327,6 +350,18 @@ class FakeRepository:
                 return tool
         return None
 
+    async def upsert_workspace_tool(self, conn, *, workspace_id, tool):
+        tools = [
+            existing
+            for existing in self._workspace_tools.get(workspace_id, [])
+            if existing.tool_id != tool.tool_id
+        ]
+        tools.append(tool)
+        self._workspace_tools[workspace_id] = tools
+
+    async def upsert_git_repository(self, conn, repository) -> None:
+        self._git_repositories[repository.repo_id] = repository
+
     async def list_timeline_messages(self, thread_id):
         return list(self._messages.get(thread_id, []))
 
@@ -337,12 +372,45 @@ class FakeRepository:
                     return message
         return None
 
+    async def fetch_tool_call(self, tool_call_id):
+        for tool_calls in self._tool_calls.values():
+            for tool_call in tool_calls:
+                if tool_call.tool_call_id == tool_call_id:
+                    return tool_call
+        return None
+
     async def list_completed_tool_calls_for_run(self, run_id):
         return [
             tool_call
             for tool_call in self._tool_calls.get(run_id, [])
             if tool_call.status in {"completed", "failed"}
         ]
+
+    async def list_expired_run_steps(self, *, now):
+        return [
+            step
+            for step in self._run_steps.values()
+            if step.status == "claimed"
+            and step.lease_expires_at is not None
+            and step.lease_expires_at <= now
+            and (step.next_retry_at is None or step.next_retry_at <= now)
+        ]
+
+    async def list_expired_tool_calls(self, *, now):
+        expired = []
+        for tool_calls in self._tool_calls.values():
+            for tool_call in tool_calls:
+                if (
+                    tool_call.status == "claimed"
+                    and tool_call.lease_expires_at is not None
+                    and tool_call.lease_expires_at <= now
+                    and (
+                        tool_call.next_retry_at is None
+                        or tool_call.next_retry_at <= now
+                    )
+                ):
+                    expired.append(tool_call)
+        return expired
 
     async def upsert_workspace(self, conn, workspace: Workspace) -> None:
         self._workspaces[workspace.workspace_id] = workspace
@@ -353,9 +421,26 @@ class FakeRepository:
     async def upsert_participant(self, conn, participant: ParticipantProfile) -> None:
         self._participants[(participant.workspace_id, participant.participant_id)] = participant
 
+    async def upsert_run_step(self, conn, step: RunStep) -> None:
+        self._run_steps[step.step_id] = step
+
+    async def upsert_tool_call(self, conn, tool_call: ToolCall) -> None:
+        tool_calls = [
+            existing
+            for existing in self._tool_calls.get(tool_call.run_id, [])
+            if existing.tool_call_id != tool_call.tool_call_id
+        ]
+        tool_calls.append(tool_call)
+        self._tool_calls[tool_call.run_id] = tool_calls
+
     async def next_workspace_sequence(self, conn, workspace_id):
         next_value = self._workspace_sequences.get(workspace_id, 0) + 1
         self._workspace_sequences[workspace_id] = next_value
+        return next_value
+
+    async def next_thread_sequence(self, conn, thread_id):
+        next_value = self._thread_sequences.get(thread_id, 0) + 1
+        self._thread_sequences[thread_id] = next_value
         return next_value
 
     async def record_event(self, conn, event: EventEnvelope) -> None:
@@ -366,6 +451,21 @@ class FakeRepository:
 
     async def delete_llm_provider(self, conn, *, provider_id):
         return self._llm_providers.pop(provider_id, None) is not None
+
+    async def get_runtime_queue_stats(self, *, now, since):
+        return self._runtime_queue_stats
+
+    async def get_global_token_total(self, *, day_start, day_end):
+        return self._global_token_total
+
+    async def get_workspace_token_total(self, *, workspace_id, day_start, day_end):
+        return self._workspace_token_totals.get(workspace_id, 0)
+
+    async def list_workspace_token_totals(self, *, day_start, day_end):
+        return [
+            {"workspace_id": workspace_id, "total_tokens": total_tokens}
+            for workspace_id, total_tokens in self._workspace_token_totals.items()
+        ]
 
 
 def _actor() -> ParticipantInput:
@@ -451,6 +551,43 @@ async def test_kernel_resolve_authenticated_user_actor_reuses_workspace_particip
 
     assert actor.user_id == user_id
     assert actor.participant_id == participant_id
+
+
+@pytest.mark.asyncio
+async def test_kernel_list_workspaces_filters_by_user_membership():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    first_user_id = uuid4()
+    second_user_id = uuid4()
+
+    first = await kernel.create_workspace(
+        CreateWorkspaceRequest(
+            name="Visible",
+            actor=ParticipantInput(
+                participant_id=uuid4(),
+                participant_type="user",
+                user_id=first_user_id,
+                display_name="First",
+            ),
+        )
+    )
+    second = await kernel.create_workspace(
+        CreateWorkspaceRequest(
+            name="Hidden",
+            actor=ParticipantInput(
+                participant_id=uuid4(),
+                participant_type="user",
+                user_id=second_user_id,
+                display_name="Second",
+            ),
+        )
+    )
+
+    visible = await kernel.list_workspaces(user_id=first_user_id)
+
+    assert [workspace.workspace_id for workspace in visible] == [first.workspace.workspace_id]
+    assert second.workspace is not None
+    assert second.workspace.workspace_id not in {workspace.workspace_id for workspace in visible}
 
 
 @pytest.mark.asyncio
@@ -732,6 +869,110 @@ async def test_kernel_create_system_tool_rejects_read_write_workspace_access_for
 
 
 @pytest.mark.asyncio
+async def test_kernel_create_system_tool_rejects_full_network_for_untrusted_tool():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+
+    with pytest.raises(ValueError, match="network=full requires trust_level='trusted'"):
+        await kernel.create_system_tool(
+            CreateSystemToolRequest(
+                actor=_actor(),
+                name="repo_sync",
+                description="Downloads remote content.",
+                execution=ToolExecutionBinding(
+                    backend_kind="docker",
+                    handler_ref="repo_sync",
+                    execution_profile={"network": "full"},
+                    trust_level="sandboxed",
+                ),
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_kernel_create_system_tool_rejects_local_process_for_untrusted_tool():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+
+    with pytest.raises(ValueError, match="local_process execution requires trust_level='trusted'"):
+        await kernel.create_system_tool(
+            CreateSystemToolRequest(
+                actor=_actor(),
+                name="repo_scan",
+                description="Scans the local process workspace.",
+                execution=ToolExecutionBinding(
+                    backend_kind="local_process",
+                    handler_ref="repo_scan",
+                    trust_level="sandboxed",
+                ),
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_kernel_workspace_management_requires_admin_or_supervisor_role():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    owner_user_id = uuid4()
+    member_user_id = uuid4()
+    created = await kernel.create_workspace(
+        CreateWorkspaceRequest(
+            name="Guarded",
+            actor=ParticipantInput(
+                participant_id=uuid4(),
+                participant_type="user",
+                user_id=owner_user_id,
+                display_name="Owner",
+            ),
+        )
+    )
+    assert created.workspace is not None
+    workspace_id = created.workspace.workspace_id
+    member_participant_id = uuid4()
+    repository._participants[(workspace_id, member_participant_id)] = ParticipantProfile(
+        participant_id=member_participant_id,
+        workspace_id=workspace_id,
+        participant_type="user",
+        user_id=member_user_id,
+        display_name="Member",
+        roles=["user"],
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    with pytest.raises(PermissionError, match="Workspace admin or supervisor role required"):
+        await kernel.upsert_role_definition(
+            workspace_id,
+            UpsertRoleDefinitionRequest(
+                actor=ParticipantInput(
+                    participant_id=member_participant_id,
+                    participant_type="user",
+                    user_id=member_user_id,
+                    display_name="Member",
+                ),
+                name="qa",
+                definition="Reviews release candidates.",
+            ),
+        )
+
+    with pytest.raises(PermissionError, match="Workspace admin or supervisor role required"):
+        await kernel.create_git_repository(
+            scope="workspace",
+            workspace_id=workspace_id,
+            payload=CreateGitRepositoryRequest(
+                actor=ParticipantInput(
+                    participant_id=member_participant_id,
+                    participant_type="user",
+                    user_id=member_user_id,
+                    display_name="Member",
+                ),
+                name="workspace-defs",
+                local_path="/tmp/workspace-defs",
+            ),
+        )
+
+
+@pytest.mark.asyncio
 async def test_kernel_setup_schema_backfills_existing_agents_without_contracts():
     stale_agent = AgentDefinition(
         agent_id=uuid4(),
@@ -759,6 +1000,349 @@ async def test_kernel_setup_schema_backfills_existing_agents_without_contracts()
         "Open questions",
         "Next action",
     ]
+
+
+def test_kernel_run_output_includes_standardized_usage_payload():
+    payload = CollaborationKernel._run_output_from_result(  # noqa: SLF001
+        AgentRunResult(
+            stop_reason="completed",
+            message="Done",
+            metadata={
+                "usage": {
+                    "provider": "openai",
+                    "model": "gpt-5.4-mini",
+                    "prompt_tokens": 21,
+                    "completion_tokens": 9,
+                    "total_tokens": 30,
+                }
+            },
+        )
+    )
+
+    assert payload["usage"] == {
+        "provider": "openai",
+        "model": "gpt-5.4-mini",
+        "prompt_tokens": 21,
+        "completion_tokens": 9,
+        "total_tokens": 30,
+    }
+
+
+@pytest.mark.asyncio
+async def test_kernel_enforce_run_step_token_budget_uses_workspace_metadata_override():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    workspace_id = uuid4()
+    step = RunStep(
+        step_id=uuid4(),
+        run_id=uuid4(),
+        task_id=uuid4(),
+        workspace_id=workspace_id,
+        thread_id=uuid4(),
+        system_agent_id=uuid4(),
+        status="claimed",
+        claimed_by_worker="agent-loop-worker",
+    )
+    repository._run_steps[step.step_id] = step
+    repository._workspaces[workspace_id] = Workspace(
+        workspace_id=workspace_id,
+        name="Budgeted",
+        metadata={"limits": {"daily_token_cap": 10}},
+    )
+    repository._global_token_total = 5
+    repository._workspace_token_totals[workspace_id] = 10
+    budget_failure = object()
+    kernel.fail_run_step = AsyncMock(return_value=budget_failure)  # type: ignore[method-assign]
+
+    result = await kernel.enforce_run_step_token_budget(
+        step_id=step.step_id,
+        worker_id="agent-loop-worker",
+        global_daily_token_cap=100,
+        default_workspace_daily_token_cap=50,
+    )
+
+    assert result is budget_failure
+    kernel.fail_run_step.assert_awaited_once()  # type: ignore[attr-defined]
+    args = kernel.fail_run_step.await_args.args  # type: ignore[attr-defined]
+    kwargs = kernel.fail_run_step.await_args.kwargs  # type: ignore[attr-defined]
+    assert args[:2] == (step.step_id, "agent-loop-worker")
+    assert "Workspace daily token cap exceeded (10/10)" in args[2]
+    assert kwargs == {"stop_reason": "budget_exhausted"}
+
+
+@pytest.mark.asyncio
+async def test_kernel_requeue_expired_run_step_applies_retry_backoff():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    step = RunStep(
+        step_id=uuid4(),
+        run_id=uuid4(),
+        task_id=uuid4(),
+        workspace_id=uuid4(),
+        thread_id=uuid4(),
+        system_agent_id=uuid4(),
+        status="claimed",
+        claimed_by_worker="agent-loop-worker",
+        lease_expires_at=now,
+        last_heartbeat_at=now,
+        attempt_count=2,
+    )
+
+    requeued = await kernel._requeue_expired_run_step(step, now=now)  # noqa: SLF001
+
+    assert requeued.status == "created"
+    assert requeued.claimed_by_worker is None
+    assert requeued.lease_expires_at is None
+    assert requeued.last_heartbeat_at is None
+    assert requeued.next_retry_at == now + timedelta(seconds=120)
+    assert requeued.error == "Run step lease expired; retry 3 scheduled"
+    assert await repository.fetch_run_step(step.step_id) == requeued
+
+
+@pytest.mark.asyncio
+async def test_kernel_fail_expired_tool_call_fails_waiting_step_and_run():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    task_id = uuid4()
+    run_id = uuid4()
+    step_id = uuid4()
+    system_agent_id = uuid4()
+    participant_id = uuid4()
+    tool_call_id = uuid4()
+    correlation_id = uuid4()
+    error = "Tool call lease expired after 3 attempts"
+
+    task = Task(
+        task_id=task_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        title="Reconcile execution",
+        description="Validate expired tool-call handling.",
+        requested_by=uuid4(),
+        status="claimed",
+        claimed_by=participant_id,
+        correlation_id=correlation_id,
+        metadata={
+            "target_system_agent_id": str(system_agent_id),
+            "target_participant_id": str(participant_id),
+            "response_visibility": "workspace",
+        },
+        created_at=now,
+        updated_at=now,
+    )
+    run = Run(
+        run_id=run_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        task_id=task_id,
+        participant_id=participant_id,
+        status="started",
+        correlation_id=correlation_id,
+        causation_id=task_id,
+        created_at=now,
+        updated_at=now,
+    )
+    step = RunStep(
+        step_id=step_id,
+        run_id=run_id,
+        task_id=task_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        system_agent_id=system_agent_id,
+        status="waiting_tools",
+        created_at=now,
+        updated_at=now,
+    )
+    tool_call = ToolCall(
+        tool_call_id=tool_call_id,
+        run_id=run_id,
+        run_step_id=step_id,
+        task_id=task_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        system_agent_id=system_agent_id,
+        tool_id=uuid4(),
+        tool_name="repo_search",
+        status="claimed",
+        execution_spec=ExecutionSpec(
+            invocation_id=uuid4(),
+            handler_ref="repo_search",
+        ).model_dump(mode="json"),
+        claimed_by_worker="tool-worker",
+        attempt_count=3,
+        lease_expires_at=now,
+        last_heartbeat_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    repository._tasks[task_id] = task
+    repository._runs[run_id] = run
+    repository._run_steps[step_id] = step
+    repository._tool_calls[run_id] = [tool_call]
+
+    participant = ParticipantProfile(
+        participant_id=participant_id,
+        workspace_id=workspace_id,
+        participant_type="agent",
+        system_agent_id=system_agent_id,
+        display_name="Testing Agent",
+        roles=["testing agent"],
+        created_at=now,
+        updated_at=now,
+    )
+    failure_event = EventEnvelope(
+        event_type="run.failed",
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        actor=ActorRef(type="agent", id=participant_id),
+        target=TargetRef(type="run", id=run_id),
+        visibility="agents_only",
+    )
+    tool_event = EventEnvelope(
+        event_type="tool_call.failed",
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        actor=ActorRef(type="agent", id=participant_id),
+        target=TargetRef(type="tool_call", id=tool_call_id),
+        visibility="agents_only",
+    )
+    kernel._require_run_participant = AsyncMock(return_value=participant)  # type: ignore[method-assign]
+    kernel._build_thread_event = AsyncMock(return_value=tool_event)  # type: ignore[method-assign]
+    kernel.fail_run = AsyncMock(return_value=type("Failure", (), {"events": [failure_event]})())  # type: ignore[method-assign]
+
+    result = await kernel._fail_expired_tool_call(tool_call, error=error)  # noqa: SLF001
+
+    updated_step = await repository.fetch_run_step(step_id)
+    updated_tool_call = await repository.fetch_tool_call(tool_call_id)
+    assert updated_step is not None
+    assert updated_step.status == "failed"
+    assert updated_step.error == error
+    assert updated_tool_call is not None
+    assert updated_tool_call.status == "failed"
+    assert updated_tool_call.error == error
+    assert updated_tool_call.result is not None
+    assert updated_tool_call.result.error == error
+    assert updated_tool_call.next_retry_at is None
+    kernel.fail_run.assert_awaited_once_with(  # type: ignore[attr-defined]
+        run_id,
+        system_agent_id,
+        error,
+        stop_reason="tool_failure",
+    )
+    assert result.events == [tool_event, failure_event]
+
+
+@pytest.mark.asyncio
+async def test_kernel_reconcile_expired_execution_leases_routes_requeues_and_terminal_failures():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    kernel._now = lambda: now  # type: ignore[method-assign]
+    requeue_step = RunStep(
+        step_id=uuid4(),
+        run_id=uuid4(),
+        task_id=uuid4(),
+        workspace_id=uuid4(),
+        thread_id=uuid4(),
+        system_agent_id=uuid4(),
+        status="claimed",
+        attempt_count=1,
+        lease_expires_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    fail_step = RunStep(
+        step_id=uuid4(),
+        run_id=uuid4(),
+        task_id=uuid4(),
+        workspace_id=uuid4(),
+        thread_id=uuid4(),
+        system_agent_id=uuid4(),
+        status="claimed",
+        attempt_count=3,
+        lease_expires_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    requeue_tool = ToolCall(
+        tool_call_id=uuid4(),
+        run_id=uuid4(),
+        run_step_id=uuid4(),
+        task_id=uuid4(),
+        workspace_id=uuid4(),
+        thread_id=uuid4(),
+        system_agent_id=uuid4(),
+        tool_id=uuid4(),
+        tool_name="repo_search",
+        status="claimed",
+        execution_spec=ExecutionSpec(invocation_id=uuid4(), handler_ref="repo_search").model_dump(mode="json"),
+        attempt_count=1,
+        lease_expires_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    fail_tool = ToolCall(
+        tool_call_id=uuid4(),
+        run_id=uuid4(),
+        run_step_id=uuid4(),
+        task_id=uuid4(),
+        workspace_id=uuid4(),
+        thread_id=uuid4(),
+        system_agent_id=uuid4(),
+        tool_id=uuid4(),
+        tool_name="repo_search",
+        status="claimed",
+        execution_spec=ExecutionSpec(invocation_id=uuid4(), handler_ref="repo_search").model_dump(mode="json"),
+        attempt_count=3,
+        lease_expires_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    repository._run_steps[requeue_step.step_id] = requeue_step
+    repository._run_steps[fail_step.step_id] = fail_step
+    repository._tool_calls[requeue_tool.run_id] = [requeue_tool]
+    repository._tool_calls[fail_tool.run_id] = [fail_tool]
+
+    expected_step = requeue_step.model_copy(update={"status": "created"})
+    expected_tool = requeue_tool.model_copy(update={"status": "created"})
+    step_failure_event = EventEnvelope(
+        event_type="run.failed",
+        workspace_id=fail_step.workspace_id,
+        thread_id=fail_step.thread_id,
+        actor=ActorRef(type="agent", id=uuid4()),
+        target=TargetRef(type="run", id=fail_step.run_id),
+        visibility="agents_only",
+    )
+    tool_failure_event = EventEnvelope(
+        event_type="tool_call.failed",
+        workspace_id=fail_tool.workspace_id,
+        thread_id=fail_tool.thread_id,
+        actor=ActorRef(type="agent", id=uuid4()),
+        target=TargetRef(type="tool_call", id=fail_tool.tool_call_id),
+        visibility="agents_only",
+    )
+    kernel._requeue_expired_run_step = AsyncMock(return_value=expected_step)  # type: ignore[method-assign]
+    kernel._fail_expired_run_step = AsyncMock(  # type: ignore[method-assign]
+        return_value=type("Failure", (), {"events": [step_failure_event]})()
+    )
+    kernel._requeue_expired_tool_call = AsyncMock(return_value=expected_tool)  # type: ignore[method-assign]
+    kernel._fail_expired_tool_call = AsyncMock(  # type: ignore[method-assign]
+        return_value=type("Failure", (), {"events": [tool_failure_event]})()
+    )
+
+    result = await kernel.reconcile_expired_execution_leases()
+
+    assert result.run_steps == [expected_step]
+    assert result.tool_calls == [expected_tool]
+    assert result.events == [step_failure_event, tool_failure_event]
+    kernel._requeue_expired_run_step.assert_awaited_once_with(requeue_step, now=now)  # type: ignore[attr-defined]
+    kernel._fail_expired_run_step.assert_awaited_once()  # type: ignore[attr-defined]
+    kernel._requeue_expired_tool_call.assert_awaited_once_with(requeue_tool, now=now)  # type: ignore[attr-defined]
+    kernel._fail_expired_tool_call.assert_awaited_once()  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

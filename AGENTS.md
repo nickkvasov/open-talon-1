@@ -41,6 +41,9 @@ Primary local flow:
 - Keep workspace-local state on `participants`: status, visibility scope, roles, capabilities, timestamps, and metadata.
 - Keep execution-side workspace materialization separate from collaboration `Workspace` models. Use `ExecutionWorkspaceRef` for executor payloads.
 - Authenticated human identity should be derived in `gateway-edge` from OIDC auth context, not trusted from client-provided actor fields.
+- Keep OIDC workspace reads membership-scoped. Non-members should get `404` for workspace-scoped reads rather than `403`.
+- Global system-definition, global publish, and provider-management routes are admin-only for OIDC users unless the request is coming through an existing operator/system-auth path.
+- Workspace role-definition changes, workspace tool management, workspace Git repository creation, and workspace asset publishing require workspace `admin` or `supervisor`.
 - Treat `collab_event_log` and `audit_event_ledger` as separate concerns: collaboration fanout vs. compliance/investigation.
 - `audit_event_ledger` is append-only in steady-state code; do not add update/delete flows for audit rows.
 - Audit integrity depends on `chain_partition`, `chain_sequence`, `prev_hash`, and `event_hash`; preserve chain semantics when changing audit writes.
@@ -49,6 +52,9 @@ Primary local flow:
 - Memory providers are persistent records in `memory_providers`; do not hardcode provider definitions in application logic after bootstrapping.
 - Local OpenBao now uses persistent file storage under `infrastructure/data/openbao`; do not assume `docker compose down` clears local secrets.
 - Postgres is the canonical memory store. Mem0 and optional graph backends such as Memgraph are derived retrieval projections, not the source of truth.
+- Risky tool execution profiles require `trust_level="trusted"`: `workspace_access=read_write`, `network=full`, and `local_process`.
+- Execution retries use `next_retry_at` with bounded backoff. Do not reintroduce immediate infinite lease requeue loops.
+- Token budgets rely on normalized usage in `run.output["usage"]` and the runtime caps `OPEN_TALON_GLOBAL_DAILY_TOKEN_CAP` and `OPEN_TALON_WORKSPACE_DAILY_TOKEN_CAP`.
 
 ## Database Rules
 
@@ -161,6 +167,13 @@ If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 - run `tests/tui`
 - verify docs and env defaults stay aligned with the actual login flow
 
+If a change touches workspace authz, global admin routes, or workspace membership filtering:
+
+- run relevant `tests/gateway-edge/test_workspaces.py`
+- run relevant `tests/gateway-edge/test_admin.py`
+- make sure non-member workspace reads still return `404`
+- make sure global OIDC reads/writes still require `admin`
+
 If a change touches audit logging, audit APIs, event relays, or runtime failure reporting:
 
 - inspect `packages/contracts`, `services/core-collab`, `services/gateway-edge`, and `services/agent-runtime` together
@@ -168,6 +181,13 @@ If a change touches audit logging, audit APIs, event relays, or runtime failure 
 - keep relay/projector failures non-blocking for canonical audit writes
 - run at least one gateway audit test and one repository chain-verification test
 - keep MinIO export/checkpoint behavior aligned with docs and env defaults
+
+If a change touches execution lease recovery, budget enforcement, or runtime overview behavior:
+
+- run relevant `tests/core-collab/test_agent_contracts.py`
+- run relevant `tests/agent-runtime/test_workers.py`
+- verify retry backoff, terminal failure propagation, and `budget_exhausted` handling together
+- keep `docs/system-quickstart.md`, `README.md`, and `infrastructure/.env.example` aligned with any new operator knobs or endpoints
 
 ## Code Change Rules
 
@@ -181,6 +201,8 @@ If a change touches audit logging, audit APIs, event relays, or runtime failure 
 - Do not remove compatibility paths from live data unless the corresponding migration is included.
 - When cleaning legacy columns or data, update both code and migration flow together.
 - When changing worker behavior, cover both durable state transitions and emitted Kafka/thread events in tests.
+- Preserve `next_retry_at`-based scheduling and bounded retry semantics when changing lease reconciliation or claim logic.
+- Preserve normalized `run.output["usage"]` payloads when changing model runtime or provider integrations.
 - When changing provider or secret behavior, keep `gateway-edge`, `core-collab`, `agent-runtime`, and docs aligned on persistent provider definitions and OpenBao-backed secret resolution.
 - When adding a new memory provider, implement the shared `MemoryProvider` protocol in `services/workspace-memory/workspace_memory/providers.py` and register it in `build_provider_index(...)` instead of bypassing the abstraction.
 - When working on memory search behavior, preserve the rule that graph relations are additive context only and not the canonical memory store.
@@ -221,6 +243,7 @@ If a change touches audit logging, audit APIs, event relays, or runtime failure 
 - `services/core-collab/core_collab/kernel.py`
 - `services/agent-runtime/agent_runtime/workers.py`
 - `services/agent-runtime/agent_runtime/agent_task_worker.py`
+- `services/agent-runtime/agent_runtime/config.py`
 - `services/agent-runtime/agent_runtime/secrets.py`
 - `services/agent-runtime/agent_runtime/execution/`
 - `services/workspace-memory/workspace_memory/providers.py`
@@ -233,6 +256,7 @@ If a change touches audit logging, audit APIs, event relays, or runtime failure 
 - `services/gateway-edge/gateway_edge/services/audit.py`
 - `services/gateway-edge/gateway_edge/audit_middleware.py`
 - `services/gateway-edge/gateway_edge/db/postgres.py`
+- `services/gateway-edge/gateway_edge/routers/admin.py`
 - `packages/contracts/open_talon_contracts/llm_engines.py`
 - `apps/tui/open_talon_tui/main.py`
 - `apps/tui/open_talon_tui/tui2.py`

@@ -43,6 +43,8 @@ class RuntimeWorkerSettings:
     reconcile_interval_seconds: float
     poll_interval_seconds: float
     model_timeout_seconds: float
+    global_daily_token_cap: int
+    workspace_daily_token_cap_default: int
     enable_kafka_wakeups: bool
     execution_root: str
     default_workspace_path: str | None
@@ -78,6 +80,11 @@ class RuntimeWorkerSettings:
             reconcile_interval_seconds=_get_float("RECONCILE_INTERVAL_SECONDS", 5.0),
             poll_interval_seconds=_get_float("AGENT_LOOP_POLL_INTERVAL_SECONDS", 1.0),
             model_timeout_seconds=_get_float("AGENT_LOOP_MODEL_TIMEOUT_SECONDS", 60.0),
+            global_daily_token_cap=_get_int("OPEN_TALON_GLOBAL_DAILY_TOKEN_CAP", 0),
+            workspace_daily_token_cap_default=_get_int(
+                "OPEN_TALON_WORKSPACE_DAILY_TOKEN_CAP",
+                0,
+            ),
             enable_kafka_wakeups=_get_bool("ENABLE_KAFKA_WAKEUPS", True),
             execution_root=os.getenv("OPEN_TALON_EXECUTION_ROOT", "/tmp/open-talon-executions"),
             default_workspace_path=os.getenv("OPEN_TALON_DEFAULT_WORKSPACE_PATH"),

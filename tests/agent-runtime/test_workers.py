@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from types import SimpleNamespace
 from uuid import uuid4
+
+import pytest
 
 _AGENT_RUNTIME_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../../services/agent-runtime")
@@ -29,7 +32,7 @@ for path in (
 from agent_runtime.config import RuntimeWorkerSettings
 from agent_runtime.events import route_event_topic
 from agent_runtime.execution.registry import ExecutionBackendRegistry
-from agent_runtime.workers import ToolWorker
+from agent_runtime.workers import AgentLoopWorker, Reconciler, ToolWorker
 from open_talon_contracts.models import (
     ActorRef,
     EventEnvelope,
@@ -37,6 +40,7 @@ from open_talon_contracts.models import (
     ExecutionResult,
     ExecutionSpec,
     ExecutionWorkspaceRef,
+    RunStep,
     TargetRef,
     ToolCall,
     ToolCallResult,
@@ -132,6 +136,8 @@ def _settings() -> RuntimeWorkerSettings:
         reconcile_interval_seconds=1,
         poll_interval_seconds=1,
         model_timeout_seconds=60,
+        global_daily_token_cap=0,
+        workspace_daily_token_cap_default=0,
         enable_kafka_wakeups=False,
         execution_root="/tmp/open-talon-executions",
         default_workspace_path=None,
@@ -267,3 +273,145 @@ def test_tool_worker_fills_execution_workspace_path_from_settings():
     assert backend.submitted_specs
     assert backend.submitted_specs[0].execution_workspace is not None
     assert backend.submitted_specs[0].execution_workspace.path == "/tmp/default-workspace"
+
+
+def test_agent_loop_worker_fails_claimed_step_when_budget_is_exhausted():
+    publisher = _FakePublisher()
+    step = RunStep(
+        step_id=uuid4(),
+        run_id=uuid4(),
+        task_id=uuid4(),
+        workspace_id=uuid4(),
+        thread_id=uuid4(),
+        system_agent_id=uuid4(),
+        status="claimed",
+        claimed_by_worker="agent-loop-worker",
+    )
+    failure_event = EventEnvelope(
+        event_type="run.failed",
+        workspace_id=step.workspace_id,
+        thread_id=step.thread_id,
+        actor=ActorRef(type="agent", id=uuid4()),
+        target=TargetRef(type="run", id=step.run_id),
+        visibility="agents_only",
+    )
+
+    class _BudgetKernel:
+        def __init__(self) -> None:
+            self.claimed = False
+            self.budget_checks: list[tuple[int, int]] = []
+
+        async def claim_next_run_step(self, *, worker_id, lease_ttl_seconds):
+            if self.claimed:
+                return SimpleNamespace(step=None, context=None)
+            self.claimed = True
+            return SimpleNamespace(
+                step=step,
+                context=SimpleNamespace(run_step=step),
+            )
+
+        async def enforce_run_step_token_budget(
+            self,
+            *,
+            step_id,
+            worker_id,
+            global_daily_token_cap,
+            default_workspace_daily_token_cap,
+        ):
+            self.budget_checks.append(
+                (global_daily_token_cap, default_workspace_daily_token_cap)
+            )
+            return SimpleNamespace(events=[failure_event])
+
+    settings = RuntimeWorkerSettings(
+        **{
+            **_settings().__dict__,
+            "global_daily_token_cap": 100,
+            "workspace_daily_token_cap_default": 25,
+        }
+    )
+    worker = AgentLoopWorker(
+        kernel=_BudgetKernel(),
+        publisher=publisher,
+        settings=settings,
+    )
+
+    asyncio.run(worker._fill_capacity())
+
+    assert worker._processing == {}
+    assert publisher.published == [[failure_event]]
+
+
+def test_reconciler_publishes_failure_and_requeue_events(monkeypatch):
+    publisher = _FakePublisher()
+    failure_event = EventEnvelope(
+        event_type="run.failed",
+        workspace_id=uuid4(),
+        thread_id=uuid4(),
+        actor=ActorRef(type="agent", id=uuid4()),
+        target=TargetRef(type="run", id=uuid4()),
+        visibility="agents_only",
+    )
+    requeue_event = EventEnvelope(
+        event_type="run_step.requeued",
+        workspace_id=uuid4(),
+        thread_id=uuid4(),
+        actor=ActorRef(type="agent", id=uuid4()),
+        target=TargetRef(type="run_step", id=uuid4()),
+        visibility="agents_only",
+    )
+    requeued_step = RunStep(
+        step_id=uuid4(),
+        run_id=uuid4(),
+        task_id=uuid4(),
+        workspace_id=uuid4(),
+        thread_id=uuid4(),
+        system_agent_id=uuid4(),
+    )
+    requeued_tool_call = ToolCall(
+        tool_call_id=uuid4(),
+        run_id=uuid4(),
+        run_step_id=uuid4(),
+        task_id=uuid4(),
+        workspace_id=uuid4(),
+        thread_id=uuid4(),
+        system_agent_id=uuid4(),
+        tool_id=uuid4(),
+        tool_name="repo_search",
+        execution_spec=ExecutionSpec(
+            invocation_id=uuid4(),
+            handler_ref="repo_search",
+        ).model_dump(mode="json"),
+    )
+
+    class _ReconcilingKernel:
+        def __init__(self) -> None:
+            self.requeued_batches: list[tuple[list[RunStep], list[ToolCall]]] = []
+
+        async def reconcile_expired_execution_leases(self):
+            return SimpleNamespace(
+                run_steps=[requeued_step],
+                tool_calls=[requeued_tool_call],
+                events=[failure_event],
+            )
+
+        async def build_requeued_execution_events(self, run_steps, tool_calls):
+            self.requeued_batches.append((run_steps, tool_calls))
+            return [requeue_event]
+
+    async def _cancel_after_first_sleep(_seconds):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("agent_runtime.workers.asyncio.sleep", _cancel_after_first_sleep)
+    kernel = _ReconcilingKernel()
+    reconciler = Reconciler(
+        kernel=kernel,
+        publisher=publisher,
+        settings=_settings(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(reconciler.run_forever())
+
+    assert kernel.requeued_batches == [([requeued_step], [requeued_tool_call])]
+    assert publisher.published == [[failure_event, requeue_event]]

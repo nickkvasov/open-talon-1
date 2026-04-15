@@ -3,9 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import logging
+from pathlib import Path
+import sys
 from uuid import UUID, uuid4
 
 import asyncpg
+
+_WORKSPACE_MEMORY_DIR = Path(__file__).resolve().parents[2] / "workspace-memory"
+if _WORKSPACE_MEMORY_DIR.is_dir():
+    workspace_memory_path = str(_WORKSPACE_MEMORY_DIR)
+    if workspace_memory_path not in sys.path:
+        sys.path.insert(0, workspace_memory_path)
+
 from workspace_memory import (
     ProviderSearchResult,
     build_default_secret_resolver,
@@ -104,6 +113,11 @@ _DEFAULT_WORKSPACE_ROLE_DEFINITIONS = {
     "supervisor": "Coordinates delivery, reviews work, and guides workspace members without full administrative control.",
     "user": "Collaborates in the workspace, participates in threads, and uses attached tools.",
 }
+
+_WORKSPACE_MANAGER_ROLES = {"admin", "supervisor"}
+_MAX_RUN_STEP_ATTEMPTS = 3
+_MAX_TOOL_CALL_ATTEMPTS = 3
+_RETRY_BACKOFF_SECONDS = (30, 120, 600)
 
 
 @dataclass
@@ -212,6 +226,12 @@ class RunCommandResult(CommandResult):
     artifacts: list[Artifact] = field(default_factory=list)
 
 
+@dataclass
+class LeaseReconciliationResult(CommandResult):
+    run_steps: list[RunStep] = field(default_factory=list)
+    tool_calls: list[ToolCall] = field(default_factory=list)
+
+
 class CollaborationKernel:
     def __init__(self, repository: CollaborationRepository) -> None:
         self._repository = repository
@@ -306,7 +326,9 @@ class CollaborationKernel:
         )
         return WorkspaceCommandResult(workspace=workspace, detail=detail, events=events)
 
-    async def list_workspaces(self) -> list[Workspace]:
+    async def list_workspaces(self, *, user_id: UUID | None = None) -> list[Workspace]:
+        if user_id is not None:
+            return await self._repository.list_workspaces_for_user(user_id)
         return await self._repository.list_workspaces()
 
     async def delete_workspace(self, workspace_id: UUID, payload: DeleteWorkspaceRequest) -> dict[str, bool | str]:
@@ -725,6 +747,10 @@ class CollaborationKernel:
             workspace = await self._repository.fetch_workspace(workspace_id)
             if workspace is None:
                 raise KeyError(f"Workspace {workspace_id} not found")
+            await self._require_workspace_management_role(
+                workspace_id,
+                payload.actor,
+            )
         now = self._now()
         repository = GitRepository(
             repo_id=uuid4(),
@@ -779,6 +805,10 @@ class CollaborationKernel:
             workspace = await self._repository.fetch_workspace(workspace_id)
             if workspace is None:
                 raise KeyError(f"Workspace {workspace_id} not found")
+            await self._require_workspace_management_role(
+                workspace_id,
+                payload.actor,
+            )
         repository = await self._repository.fetch_git_repository(payload.repository_id)
         if repository is None:
             raise KeyError(f"Git repository {payload.repository_id} not found")
@@ -1183,6 +1213,7 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
+        await self._require_workspace_management_role(workspace_id, payload.actor)
         now = self._now()
         actor = self._actor_from_input(payload.actor)
         role_definition = RoleDefinition(
@@ -1243,6 +1274,7 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
+        await self._require_workspace_management_role(workspace_id, payload.actor)
         system_tool = await self._repository.fetch_system_tool(payload.tool_id)
         if system_tool is None:
             raise KeyError(f"System tool {payload.tool_id} not found")
@@ -1296,6 +1328,7 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
+        await self._require_workspace_management_role(workspace_id, payload.actor)
         existing = await self._repository.fetch_workspace_tool(workspace_id, tool_id)
         if existing is None:
             raise KeyError(f"Workspace tool {tool_id} not attached to workspace {workspace_id}")
@@ -1347,6 +1380,7 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
+        await self._require_workspace_management_role(workspace_id, payload.actor)
         removed = await self._repository.fetch_workspace_tool(workspace_id, tool_id)
         if removed is None:
             raise KeyError(f"Workspace tool {tool_id} not attached to workspace {workspace_id}")
@@ -1921,6 +1955,109 @@ class CollaborationKernel:
         )
         return context.model_copy(update={"run_step": step})
 
+    async def enforce_run_step_token_budget(
+        self,
+        *,
+        step_id: UUID,
+        worker_id: str,
+        global_daily_token_cap: int,
+        default_workspace_daily_token_cap: int,
+    ) -> RunCommandResult | None:
+        if global_daily_token_cap <= 0 and default_workspace_daily_token_cap <= 0:
+            return None
+        step = await self._repository.fetch_run_step(step_id)
+        if step is None:
+            raise KeyError(f"Run step {step_id} not found")
+        if step.claimed_by_worker != worker_id:
+            raise ValueError(f"Run step {step_id} is not claimed by worker {worker_id}")
+        workspace = await self._repository.fetch_workspace(step.workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {step.workspace_id} not found")
+        day_start, day_end = self._utc_day_window(self._now())
+        if global_daily_token_cap > 0:
+            global_total = await self._repository.get_global_token_total(
+                day_start=day_start,
+                day_end=day_end,
+            )
+            if global_total >= global_daily_token_cap:
+                return await self.fail_run_step(
+                    step_id,
+                    worker_id,
+                    (
+                        "Global daily token cap exceeded "
+                        f"({global_total}/{global_daily_token_cap})"
+                    ),
+                    stop_reason="budget_exhausted",
+                )
+        workspace_cap = self._workspace_daily_token_cap(
+            workspace,
+            default_workspace_daily_token_cap,
+        )
+        if workspace_cap > 0:
+            workspace_total = await self._repository.get_workspace_token_total(
+                workspace_id=workspace.workspace_id,
+                day_start=day_start,
+                day_end=day_end,
+            )
+            if workspace_total >= workspace_cap:
+                return await self.fail_run_step(
+                    step_id,
+                    worker_id,
+                    (
+                        "Workspace daily token cap exceeded "
+                        f"({workspace_total}/{workspace_cap})"
+                    ),
+                    stop_reason="budget_exhausted",
+                )
+        return None
+
+    async def get_runtime_overview(self) -> dict[str, object]:
+        now = self._now()
+        since = now - timedelta(hours=24)
+        day_start, day_end = self._utc_day_window(now)
+        stats = await self._repository.get_runtime_queue_stats(now=now, since=since)
+        return {
+            "tasks": {
+                "pending": int(stats.get("tasks_pending") or 0),
+                "claimed": int(stats.get("tasks_claimed") or 0),
+            },
+            "run_steps": {
+                "pending": int(stats.get("run_steps_pending") or 0),
+                "claimed": int(stats.get("run_steps_claimed") or 0),
+            },
+            "tool_calls": {
+                "pending": int(stats.get("tool_calls_pending") or 0),
+                "claimed": int(stats.get("tool_calls_claimed") or 0),
+            },
+            "failed_last_24h": {
+                "tasks": int(stats.get("tasks_failed_last_24h") or 0),
+                "run_steps": int(stats.get("run_steps_failed_last_24h") or 0),
+                "tool_calls": int(stats.get("tool_calls_failed_last_24h") or 0),
+            },
+            "oldest_pending_age_seconds": {
+                "run_steps": (
+                    int(stats["oldest_run_step_pending_age_seconds"])
+                    if stats.get("oldest_run_step_pending_age_seconds") is not None
+                    else None
+                ),
+                "tool_calls": (
+                    int(stats["oldest_tool_call_pending_age_seconds"])
+                    if stats.get("oldest_tool_call_pending_age_seconds") is not None
+                    else None
+                ),
+            },
+            "token_totals": {
+                "global_total_tokens": await self._repository.get_global_token_total(
+                    day_start=day_start,
+                    day_end=day_end,
+                ),
+                "by_workspace": await self._repository.list_workspace_token_totals(
+                    day_start=day_start,
+                    day_end=day_end,
+                ),
+            },
+        }
+
     async def claim_next_run_step(
         self,
         *,
@@ -2084,6 +2221,7 @@ class CollaborationKernel:
                 "finished_at": now,
                 "lease_expires_at": None,
                 "last_heartbeat_at": None,
+                "next_retry_at": None,
                 "claimed_by_worker": None,
                 "execution_handle": None,
                 "updated_at": now,
@@ -2116,6 +2254,7 @@ class CollaborationKernel:
                 "finished_at": now,
                 "lease_expires_at": None,
                 "last_heartbeat_at": None,
+                "next_retry_at": None,
                 "claimed_by_worker": None,
                 "execution_handle": None,
                 "updated_at": now,
@@ -2249,11 +2388,209 @@ class CollaborationKernel:
             event_type="tool_call.failed",
         )
 
-    async def reconcile_expired_execution_leases(self) -> tuple[list[RunStep], list[ToolCall]]:
+    async def reconcile_expired_execution_leases(self) -> LeaseReconciliationResult:
         now = self._now()
-        run_steps = await self._repository.requeue_expired_run_steps(now=now)
-        tool_calls = await self._repository.requeue_expired_tool_calls(now=now)
-        return run_steps, tool_calls
+        result = LeaseReconciliationResult()
+        for step in await self._repository.list_expired_run_steps(now=now):
+            if step.attempt_count >= _MAX_RUN_STEP_ATTEMPTS:
+                failure = await self._fail_expired_run_step(
+                    step,
+                    error=(
+                        "Run step lease expired after "
+                        f"{step.attempt_count} attempts"
+                    ),
+                )
+                result.events.extend(failure.events)
+                continue
+            result.run_steps.append(
+                await self._requeue_expired_run_step(step, now=now)
+            )
+        for tool_call in await self._repository.list_expired_tool_calls(now=now):
+            if tool_call.attempt_count >= _MAX_TOOL_CALL_ATTEMPTS:
+                failure = await self._fail_expired_tool_call(
+                    tool_call,
+                    error=(
+                        "Tool call lease expired after "
+                        f"{tool_call.attempt_count} attempts"
+                    ),
+                )
+                result.events.extend(failure.events)
+                continue
+            result.tool_calls.append(
+                await self._requeue_expired_tool_call(tool_call, now=now)
+            )
+        return result
+
+    async def _requeue_expired_run_step(self, step: RunStep, *, now: datetime) -> RunStep:
+        updated_step = step.model_copy(
+            update={
+                "status": "created",
+                "claimed_by_worker": None,
+                "lease_expires_at": None,
+                "last_heartbeat_at": None,
+                "next_retry_at": now
+                + timedelta(
+                    seconds=self._retry_backoff_for_attempt(step.attempt_count)
+                ),
+                "execution_handle": None,
+                "error": (
+                    "Run step lease expired; "
+                    f"retry {step.attempt_count + 1} scheduled"
+                ),
+                "updated_at": now,
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_run_step(conn, updated_step)
+        return updated_step
+
+    async def _requeue_expired_tool_call(
+        self,
+        tool_call: ToolCall,
+        *,
+        now: datetime,
+    ) -> ToolCall:
+        updated_tool_call = tool_call.model_copy(
+            update={
+                "status": "created",
+                "claimed_by_worker": None,
+                "lease_expires_at": None,
+                "last_heartbeat_at": None,
+                "next_retry_at": now
+                + timedelta(
+                    seconds=self._retry_backoff_for_attempt(tool_call.attempt_count)
+                ),
+                "execution_handle": None,
+                "error": (
+                    "Tool call lease expired; "
+                    f"retry {tool_call.attempt_count + 1} scheduled"
+                ),
+                "updated_at": now,
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_tool_call(conn, updated_tool_call)
+        return updated_tool_call
+
+    async def _fail_expired_run_step(
+        self,
+        step: RunStep,
+        *,
+        error: str,
+    ) -> RunCommandResult:
+        now = self._now()
+        updated_step = step.model_copy(
+            update={
+                "status": "failed",
+                "error": error,
+                "finished_at": now,
+                "lease_expires_at": None,
+                "last_heartbeat_at": None,
+                "next_retry_at": None,
+                "claimed_by_worker": None,
+                "execution_handle": None,
+                "updated_at": now,
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_run_step(conn, updated_step)
+        run = await self._repository.fetch_run(step.run_id)
+        if run is not None and run.status in {"completed", "failed"}:
+            return RunCommandResult()
+        return await self.fail_run(
+            step.run_id,
+            step.system_agent_id,
+            error,
+            stop_reason="tool_failure",
+        )
+
+    async def _fail_expired_tool_call(
+        self,
+        tool_call: ToolCall,
+        *,
+        error: str,
+    ) -> CommandResult:
+        step = await self._repository.fetch_run_step(tool_call.run_step_id)
+        run = await self._repository.fetch_run(tool_call.run_id)
+        task = await self._repository.fetch_task(tool_call.task_id)
+        if step is None or run is None or task is None:
+            raise KeyError(
+                f"Tool call {tool_call.tool_call_id} is missing execution state"
+            )
+        participant = await self._require_run_participant(
+            run=run,
+            task=task,
+            system_agent_id=tool_call.system_agent_id,
+        )
+        actor = ActorRef(type="agent", id=participant.participant_id)
+        now = self._now()
+        updated_tool_call = tool_call.model_copy(
+            update={
+                "status": "failed",
+                "error": error,
+                "result": ToolCallResult(error=error),
+                "lease_expires_at": None,
+                "last_heartbeat_at": None,
+                "next_retry_at": None,
+                "claimed_by_worker": None,
+                "execution_handle": None,
+                "finished_at": now,
+                "updated_at": now,
+            }
+        )
+        should_fail_step = step.status == "waiting_tools"
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_tool_call(conn, updated_tool_call)
+                if should_fail_step:
+                    await self._repository.upsert_run_step(
+                        conn,
+                        step.model_copy(
+                            update={
+                                "status": "failed",
+                                "error": error,
+                                "finished_at": now,
+                                "lease_expires_at": None,
+                                "last_heartbeat_at": None,
+                                "next_retry_at": None,
+                                "claimed_by_worker": None,
+                                "execution_handle": None,
+                                "updated_at": now,
+                            }
+                        ),
+                    )
+                event = await self._build_thread_event(
+                    conn,
+                    task.workspace_id,
+                    task.thread_id,
+                    "tool_call.failed",
+                    actor=actor,
+                    target=TargetRef(type="tool_call", id=tool_call.tool_call_id),
+                    payload=updated_tool_call.model_dump(mode="json"),
+                    visibility="agents_only",
+                    timestamp=now,
+                    correlation_id=run.correlation_id,
+                    causation_id=task.task_id,
+                )
+                await self._repository.record_event(conn, event)
+        events = [event]
+        if should_fail_step and run.status not in {"completed", "failed"}:
+            failure = await self.fail_run(
+                tool_call.run_id,
+                tool_call.system_agent_id,
+                error,
+                stop_reason="tool_failure",
+            )
+            events.extend(failure.events)
+        return CommandResult(events=events)
+
+    @staticmethod
+    def _retry_backoff_for_attempt(attempt_count: int) -> int:
+        index = max(0, min(attempt_count - 1, len(_RETRY_BACKOFF_SECONDS) - 1))
+        return _RETRY_BACKOFF_SECONDS[index]
 
     async def build_requeued_execution_events(
         self,
@@ -2393,7 +2730,7 @@ class CollaborationKernel:
         updated_run = run.model_copy(
             update={
                 "status": "completed",
-                "output": result.model_dump(mode="json"),
+                "output": self._run_output_from_result(result),
                 "updated_at": now,
                 "metadata": {
                     **run.metadata,
@@ -3603,6 +3940,41 @@ class CollaborationKernel:
             return message_visibility
         return "workspace"
 
+    @classmethod
+    def _run_output_from_result(cls, result: AgentRunResult) -> dict[str, object]:
+        payload = result.model_dump(mode="json")
+        usage = cls._run_usage_from_result(result)
+        if usage is not None:
+            payload["usage"] = usage
+        return payload
+
+    @staticmethod
+    def _run_usage_from_result(result: AgentRunResult) -> dict[str, object] | None:
+        raw = result.metadata.get("usage")
+        if not isinstance(raw, dict):
+            return None
+
+        def _usage_int(name: str) -> int | None:
+            value = raw.get(name)
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, int):
+                return value
+            return None
+
+        provider = raw.get("provider")
+        model = raw.get("model")
+        usage = {
+            "provider": provider if isinstance(provider, str) else None,
+            "model": model if isinstance(model, str) else None,
+            "prompt_tokens": _usage_int("prompt_tokens"),
+            "completion_tokens": _usage_int("completion_tokens"),
+            "total_tokens": _usage_int("total_tokens"),
+        }
+        if all(value is None for value in usage.values()):
+            return None
+        return usage
+
     @staticmethod
     def _stop_reason_returns_to_thread(stop_reason: StopReason) -> bool:
         return stop_reason in {
@@ -3650,6 +4022,7 @@ class CollaborationKernel:
                 "result": result,
                 "lease_expires_at": None,
                 "last_heartbeat_at": None,
+                "next_retry_at": None,
                 "claimed_by_worker": None,
                 "execution_handle": None,
                 "finished_at": now,
@@ -3698,6 +4071,7 @@ class CollaborationKernel:
                             "status": "completed",
                             "lease_expires_at": None,
                             "last_heartbeat_at": None,
+                            "next_retry_at": None,
                             "claimed_by_worker": None,
                             "execution_handle": None,
                             "finished_at": now,
@@ -3736,11 +4110,8 @@ class CollaborationKernel:
         draft: AgentToolCallDraft,
         workspace_id: UUID,
     ) -> ExecutionSpec:
+        self._validate_tool_execution_binding(tool.execution)
         profile = dict(tool.execution.execution_profile)
-        if profile.get("workspace_access", "read_only") == "read_write" and tool.execution.trust_level != "trusted":
-            raise ValueError(
-                f"Tool {tool.name!r} requests read_write workspace access but is not marked trusted"
-            )
         return ExecutionSpec(
             invocation_id=uuid4(),
             handler_ref=tool.execution.handler_ref or tool.name,
@@ -3956,6 +4327,25 @@ class CollaborationKernel:
             display_name=display_name,
         )
 
+    async def _require_workspace_management_role(
+        self,
+        workspace_id: UUID,
+        actor: ParticipantInput,
+    ) -> ParticipantProfile:
+        participant = await self._repository.fetch_participant(
+            workspace_id,
+            actor.participant_id,
+        )
+        if participant is None:
+            raise PermissionError(
+                f"Workspace {workspace_id} requires an attached participant for this action"
+            )
+        if _WORKSPACE_MANAGER_ROLES.intersection(participant.roles):
+            return participant
+        raise PermissionError(
+            "Workspace admin or supervisor role required"
+        )
+
     @staticmethod
     def _workspace_metadata_for_create(
         *,
@@ -4002,6 +4392,45 @@ class CollaborationKernel:
         return list(dict.fromkeys([*roles, "admin"]))
 
     @staticmethod
+    def _utc_day_window(timestamp: datetime) -> tuple[datetime, datetime]:
+        current = timestamp.astimezone(timezone.utc)
+        day_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+        return day_start, day_start + timedelta(days=1)
+
+    @staticmethod
+    def _workspace_daily_token_cap(
+        workspace: Workspace,
+        default_cap: int,
+    ) -> int:
+        limits = workspace.metadata.get("limits", {})
+        if isinstance(limits, dict):
+            override = CollaborationKernel._metadata_int_value(
+                limits.get("daily_token_cap")
+            )
+            if override is not None:
+                return override
+        override = CollaborationKernel._metadata_int_value(
+            workspace.metadata.get("daily_token_cap")
+        )
+        if override is not None:
+            return override
+        return default_cap
+
+    @staticmethod
+    def _metadata_int_value(value: object) -> int | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.isdigit():
+                return int(stripped)
+        return None
+
+    @staticmethod
     def _role_definitions_from_workspace(workspace: Workspace) -> list[RoleDefinition]:
         raw = workspace.metadata.get("role_definitions", {})
         if isinstance(raw, dict):
@@ -4022,8 +4451,13 @@ class CollaborationKernel:
     @staticmethod
     def _validate_tool_execution_binding(execution) -> None:
         workspace_access = execution.execution_profile.get("workspace_access", "read_only")
+        network = execution.execution_profile.get("network", "none")
         if workspace_access == "read_write" and execution.trust_level != "trusted":
             raise ValueError("read_write workspace access requires trust_level='trusted'")
+        if network == "full" and execution.trust_level != "trusted":
+            raise ValueError("network=full requires trust_level='trusted'")
+        if execution.backend_kind == "local_process" and execution.trust_level != "trusted":
+            raise ValueError("local_process execution requires trust_level='trusted'")
 
     async def _validate_asset_link_target(
         self,

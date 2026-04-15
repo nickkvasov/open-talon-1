@@ -1478,8 +1478,8 @@ class CollaborationRepository:
             INSERT INTO run_steps (
                 step_id, run_id, task_id, workspace_id, thread_id, system_agent_id,
                 step_index, kind, status, input, output, claimed_by_worker,
-                lease_expires_at, last_heartbeat_at, attempt_count, error,
-                execution_handle, submitted_at, started_at, finished_at,
+                lease_expires_at, last_heartbeat_at, next_retry_at, attempt_count,
+                error, execution_handle, submitted_at, started_at, finished_at,
                 created_at, updated_at, metadata
             )
             VALUES (
@@ -1487,7 +1487,7 @@ class CollaborationRepository:
                 $7, $8, $9, $10, $11, $12,
                 $13, $14, $15, $16,
                 $17, $18, $19, $20,
-                $21, $22, $23
+                $21, $22, $23, $24
             )
             ON CONFLICT (step_id) DO UPDATE
                 SET status = EXCLUDED.status,
@@ -1496,6 +1496,7 @@ class CollaborationRepository:
                     claimed_by_worker = EXCLUDED.claimed_by_worker,
                     lease_expires_at = EXCLUDED.lease_expires_at,
                     last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+                    next_retry_at = EXCLUDED.next_retry_at,
                     attempt_count = EXCLUDED.attempt_count,
                     error = EXCLUDED.error,
                     execution_handle = EXCLUDED.execution_handle,
@@ -1519,6 +1520,7 @@ class CollaborationRepository:
             step.claimed_by_worker,
             step.lease_expires_at,
             step.last_heartbeat_at,
+            step.next_retry_at,
             step.attempt_count,
             step.error,
             step.execution_handle,
@@ -1536,16 +1538,16 @@ class CollaborationRepository:
             INSERT INTO tool_calls (
                 tool_call_id, run_id, run_step_id, task_id, workspace_id, thread_id,
                 system_agent_id, tool_id, tool_name, status, arguments, execution_spec,
-                claimed_by_worker, lease_expires_at, last_heartbeat_at, attempt_count,
-                error, execution_handle, result, submitted_at, started_at, finished_at,
-                created_at, updated_at, metadata
+                claimed_by_worker, lease_expires_at, last_heartbeat_at, next_retry_at,
+                attempt_count, error, execution_handle, result, submitted_at, started_at,
+                finished_at, created_at, updated_at, metadata
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6,
                 $7, $8, $9, $10, $11, $12,
                 $13, $14, $15, $16,
                 $17, $18, $19, $20, $21, $22,
-                $23, $24, $25
+                $23, $24, $25, $26
             )
             ON CONFLICT (tool_call_id) DO UPDATE
                 SET status = EXCLUDED.status,
@@ -1554,6 +1556,7 @@ class CollaborationRepository:
                     claimed_by_worker = EXCLUDED.claimed_by_worker,
                     lease_expires_at = EXCLUDED.lease_expires_at,
                     last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+                    next_retry_at = EXCLUDED.next_retry_at,
                     attempt_count = EXCLUDED.attempt_count,
                     error = EXCLUDED.error,
                     execution_handle = EXCLUDED.execution_handle,
@@ -1579,6 +1582,7 @@ class CollaborationRepository:
             tool_call.claimed_by_worker,
             tool_call.lease_expires_at,
             tool_call.last_heartbeat_at,
+            tool_call.next_retry_at,
             tool_call.attempt_count,
             tool_call.error,
             tool_call.execution_handle,
@@ -1644,6 +1648,25 @@ class CollaborationRepository:
             FROM workspaces
             ORDER BY created_at ASC
             """
+        )
+        return [self._workspace_from_row(row) for row in rows]
+
+    async def list_workspaces_for_user(self, user_id: UUID) -> list[Workspace]:
+        rows = await self._pool.fetch(
+            """
+            SELECT w.workspace_id, w.name, w.description, w.owner_user_id,
+                   w.created_at, w.updated_at, w.metadata
+            FROM workspaces w
+            WHERE EXISTS (
+                SELECT 1
+                FROM participants p
+                WHERE p.workspace_id = w.workspace_id
+                  AND p.participant_type = 'user'
+                  AND p.user_id = $1
+            )
+            ORDER BY w.created_at ASC
+            """,
+            user_id,
         )
         return [self._workspace_from_row(row) for row in rows]
 
@@ -2183,7 +2206,7 @@ class CollaborationRepository:
             """
             SELECT step_id, run_id, task_id, workspace_id, thread_id, system_agent_id,
                    step_index, kind, status, input, output, claimed_by_worker,
-                   lease_expires_at, last_heartbeat_at, attempt_count, error,
+                   lease_expires_at, last_heartbeat_at, next_retry_at, attempt_count, error,
                    execution_handle, submitted_at, started_at, finished_at,
                    created_at, updated_at, metadata
             FROM run_steps
@@ -2198,7 +2221,7 @@ class CollaborationRepository:
             """
             SELECT step_id, run_id, task_id, workspace_id, thread_id, system_agent_id,
                    step_index, kind, status, input, output, claimed_by_worker,
-                   lease_expires_at, last_heartbeat_at, attempt_count, error,
+                   lease_expires_at, last_heartbeat_at, next_retry_at, attempt_count, error,
                    execution_handle, submitted_at, started_at, finished_at,
                    created_at, updated_at, metadata
             FROM run_steps
@@ -2222,6 +2245,7 @@ class CollaborationRepository:
                 SELECT step_id
                 FROM run_steps
                 WHERE status = 'created'
+                  AND (next_retry_at IS NULL OR next_retry_at <= $3)
                   AND (
                     SELECT COUNT(*)
                     FROM run_steps active
@@ -2237,6 +2261,7 @@ class CollaborationRepository:
                 claimed_by_worker = $1,
                 lease_expires_at = $2,
                 last_heartbeat_at = $3,
+                next_retry_at = NULL,
                 started_at = COALESCE(rs.started_at, $3),
                 updated_at = $3,
                 attempt_count = rs.attempt_count + 1
@@ -2244,7 +2269,7 @@ class CollaborationRepository:
             WHERE rs.step_id = candidate.step_id
             RETURNING rs.step_id, rs.run_id, rs.task_id, rs.workspace_id, rs.thread_id, rs.system_agent_id,
                       rs.step_index, rs.kind, rs.status, rs.input, rs.output, rs.claimed_by_worker,
-                      rs.lease_expires_at, rs.last_heartbeat_at, rs.attempt_count, rs.error,
+                      rs.lease_expires_at, rs.last_heartbeat_at, rs.next_retry_at, rs.attempt_count, rs.error,
                       rs.execution_handle, rs.submitted_at, rs.started_at, rs.finished_at,
                       rs.created_at, rs.updated_at, rs.metadata
             """,
@@ -2273,7 +2298,7 @@ class CollaborationRepository:
               AND status = 'claimed'
             RETURNING step_id, run_id, task_id, workspace_id, thread_id, system_agent_id,
                       step_index, kind, status, input, output, claimed_by_worker,
-                      lease_expires_at, last_heartbeat_at, attempt_count, error,
+                      lease_expires_at, last_heartbeat_at, next_retry_at, attempt_count, error,
                       execution_handle, submitted_at, started_at, finished_at,
                       created_at, updated_at, metadata
             """,
@@ -2284,24 +2309,19 @@ class CollaborationRepository:
         )
         return self._run_step_from_row(row) if row else None
 
-    async def requeue_expired_run_steps(self, *, now) -> list[RunStep]:
+    async def list_expired_run_steps(self, *, now) -> list[RunStep]:
         rows = await self._pool.fetch(
             """
-            UPDATE run_steps
-            SET status = 'created',
-                claimed_by_worker = NULL,
-                lease_expires_at = NULL,
-                last_heartbeat_at = NULL,
-                execution_handle = NULL,
-                updated_at = $1
+            SELECT step_id, run_id, task_id, workspace_id, thread_id, system_agent_id,
+                   step_index, kind, status, input, output, claimed_by_worker,
+                   lease_expires_at, last_heartbeat_at, next_retry_at, attempt_count, error,
+                   execution_handle, submitted_at, started_at, finished_at,
+                   created_at, updated_at, metadata
+            FROM run_steps
             WHERE status = 'claimed'
               AND lease_expires_at IS NOT NULL
               AND lease_expires_at < $1
-            RETURNING step_id, run_id, task_id, workspace_id, thread_id, system_agent_id,
-                      step_index, kind, status, input, output, claimed_by_worker,
-                      lease_expires_at, last_heartbeat_at, attempt_count, error,
-                      execution_handle, submitted_at, started_at, finished_at,
-                      created_at, updated_at, metadata
+            ORDER BY lease_expires_at ASC, submitted_at ASC, created_at ASC
             """,
             now,
         )
@@ -2312,7 +2332,7 @@ class CollaborationRepository:
             """
             SELECT tool_call_id, run_id, run_step_id, task_id, workspace_id, thread_id,
                    system_agent_id, tool_id, tool_name, status, arguments, execution_spec,
-                   claimed_by_worker, lease_expires_at, last_heartbeat_at, attempt_count,
+                   claimed_by_worker, lease_expires_at, last_heartbeat_at, next_retry_at, attempt_count,
                    error, execution_handle, result, submitted_at, started_at, finished_at,
                    created_at, updated_at, metadata
             FROM tool_calls
@@ -2327,7 +2347,7 @@ class CollaborationRepository:
             """
             SELECT tool_call_id, run_id, run_step_id, task_id, workspace_id, thread_id,
                    system_agent_id, tool_id, tool_name, status, arguments, execution_spec,
-                   claimed_by_worker, lease_expires_at, last_heartbeat_at, attempt_count,
+                   claimed_by_worker, lease_expires_at, last_heartbeat_at, next_retry_at, attempt_count,
                    error, execution_handle, result, submitted_at, started_at, finished_at,
                    created_at, updated_at, metadata
             FROM tool_calls
@@ -2343,7 +2363,7 @@ class CollaborationRepository:
             """
             SELECT tool_call_id, run_id, run_step_id, task_id, workspace_id, thread_id,
                    system_agent_id, tool_id, tool_name, status, arguments, execution_spec,
-                   claimed_by_worker, lease_expires_at, last_heartbeat_at, attempt_count,
+                   claimed_by_worker, lease_expires_at, last_heartbeat_at, next_retry_at, attempt_count,
                    error, execution_handle, result, submitted_at, started_at, finished_at,
                    created_at, updated_at, metadata
             FROM tool_calls
@@ -2370,6 +2390,7 @@ class CollaborationRepository:
                 SELECT tc.tool_call_id
                 FROM tool_calls tc
                 WHERE tc.status = 'created'
+                  AND (tc.next_retry_at IS NULL OR tc.next_retry_at <= $3)
                   AND (
                     SELECT COUNT(*)
                     FROM tool_calls active
@@ -2391,6 +2412,7 @@ class CollaborationRepository:
                 claimed_by_worker = $1,
                 lease_expires_at = $2,
                 last_heartbeat_at = $3,
+                next_retry_at = NULL,
                 started_at = COALESCE(tc.started_at, $3),
                 updated_at = $3,
                 attempt_count = tc.attempt_count + 1
@@ -2398,7 +2420,7 @@ class CollaborationRepository:
             WHERE tc.tool_call_id = candidate.tool_call_id
             RETURNING tc.tool_call_id, tc.run_id, tc.run_step_id, tc.task_id, tc.workspace_id, tc.thread_id,
                       tc.system_agent_id, tc.tool_id, tc.tool_name, tc.status, tc.arguments, tc.execution_spec,
-                      tc.claimed_by_worker, tc.lease_expires_at, tc.last_heartbeat_at, tc.attempt_count,
+                      tc.claimed_by_worker, tc.lease_expires_at, tc.last_heartbeat_at, tc.next_retry_at, tc.attempt_count,
                       tc.error, tc.execution_handle, tc.result, tc.submitted_at, tc.started_at, tc.finished_at,
                       tc.created_at, tc.updated_at, tc.metadata
             """,
@@ -2429,7 +2451,7 @@ class CollaborationRepository:
               AND status = 'claimed'
             RETURNING tool_call_id, run_id, run_step_id, task_id, workspace_id, thread_id,
                       system_agent_id, tool_id, tool_name, status, arguments, execution_spec,
-                      claimed_by_worker, lease_expires_at, last_heartbeat_at, attempt_count,
+                      claimed_by_worker, lease_expires_at, last_heartbeat_at, next_retry_at, attempt_count,
                       error, execution_handle, result, submitted_at, started_at, finished_at,
                       created_at, updated_at, metadata
             """,
@@ -2440,28 +2462,173 @@ class CollaborationRepository:
         )
         return self._tool_call_from_row(row) if row else None
 
-    async def requeue_expired_tool_calls(self, *, now) -> list[ToolCall]:
+    async def list_expired_tool_calls(self, *, now) -> list[ToolCall]:
         rows = await self._pool.fetch(
             """
-            UPDATE tool_calls
-            SET status = 'created',
-                claimed_by_worker = NULL,
-                lease_expires_at = NULL,
-                last_heartbeat_at = NULL,
-                execution_handle = NULL,
-                updated_at = $1
+            SELECT tool_call_id, run_id, run_step_id, task_id, workspace_id, thread_id,
+                   system_agent_id, tool_id, tool_name, status, arguments, execution_spec,
+                   claimed_by_worker, lease_expires_at, last_heartbeat_at, next_retry_at, attempt_count,
+                   error, execution_handle, result, submitted_at, started_at, finished_at,
+                   created_at, updated_at, metadata
+            FROM tool_calls
             WHERE status = 'claimed'
               AND lease_expires_at IS NOT NULL
               AND lease_expires_at < $1
-            RETURNING tool_call_id, run_id, run_step_id, task_id, workspace_id, thread_id,
-                      system_agent_id, tool_id, tool_name, status, arguments, execution_spec,
-                      claimed_by_worker, lease_expires_at, last_heartbeat_at, attempt_count,
-                      error, execution_handle, result, submitted_at, started_at, finished_at,
-                      created_at, updated_at, metadata
+            ORDER BY lease_expires_at ASC, submitted_at ASC, created_at ASC
             """,
             now,
         )
         return [self._tool_call_from_row(row) for row in rows]
+
+    async def get_runtime_queue_stats(self, *, now, since) -> dict[str, int | None]:
+        row = await self._pool.fetchrow(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM tasks WHERE status IN ('created', 'released')) AS tasks_pending,
+                (SELECT COUNT(*) FROM tasks WHERE status = 'claimed') AS tasks_claimed,
+                (
+                    SELECT COUNT(*)
+                    FROM run_steps
+                    WHERE status = 'created'
+                      AND (next_retry_at IS NULL OR next_retry_at <= $1)
+                ) AS run_steps_pending,
+                (SELECT COUNT(*) FROM run_steps WHERE status = 'claimed') AS run_steps_claimed,
+                (
+                    SELECT COUNT(*)
+                    FROM tool_calls
+                    WHERE status = 'created'
+                      AND (next_retry_at IS NULL OR next_retry_at <= $1)
+                ) AS tool_calls_pending,
+                (SELECT COUNT(*) FROM tool_calls WHERE status = 'claimed') AS tool_calls_claimed,
+                (
+                    SELECT COUNT(*)
+                    FROM tasks
+                    WHERE status = 'failed'
+                      AND updated_at >= $2
+                ) AS tasks_failed_last_24h,
+                (
+                    SELECT COUNT(*)
+                    FROM run_steps
+                    WHERE status = 'failed'
+                      AND updated_at >= $2
+                ) AS run_steps_failed_last_24h,
+                (
+                    SELECT COUNT(*)
+                    FROM tool_calls
+                    WHERE status = 'failed'
+                      AND updated_at >= $2
+                ) AS tool_calls_failed_last_24h,
+                (
+                    SELECT EXTRACT(EPOCH FROM ($1 - MIN(submitted_at)))::bigint
+                    FROM run_steps
+                    WHERE status = 'created'
+                      AND (next_retry_at IS NULL OR next_retry_at <= $1)
+                ) AS oldest_run_step_pending_age_seconds,
+                (
+                    SELECT EXTRACT(EPOCH FROM ($1 - MIN(submitted_at)))::bigint
+                    FROM tool_calls
+                    WHERE status = 'created'
+                      AND (next_retry_at IS NULL OR next_retry_at <= $1)
+                ) AS oldest_tool_call_pending_age_seconds
+            """,
+            now,
+            since,
+        )
+        return dict(row or {})
+
+    async def get_global_token_total(self, *, day_start, day_end) -> int:
+        total = await self._pool.fetchval(
+            """
+            SELECT COALESCE(
+                SUM(
+                    CASE
+                        WHEN output ? 'usage'
+                         AND output->'usage' ? 'total_tokens'
+                        THEN COALESCE((output->'usage'->>'total_tokens')::bigint, 0)
+                        ELSE 0
+                    END
+                ),
+                0
+            )
+            FROM runs
+            WHERE updated_at >= $1
+              AND updated_at < $2
+            """,
+            day_start,
+            day_end,
+        )
+        return int(total or 0)
+
+    async def get_workspace_token_total(
+        self,
+        *,
+        workspace_id: UUID,
+        day_start,
+        day_end,
+    ) -> int:
+        total = await self._pool.fetchval(
+            """
+            SELECT COALESCE(
+                SUM(
+                    CASE
+                        WHEN output ? 'usage'
+                         AND output->'usage' ? 'total_tokens'
+                        THEN COALESCE((output->'usage'->>'total_tokens')::bigint, 0)
+                        ELSE 0
+                    END
+                ),
+                0
+            )
+            FROM runs
+            WHERE workspace_id = $1
+              AND updated_at >= $2
+              AND updated_at < $3
+            """,
+            workspace_id,
+            day_start,
+            day_end,
+        )
+        return int(total or 0)
+
+    async def list_workspace_token_totals(self, *, day_start, day_end) -> list[dict[str, int | UUID]]:
+        rows = await self._pool.fetch(
+            """
+            SELECT workspace_id,
+                   COALESCE(
+                       SUM(
+                           CASE
+                               WHEN output ? 'usage'
+                                AND output->'usage' ? 'total_tokens'
+                               THEN COALESCE((output->'usage'->>'total_tokens')::bigint, 0)
+                               ELSE 0
+                           END
+                       ),
+                       0
+                   ) AS total_tokens
+            FROM runs
+            WHERE updated_at >= $1
+              AND updated_at < $2
+            GROUP BY workspace_id
+            HAVING COALESCE(
+                SUM(
+                    CASE
+                        WHEN output ? 'usage'
+                         AND output->'usage' ? 'total_tokens'
+                        THEN COALESCE((output->'usage'->>'total_tokens')::bigint, 0)
+                        ELSE 0
+                    END
+                ),
+                0
+            ) > 0
+            ORDER BY total_tokens DESC, workspace_id ASC
+            """,
+            day_start,
+            day_end,
+        )
+        return [
+            {"workspace_id": row["workspace_id"], "total_tokens": int(row["total_tokens"] or 0)}
+            for row in rows
+        ]
 
     async def fetch_message(self, message_id: UUID) -> TimelineMessage | None:
         row = await self._pool.fetchrow(
@@ -2774,6 +2941,7 @@ class CollaborationRepository:
             claimed_by_worker=row["claimed_by_worker"],
             lease_expires_at=row["lease_expires_at"],
             last_heartbeat_at=row["last_heartbeat_at"],
+            next_retry_at=row["next_retry_at"],
             attempt_count=row["attempt_count"],
             error=row["error"],
             execution_handle=row["execution_handle"],
@@ -2806,6 +2974,7 @@ class CollaborationRepository:
             claimed_by_worker=row["claimed_by_worker"],
             lease_expires_at=row["lease_expires_at"],
             last_heartbeat_at=row["last_heartbeat_at"],
+            next_retry_at=row["next_retry_at"],
             attempt_count=row["attempt_count"],
             error=row["error"],
             execution_handle=row["execution_handle"],

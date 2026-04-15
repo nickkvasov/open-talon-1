@@ -10,6 +10,22 @@ from uuid import uuid4
 
 import pytest
 
+from gateway_edge.config import settings
+from gateway_edge.models import AuthContext
+
+
+def _oidc_context(*, roles: list[str]) -> AuthContext:
+    return AuthContext(
+        kind="oidc",
+        user_id=uuid4(),
+        issuer="http://issuer.test/realms/open-talon",
+        subject="subject-123",
+        email="nikolay@example.com",
+        display_name="Nikolay",
+        roles=roles,
+        claims={"sub": "subject-123"},
+    )
+
 
 # ── POST /v1/admin/api-keys ────────────────────────────────────────────────────
 
@@ -109,6 +125,83 @@ async def test_revoke_removes_key_from_list(client, _mock_api_key_backend):
     r_list = await client.get("/v1/admin/api-keys")
     key_ids = [k["key_id"] for k in r_list.json()]
     assert key_id not in key_ids
+
+
+async def test_runtime_overview_returns_runtime_queue_and_token_totals(
+    client,
+    mock_collaboration_service,
+):
+    async def fake_overview():
+        workspace_id = uuid4()
+        return {
+            "tasks": {"pending": 2, "claimed": 1},
+            "run_steps": {"pending": 3, "claimed": 1},
+            "tool_calls": {"pending": 4, "claimed": 2},
+            "failed_last_24h": {"tasks": 1, "run_steps": 2, "tool_calls": 3},
+            "oldest_pending_age_seconds": {"run_steps": 45, "tool_calls": 90},
+            "token_totals": {
+                "global_total_tokens": 144,
+                "by_workspace": [
+                    {"workspace_id": workspace_id, "total_tokens": 120}
+                ],
+            },
+        }
+
+    mock_collaboration_service.get_runtime_overview = fake_overview
+
+    response = await client.get("/v1/admin/runtime/overview")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tasks"] == {"pending": 2, "claimed": 1}
+    assert body["failed_last_24h"] == {"tasks": 1, "run_steps": 2, "tool_calls": 3}
+    assert body["token_totals"]["global_total_tokens"] == 144
+    assert body["token_totals"]["by_workspace"][0]["total_tokens"] == 120
+
+
+async def test_runtime_overview_requires_admin_role_in_oidc_mode(client, monkeypatch):
+    auth_context = _oidc_context(roles=["workspace-user"])
+    monkeypatch.setattr(settings, "auth_mode", "oidc")
+
+    async def _validate(token: str):
+        assert token == "good-token"
+        return auth_context
+
+    async def _sync(context):
+        return context
+
+    monkeypatch.setattr("gateway_edge.auth.middleware.validate_oidc_token", _validate)
+    monkeypatch.setattr("gateway_edge.auth.middleware.sync_oidc_auth_context", _sync)
+
+    response = await client.get(
+        "/v1/admin/runtime/overview",
+        headers={"Authorization": "Bearer good-token"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Admin access required"
+
+
+async def test_runtime_overview_allows_admin_role_in_oidc_mode(client, monkeypatch):
+    auth_context = _oidc_context(roles=["admin"])
+    monkeypatch.setattr(settings, "auth_mode", "oidc")
+
+    async def _validate(token: str):
+        assert token == "good-token"
+        return auth_context
+
+    async def _sync(context):
+        return context
+
+    monkeypatch.setattr("gateway_edge.auth.middleware.validate_oidc_token", _validate)
+    monkeypatch.setattr("gateway_edge.auth.middleware.sync_oidc_auth_context", _sync)
+
+    response = await client.get(
+        "/v1/admin/runtime/overview",
+        headers={"Authorization": "Bearer good-token"},
+    )
+
+    assert response.status_code == 200
 
 
 # ── Fixture: in-memory API key backend ───────────────────────────────────────

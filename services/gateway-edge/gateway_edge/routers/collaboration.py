@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from gateway_edge.auth.api_key import validate_api_key
@@ -84,6 +85,12 @@ from gateway_edge.services.llm_registry import list_registered_llm_engines
 
 router = APIRouter(prefix="/v1", tags=["collaboration"])
 logger = logging.getLogger(__name__)
+
+
+class _AttachWorkspaceToolBody(BaseModel):
+    actor: ParticipantInput
+    enabled: bool = True
+    metadata: dict[str, object] = Field(default_factory=dict)
 
 
 def _actor_log(actor: ParticipantInput) -> dict[str, str]:
@@ -260,7 +267,91 @@ def _http_error(exc: Exception) -> HTTPException:
         return exc
     if isinstance(exc, KeyError):
         return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, PermissionError):
+        return HTTPException(status_code=403, detail=str(exc))
     return HTTPException(status_code=400, detail=str(exc))
+
+
+def _workspace_not_found(workspace_id: UUID) -> HTTPException:
+    return HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
+
+
+def _thread_not_found(thread_id: UUID) -> HTTPException:
+    return HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+
+async def _require_workspace_membership(
+    request: Request,
+    workspace_id: UUID,
+) -> ParticipantInput | None:
+    auth_context = _user_auth_context(request)
+    if auth_context is None:
+        return None
+    try:
+        return await collab_svc.collaboration_service.resolve_authenticated_user_actor(
+            workspace_id=workspace_id,
+            auth_context=auth_context,
+            auto_create=False,
+        )
+    except KeyError as exc:
+        raise _workspace_not_found(workspace_id) from exc
+
+
+async def _require_thread_membership(
+    request: Request,
+    thread_id: UUID,
+) -> ParticipantInput | None:
+    auth_context = _user_auth_context(request)
+    if auth_context is None:
+        return None
+    try:
+        return await collab_svc.collaboration_service.resolve_authenticated_thread_actor(
+            thread_id=thread_id,
+            auth_context=auth_context,
+            auto_create=False,
+        )
+    except KeyError as exc:
+        raise _thread_not_found(thread_id) from exc
+
+
+async def _require_asset_workspace_membership(
+    request: Request,
+    asset_id: UUID,
+) -> WorkspaceAsset:
+    asset = await collab_svc.collaboration_service.get_workspace_asset(asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail=f"Workspace asset {asset_id} not found")
+    if asset.workspace_id is not None:
+        await _require_workspace_membership(request, asset.workspace_id)
+    return asset
+
+
+async def _require_workspace_admin_or_supervisor(
+    request: Request,
+    workspace_id: UUID,
+) -> ParticipantInput | None:
+    if has_admin_access(request):
+        return None
+    actor = await _require_workspace_membership(request, workspace_id)
+    if actor is None:
+        return None
+    workspace = await collab_svc.collaboration_service.get_workspace(workspace_id)
+    participant = next(
+        (
+            item
+            for item in workspace.participants
+            if item.participant_id == actor.participant_id
+        ),
+        None,
+    )
+    if participant is None:
+        raise _workspace_not_found(workspace_id)
+    if {"admin", "supervisor"}.intersection(participant.roles):
+        return actor
+    raise HTTPException(
+        status_code=403,
+        detail="Workspace admin or supervisor role required",
+    )
 
 
 @router.post("/workspaces", response_model=WorkspaceDetail, summary="Create a workspace")
@@ -281,9 +372,11 @@ async def create_workspace(request: Request, payload: CreateWorkspaceRequest) ->
 
 
 @router.get("/workspaces", response_model=list[Workspace], summary="List workspaces")
-async def list_workspaces() -> list[Workspace]:
+async def list_workspaces(request: Request) -> list[Workspace]:
     logger.debug("HTTP list_workspaces")
-    return await collab_svc.collaboration_service.list_workspaces()
+    auth_context = _user_auth_context(request)
+    user_id = auth_context.user_id if auth_context is not None else None
+    return await collab_svc.collaboration_service.list_workspaces(user_id=user_id)
 
 
 @router.delete(
@@ -322,9 +415,10 @@ async def delete_workspace(
     response_model=WorkspaceDetail,
     summary="Get workspace detail",
 )
-async def get_workspace(workspace_id: UUID) -> WorkspaceDetail:
+async def get_workspace(request: Request, workspace_id: UUID) -> WorkspaceDetail:
     logger.debug("HTTP get_workspace workspace_id=%s", workspace_id)
     try:
+        await _require_workspace_membership(request, workspace_id)
         return await collab_svc.collaboration_service.get_workspace(workspace_id)
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -335,9 +429,13 @@ async def get_workspace(workspace_id: UUID) -> WorkspaceDetail:
     response_model=list[ParticipantProfile],
     summary="List participant advertisements in a workspace",
 )
-async def list_workspace_participants(workspace_id: UUID) -> list[ParticipantProfile]:
+async def list_workspace_participants(
+    request: Request,
+    workspace_id: UUID,
+) -> list[ParticipantProfile]:
     logger.debug("HTTP list_workspace_participants workspace_id=%s", workspace_id)
     try:
+        await _require_workspace_membership(request, workspace_id)
         return await collab_svc.collaboration_service.list_workspace_participants(
             workspace_id
         )
@@ -428,6 +526,7 @@ async def create_system_agent(
     request: Request,
     payload: CreateSystemAgentRequest,
 ) -> AgentDefinition:
+    require_admin_access(request)
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP create_system_agent actor=%s display_name=%r endpoint_kind=%s",
@@ -753,7 +852,8 @@ async def health_check_memory_provider(
     response_model=list[AgentDefinition],
     summary="List system-level agent definitions",
 )
-async def list_system_agents() -> list[AgentDefinition]:
+async def list_system_agents(request: Request) -> list[AgentDefinition]:
+    require_admin_access(request)
     logger.debug("HTTP list_system_agents")
     try:
         return await collab_svc.collaboration_service.list_system_agents()
@@ -770,6 +870,7 @@ async def create_system_tool(
     request: Request,
     payload: CreateSystemToolRequest,
 ) -> SystemToolDefinition:
+    require_admin_access(request)
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP create_system_tool actor=%s name=%r",
@@ -787,7 +888,8 @@ async def create_system_tool(
     response_model=list[SystemToolDefinition],
     summary="List system-wide tool definitions",
 )
-async def list_system_tools() -> list[SystemToolDefinition]:
+async def list_system_tools(request: Request) -> list[SystemToolDefinition]:
+    require_admin_access(request)
     logger.debug("HTTP list_system_tools")
     try:
         return await collab_svc.collaboration_service.list_system_tools()
@@ -805,6 +907,7 @@ async def update_system_tool(
     tool_id: UUID,
     payload: UpdateSystemToolRequest,
 ) -> SystemToolDefinition:
+    require_admin_access(request)
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP update_system_tool tool_id=%s actor=%s",
@@ -830,6 +933,7 @@ async def update_system_agent(
     agent_id: UUID,
     payload: UpdateSystemAgentRequest,
 ) -> AgentDefinition:
+    require_admin_access(request)
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP update_system_agent agent_id=%s actor=%s",
@@ -854,6 +958,7 @@ async def create_global_git_repository(
     request: Request,
     payload: CreateGitRepositoryRequest,
 ) -> GitRepository:
+    require_admin_access(request)
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP create_global_git_repository actor=%s name=%r local_path=%s",
@@ -876,7 +981,8 @@ async def create_global_git_repository(
     response_model=list[GitRepository],
     summary="List globally registered Git repositories",
 )
-async def list_global_git_repositories() -> list[GitRepository]:
+async def list_global_git_repositories(request: Request) -> list[GitRepository]:
+    require_admin_access(request)
     logger.debug("HTTP list_global_git_repositories")
     try:
         return await collab_svc.collaboration_service.list_git_repositories(scope="global")
@@ -893,6 +999,7 @@ async def publish_global_asset_from_git(
     request: Request,
     payload: PublishAssetFromGitRequest,
 ) -> WorkspaceAssetVersion:
+    require_admin_access(request)
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP publish_global_asset_from_git actor=%s repository_id=%s logical_name=%r path=%s",
@@ -917,11 +1024,14 @@ async def publish_global_asset_from_git(
     summary="List published assets with optional workspace scoping",
 )
 async def list_assets(
+    request: Request,
     workspace_id: UUID | None = Query(default=None),
     scope: str | None = Query(default=None),
 ) -> list[WorkspaceAsset]:
     logger.debug("HTTP list_assets workspace_id=%s scope=%s", workspace_id, scope)
     try:
+        if workspace_id is not None:
+            await _require_workspace_membership(request, workspace_id)
         return await collab_svc.collaboration_service.list_workspace_assets(
             scope=scope,
             workspace_id=workspace_id,
@@ -935,9 +1045,10 @@ async def list_assets(
     response_model=list[WorkspaceAssetVersion],
     summary="List immutable versions for a published asset",
 )
-async def list_asset_versions(asset_id: UUID) -> list[WorkspaceAssetVersion]:
+async def list_asset_versions(request: Request, asset_id: UUID) -> list[WorkspaceAssetVersion]:
     logger.debug("HTTP list_asset_versions asset_id=%s", asset_id)
     try:
+        await _require_asset_workspace_membership(request, asset_id)
         return await collab_svc.collaboration_service.list_workspace_asset_versions(asset_id)
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -953,6 +1064,7 @@ async def link_asset_version(
     asset_id: UUID,
     payload: LinkAssetRequest,
 ) -> AssetLink:
+    require_admin_access(request)
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP link_asset_version asset_id=%s target_type=%s target_id=%s purpose=%s actor=%s",
@@ -978,6 +1090,7 @@ async def activate_asset_version(
     asset_id: UUID,
     payload: ActivateAssetVersionRequest,
 ) -> AssetLink:
+    require_admin_access(request)
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP activate_asset_version asset_id=%s target_type=%s target_id=%s purpose=%s actor=%s",
@@ -999,11 +1112,13 @@ async def activate_asset_version(
     summary="Generate a presigned download URL for a published asset version",
 )
 async def get_asset_download_url(
+    request: Request,
     asset_id: UUID,
     asset_version_id: UUID | None = Query(default=None),
 ) -> str:
     logger.debug("HTTP get_asset_download_url asset_id=%s asset_version_id=%s", asset_id, asset_version_id)
     try:
+        await _require_asset_workspace_membership(request, asset_id)
         return await collab_svc.collaboration_service.get_asset_download_url(
             asset_id,
             asset_version_id=asset_version_id,
@@ -1018,11 +1133,14 @@ async def get_asset_download_url(
     summary="Resolve active global and workspace asset bindings for a system agent",
 )
 async def list_resolved_agent_assets(
+    request: Request,
     agent_id: UUID,
     workspace_id: UUID | None = Query(default=None),
 ) -> list[ResolvedAssetBinding]:
     logger.debug("HTTP list_resolved_agent_assets agent_id=%s workspace_id=%s", agent_id, workspace_id)
     try:
+        if workspace_id is not None:
+            await _require_workspace_membership(request, workspace_id)
         return await collab_svc.collaboration_service.list_resolved_agent_assets(
             agent_id=agent_id,
             workspace_id=workspace_id,
@@ -1037,11 +1155,14 @@ async def list_resolved_agent_assets(
     summary="Resolve active global and workspace asset bindings for a system tool",
 )
 async def list_resolved_tool_assets(
+    request: Request,
     tool_id: UUID,
     workspace_id: UUID | None = Query(default=None),
 ) -> list[ResolvedAssetBinding]:
     logger.debug("HTTP list_resolved_tool_assets tool_id=%s workspace_id=%s", tool_id, workspace_id)
     try:
+        if workspace_id is not None:
+            await _require_workspace_membership(request, workspace_id)
         return await collab_svc.collaboration_service.list_resolved_tool_assets(
             tool_id=tool_id,
             workspace_id=workspace_id,
@@ -1132,13 +1253,16 @@ async def upsert_role_definition(
     role_name: str,
     payload: UpsertRoleDefinitionRequest,
 ) -> RoleDefinition:
+    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
     payload = payload.model_copy(
         update={
             "name": role_name,
-            "actor": await _resolve_workspace_actor(
+            "actor": actor
+            or await _resolve_workspace_actor(
                 request,
                 payload.actor,
                 workspace_id=workspace_id,
+                auto_create=False,
             ),
         }
     )
@@ -1162,9 +1286,13 @@ async def upsert_role_definition(
     response_model=list[WorkspaceTool],
     summary="List tools registered for a workspace",
 )
-async def list_workspace_tools(workspace_id: UUID) -> list[WorkspaceTool]:
+async def list_workspace_tools(
+    request: Request,
+    workspace_id: UUID,
+) -> list[WorkspaceTool]:
     logger.debug("HTTP list_workspace_tools workspace_id=%s", workspace_id)
     try:
+        await _require_workspace_membership(request, workspace_id)
         return await collab_svc.collaboration_service.list_workspace_tools(workspace_id)
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -1180,9 +1308,11 @@ async def create_workspace_git_repository(
     workspace_id: UUID,
     payload: CreateGitRepositoryRequest,
 ) -> GitRepository:
+    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
     payload = payload.model_copy(
         update={
-            "actor": await _resolve_workspace_actor(
+            "actor": actor
+            or await _resolve_workspace_actor(
                 request,
                 payload.actor,
                 workspace_id=workspace_id,
@@ -1212,9 +1342,13 @@ async def create_workspace_git_repository(
     response_model=list[GitRepository],
     summary="List workspace-scoped Git repositories",
 )
-async def list_workspace_git_repositories(workspace_id: UUID) -> list[GitRepository]:
+async def list_workspace_git_repositories(
+    request: Request,
+    workspace_id: UUID,
+) -> list[GitRepository]:
     logger.debug("HTTP list_workspace_git_repositories workspace_id=%s", workspace_id)
     try:
+        await _require_workspace_membership(request, workspace_id)
         return await collab_svc.collaboration_service.list_git_repositories(
             scope="workspace",
             workspace_id=workspace_id,
@@ -1233,9 +1367,11 @@ async def publish_workspace_asset_from_git(
     workspace_id: UUID,
     payload: PublishAssetFromGitRequest,
 ) -> WorkspaceAssetVersion:
+    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
     payload = payload.model_copy(
         update={
-            "actor": await _resolve_workspace_actor(
+            "actor": actor
+            or await _resolve_workspace_actor(
                 request,
                 payload.actor,
                 workspace_id=workspace_id,
@@ -1270,18 +1406,20 @@ async def attach_workspace_tool(
     request: Request,
     workspace_id: UUID,
     tool_id: UUID,
-    payload: AttachWorkspaceToolRequest,
+    payload: _AttachWorkspaceToolBody,
 ) -> WorkspaceTool:
-    payload = payload.model_copy(
-        update={
-            "tool_id": tool_id,
-            "actor": await _resolve_workspace_actor(
-                request,
-                payload.actor,
-                workspace_id=workspace_id,
-                auto_create=False,
-            ),
-        }
+    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
+    payload = AttachWorkspaceToolRequest(
+        tool_id=tool_id,
+        enabled=payload.enabled,
+        metadata=payload.metadata,
+        actor=actor
+        or await _resolve_workspace_actor(
+            request,
+            payload.actor,
+            workspace_id=workspace_id,
+            auto_create=False,
+        ),
     )
     logger.debug(
         "HTTP attach_workspace_tool workspace_id=%s tool_id=%s actor=%s enabled=%s",
@@ -1310,9 +1448,11 @@ async def update_workspace_tool(
     tool_id: UUID,
     payload: UpdateWorkspaceToolRequest,
 ) -> WorkspaceTool:
+    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
     payload = payload.model_copy(
         update={
-            "actor": await _resolve_workspace_actor(
+            "actor": actor
+            or await _resolve_workspace_actor(
                 request,
                 payload.actor,
                 workspace_id=workspace_id,
@@ -1347,9 +1487,11 @@ async def delete_workspace_tool(
     tool_id: UUID,
     payload: DeleteWorkspaceToolRequest = Body(...),
 ) -> dict[str, bool | str]:
+    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
     payload = payload.model_copy(
         update={
-            "actor": await _resolve_workspace_actor(
+            "actor": actor
+            or await _resolve_workspace_actor(
                 request,
                 payload.actor,
                 workspace_id=workspace_id,
@@ -1408,9 +1550,10 @@ async def create_thread(
     response_model=list[Thread],
     summary="List threads in a workspace",
 )
-async def list_threads(workspace_id: UUID) -> list[Thread]:
+async def list_threads(request: Request, workspace_id: UUID) -> list[Thread]:
     logger.debug("HTTP list_threads workspace_id=%s", workspace_id)
     try:
+        await _require_workspace_membership(request, workspace_id)
         return await collab_svc.collaboration_service.list_threads(workspace_id)
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -1421,9 +1564,10 @@ async def list_threads(workspace_id: UUID) -> list[Thread]:
     response_model=ThreadDetail,
     summary="Get thread detail",
 )
-async def get_thread(thread_id: UUID) -> ThreadDetail:
+async def get_thread(request: Request, thread_id: UUID) -> ThreadDetail:
     logger.debug("HTTP get_thread thread_id=%s", thread_id)
     try:
+        await _require_thread_membership(request, thread_id)
         return await collab_svc.collaboration_service.get_thread(thread_id)
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -1434,9 +1578,10 @@ async def get_thread(thread_id: UUID) -> ThreadDetail:
     response_model=TimelinePage,
     summary="Get the thread timeline",
 )
-async def get_thread_timeline(thread_id: UUID) -> TimelinePage:
+async def get_thread_timeline(request: Request, thread_id: UUID) -> TimelinePage:
     logger.debug("HTTP get_thread_timeline thread_id=%s", thread_id)
     try:
+        await _require_thread_membership(request, thread_id)
         return await collab_svc.collaboration_service.get_timeline(thread_id)
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -1478,9 +1623,13 @@ async def post_message(
     response_model=list[MemoryEntry],
     summary="List workspace memory entries",
 )
-async def list_workspace_memory(workspace_id: UUID) -> list[MemoryEntry]:
+async def list_workspace_memory(
+    request: Request,
+    workspace_id: UUID,
+) -> list[MemoryEntry]:
     logger.debug("HTTP list_workspace_memory workspace_id=%s", workspace_id)
     try:
+        await _require_workspace_membership(request, workspace_id)
         return await collab_svc.collaboration_service.list_memory_entries(workspace_id)
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -1625,9 +1774,10 @@ async def delete_workspace_memory(
     response_model=list[MemoryEntry],
     summary="List confirmed thread memory entries",
 )
-async def list_thread_memory(thread_id: UUID) -> list[MemoryEntry]:
+async def list_thread_memory(request: Request, thread_id: UUID) -> list[MemoryEntry]:
     logger.debug("HTTP list_thread_memory thread_id=%s", thread_id)
     try:
+        await _require_thread_membership(request, thread_id)
         return await collab_svc.collaboration_service.list_thread_memory_entries(thread_id)
     except Exception as exc:
         raise _http_error(exc) from exc

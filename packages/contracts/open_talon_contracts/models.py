@@ -554,6 +554,7 @@ class RunStep(BaseModel):
     claimed_by_worker: str | None = None
     lease_expires_at: datetime | None = None
     last_heartbeat_at: datetime | None = None
+    next_retry_at: datetime | None = None
     attempt_count: int = 0
     error: str | None = None
     execution_handle: str | None = None
@@ -591,6 +592,7 @@ class ToolCall(BaseModel):
     claimed_by_worker: str | None = None
     lease_expires_at: datetime | None = None
     last_heartbeat_at: datetime | None = None
+    next_retry_at: datetime | None = None
     attempt_count: int = 0
     error: str | None = None
     execution_handle: str | None = None

@@ -1004,6 +1004,13 @@ async def test_local_ollama_executor_emits_generation_observation(monkeypatch):
         "completion_tokens": 7,
         "total_tokens": 19,
     }
+    assert result.metadata["usage"] == {
+        "provider": "ollama",
+        "model": "gemma4:latest",
+        "prompt_tokens": 12,
+        "completion_tokens": 7,
+        "total_tokens": 19,
+    }
 
 
 @pytest.mark.asyncio
@@ -1121,6 +1128,13 @@ async def test_http_executor_calls_openai_responses_with_api_key(monkeypatch):
     assert observer.records[0]["name"] == "remote-openai-responses"
     update = observer.records[0]["updates"][0]
     assert update["usage_details"] == {
+        "prompt_tokens": 21,
+        "completion_tokens": 9,
+        "total_tokens": 30,
+    }
+    assert result.metadata["usage"] == {
+        "provider": "openai",
+        "model": "gpt-5.4-mini",
         "prompt_tokens": 21,
         "completion_tokens": 9,
         "total_tokens": 30,

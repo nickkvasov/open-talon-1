@@ -210,6 +210,16 @@ class AgentLoopWorker:
             )
             if claim.step is None or claim.context is None:
                 break
+            budget_failure = await self._kernel.enforce_run_step_token_budget(
+                step_id=claim.step.step_id,
+                worker_id="agent-loop-worker",
+                global_daily_token_cap=self._settings.global_daily_token_cap,
+                default_workspace_daily_token_cap=self._settings.workspace_daily_token_cap_default,
+            )
+            if budget_failure is not None:
+                if budget_failure.events:
+                    await self._publisher.publish(budget_failure.events)
+                continue
             task = asyncio.create_task(self._process_step(claim.step.step_id, claim.context))
             self._processing[claim.step.step_id] = task
             task.add_done_callback(
@@ -528,15 +538,22 @@ class Reconciler:
 
     async def run_forever(self) -> None:
         while True:
-            steps, tool_calls = await self._kernel.reconcile_expired_execution_leases()
-            if steps or tool_calls:
-                events = await self._kernel.build_requeued_execution_events(steps, tool_calls)
+            reconciliation = await self._kernel.reconcile_expired_execution_leases()
+            if reconciliation.run_steps or reconciliation.tool_calls or reconciliation.events:
+                events = list(reconciliation.events)
+                events.extend(
+                    await self._kernel.build_requeued_execution_events(
+                        reconciliation.run_steps,
+                        reconciliation.tool_calls,
+                    )
+                )
                 if events:
                     await self._publisher.publish(events)
                 logger.warning(
-                    "Requeued expired execution leases run_steps=%s tool_calls=%s",
-                    len(steps),
-                    len(tool_calls),
+                    "Reconciled expired execution leases run_steps=%s tool_calls=%s failure_events=%s",
+                    len(reconciliation.run_steps),
+                    len(reconciliation.tool_calls),
+                    len(reconciliation.events),
                 )
             await asyncio.sleep(self._settings.reconcile_interval_seconds)
 

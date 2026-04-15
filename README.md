@@ -41,8 +41,20 @@ Important implications:
 
 - client apps should not treat `participant_id` as a global human identity
 - authenticated human requests may still include an `actor` object for compatibility, but the gateway derives the effective human actor from the bearer token
+- OIDC workspace listing and workspace-scoped reads are membership-scoped; non-members should see `404` for workspace, thread, memory, and workspace-scoped asset reads
+- global system-definition, global publish, and provider-management routes are admin-only for OIDC users; API-key and other system-admin operator flows keep their existing semantics
 - OpenBao remains part of the local stack for secrets and other internal uses, not as the primary end-user login system
 - the local Keycloak dev setup is intended to allow HTTP during development; `keycloak-init` normalizes `sslRequired=none` for both `master` and `open-talon`, and you can re-apply that with `docker compose up -d keycloak keycloak-init`
+
+## Operational Guardrails
+
+The current defaults are aimed at a single medium-sized internal company deployment.
+
+- global reads and writes for system agents, system tools, global Git repositories, global asset publish/link/activate flows, and provider management are admin-only for OIDC users
+- workspace role-definition changes, workspace tool attach/update/delete, workspace Git repository creation, and workspace asset publishing require workspace `admin` or `supervisor`
+- `GET /v1/workspaces` only returns workspaces where the authenticated human already has a participant record
+- workspace-scoped reads intentionally return `404` for non-members so valid workspace and thread IDs are not enumerable
+- risky tool execution profiles require `trust_level="trusted"`: `workspace_access=read_write`, `network=full`, and `local_process`
 
 ## Audit Logging
 
@@ -134,6 +146,16 @@ V1 execution backends:
 - `local_process`: minimal backend for tests and explicitly trusted built-ins
 
 The Docker backend uses a short-lived container with a read-only root filesystem, dropped capabilities, no-new-privileges, resource limits, and `--network none` by default.
+
+Runtime guardrails now also include:
+
+- bounded retry scheduling through `next_retry_at` on `run_steps` and `tool_calls`
+- reconciler backoff of `30s`, `2m`, and `10m`, with terminal failure after the third expired lease
+- terminal expired tool calls fail the waiting run step and then fail the parent run with stop reason `tool_failure`
+- normalized token usage persisted in `run.output["usage"]` with `provider`, `model`, `prompt_tokens`, `completion_tokens`, and `total_tokens`
+- optional token caps through `OPEN_TALON_GLOBAL_DAILY_TOKEN_CAP` and `OPEN_TALON_WORKSPACE_DAILY_TOKEN_CAP`
+- workspace-specific token-cap overrides from `workspace.metadata["limits"]["daily_token_cap"]` or `workspace.metadata["daily_token_cap"]`
+- admin visibility at `GET /v1/admin/runtime/overview` for queue counts, recent failures, pending age, and current-day token totals
 
 Common tool endpoints:
 
@@ -325,6 +347,7 @@ Common local endpoints:
 - `gateway-edge docs`: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - `gateway-edge audit list`: [http://127.0.0.1:8000/v1/audit/events](http://127.0.0.1:8000/v1/audit/events)
 - `gateway-edge audit export`: [http://127.0.0.1:8000/v1/audit/events/export](http://127.0.0.1:8000/v1/audit/events/export)
+- `gateway-edge runtime overview` (admin only): [http://127.0.0.1:8000/v1/admin/runtime/overview](http://127.0.0.1:8000/v1/admin/runtime/overview)
 - `langfuse-web`: [http://localhost:3000](http://localhost:3000)
 - `hyperdx` when started with `--profile hyperdx`: [http://127.0.0.1:8080](http://127.0.0.1:8080)
 - `pgadmin`: [http://localhost:5050](http://localhost:5050)

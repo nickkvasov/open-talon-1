@@ -202,6 +202,43 @@ class MeResponse(BaseModel):
     roles: list[str] = Field(default_factory=list)
     claims: dict[str, Any] = Field(default_factory=dict)
 
+
+class RuntimeQueueCounts(BaseModel):
+    pending: int = 0
+    claimed: int = 0
+
+
+class RuntimeFailedCounts(BaseModel):
+    tasks: int = 0
+    run_steps: int = 0
+    tool_calls: int = 0
+
+
+class RuntimeOldestPendingAge(BaseModel):
+    run_steps: int | None = None
+    tool_calls: int | None = None
+
+
+class WorkspaceTokenTotal(BaseModel):
+    workspace_id: UUID
+    total_tokens: int = 0
+
+
+class RuntimeTokenTotals(BaseModel):
+    global_total_tokens: int = 0
+    by_workspace: list[WorkspaceTokenTotal] = Field(default_factory=list)
+
+
+class RuntimeOverviewResponse(BaseModel):
+    tasks: RuntimeQueueCounts = Field(default_factory=RuntimeQueueCounts)
+    run_steps: RuntimeQueueCounts = Field(default_factory=RuntimeQueueCounts)
+    tool_calls: RuntimeQueueCounts = Field(default_factory=RuntimeQueueCounts)
+    failed_last_24h: RuntimeFailedCounts = Field(default_factory=RuntimeFailedCounts)
+    oldest_pending_age_seconds: RuntimeOldestPendingAge = Field(
+        default_factory=RuntimeOldestPendingAge
+    )
+    token_totals: RuntimeTokenTotals = Field(default_factory=RuntimeTokenTotals)
+
 __all__ = [
     "ActorRef",
     "AgentArtifactDraft",
@@ -276,6 +313,11 @@ __all__ = [
     "ResolvedAssetBinding",
     "ResultSink",
     "RoleDefinition",
+    "RuntimeFailedCounts",
+    "RuntimeOldestPendingAge",
+    "RuntimeOverviewResponse",
+    "RuntimeQueueCounts",
+    "RuntimeTokenTotals",
     "ServiceStatus",
     "SystemToolDefinition",
     "SessionInfo",
@@ -310,6 +352,7 @@ __all__ = [
     "WorkspaceAsset",
     "WorkspaceAssetVersion",
     "WorkspaceDetail",
+    "WorkspaceTokenTotal",
     "WorkspaceTool",
     "DEFAULT_LOCAL_OLLAMA_ENGINE_ID",
     "DEFAULT_LOCAL_OLLAMA_URL",

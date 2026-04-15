@@ -133,8 +133,16 @@ class MockCollaborationService:
             tools=[],
         )
 
-    async def list_workspaces(self):
-        return list(self.workspaces.values())
+    async def list_workspaces(self, *, user_id=None):
+        workspaces = list(self.workspaces.values())
+        if user_id is None:
+            return workspaces
+        visible: list = []
+        for workspace in workspaces:
+            participants = self.participants.get(str(workspace.workspace_id), {})
+            if any(participant.user_id == user_id for participant in participants.values()):
+                visible.append(workspace)
+        return visible
 
     async def resolve_authenticated_user_actor(
         self,
@@ -515,6 +523,16 @@ class MockCollaborationService:
             raise KeyError(f"Workspace asset {asset_id} not found")
         return list(self.asset_versions.get(str(asset_id), []))
 
+    async def get_workspace_asset(self, asset_id: UUID):
+        return self.assets.get(str(asset_id))
+
+    async def get_workspace_asset_version(self, asset_version_id: UUID):
+        for versions in self.asset_versions.values():
+            for version in versions:
+                if version.asset_version_id == asset_version_id:
+                    return version
+        return None
+
     async def activate_asset_version(self, asset_id: UUID, payload):
         from gateway_edge.models import AssetLink
 
@@ -799,6 +817,16 @@ class MockCollaborationService:
         if removed is None:
             raise KeyError(f"Workspace tool {tool_id!r} not found")
         return {"deleted": True, "workspace_id": str(workspace_id), "tool_id": str(tool_id)}
+
+    async def get_runtime_overview(self):
+        return {
+            "tasks": {"pending": 0, "claimed": 0},
+            "run_steps": {"pending": 0, "claimed": 0},
+            "tool_calls": {"pending": 0, "claimed": 0},
+            "failed_last_24h": {"tasks": 0, "run_steps": 0, "tool_calls": 0},
+            "oldest_pending_age_seconds": {"run_steps": None, "tool_calls": None},
+            "token_totals": {"global_total_tokens": 0, "by_workspace": []},
+        }
 
     async def assume_participant_role(self, workspace_id: UUID, participant_id: UUID, payload):
         from gateway_edge.models import ParticipantProfile

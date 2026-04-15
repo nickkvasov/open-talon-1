@@ -157,8 +157,8 @@ class CollaborationService:
             auto_create=auto_create,
         )
 
-    async def list_workspaces(self) -> list[Workspace]:
-        return await self._require_kernel().list_workspaces()
+    async def list_workspaces(self, *, user_id: UUID | None = None) -> list[Workspace]:
+        return await self._require_kernel().list_workspaces(user_id=user_id)
 
     async def delete_workspace(
         self, workspace_id: UUID, payload: DeleteWorkspaceRequest
@@ -362,6 +362,15 @@ class CollaborationService:
     ) -> list[WorkspaceAssetVersion]:
         return await self._require_kernel().list_workspace_asset_versions(asset_id)
 
+    async def get_workspace_asset(self, asset_id: UUID) -> WorkspaceAsset | None:
+        return await self._require_kernel().get_workspace_asset(asset_id)
+
+    async def get_workspace_asset_version(
+        self,
+        asset_version_id: UUID,
+    ) -> WorkspaceAssetVersion | None:
+        return await self._require_kernel().get_workspace_asset_version(asset_version_id)
+
     async def activate_asset_version(
         self,
         asset_id: UUID,
@@ -516,6 +525,9 @@ class CollaborationService:
             tool_id,
             payload,
         )
+
+    async def get_runtime_overview(self) -> dict[str, object]:
+        return await self._require_kernel().get_runtime_overview()
 
     async def assume_participant_role(
         self,

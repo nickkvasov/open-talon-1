@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import httpx
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from gateway_edge.config import settings
-from gateway_edge.models import AuthContext
+from gateway_edge.models import AuthContext, ParticipantProfile
 
 
 def _oidc_context(*, roles: list[str]) -> AuthContext:
@@ -18,6 +19,19 @@ def _oidc_context(*, roles: list[str]) -> AuthContext:
         roles=roles,
         claims={"sub": "subject-123"},
     )
+
+
+def _patch_oidc_tokens(monkeypatch, token_map: dict[str, AuthContext]) -> None:
+    monkeypatch.setattr(settings, "auth_mode", "oidc")
+
+    async def _validate(token: str):
+        return token_map.get(token)
+
+    async def _sync(context):
+        return context
+
+    monkeypatch.setattr("gateway_edge.auth.middleware.validate_oidc_token", _validate)
+    monkeypatch.setattr("gateway_edge.auth.middleware.sync_oidc_auth_context", _sync)
 
 
 async def test_create_workspace_returns_workspace_and_participants(client, actor_payload):
@@ -48,6 +62,43 @@ async def test_list_workspaces_returns_created_workspace(client, actor_payload):
     resp = await client.get("/v1/workspaces")
     assert resp.status_code == 200
     assert resp.json()[0]["name"] == "Observability"
+
+
+async def test_list_workspaces_filters_to_authenticated_user_membership_in_oidc_mode(
+    client,
+    actor_payload,
+    monkeypatch,
+):
+    first_context = _oidc_context(roles=["workspace-user"])
+    second_context = _oidc_context(roles=["workspace-user"])
+    _patch_oidc_tokens(
+        monkeypatch,
+        {
+            "first-token": first_context,
+            "second-token": second_context,
+        },
+    )
+
+    first_workspace = await client.post(
+        "/v1/workspaces",
+        headers={"Authorization": "Bearer first-token"},
+        json={"name": "Visible Workspace", "actor": actor_payload},
+    )
+    second_workspace = await client.post(
+        "/v1/workspaces",
+        headers={"Authorization": "Bearer second-token"},
+        json={"name": "Hidden Workspace", "actor": actor_payload},
+    )
+    assert first_workspace.status_code == 200
+    assert second_workspace.status_code == 200
+
+    response = await client.get(
+        "/v1/workspaces",
+        headers={"Authorization": "Bearer first-token"},
+    )
+
+    assert response.status_code == 200
+    assert [workspace["name"] for workspace in response.json()] == ["Visible Workspace"]
 
 
 async def test_list_llm_engines_returns_registered_engines(client, actor_payload):
@@ -224,6 +275,398 @@ async def test_workspace_git_repository_publish_and_versions_are_listed(client, 
     versions = await client.get(f"/v1/assets/{asset['asset_id']}/versions")
     assert versions.status_code == 200
     assert [item["version"] for item in versions.json()] == [1, 2]
+
+
+async def test_global_system_definition_routes_require_admin_role_in_oidc_mode(
+    client,
+    actor_payload,
+    monkeypatch,
+):
+    _patch_oidc_tokens(
+        monkeypatch,
+        {"user-token": _oidc_context(roles=["workspace-user"])},
+    )
+
+    agent_resp = await client.post(
+        "/v1/agents",
+        headers={"Authorization": "Bearer user-token"},
+        json={
+            "actor": actor_payload,
+            "display_name": "Guarded Agent",
+            "description": "Should require admin access.",
+            "role": "system admin",
+            "capabilities": ["planning"],
+            "endpoint": {"kind": "remote", "model": "gpt-5.4"},
+            "system_prompt": "Guard global agent management.",
+        },
+    )
+    list_agents_resp = await client.get(
+        "/v1/agents",
+        headers={"Authorization": "Bearer user-token"},
+    )
+    tool_resp = await client.post(
+        "/v1/tools",
+        headers={"Authorization": "Bearer user-token"},
+        json={
+            "actor": actor_payload,
+            "name": "repo_search",
+            "description": "Should require admin access.",
+        },
+    )
+    list_tools_resp = await client.get(
+        "/v1/tools",
+        headers={"Authorization": "Bearer user-token"},
+    )
+    repo_resp = await client.post(
+        "/v1/git-repositories",
+        headers={"Authorization": "Bearer user-token"},
+        json={
+            "actor": actor_payload,
+            "name": "guarded-definitions",
+            "local_path": "/tmp/guarded-definitions",
+        },
+    )
+    list_repos_resp = await client.get(
+        "/v1/git-repositories",
+        headers={"Authorization": "Bearer user-token"},
+    )
+    publish_resp = await client.post(
+        "/v1/assets/publish-from-git",
+        headers={"Authorization": "Bearer user-token"},
+        json={
+            "actor": actor_payload,
+            "repository_id": str(uuid4()),
+            "asset_type": "agent_instruction",
+            "logical_name": "guarded-agent-md",
+            "title": "Guarded Agent.md",
+            "git_path": "agents/guarded/AGENT.md",
+        },
+    )
+    link_resp = await client.post(
+        f"/v1/assets/{uuid4()}/links",
+        headers={"Authorization": "Bearer user-token"},
+        json={
+            "actor": actor_payload,
+            "asset_version_id": str(uuid4()),
+            "target_type": "system_agent",
+            "target_id": str(uuid4()),
+            "purpose": "agent_md",
+        },
+    )
+    activate_resp = await client.post(
+        f"/v1/assets/{uuid4()}/activate",
+        headers={"Authorization": "Bearer user-token"},
+        json={
+            "actor": actor_payload,
+            "asset_version_id": str(uuid4()),
+            "target_type": "system_agent",
+            "target_id": str(uuid4()),
+            "purpose": "agent_md",
+        },
+    )
+
+    for response in (
+        agent_resp,
+        list_agents_resp,
+        tool_resp,
+        list_tools_resp,
+        repo_resp,
+        list_repos_resp,
+        publish_resp,
+        link_resp,
+        activate_resp,
+    ):
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Admin access required"
+
+
+async def test_global_system_definition_routes_allow_admin_role_in_oidc_mode(
+    client,
+    actor_payload,
+    monkeypatch,
+):
+    _patch_oidc_tokens(
+        monkeypatch,
+        {"admin-token": _oidc_context(roles=["admin"])},
+    )
+
+    agent_resp = await client.post(
+        "/v1/agents",
+        headers={"Authorization": "Bearer admin-token"},
+        json={
+            "actor": actor_payload,
+            "display_name": "Admin Agent",
+            "description": "Allowed for admins.",
+            "role": "system admin",
+            "capabilities": ["planning"],
+            "endpoint": {"kind": "remote", "model": "gpt-5.4"},
+            "system_prompt": "Guard global agent management.",
+        },
+    )
+    tool_resp = await client.post(
+        "/v1/tools",
+        headers={"Authorization": "Bearer admin-token"},
+        json={
+            "actor": actor_payload,
+            "name": "repo_search",
+            "description": "Allowed for admins.",
+        },
+    )
+    repo_resp = await client.post(
+        "/v1/git-repositories",
+        headers={"Authorization": "Bearer admin-token"},
+        json={
+            "actor": actor_payload,
+            "name": "admin-definitions",
+            "local_path": "/tmp/admin-definitions",
+        },
+    )
+    agent_id = agent_resp.json()["agent_id"]
+    repository_id = repo_resp.json()["repo_id"]
+    publish_resp = await client.post(
+        "/v1/assets/publish-from-git",
+        headers={"Authorization": "Bearer admin-token"},
+        json={
+            "actor": actor_payload,
+            "repository_id": repository_id,
+            "asset_type": "agent_instruction",
+            "logical_name": "admin-agent-md",
+            "title": "Admin Agent Instructions",
+            "git_path": "agents/admin/AGENT.md",
+        },
+    )
+    assert publish_resp.status_code == 200
+    asset_version_id = publish_resp.json()["asset_version_id"]
+    assets_resp = await client.get(
+        "/v1/assets",
+        headers={"Authorization": "Bearer admin-token"},
+    )
+    assert assets_resp.status_code == 200
+    asset_id = next(
+        item["asset_id"]
+        for item in assets_resp.json()
+        if item["logical_name"] == "admin-agent-md"
+    )
+    link_resp = await client.post(
+        f"/v1/assets/{asset_id}/links",
+        headers={"Authorization": "Bearer admin-token"},
+        json={
+            "actor": actor_payload,
+            "asset_version_id": asset_version_id,
+            "target_type": "system_agent",
+            "target_id": agent_id,
+            "purpose": "agent_md",
+        },
+    )
+    activate_resp = await client.post(
+        f"/v1/assets/{asset_id}/activate",
+        headers={"Authorization": "Bearer admin-token"},
+        json={
+            "actor": actor_payload,
+            "asset_version_id": asset_version_id,
+            "target_type": "system_agent",
+            "target_id": agent_id,
+            "purpose": "agent_md",
+        },
+    )
+    list_agents_resp = await client.get(
+        "/v1/agents",
+        headers={"Authorization": "Bearer admin-token"},
+    )
+    list_tools_resp = await client.get(
+        "/v1/tools",
+        headers={"Authorization": "Bearer admin-token"},
+    )
+    list_repos_resp = await client.get(
+        "/v1/git-repositories",
+        headers={"Authorization": "Bearer admin-token"},
+    )
+
+    assert agent_resp.status_code == 200
+    assert tool_resp.status_code == 200
+    assert repo_resp.status_code == 200
+    assert link_resp.status_code == 200
+    assert activate_resp.status_code == 200
+    assert list_agents_resp.status_code == 200
+    assert list_tools_resp.status_code == 200
+    assert list_repos_resp.status_code == 200
+
+
+async def test_non_member_workspace_thread_memory_and_asset_reads_return_404(
+    client,
+    mock_collaboration_service,
+    actor_payload,
+    monkeypatch,
+):
+    owner_context = _oidc_context(roles=["workspace-user"])
+    outsider_context = _oidc_context(roles=["workspace-user"])
+    _patch_oidc_tokens(
+        monkeypatch,
+        {
+            "owner-token": owner_context,
+            "outsider-token": outsider_context,
+        },
+    )
+
+    workspace_resp = await client.post(
+        "/v1/workspaces",
+        headers={"Authorization": "Bearer owner-token"},
+        json={"name": "Private Workspace", "actor": actor_payload},
+    )
+    assert workspace_resp.status_code == 200
+    workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+
+    thread_resp = await client.post(
+        f"/v1/workspaces/{workspace_id}/threads",
+        headers={"Authorization": "Bearer owner-token"},
+        json={"title": "Private Thread", "actor": actor_payload},
+    )
+    assert thread_resp.status_code == 200
+    thread_id = thread_resp.json()["thread"]["thread_id"]
+
+    memory_resp = await client.post(
+        f"/v1/workspaces/{workspace_id}/memory",
+        headers={"Authorization": "Bearer owner-token"},
+        json={
+            "actor": actor_payload,
+            "entry_type": "decision",
+            "content": "Private workspace memory",
+        },
+    )
+    assert memory_resp.status_code == 200
+
+    repo_resp = await client.post(
+        f"/v1/workspaces/{workspace_id}/git-repositories",
+        headers={"Authorization": "Bearer owner-token"},
+        json={
+            "actor": actor_payload,
+            "name": "private-definitions",
+            "local_path": "/tmp/private-definitions",
+        },
+    )
+    assert repo_resp.status_code == 200
+    repository_id = repo_resp.json()["repo_id"]
+
+    publish_resp = await client.post(
+        f"/v1/workspaces/{workspace_id}/assets/publish-from-git",
+        headers={"Authorization": "Bearer owner-token"},
+        json={
+            "actor": actor_payload,
+            "repository_id": repository_id,
+            "asset_type": "agent_instruction",
+            "logical_name": "private-agent-md",
+            "title": "Private Agent Instructions",
+            "git_path": "agents/private/AGENT.md",
+        },
+    )
+    assert publish_resp.status_code == 200
+
+    assets_resp = await client.get(
+        f"/v1/assets?workspace_id={workspace_id}",
+        headers={"Authorization": "Bearer owner-token"},
+    )
+    asset_id = next(
+        item["asset_id"]
+        for item in assets_resp.json()
+        if item["logical_name"] == "private-agent-md"
+    )
+
+    for path in (
+        f"/v1/workspaces/{workspace_id}",
+        f"/v1/workspaces/{workspace_id}/participants",
+        f"/v1/workspaces/{workspace_id}/memory",
+        f"/v1/threads/{thread_id}",
+        f"/v1/threads/{thread_id}/timeline",
+        f"/v1/threads/{thread_id}/memory",
+        f"/v1/assets?workspace_id={workspace_id}",
+        f"/v1/assets/{asset_id}/versions",
+        f"/v1/assets/{asset_id}/download",
+    ):
+        response = await client.get(
+            path,
+            headers={"Authorization": "Bearer outsider-token"},
+        )
+        assert response.status_code == 404
+
+
+async def test_workspace_management_routes_require_workspace_admin_or_supervisor_role(
+    client,
+    mock_collaboration_service,
+    actor_payload,
+    monkeypatch,
+):
+    admin_context = _oidc_context(roles=["admin"])
+    owner_context = _oidc_context(roles=["workspace-user"])
+    member_context = _oidc_context(roles=["workspace-user"])
+    _patch_oidc_tokens(
+        monkeypatch,
+        {
+            "admin-token": admin_context,
+            "owner-token": owner_context,
+            "member-token": member_context,
+        },
+    )
+
+    workspace_resp = await client.post(
+        "/v1/workspaces",
+        headers={"Authorization": "Bearer owner-token"},
+        json={"name": "Managed Workspace", "actor": actor_payload},
+    )
+    assert workspace_resp.status_code == 200
+    workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+    workspace_uuid = UUID(workspace_id)
+
+    member_participant = ParticipantProfile(
+        participant_id=uuid4(),
+        workspace_id=workspace_uuid,
+        participant_type="user",
+        user_id=member_context.user_id,
+        display_name=member_context.display_name or "Member",
+        roles=["user"],
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    mock_collaboration_service.participants.setdefault(str(workspace_id), {})[
+        str(member_participant.participant_id)
+    ] = member_participant
+
+    tool_resp = await client.post(
+        "/v1/tools",
+        headers={"Authorization": "Bearer admin-token"},
+        json={
+            "actor": actor_payload,
+            "name": "repo_search",
+            "description": "Admin-created tool.",
+        },
+    )
+    assert tool_resp.status_code == 200
+    tool_id = tool_resp.json()["tool_id"]
+
+    member_tool_attach = await client.put(
+        f"/v1/workspaces/{workspace_id}/tools/{tool_id}",
+        headers={"Authorization": "Bearer member-token"},
+        json={"actor": actor_payload, "enabled": True},
+    )
+    member_repo_create = await client.post(
+        f"/v1/workspaces/{workspace_id}/git-repositories",
+        headers={"Authorization": "Bearer member-token"},
+        json={
+            "actor": actor_payload,
+            "name": "member-definitions",
+            "local_path": "/tmp/member-definitions",
+        },
+    )
+    owner_tool_attach = await client.put(
+        f"/v1/workspaces/{workspace_id}/tools/{tool_id}",
+        headers={"Authorization": "Bearer owner-token"},
+        json={"actor": actor_payload, "enabled": True},
+    )
+
+    assert member_tool_attach.status_code == 403
+    assert member_tool_attach.json()["detail"] == "Workspace admin or supervisor role required"
+    assert member_repo_create.status_code == 403
+    assert member_repo_create.json()["detail"] == "Workspace admin or supervisor role required"
+    assert owner_tool_attach.status_code == 200
 
 
 async def test_llm_providers_can_be_created_listed_updated_and_deleted(client, actor_payload):

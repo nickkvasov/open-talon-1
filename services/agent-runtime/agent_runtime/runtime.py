@@ -309,6 +309,11 @@ class LocalOllamaExecutor:
                 "provider": provider,
                 "model": model,
                 "endpoint_kind": endpoint.kind,
+                **(
+                    {"usage": _usage_metadata(provider=provider, model=model, usage=usage_details)}
+                    if usage_details
+                    else {}
+                ),
             },
         )
 
@@ -389,7 +394,17 @@ class HttpEndpointExecutor:
                     "status_code": response.status_code,
                 },
             )
-        return _coerce_run_result(payload, context=context)
+        result = _coerce_run_result(payload, context=context)
+        return result.model_copy(
+            update={
+                "metadata": {
+                    **result.metadata,
+                    "provider": provider,
+                    "endpoint_kind": endpoint.kind,
+                    **({"model": endpoint.model} if endpoint.model else {}),
+                }
+            }
+        )
 
     async def _execute_openai(
         self,
@@ -450,7 +465,23 @@ class HttpEndpointExecutor:
                     "status_code": response.status_code,
                 },
             )
-        return _coerce_run_result(payload, context=context)
+        result = _coerce_run_result(payload, context=context)
+        usage = _openai_usage_details(payload)
+        return result.model_copy(
+            update={
+                "metadata": {
+                    **result.metadata,
+                    "provider": provider,
+                    "model": endpoint.model,
+                    "endpoint_kind": endpoint.kind,
+                    **(
+                        {"usage": _usage_metadata(provider=provider, model=endpoint.model, usage=usage)}
+                        if usage
+                        else {}
+                    ),
+                }
+            }
+        )
 
 
 class AgentTaskRuntime:
@@ -980,6 +1011,21 @@ def _langfuse_metadata(
         "provider": provider,
         "task_id": str(task_id) if task_id else None,
         "run_id": str(run_id) if run_id else None,
+    }
+
+
+def _usage_metadata(
+    *,
+    provider: str | None,
+    model: str | None,
+    usage: dict[str, int],
+) -> dict[str, Any]:
+    return {
+        "provider": provider,
+        "model": model,
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
+        "total_tokens": usage.get("total_tokens"),
     }
 
 

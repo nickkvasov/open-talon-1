@@ -83,6 +83,7 @@ That keeps Postgres as the canonical memory store and adds the optional local `m
 - API docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - Audit events API: [http://127.0.0.1:8000/v1/audit/events](http://127.0.0.1:8000/v1/audit/events)
 - Audit export API: [http://127.0.0.1:8000/v1/audit/events/export](http://127.0.0.1:8000/v1/audit/events/export)
+- Runtime overview API (admin only): [http://127.0.0.1:8000/v1/admin/runtime/overview](http://127.0.0.1:8000/v1/admin/runtime/overview)
 - Keycloak: [http://127.0.0.1:8081](http://127.0.0.1:8081)
 - Open Talon realm issuer: [http://127.0.0.1:8081/realms/open-talon](http://127.0.0.1:8081/realms/open-talon)
 - OpenID config: [http://127.0.0.1:8081/realms/open-talon/.well-known/openid-configuration](http://127.0.0.1:8081/realms/open-talon/.well-known/openid-configuration)
@@ -138,6 +139,13 @@ Relevant layered-memory defaults from [`infrastructure/.env.example`](/Users/nik
 - `OPEN_TALON_MEMGRAPH_USER=memgraph`
 - `OPEN_TALON_MEMGRAPH_PASSWORD=memgraph`
 
+Relevant runtime-guardrail defaults from [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example):
+
+- `OPEN_TALON_GLOBAL_DAILY_TOKEN_CAP=0`
+- `OPEN_TALON_WORKSPACE_DAILY_TOKEN_CAP=0`
+
+`0` disables the cap. Workspace-specific overrides can be set in workspace metadata using either `limits.daily_token_cap` or top-level `daily_token_cap`.
+
 ## 5. Keycloak Local Auth Model
 
 - The imported `open-talon` realm is configured for local HTTP development with `sslRequired=none`.
@@ -147,6 +155,14 @@ Relevant layered-memory defaults from [`infrastructure/.env.example`](/Users/nik
 - Future browser apps are expected to use the `open-talon-web` public client with authorization code + PKCE.
 - Human identity is global in `users` and `auth_identities`.
 - Workspace-local membership and roles are stored in `participants`.
+
+Current local hardening defaults:
+
+- global system-definition, global publish, provider-management, and runtime-overview APIs require the Keycloak `admin` role when using OIDC
+- `GET /v1/workspaces` only returns workspaces where the authenticated human already has a participant
+- non-members should receive `404` for workspace, thread, memory, and workspace-scoped asset reads
+- workspace `admin` or `supervisor` is required for workspace role-definition changes, workspace tool management, workspace Git repository creation, and workspace asset publishing
+- risky tools must be created as `trust_level="trusted"` if they use `workspace_access=read_write`, `network=full`, or `local_process`
 
 ## 6. First Keycloak Sign-In
 
@@ -287,6 +303,22 @@ curl http://127.0.0.1:8081/realms/open-talon/.well-known/openid-configuration
 docker compose -f infrastructure/docker-compose.yaml ps keycloak keycloak-init
 docker compose -f infrastructure/docker-compose.yaml logs --tail=50 keycloak-init keycloak
 ```
+
+Operator check for the runtime overview endpoint:
+
+```bash
+curl -H "Authorization: Bearer <admin-token>" \
+  http://127.0.0.1:8000/v1/admin/runtime/overview
+```
+
+Expected operator signals:
+
+- pending and claimed counts for tasks, run steps, and tool calls
+- failed counts for the last 24 hours
+- oldest pending ages for run steps and tool calls
+- current-day token totals globally and by workspace
+
+If you enable token caps and a run hits the limit, the affected run step should fail with stop reason `budget_exhausted`.
 
 Targeted Python tests:
 
