@@ -68,6 +68,11 @@ def create_app() -> FastAPI:
         if settings.cors_origins.strip() == "*"
         else [o.strip() for o in settings.cors_origins.split(",")]
     )
+    if "http://localhost:5173" not in origins and "*" not in origins:
+        origins.append("http://localhost:5173")
+    elif "*" in origins:
+        origins = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:8000"]
+        
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,

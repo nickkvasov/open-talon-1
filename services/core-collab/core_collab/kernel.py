@@ -348,6 +348,52 @@ class CollaborationKernel:
         logger.debug("Kernel delete_workspace complete workspace_id=%s", workspace_id)
         return {"deleted": True, "workspace_id": str(workspace_id)}
 
+    async def update_workspace(
+        self, workspace_id: UUID, payload: UpdateWorkspaceRequest
+    ) -> WorkspaceCommandResult:
+        logger.debug(
+            "Kernel update_workspace workspace_id=%s participant_id=%s",
+            workspace_id,
+            payload.actor.participant_id,
+        )
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+        updated = workspace.model_copy(
+            update={
+                "name": payload.name or workspace.name,
+                "description": (
+                    payload.description
+                    if payload.description is not None
+                    else workspace.description
+                ),
+                "updated_at": now,
+                "metadata": (
+                    {**workspace.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else workspace.metadata
+                ),
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_workspace(conn, updated)
+                event = await self._build_workspace_event(
+                    conn,
+                    workspace_id,
+                    "workspace.updated",
+                    actor=actor,
+                    target=TargetRef(type="workspace", id=workspace_id),
+                    payload=updated.model_dump(mode="json"),
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+
+        detail = await self.get_workspace_detail(workspace_id)
+        return WorkspaceCommandResult(workspace=updated, detail=detail, events=[event])
+
     async def get_workspace_detail(self, workspace_id: UUID) -> WorkspaceDetail:
         logger.debug("Kernel get_workspace_detail workspace_id=%s", workspace_id)
         workspace = await self._repository.fetch_workspace(workspace_id)
@@ -459,6 +505,18 @@ class CollaborationKernel:
                 await self._repository.upsert_system_agent(conn, agent)
         return AgentDefinitionCommandResult(agent=agent)
 
+    async def delete_system_agent(self, agent_id: UUID, payload: DeleteSystemAgentRequest) -> dict[str, bool | str]:
+        _ = payload
+        existing = await self._repository.fetch_system_agent(agent_id)
+        if existing is None:
+            raise KeyError(f"System agent {agent_id} not found")
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                deleted = await self._repository.delete_system_agent(conn, agent_id=agent_id)
+        if not deleted:
+            raise KeyError(f"System agent {agent_id} not found")
+        return {"deleted": True, "agent_id": str(agent_id)}
+
     async def list_system_agents(self) -> list[AgentDefinition]:
         return await self._repository.list_system_agents()
 
@@ -487,6 +545,18 @@ class CollaborationKernel:
             async with conn.transaction():
                 await self._repository.upsert_system_tool(conn, tool)
         return SystemToolCommandResult(tool=tool)
+
+    async def delete_system_tool(self, tool_id: UUID, payload: DeleteSystemToolRequest) -> dict[str, bool | str]:
+        _ = payload
+        existing = await self._repository.fetch_system_tool(tool_id)
+        if existing is None:
+            raise KeyError(f"System tool {tool_id} not found")
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                deleted = await self._repository.delete_system_tool(conn, tool_id=tool_id)
+        if not deleted:
+            raise KeyError(f"System tool {tool_id} not found")
+        return {"deleted": True, "tool_id": str(tool_id)}
 
     async def create_llm_provider(
         self, payload: CreateLlmProviderRequest
@@ -1251,6 +1321,55 @@ class CollaborationKernel:
                 )
                 await self._repository.record_event(conn, event)
         return RoleDefinitionCommandResult(role_definition=role_definition, events=[event])
+
+    async def delete_role_definition(
+        self,
+        workspace_id: UUID,
+        role_name: str,
+        payload: DeleteRoleDefinitionRequest,
+    ) -> dict[str, bool | str]:
+        logger.debug(
+            "Kernel delete_role_definition workspace_id=%s actor_id=%s name=%r",
+            workspace_id,
+            payload.actor.participant_id,
+            role_name,
+        )
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        await self._require_workspace_management_role(workspace_id, payload.actor)
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+
+        role_map = {
+            role.name: role.model_dump(mode="json")
+            for role in self._role_definitions_from_workspace(workspace)
+        }
+        if role_name not in role_map:
+            raise KeyError(f"Role {role_name} not found in workspace {workspace_id}")
+
+        removed_role_data = role_map.pop(role_name)
+        updated_workspace = workspace.model_copy(
+            update={
+                "updated_at": now,
+                "metadata": {**workspace.metadata, "role_definitions": role_map},
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_workspace(conn, updated_workspace)
+                event = await self._build_workspace_event(
+                    conn,
+                    workspace_id,
+                    "role_definition.deleted",
+                    actor=actor,
+                    target=TargetRef(type="workspace", id=workspace_id),
+                    payload=removed_role_data,
+                    visibility="workspace",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        return {"deleted": True, "workspace_id": str(workspace_id), "role_name": role_name}
 
     async def list_workspace_tools(self, workspace_id: UUID) -> list[WorkspaceTool]:
         logger.debug("Kernel list_workspace_tools workspace_id=%s", workspace_id)

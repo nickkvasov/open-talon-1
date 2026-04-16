@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "info"
-    # Comma-separated list of allowed CORS origins ("*" = all, dev default)
-    cors_origins: str = "*"
+    # Comma-separated list of allowed CORS origins
+    cors_origins: str = "http://localhost:5173,http://localhost:8000,http://127.0.0.1:5173,*"
 
     # ── Auth ─────────────────────────────────────────────────────────────────
     # none     = no auth (dev)
