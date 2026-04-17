@@ -1631,6 +1631,88 @@ async def test_create_or_update_named_role_definition_in_workspace(client, actor
     assert roles["reviewer"]["definition"] == "Reviews code, architecture, and rollout risk with a QA mindset."
 
 
+async def test_delete_named_role_definition_in_workspace(client, actor_payload):
+    workspace_resp = await client.post(
+        "/v1/workspaces",
+        json={"name": "Role Cleanup", "actor": actor_payload},
+    )
+    workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+
+    await client.put(
+        f"/v1/workspaces/{workspace_id}/roles/reviewer",
+        json={
+            "actor": actor_payload,
+            "name": "ignored",
+            "definition": "Reviews code and rollout safety.",
+        },
+    )
+
+    delete_resp = await client.request(
+        "DELETE",
+        f"/v1/workspaces/{workspace_id}/roles/reviewer",
+        json={"actor": actor_payload},
+    )
+
+    assert delete_resp.status_code == 200
+    assert delete_resp.json() == {
+        "deleted": True,
+        "workspace_id": workspace_id,
+        "role_name": "reviewer",
+    }
+
+    workspace_detail = await client.get(f"/v1/workspaces/{workspace_id}")
+    assert workspace_detail.status_code == 200
+    role_names = [role["name"] for role in workspace_detail.json()["role_definitions"]]
+    assert "reviewer" not in role_names
+
+
+async def test_update_workspace_requires_workspace_admin_or_supervisor_in_oidc_mode(
+    client,
+    actor_payload,
+    monkeypatch,
+):
+    owner_context = _oidc_context(roles=["workspace-user"])
+    member_context = _oidc_context(roles=["workspace-user"])
+    _patch_oidc_tokens(
+        monkeypatch,
+        {
+            "owner-token": owner_context,
+            "member-token": member_context,
+        },
+    )
+
+    workspace_resp = await client.post(
+        "/v1/workspaces",
+        headers={"Authorization": "Bearer owner-token"},
+        json={"name": "Guarded Workspace", "actor": actor_payload},
+    )
+    workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+
+    member_role_resp = await client.patch(
+        f"/v1/workspaces/{workspace_id}/participants/{member_context.user_id}/role",
+        headers={"Authorization": "Bearer member-token"},
+        json={
+            "actor": actor_payload,
+            "role": "reviewer",
+            "description": "Reviews but cannot administer the workspace.",
+        },
+    )
+    assert member_role_resp.status_code == 200
+
+    update_resp = await client.patch(
+        f"/v1/workspaces/{workspace_id}",
+        headers={"Authorization": "Bearer member-token"},
+        json={
+            "actor": actor_payload,
+            "name": "Renamed by Member",
+            "metadata": {"source": "portal"},
+        },
+    )
+
+    assert update_resp.status_code == 403
+    assert update_resp.json()["detail"] == "Workspace admin or supervisor role required"
+
+
 async def test_create_workspace_tool_exposes_it_in_workspace_detail(client, actor_payload):
     workspace_resp = await client.post(
         "/v1/workspaces",
@@ -2005,6 +2087,59 @@ async def test_update_agent_participant_changes_endpoint_prompt_and_role(client,
     assert body["definition"]["runtime"] == "responses-api"
     assert attach_update_resp.status_code == 200
     assert attach_update_resp.json()["status"] == "busy"
+
+
+async def test_delete_system_agent_removes_definition(client, actor_payload):
+    create_resp = await client.post(
+        "/v1/agents",
+        json={
+            "actor": actor_payload,
+            "display_name": "Disposable Agent",
+            "description": "Temporary definition for delete coverage.",
+            "role": "cleanup agent",
+            "capabilities": ["cleanup"],
+            "endpoint": {"kind": "local", "model": "qwen-coder"},
+            "system_prompt": "Clean up safely.",
+        },
+    )
+    assert create_resp.status_code == 200
+    agent_id = create_resp.json()["agent_id"]
+
+    delete_resp = await client.request(
+        "DELETE",
+        f"/v1/agents/{agent_id}",
+        json={"actor": actor_payload},
+    )
+
+    assert delete_resp.status_code == 200
+    assert delete_resp.json() == {"deleted": True, "agent_id": agent_id}
+    assert [agent["agent_id"] for agent in (await client.get("/v1/agents")).json()] == []
+
+
+async def test_delete_system_tool_removes_definition(client, actor_payload):
+    create_resp = await client.post(
+        "/v1/tools",
+        json={
+            "actor": actor_payload,
+            "name": "disposable_tool",
+            "description": "Temporary tool for delete coverage.",
+            "parameter_contract": {"strategy": "strict"},
+            "input_schema": {"type": "object"},
+            "execution": {"strategy": "local"},
+        },
+    )
+    assert create_resp.status_code == 200
+    tool_id = create_resp.json()["tool_id"]
+
+    delete_resp = await client.request(
+        "DELETE",
+        f"/v1/tools/{tool_id}",
+        json={"actor": actor_payload},
+    )
+
+    assert delete_resp.status_code == 200
+    assert delete_resp.json() == {"deleted": True, "tool_id": tool_id}
+    assert [tool["tool_id"] for tool in (await client.get("/v1/tools")).json()] == []
 
 
 async def test_create_system_agent_participant_uses_system_scope(client, actor_payload):

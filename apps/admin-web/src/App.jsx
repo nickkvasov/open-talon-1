@@ -43,7 +43,7 @@ const App = () => {
     <div className="flex h-screen overflow-hidden bg-slate-50 dark:bg-slate-900 transition-colors duration-200">
       <Sidebar />
       <div className="relative flex flex-col flex-1 overflow-y-auto overflow-x-hidden">
-        <Header user={auth.user} signOut={() => void auth.removeUser()} />
+        <Header user={auth.user} signOut={() => void auth.signoutRedirect()} />
         <main>
           <Routes>
             <Route path="/" element={<Navigate to="/dashboard" replace />} />

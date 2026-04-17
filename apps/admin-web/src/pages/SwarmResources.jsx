@@ -14,8 +14,7 @@ import {
 } from 'lucide-react';
 import { useApi } from '../api/useApi';
 import ConfirmationModal from '../components/Common/ConfirmationModal';
-
-const API_BASE = 'http://localhost:8000/v1';
+import { buildAdminActor } from '../config/adminActor';
 
 export default function SwarmResources() {
   const api = useApi();
@@ -131,7 +130,7 @@ export default function SwarmResources() {
         try {
           await api.delete(`/v1/agents/${agent_id}`, {
             data: {
-              actor: { participant_id: "00000000-0000-0000-0000-000000000001", participant_type: "user", display_name: "Admin" }
+              actor: buildAdminActor()
             }
           });
           fetchResources();
@@ -151,7 +150,7 @@ export default function SwarmResources() {
         try {
           await api.delete(`/v1/tools/${tool_id}`, {
             data: {
-              actor: { participant_id: "00000000-0000-0000-0000-000000000001", participant_type: "user", display_name: "Admin" }
+              actor: buildAdminActor()
             }
           });
           fetchResources();
@@ -165,7 +164,7 @@ export default function SwarmResources() {
   const handleSaveAgent = async () => {
     try {
       const payload = {
-        actor: { participant_id: "00000000-0000-0000-0000-000000000001", participant_type: "user", display_name: "Admin" },
+        actor: buildAdminActor(),
         display_name: agentData.display_name,
         description: agentData.description,
         role: agentData.role,
@@ -196,7 +195,7 @@ export default function SwarmResources() {
   const handleSaveTool = async () => {
     try {
       const payload = {
-        actor: { participant_id: "00000000-0000-0000-0000-000000000001", participant_type: "user", display_name: "Admin" },
+        actor: buildAdminActor(),
         name: toolData.name,
         description: toolData.description,
         parameter_contract: { strategy: toolData.param_strategy },

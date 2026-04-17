@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { 
+import {
   Plus, 
   Server, 
   Database, 
@@ -13,10 +13,11 @@ import {
   Settings2
 } from 'lucide-react';
 import ConfirmationModal from '../components/Common/ConfirmationModal';
-
-const API_BASE = 'http://localhost:8000/v1';
+import { useApi } from '../api/useApi';
+import { buildAdminActor } from '../config/adminActor';
 
 export default function Providers() {
+  const api = useApi();
   const [llmProviders, setLlmProviders] = useState([]);
   const [memoryProviders, setMemoryProviders] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -65,28 +66,23 @@ export default function Providers() {
     try {
       setLoading(true);
       const [llmRes, memRes] = await Promise.all([
-        fetch(`${API_BASE}/llm-providers`),
-        fetch(`${API_BASE}/memory-providers`)
+        api.get('/v1/llm-providers'),
+        api.get('/v1/memory-providers')
       ]);
-      
-      if (!llmRes.ok || !memRes.ok) throw new Error('Failed to fetch providers');
-      
-      const llmEntries = await llmRes.json();
-      const memEntries = await memRes.json();
-      
-      setLlmProviders(llmEntries);
-      setMemoryProviders(memEntries);
+
+      setLlmProviders(llmRes.data);
+      setMemoryProviders(memRes.data);
       setError(null);
     } catch (err) {
-      setError(err.message);
+      setError(err.message || 'Failed to fetch providers');
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchData();
-  }, []);
+    void fetchData();
+  }, [api]);
 
   const resetForms = () => {
     setLlmFormData({
@@ -170,24 +166,13 @@ export default function Providers() {
       onConfirm: async () => {
         try {
           const endpoint = activeTab === 'llm' ? `llm-providers/${id}` : `memory-providers/${id}`;
-          const res = await fetch(`${API_BASE}/${endpoint}`, {
-            method: 'DELETE',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              actor: {
-                participant_id: '00000000-0000-0000-0000-000000000001',
-                participant_type: 'user',
-                display_name: 'Admin'
-              }
-            })
+          await api.delete(`/v1/${endpoint}`, {
+            data: {
+              actor: buildAdminActor()
+            }
           });
-          
-          if (!res.ok) {
-            const errData = await res.json();
-            throw new Error(errData.detail || 'Failed to delete provider');
-          }
-          
-          fetchData();
+
+          await fetchData();
         } catch (err) {
           alert('Failed to delete provider: ' + err.message);
         }
@@ -198,19 +183,13 @@ export default function Providers() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
-      const actor = {
-        participant_id: '00000000-0000-0000-0000-000000000001',
-        participant_type: 'user',
-        display_name: 'Admin'
-      };
-
       let payload;
       let endpoint;
       let method;
 
       if (activeTab === 'llm') {
         payload = {
-          actor,
+          actor: buildAdminActor(),
           engine_id: llmFormData.engine_id,
           display_name: llmFormData.display_name,
           description: llmFormData.description,
@@ -229,7 +208,7 @@ export default function Providers() {
         method = modalMode === 'edit' ? 'PATCH' : 'POST';
       } else {
         payload = {
-          actor,
+          actor: buildAdminActor(),
           provider_key: memoryFormData.provider_key,
           display_name: memoryFormData.display_name,
           description: memoryFormData.description,
@@ -243,19 +222,14 @@ export default function Providers() {
         method = modalMode === 'edit' ? 'PATCH' : 'POST';
       }
 
-      const res = await fetch(`${API_BASE}/${endpoint}`, {
+      await api.request({
+        url: `/v1/${endpoint}`,
         method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        data: payload,
       });
 
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.detail || 'Action failed');
-      }
-
       setIsModalOpen(false);
-      fetchData();
+      await fetchData();
     } catch (err) {
       alert(err.message);
     }
@@ -264,10 +238,8 @@ export default function Providers() {
   const handleHealthCheck = async (id) => {
     try {
       const endpoint = activeTab === 'llm' ? `llm-providers/${id}/health-check` : `memory-providers/${id}/health-check`;
-      const res = await fetch(`${API_BASE}/${endpoint}`, { method: 'POST' });
-      const report = await res.json();
-      
-      const statusColor = report.status === 'healthy' ? 'text-emerald-500' : report.status === 'degraded' ? 'text-amber-500' : 'text-rose-500';
+      const { data: report } = await api.post(`/v1/${endpoint}`);
+
       alert(`Provider Status: ${report.status}\n\n${report.checks.map(c => `- ${c.name}: ${c.status} (${c.detail})`).join('\n')}`);
     } catch (err) {
       alert('Health check failed: ' + err.message);

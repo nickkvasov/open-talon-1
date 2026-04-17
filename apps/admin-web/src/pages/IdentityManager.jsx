@@ -1,5 +1,6 @@
 import React from 'react';
 import { Users, Info } from 'lucide-react';
+import { runtimeConfig } from '../config/runtime';
 
 export default function IdentityManager() {
   return (
@@ -18,7 +19,7 @@ export default function IdentityManager() {
           To create users, reset passwords, or assign global <code>admin</code> or <code>supervisor</code> roles, please use the Keycloak Administration console.
         </p>
         <a 
-          href="http://localhost:8081" 
+          href={runtimeConfig.keycloakBaseUrl}
           target="_blank" 
           rel="noopener noreferrer"
           className="bg-blue-500 hover:bg-sky-600 text-white font-medium py-2 px-6 rounded transition-colors inline-flex items-center"

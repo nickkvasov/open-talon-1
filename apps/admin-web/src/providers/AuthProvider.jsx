@@ -1,13 +1,14 @@
 import React from 'react';
 import { AuthProvider as OidcProvider } from 'react-oidc-context';
+import { runtimeConfig } from '../config/runtime';
 
 const oidcConfig = {
-  authority: 'http://localhost:8081/realms/open-talon',
-  client_id: 'open-talon-admin-web', 
-  redirect_uri: window.location.origin,
+  authority: runtimeConfig.keycloakAuthority,
+  client_id: runtimeConfig.oidcClientId,
+  redirect_uri: runtimeConfig.appBaseUrl,
   response_type: 'code',
   scope: 'openid profile email roles',
-  post_logout_redirect_uri: window.location.origin,
+  post_logout_redirect_uri: runtimeConfig.appBaseUrl,
   onSigninCallback: (_user) => {
     window.history.replaceState(
       {},

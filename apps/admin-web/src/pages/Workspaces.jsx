@@ -14,8 +14,7 @@ import {
 } from 'lucide-react';
 import { useApi } from '../api/useApi';
 import ConfirmationModal from '../components/Common/ConfirmationModal';
-
-const API_BASE = 'http://localhost:8000/v1';
+import { buildAdminActor } from '../config/adminActor';
 
 export default function Workspaces() {
   const api = useApi();
@@ -101,7 +100,7 @@ export default function Workspaces() {
         try {
           await api.delete(`/v1/workspaces/${workspace_id}`, {
             data: {
-              actor: { participant_id: "00000000-0000-0000-0000-000000000001", participant_type: "user", display_name: "Admin" }
+              actor: buildAdminActor()
             }
           });
           fetchWorkspaces();
@@ -116,7 +115,7 @@ export default function Workspaces() {
     e.preventDefault();
     try {
       const payload = {
-        actor: { participant_id: "00000000-0000-0000-0000-000000000001", participant_type: "user", display_name: "Admin" },
+        actor: buildAdminActor(),
         name: workspaceFormData.name,
         description: workspaceFormData.description,
         metadata: JSON.parse(workspaceFormData.metadata || '{}')
@@ -138,7 +137,7 @@ export default function Workspaces() {
   const handleSaveRole = async (workspaceId, roleName) => {
     try {
       await api.put(`/v1/workspaces/${workspaceId}/roles/${roleName}`, {
-        actor: { participant_id: "00000000-0000-0000-0000-000000000001", participant_type: "user", display_name: "Admin" },
+        actor: buildAdminActor(),
         name: roleName,
         definition: editingRoleDef
       });
@@ -166,7 +165,7 @@ export default function Workspaces() {
         try {
           await api.delete(`/v1/workspaces/${workspaceId}/roles/${roleName}`, {
             data: {
-              actor: { participant_id: "00000000-0000-0000-0000-000000000001", participant_type: "user", display_name: "Admin" }
+              actor: buildAdminActor()
             }
           });
           const updatedWs = await api.get(`/v1/workspaces/${workspaceId}`);

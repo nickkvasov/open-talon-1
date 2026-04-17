@@ -100,8 +100,16 @@ def _extract_roles(claims: dict[str, Any]) -> list[str]:
     return roles
 
 
+def _expected_client_ids() -> set[str]:
+    client_ids = {
+        settings.oidc_client_id_tui,
+        settings.oidc_client_id_web,
+    }
+    return {value for value in client_ids if value}
+
+
 def _expected_audiences() -> set[str]:
-    audiences = {settings.oidc_client_id_tui}
+    audiences = set(_expected_client_ids())
     if settings.oidc_audience:
         audiences.add(settings.oidc_audience)
     return {value for value in audiences if value}

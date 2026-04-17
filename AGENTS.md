@@ -12,6 +12,7 @@ Main components:
 - `services/core-collab`: canonical collaboration domain logic and Postgres repository layer
 - `services/agent-runtime`: stateless workers for task dispatch, agent-loop execution, tool execution, and lease reconciliation
 - `packages/contracts`: shared Pydantic contracts used across services
+- `apps/admin-web`: browser-based admin console for runtime overview, providers, swarm resources, workspaces, and API keys
 - `apps/tui`: terminal UI client for workspace/thread collaboration
   - `open_talon_tui.tui2` is the preferred human terminal client when copy/select/link behavior matters
 - `infrastructure`: local Docker-based backing services
@@ -84,6 +85,7 @@ source .venv/bin/activate
   - base URL: `http://127.0.0.1:8081`
   - realm: `open-talon`
   - TUI client: `open-talon-tui`
+  - browser client: `open-talon-web`
 - Default local OpenBao:
   - base URL: `http://127.0.0.1:8200`
   - root token: `root`
@@ -97,6 +99,7 @@ Useful local endpoints and credentials:
 
 - Gateway: `http://127.0.0.1:8000`
 - Gateway docs: `http://127.0.0.1:8000/docs`
+- Admin web dev server: `http://localhost:5173`
 - Audit API base: `http://127.0.0.1:8000/v1/audit`
 - Kafka: `localhost:9092`
 - Valkey: `localhost:6379`
@@ -167,6 +170,13 @@ If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 - run `tests/tui`
 - verify docs and env defaults stay aligned with the actual login flow
 
+If a change touches the admin web, browser OIDC login, admin-browser routing, or deployed browser config:
+
+- inspect `apps/admin-web`, `services/gateway-edge`, and Keycloak defaults together
+- keep `apps/admin-web/public/runtime-config.json`, `apps/admin-web/README.md`, `README.md`, and `docs/system-quickstart.md` aligned
+- run `npm run build` in `apps/admin-web`
+- run `npm run test:e2e` in `apps/admin-web` when browser behavior or destructive admin flows change
+
 If a change touches workspace authz, global admin routes, or workspace membership filtering:
 
 - run relevant `tests/gateway-edge/test_workspaces.py`
@@ -193,6 +203,8 @@ If a change touches execution lease recovery, budget enforcement, or runtime ove
 
 - Preserve the normalized participant model.
 - Avoid hidden schema changes in app startup code.
+- Keep the admin web deployable from a subpath; do not reintroduce root-only router, asset, or OIDC redirect assumptions.
+- Keep browser runtime config runtime-loadable; do not move admin-web environment selection back to build-time-only config.
 - Keep gateway routers thin; prefer logic in services/kernel/repository layers.
 - Keep audit capture in dedicated middleware/services instead of scattering ad hoc audit inserts through routers.
 - Keep execution orchestration in Open Talon code and isolate only the backend executor behind the execution interface.
@@ -237,7 +249,12 @@ If a change touches execution lease recovery, budget enforcement, or runtime ove
 ## Key Files
 
 - `README.md`
+- `apps/admin-web/README.md`
+- `apps/admin-web/public/runtime-config.json`
+- `apps/admin-web/src/config/runtime.js`
+- `apps/admin-web/src/providers/AuthProvider.jsx`
 - `docs/db-migrations.md`
+- `docs/system-quickstart.md`
 - `services/core-collab/core_collab/migrations.py`
 - `services/core-collab/core_collab/repository.py`
 - `services/core-collab/core_collab/kernel.py`

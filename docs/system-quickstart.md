@@ -106,7 +106,41 @@ That keeps Postgres as the canonical memory store and adds the optional local `m
 - Memgraph bolt: `localhost:7688` when started with `./open-talon start --memgraph`
 - Memgraph HTTP: [http://127.0.0.1:7444](http://127.0.0.1:7444) when started with `./open-talon start --memgraph`
 
-## 4. Default Local Credentials
+## 4. Start The Admin Web
+
+The browser admin app is optional, but it is the easiest way to exercise the OIDC browser flow and the admin-only management surfaces.
+
+From the repo root:
+
+```bash
+cd apps/admin-web
+npm install
+npm run dev
+```
+
+Open [http://localhost:5173](http://localhost:5173) and sign in with a seeded realm user that has the Keycloak `admin` role such as:
+
+- `admin` / `admin123`
+- `admin2` / `admin223`
+
+Local browser defaults:
+
+- SPA URL: `http://localhost:5173`
+- gateway API: `http://127.0.0.1:8000`
+- Keycloak base URL: `http://127.0.0.1:8081`
+- realm: `open-talon`
+- browser OIDC client: `open-talon-web`
+
+The app also includes Playwright coverage:
+
+```bash
+npm run test:e2e:install
+npm run test:e2e
+```
+
+See [apps/admin-web/README.md](/Users/nikolay.kvasov/Development/open-talon-1/apps/admin-web/README.md) for the full browser test matrix.
+
+## 5. Default Local Credentials
 
 - Postgres: `admin` / `password`
 - pgAdmin: `admin@local.dev` / `admin`
@@ -146,13 +180,13 @@ Relevant runtime-guardrail defaults from [`infrastructure/.env.example`](/Users/
 
 `0` disables the cap. Workspace-specific overrides can be set in workspace metadata using either `limits.daily_token_cap` or top-level `daily_token_cap`.
 
-## 5. Keycloak Local Auth Model
+## 6. Keycloak Local Auth Model
 
 - The imported `open-talon` realm is configured for local HTTP development with `sslRequired=none`.
 - The local startup flow also runs a `keycloak-init` step that sets `sslRequired=none` for both `master` and `open-talon`.
 - Keycloak is the primary end-user auth system for local Open Talon development.
 - The TUI uses the `open-talon-tui` public client and authenticates with OIDC device flow.
-- Future browser apps are expected to use the `open-talon-web` public client with authorization code + PKCE.
+- The admin web uses the `open-talon-web` public client with authorization code + PKCE.
 - Human identity is global in `users` and `auth_identities`.
 - Workspace-local membership and roles are stored in `participants`.
 
@@ -164,7 +198,7 @@ Current local hardening defaults:
 - workspace `admin` or `supervisor` is required for workspace role-definition changes, workspace tool management, workspace Git repository creation, and workspace asset publishing
 - risky tools must be created as `trust_level="trusted"` if they use `workspace_access=read_write`, `network=full`, or `local_process`
 
-## 6. First Keycloak Sign-In
+## 7. First Keycloak Sign-In
 
 If you want to inspect the realm in the Keycloak UI before using the TUI:
 
@@ -187,7 +221,7 @@ Important distinction:
 - `admin` / `admin123` is the default Open Talon realm user in `open-talon`
 - the Open Talon realm user `admin` has the `admin` realm role
 
-## 7. Use The TUI With A Profile
+## 8. Use The TUI With A Profile
 
 For the most reliable terminal experience, start `tui2` with a named local profile:
 
@@ -293,7 +327,7 @@ That lets multiple humans use the same machine without sharing identity. Each pr
 
 Recent live verification in local dev confirmed the end-to-end `tui2` flow for the realm user `admin`: profile bootstrap, `/account whoami`, `/thread create`, and a real message send all completed successfully against the running stack.
 
-## 8. Quick Verification
+## 9. Quick Verification
 
 Fast endpoint checks:
 
@@ -335,7 +369,30 @@ If you changed schema, auth, routing, or participant identity behavior, run:
 pytest -q
 ```
 
-## 9. Audit Logging Quick Checks
+## 10. Admin Web Deployment Notes
+
+The built admin SPA can now be promoted across environments without rebuilding if you replace [`apps/admin-web/public/runtime-config.json`](/Users/nikolay.kvasov/Development/open-talon-1/apps/admin-web/public/runtime-config.json) in the deployed artifact.
+
+Example deployed config:
+
+```json
+{
+  "gatewayUrl": "https://api.example.com",
+  "keycloakBaseUrl": "https://sso.example.com",
+  "keycloakRealm": "open-talon",
+  "oidcClientId": "open-talon-web",
+  "appBasePath": "/admin"
+}
+```
+
+Important deployment rules:
+
+- `appBasePath` must match the subpath where the SPA is mounted
+- the reverse proxy or static host still needs normal SPA fallback behavior for deep links such as `/admin/workspaces`
+- the built bundle uses relative asset paths, so it can be served from `/` or a subpath
+- the Keycloak client redirect URIs and post-logout redirect URIs must include the deployed browser URL
+
+## 11. Audit Logging Quick Checks
 
 Audit is available as soon as the stack is up.
 
@@ -385,7 +442,7 @@ Note:
 - the current local code writes directly to ClickHouse for the warehouse path
 - HyperDX is available through the optional `hyperdx` compose profile, but the Open Talon API remains the authoritative audit interface
 
-## 10. Layered Memory Quick Notes
+## 12. Layered Memory Quick Notes
 
 Open Talon uses layered memory with three scopes:
 
@@ -426,7 +483,7 @@ If you run Docker Compose directly instead of `./open-talon start`, enable the o
 docker compose -f infrastructure/docker-compose.yaml --profile mem0-graph up -d
 ```
 
-## 11. Seeded OpenAI Agent Smoke Test
+## 13. Seeded OpenAI Agent Smoke Test
 
 The local migrations seed:
 
@@ -533,7 +590,7 @@ Known current limitation:
 
 - the seeded OpenAI path still posts raw OpenAI response JSON into the final thread message body; execution works, but response formatting is still rough
 
-## 12. Common Keycloak Recovery Commands
+## 14. Common Keycloak Recovery Commands
 
 If the local Keycloak UI says HTTPS is required or the realm state looks stale:
 
@@ -556,7 +613,7 @@ Expected healthy signal from the helper logs:
 
 - `Keycloak local dev realms updated.`
 
-## 11. Stop Everything
+## 15. Stop Everything
 
 ```bash
 ./open-talon stop

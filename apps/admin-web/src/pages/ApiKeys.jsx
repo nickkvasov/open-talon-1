@@ -21,6 +21,8 @@ export default function ApiKeys() {
     onConfirm: () => {} 
   });
 
+  const getKeyLabel = (key) => key.label || key.name || '';
+
   const fetchKeys = async () => {
     try {
       const res = await api.get('/v1/admin/api-keys');
@@ -121,8 +123,11 @@ export default function ApiKeys() {
           <h2 className="text-lg font-bold dark:text-white mb-4">Generate New Key</h2>
           <form onSubmit={handleCreate} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Key Name</label>
+              <label htmlFor="api-key-name" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+                Key Name
+              </label>
               <input 
+                id="api-key-name"
                 type="text" 
                 required
                 value={newName}
@@ -132,8 +137,11 @@ export default function ApiKeys() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Expiration (Days)</label>
+              <label htmlFor="api-key-expiration-days" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+                Expiration (Days)
+              </label>
               <input 
+                id="api-key-expiration-days"
                 type="number" 
                 min="1" max="365"
                 value={newDays}
@@ -174,7 +182,9 @@ export default function ApiKeys() {
                 <td className="px-6 py-4 font-medium dark:text-slate-200 w-1/3">
                   <div className="flex items-center gap-2">
                     <KeySquare className="w-4 h-4 text-slate-400 shrink-0" />
-                    <span className="truncate block" title={k.name}>{k.name}</span>
+                    <span className="truncate block" title={getKeyLabel(k)}>
+                      {getKeyLabel(k)}
+                    </span>
                   </div>
                 </td>
                 <td className="px-6 py-4 font-mono text-xs text-slate-500">{k.prefix}...</td>

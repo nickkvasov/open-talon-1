@@ -131,6 +131,29 @@ async def test_any_mode_rejects_no_credentials(client, monkeypatch):
     assert resp.status_code == 401
 
 
+async def test_options_preflight_skips_auth(client, monkeypatch):
+    monkeypatch.setattr(settings, "auth_mode", "oidc")
+    resp = await client.options(
+        "/v1/admin/runtime/overview",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization",
+        },
+    )
+    assert resp.status_code in (200, 204)
+
+
+async def test_unauthorized_response_keeps_cors_headers(client, monkeypatch):
+    monkeypatch.setattr(settings, "auth_mode", "oidc")
+    resp = await client.get(
+        "/v1/admin/runtime/overview",
+        headers={"Origin": "http://127.0.0.1:5173"},
+    )
+    assert resp.status_code == 401
+    assert resp.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+
+
 # ── Skip paths are always public ──────────────────────────────────────────────
 
 async def test_health_endpoint_skips_auth(client, monkeypatch):

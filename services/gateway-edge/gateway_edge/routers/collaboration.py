@@ -424,9 +424,11 @@ async def update_workspace(
     workspace_id: UUID,
     payload: UpdateWorkspaceRequest,
 ) -> WorkspaceDetail:
+    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
     payload = payload.model_copy(
         update={
-            "actor": await _resolve_workspace_actor(
+            "actor": actor
+            or await _resolve_workspace_actor(
                 request,
                 payload.actor,
                 workspace_id=workspace_id,

@@ -1,15 +1,14 @@
 import axios from 'axios';
 import { useAuth } from 'react-oidc-context';
 import { useMemo } from 'react';
-
-const GATEWAY_URL = 'http://localhost:8000';
+import { runtimeConfig } from '../config/runtime';
 
 export function useApi() {
   const auth = useAuth();
 
   const api = useMemo(() => {
     const instance = axios.create({
-      baseURL: GATEWAY_URL,
+      baseURL: runtimeConfig.gatewayUrl,
     });
 
     instance.interceptors.request.use((config) => {

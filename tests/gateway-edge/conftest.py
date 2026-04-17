@@ -216,6 +216,29 @@ class MockCollaborationService:
         self.workspace_sequences.pop(str(workspace_id), None)
         return {"deleted": True, "workspace_id": str(workspace_id)}
 
+    async def update_workspace(self, workspace_id: UUID, payload):
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        updated = workspace.model_copy(
+            update={
+                "name": payload.name or workspace.name,
+                "description": (
+                    payload.description
+                    if payload.description is not None
+                    else workspace.description
+                ),
+                "updated_at": datetime.now(timezone.utc),
+                "metadata": (
+                    {**workspace.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else workspace.metadata
+                ),
+            }
+        )
+        self.workspaces[str(workspace_id)] = updated
+        return await self.get_workspace(workspace_id)
+
     async def get_workspace(self, workspace_id: UUID):
         from gateway_edge.models import WorkspaceDetail
 
@@ -285,6 +308,12 @@ class MockCollaborationService:
         )
         self.system_agents[str(agent.agent_id)] = agent
         return agent
+
+    async def delete_system_agent(self, agent_id: UUID, payload):
+        if str(agent_id) not in self.system_agents:
+            raise KeyError(f"System agent {agent_id} not found")
+        self.system_agents.pop(str(agent_id), None)
+        return {"deleted": True, "agent_id": str(agent_id)}
 
     async def list_system_agents(self):
         return list(self.system_agents.values())
@@ -363,6 +392,12 @@ class MockCollaborationService:
         )
         self.system_tools[str(tool.tool_id)] = tool
         return tool
+
+    async def delete_system_tool(self, tool_id: UUID, payload):
+        if str(tool_id) not in self.system_tools:
+            raise KeyError(f"System tool {tool_id} not found")
+        self.system_tools.pop(str(tool_id), None)
+        return {"deleted": True, "tool_id": str(tool_id)}
 
     async def list_system_tools(self):
         return list(self.system_tools.values())
@@ -760,6 +795,15 @@ class MockCollaborationService:
         self.role_definitions.setdefault(str(workspace_id), {})[payload.name] = role_definition
         return role_definition
 
+    async def delete_role_definition(self, workspace_id: UUID, role_name: str, payload):
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        removed = self.role_definitions.get(str(workspace_id), {}).pop(role_name, None)
+        if removed is None:
+            raise KeyError(f"Role {role_name} not found in workspace {workspace_id}")
+        return {"deleted": True, "workspace_id": str(workspace_id), "role_name": role_name}
+
     async def list_workspace_tools(self, workspace_id: UUID):
         workspace = self.workspaces.get(str(workspace_id))
         if workspace is None:
@@ -851,6 +895,7 @@ class MockCollaborationService:
             participant_id=participant_id,
             workspace_id=workspace_id,
             participant_type=payload.actor.participant_type,
+            user_id=payload.actor.user_id,
             display_name=payload.actor.display_name,
             description=description,
             roles=[payload.role],

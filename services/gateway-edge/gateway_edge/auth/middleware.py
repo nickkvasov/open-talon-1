@@ -39,6 +39,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         request.state.auth_context = None
+        # Browser clients need unauthenticated CORS preflight requests to succeed.
+        if request.method == "OPTIONS":
+            return await call_next(request)
         # Always allow skipped paths
         if request.url.path in self._skip_paths:
             return await call_next(request)

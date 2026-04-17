@@ -5,10 +5,11 @@ import App from './App.jsx'
 import './index.css'
 import { AuthProvider } from './providers/AuthProvider.jsx'
 import { ThemeProvider } from './providers/ThemeProvider.jsx'
+import { runtimeConfig } from './config/runtime.js'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <BrowserRouter>
+    <BrowserRouter basename={runtimeConfig.appBasePath}>
       <ThemeProvider>
         <AuthProvider>
           <App />

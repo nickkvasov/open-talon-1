@@ -11,6 +11,7 @@ Open Talon is a local-first collaboration system where users and agents are firs
 At a high level:
 
 - `services/gateway-edge` is the main entrypoint for clients and developer tools
+- `apps/admin-web` provides the browser-based admin console for runtime overview, provider management, workspace policy edits, swarm resource management, and API key operations
 - `apps/tui` provides a terminal UI that talks to the gateway
   - `tui2` is the recommended scrollback-first terminal client for reliable mouse copy/select and terminal-native link handling
 - `services/core-collab` manages shared collaboration concepts like workspaces, threads, participants, presence, and timelines across both humans and agents
@@ -45,6 +46,43 @@ Important implications:
 - global system-definition, global publish, and provider-management routes are admin-only for OIDC users; API-key and other system-admin operator flows keep their existing semantics
 - OpenBao remains part of the local stack for secrets and other internal uses, not as the primary end-user login system
 - the local Keycloak dev setup is intended to allow HTTP during development; `keycloak-init` normalizes `sslRequired=none` for both `master` and `open-talon`, and you can re-apply that with `docker compose up -d keycloak keycloak-init`
+- browser-based admin flows use the `open-talon-web` public Keycloak client with authorization code + PKCE; terminal flows use `open-talon-tui` with device flow
+
+## Admin Web
+
+The admin web app lives in [apps/admin-web](/Users/nikolay.kvasov/Development/open-talon-1/apps/admin-web) and is the main browser surface for:
+
+- runtime overview and operator visibility
+- global LLM and memory provider management
+- system agent and system tool management
+- workspace create, update, role override, and delete flows
+- admin API key management
+
+Local usage:
+
+```bash
+cd apps/admin-web
+npm install
+npm run dev
+```
+
+With the local stack running, the default browser entrypoint is [http://localhost:5173](http://localhost:5173).
+
+The app expects:
+
+- gateway API at `http://127.0.0.1:8000`
+- Keycloak at `http://127.0.0.1:8081`
+- Keycloak realm `open-talon`
+- OIDC client `open-talon-web`
+
+Deployment notes:
+
+- the built SPA now reads browser runtime config from `apps/admin-web/public/runtime-config.json`
+- that runtime file is meant to be replaced per environment so the same built artifact can move across dev, staging, and prod without rebuilding
+- `appBasePath` in that file must match the deployed SPA mount point such as `/` or `/admin`
+- the Vite bundle now emits relative asset paths so the app can be served from a subpath
+
+See [apps/admin-web/README.md](/Users/nikolay.kvasov/Development/open-talon-1/apps/admin-web/README.md) for the full browser test and deployment guide.
 
 ## Operational Guardrails
 
@@ -348,6 +386,7 @@ Common local endpoints:
 - `gateway-edge audit list`: [http://127.0.0.1:8000/v1/audit/events](http://127.0.0.1:8000/v1/audit/events)
 - `gateway-edge audit export`: [http://127.0.0.1:8000/v1/audit/events/export](http://127.0.0.1:8000/v1/audit/events/export)
 - `gateway-edge runtime overview` (admin only): [http://127.0.0.1:8000/v1/admin/runtime/overview](http://127.0.0.1:8000/v1/admin/runtime/overview)
+- `admin-web` dev server: [http://localhost:5173](http://localhost:5173)
 - `langfuse-web`: [http://localhost:3000](http://localhost:3000)
 - `hyperdx` when started with `--profile hyperdx`: [http://127.0.0.1:8080](http://127.0.0.1:8080)
 - `pgadmin`: [http://localhost:5050](http://localhost:5050)
@@ -458,6 +497,7 @@ That root environment installs:
 - the collaboration kernel from `services/core-collab`
 - the agent runtime helpers from `services/agent-runtime`
 - the gateway edge service from `services/gateway-edge`
+- the browser admin app source lives separately in `apps/admin-web` and uses its own npm dependencies and build tooling
 - the TUI app from `apps/tui`
 - repo-level test dependencies for gateway and infrastructure suites
 

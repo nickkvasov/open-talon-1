@@ -359,6 +359,7 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
+        await self._require_workspace_management_role(workspace_id, payload.actor)
         now = self._now()
         actor = self._actor_from_input(payload.actor)
         updated = workspace.model_copy(
