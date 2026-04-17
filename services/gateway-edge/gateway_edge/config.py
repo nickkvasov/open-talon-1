@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "info"
-    # Comma-separated list of allowed CORS origins ("*" = all, dev default)
-    cors_origins: str = "*"
+    # Comma-separated list of allowed CORS origins ("*" = all)
+    cors_origins: str = "http://localhost:5173,http://localhost:8000,http://127.0.0.1:5173"
 
     # ── Auth ─────────────────────────────────────────────────────────────────
     # none     = no auth (dev)
@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     oidc_issuer_url: str = "http://127.0.0.1:8081/realms/open-talon"
     oidc_audience: str = "open-talon-tui"
     oidc_client_id_tui: str = "open-talon-tui"
+    oidc_client_id_web: str = "open-talon-web"
     oidc_cache_ttl_seconds: int = 300
     oidc_admin_role: str = "admin"
 

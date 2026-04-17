@@ -62,12 +62,22 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
     )
 
+    # ── Auth ─────────────────────────────────────────────────────────────────
+    app.add_middleware(AuthMiddleware)
+    app.add_middleware(AuditMiddleware)
+
     # ── CORS ─────────────────────────────────────────────────────────────────
-    origins = (
-        ["*"]
-        if settings.cors_origins.strip() == "*"
-        else [o.strip() for o in settings.cors_origins.split(",")]
-    )
+    # Add CORS last so it wraps auth/audit responses too, including 401/403s.
+    if settings.cors_origins.strip() == "*":
+        origins = ["*"]
+    else:
+        configured_origins = [
+            origin.strip()
+            for origin in settings.cors_origins.split(",")
+            if origin.strip() and origin.strip() != "*"
+        ]
+        origins = list(dict.fromkeys(configured_origins))
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
@@ -75,10 +85,6 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    # ── Auth ─────────────────────────────────────────────────────────────────
-    app.add_middleware(AuthMiddleware)
-    app.add_middleware(AuditMiddleware)
 
     # ── Routers ───────────────────────────────────────────────────────────────
     app.include_router(health.router)

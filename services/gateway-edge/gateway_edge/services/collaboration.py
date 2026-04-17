@@ -43,6 +43,9 @@ from gateway_edge.models import (
     DeleteLlmProviderRequest,
     DeleteMemoryProviderRequest,
     DeleteParticipantRequest,
+    DeleteRoleDefinitionRequest,
+    DeleteSystemAgentRequest,
+    DeleteSystemToolRequest,
     DeleteWorkspaceToolRequest,
     DeleteWorkspaceRequest,
     EventEnvelope,
@@ -61,6 +64,7 @@ from gateway_edge.models import (
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    UpdateWorkspaceRequest,
     UpdateSystemAgentRequest,
     UpsertRoleDefinitionRequest,
     UpdateSystemToolRequest,
@@ -170,6 +174,21 @@ class CollaborationService:
         )
         return await self._require_kernel().delete_workspace(workspace_id, payload)
 
+    async def update_workspace(
+        self,
+        workspace_id: UUID,
+        payload: UpdateWorkspaceRequest,
+    ) -> WorkspaceDetail:
+        logger.debug(
+            "Service update_workspace workspace_id=%s participant_id=%s",
+            workspace_id,
+            payload.actor.participant_id,
+        )
+        result = await self._require_kernel().update_workspace(workspace_id, payload)
+        await self._publish_events(result.events)
+        assert result.detail is not None
+        return result.detail
+
     async def get_workspace(self, workspace_id: UUID) -> WorkspaceDetail:
         logger.debug("Service get_workspace workspace_id=%s", workspace_id)
         return await self._require_kernel().get_workspace_detail(workspace_id)
@@ -255,6 +274,13 @@ class CollaborationService:
         assert result.tool is not None
         return result.tool
 
+    async def delete_system_tool(
+        self,
+        tool_id: UUID,
+        payload: DeleteSystemToolRequest,
+    ) -> dict[str, bool | str]:
+        return await self._require_kernel().delete_system_tool(tool_id, payload)
+
     async def update_llm_provider(
         self, provider_id: UUID, payload: UpdateLlmProviderRequest
     ) -> LlmProviderDefinition:
@@ -275,6 +301,13 @@ class CollaborationService:
         result = await self._require_kernel().update_system_agent(agent_id, payload)
         assert result.agent is not None
         return result.agent
+
+    async def delete_system_agent(
+        self,
+        agent_id: UUID,
+        payload: DeleteSystemAgentRequest,
+    ) -> dict[str, bool | str]:
+        return await self._require_kernel().delete_system_agent(agent_id, payload)
 
     async def create_git_repository(
         self,
@@ -466,6 +499,24 @@ class CollaborationService:
         await self._publish_events(result.events)
         assert result.role_definition is not None
         return result.role_definition
+
+    async def delete_role_definition(
+        self,
+        workspace_id: UUID,
+        role_name: str,
+        payload: DeleteRoleDefinitionRequest,
+    ) -> dict[str, bool | str]:
+        logger.debug(
+            "Service delete_role_definition workspace_id=%s actor_id=%s role_name=%r",
+            workspace_id,
+            payload.actor.participant_id,
+            role_name,
+        )
+        return await self._require_kernel().delete_role_definition(
+            workspace_id,
+            role_name,
+            payload,
+        )
 
     async def list_workspace_tools(self, workspace_id: UUID) -> list[WorkspaceTool]:
         logger.debug("Service list_workspace_tools workspace_id=%s", workspace_id)

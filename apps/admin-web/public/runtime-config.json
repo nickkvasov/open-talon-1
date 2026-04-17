@@ -1,0 +1,7 @@
+{
+  "gatewayUrl": "http://127.0.0.1:8000",
+  "keycloakBaseUrl": "http://127.0.0.1:8081",
+  "keycloakRealm": "open-talon",
+  "oidcClientId": "open-talon-web",
+  "appBasePath": "/"
+}

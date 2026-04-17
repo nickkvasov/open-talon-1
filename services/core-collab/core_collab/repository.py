@@ -1067,6 +1067,36 @@ class CollaborationRepository:
         )
         return result.endswith("1")
 
+    async def delete_system_agent(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        agent_id: UUID,
+    ) -> bool:
+        result = await conn.execute(
+            """
+            DELETE FROM system_agents
+            WHERE agent_id = $1
+            """,
+            agent_id,
+        )
+        return result.endswith("1")
+
+    async def delete_system_tool(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        tool_id: UUID,
+    ) -> bool:
+        result = await conn.execute(
+            """
+            DELETE FROM system_tools
+            WHERE tool_id = $1
+            """,
+            tool_id,
+        )
+        return result.endswith("1")
+
     async def delete_workspace(
         self, conn: asyncpg.Connection, workspace_id: UUID
     ) -> bool:

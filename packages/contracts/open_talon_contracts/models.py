@@ -809,6 +809,13 @@ class DeleteWorkspaceRequest(BaseModel):
     actor: ParticipantInput
 
 
+class UpdateWorkspaceRequest(BaseModel):
+    actor: ParticipantInput
+    name: str | None = None
+    description: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
 class DeleteParticipantRequest(BaseModel):
     actor: ParticipantInput
 
@@ -826,6 +833,10 @@ class UpsertRoleDefinitionRequest(BaseModel):
     definition: str
 
 
+class DeleteRoleDefinitionRequest(BaseModel):
+    actor: ParticipantInput
+
+
 class CreateSystemToolRequest(BaseModel):
     actor: ParticipantInput
     name: str
@@ -834,6 +845,10 @@ class CreateSystemToolRequest(BaseModel):
     input_schema: dict[str, Any] = Field(default_factory=dict)
     execution: ToolExecutionBinding = Field(default_factory=ToolExecutionBinding)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class DeleteSystemToolRequest(BaseModel):
+    actor: ParticipantInput
 
 
 class UpdateSystemToolRequest(BaseModel):
@@ -954,6 +969,10 @@ class CreateSystemAgentRequest(BaseModel):
     )
     definition: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class DeleteSystemAgentRequest(BaseModel):
+    actor: ParticipantInput
 
 
 class UpdateSystemAgentRequest(BaseModel):

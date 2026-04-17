@@ -37,6 +37,11 @@ def test_keycloak_realm_import_has_dev_ssl_and_default_users():
     assert users["user1"]["credentials"][0]["value"] == "user12345"
     assert users["user2"]["realmRoles"] == ["user"]
     assert users["user2"]["credentials"][0]["value"] == "user22345"
+    clients = {client["clientId"]: client for client in payload["clients"]}
+    assert "http://localhost:5173" in clients["open-talon-web"]["redirectUris"]
+    assert "http://localhost:*" in clients["open-talon-web"]["redirectUris"]
+    assert "http://localhost:*/*" in clients["open-talon-web"]["redirectUris"]
+    assert "http://localhost:5173" in clients["open-talon-web"]["webOrigins"]
 
 
 def test_keycloak_init_script_normalizes_local_dev_realms():

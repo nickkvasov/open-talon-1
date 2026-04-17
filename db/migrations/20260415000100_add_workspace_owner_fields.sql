@@ -1,17 +1,20 @@
 ALTER TABLE workspaces
     ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(user_id) ON DELETE SET NULL;
 
-UPDATE workspaces w
+UPDATE workspaces
 SET owner_user_id = participant_owner.user_id
-FROM LATERAL (
-    SELECT p.user_id
-    FROM participants p
-    WHERE p.workspace_id = w.workspace_id
-      AND p.user_id IS NOT NULL
-    ORDER BY p.created_at ASC, p.participant_id ASC
-    LIMIT 1
-) AS participant_owner
-WHERE w.owner_user_id IS NULL;
+FROM (
+    SELECT workspace_id, user_id
+    FROM (
+        SELECT p.workspace_id, p.user_id,
+               ROW_NUMBER() OVER(PARTITION BY p.workspace_id ORDER BY p.created_at ASC, p.participant_id ASC) as rn
+        FROM participants p
+        WHERE p.user_id IS NOT NULL
+    ) sub
+    WHERE rn = 1
+) participant_owner
+WHERE workspaces.workspace_id = participant_owner.workspace_id
+  AND workspaces.owner_user_id IS NULL;
 
 WITH workspace_defaults AS (
     SELECT
@@ -61,12 +64,12 @@ WITH workspace_defaults AS (
         LIMIT 1
     ) AS first_participant ON TRUE
 )
-UPDATE workspaces w
+UPDATE workspaces
 SET metadata = jsonb_set(
-    COALESCE(w.metadata, '{}'::jsonb),
+    COALESCE(workspaces.metadata, '{}'::jsonb),
     '{role_definitions}',
     workspace_defaults.default_roles || workspace_defaults.existing_roles,
     true
 )
 FROM workspace_defaults
-WHERE w.workspace_id = workspace_defaults.workspace_id;
+WHERE workspaces.workspace_id = workspace_defaults.workspace_id;

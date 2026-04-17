@@ -96,6 +96,8 @@ if [ -n "${OPEN_TALON_WEB_ID}" ]; then
     -s standardFlowEnabled=true \
     -s directAccessGrantsEnabled=false \
     -s serviceAccountsEnabled=false \
+    -s 'redirectUris=["http://127.0.0.1:5173","http://127.0.0.1:*","http://127.0.0.1:*/*","http://localhost:5173","http://localhost:*","http://localhost:*/*"]' \
+    -s 'webOrigins=["http://127.0.0.1:5173","http://127.0.0.1:*","http://localhost:5173","http://localhost:*"]' \
     -s 'attributes."pkce.code.challenge.method"=S256' >/dev/null
 fi
 

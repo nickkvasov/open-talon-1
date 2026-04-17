@@ -42,6 +42,9 @@ from gateway_edge.models import (
     DeleteLlmProviderRequest,
     DeleteMemoryProviderRequest,
     DeleteParticipantRequest,
+    DeleteRoleDefinitionRequest,
+    DeleteSystemAgentRequest,
+    DeleteSystemToolRequest,
     DeleteWorkspaceToolRequest,
     DeleteWorkspaceRequest,
     MemoryEntry,
@@ -71,6 +74,7 @@ from gateway_edge.models import (
     UpdateMemoryProviderRequest,
     UpdateMemoryEntryRequest,
     UpdateWorkspaceToolRequest,
+    UpdateWorkspaceRequest,
     Workspace,
     WorkspaceAsset,
     WorkspaceAssetVersion,
@@ -406,6 +410,39 @@ async def delete_workspace(
     )
     try:
         return await collab_svc.collaboration_service.delete_workspace(workspace_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch(
+    "/workspaces/{workspace_id}",
+    response_model=WorkspaceDetail,
+    summary="Update workspace metadata",
+)
+async def update_workspace(
+    request: Request,
+    workspace_id: UUID,
+    payload: UpdateWorkspaceRequest,
+) -> WorkspaceDetail:
+    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
+    payload = payload.model_copy(
+        update={
+            "actor": actor
+            or await _resolve_workspace_actor(
+                request,
+                payload.actor,
+                workspace_id=workspace_id,
+                auto_create=False,
+            )
+        }
+    )
+    logger.debug(
+        "HTTP update_workspace workspace_id=%s actor=%s",
+        workspace_id,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.update_workspace(workspace_id, payload)
     except Exception as exc:
         raise _http_error(exc) from exc
 
@@ -949,6 +986,52 @@ async def update_system_agent(
         raise _http_error(exc) from exc
 
 
+@router.delete(
+    "/agents/{agent_id}",
+    response_model=dict,
+    summary="Delete a system-level agent definition",
+)
+async def delete_system_agent(
+    request: Request,
+    agent_id: UUID,
+    payload: DeleteSystemAgentRequest = Body(...),
+) -> dict[str, bool | str]:
+    require_admin_access(request)
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    logger.debug(
+        "HTTP delete_system_agent agent_id=%s actor=%s",
+        agent_id,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.delete_system_agent(agent_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/tools/{tool_id}",
+    response_model=dict,
+    summary="Delete a system-wide tool definition",
+)
+async def delete_system_tool(
+    request: Request,
+    tool_id: UUID,
+    payload: DeleteSystemToolRequest = Body(...),
+) -> dict[str, bool | str]:
+    require_admin_access(request)
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    logger.debug(
+        "HTTP delete_system_tool tool_id=%s actor=%s",
+        tool_id,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.delete_system_tool(tool_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.post(
     "/git-repositories",
     response_model=GitRepository,
@@ -1275,6 +1358,45 @@ async def upsert_role_definition(
     try:
         return await collab_svc.collaboration_service.upsert_role_definition(
             workspace_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/workspaces/{workspace_id}/roles/{role_name}",
+    response_model=dict,
+    summary="Delete a workspace role definition",
+)
+async def delete_role_definition(
+    request: Request,
+    workspace_id: UUID,
+    role_name: str,
+    payload: DeleteRoleDefinitionRequest = Body(...),
+) -> dict[str, bool | str]:
+    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
+    payload = payload.model_copy(
+        update={
+            "actor": actor
+            or await _resolve_workspace_actor(
+                request,
+                payload.actor,
+                workspace_id=workspace_id,
+                auto_create=False,
+            ),
+        }
+    )
+    logger.debug(
+        "HTTP delete_role_definition workspace_id=%s role_name=%r actor=%s",
+        workspace_id,
+        role_name,
+        _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.delete_role_definition(
+            workspace_id,
+            role_name,
             payload,
         )
     except Exception as exc:
