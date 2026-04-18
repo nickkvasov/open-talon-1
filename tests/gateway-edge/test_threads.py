@@ -204,3 +204,59 @@ async def test_post_message_with_requests_creates_atomic_request(client, actor_p
     requests_resp = await client.get(f"/v1/threads/{thread_id}/requests")
     assert requests_resp.status_code == 200
     assert requests_resp.json()[0]["questions"][0]["prompt"] == "What blocks delivery?"
+
+
+async def test_workspace_communication_log_lists_messages_requests_and_answers(client, actor_payload):
+    workspace_id = await _create_workspace(client, actor_payload)
+    thread_id = await _create_thread(client, workspace_id, actor_payload)
+
+    message_resp = await client.post(
+        f"/v1/threads/{thread_id}/messages",
+        json={
+            "actor": actor_payload,
+            "content": "Please gather delivery blockers.",
+            "visibility": "workspace",
+            "create_task": False,
+        },
+    )
+    assert message_resp.status_code == 200
+
+    create_resp = await client.post(
+        f"/v1/threads/{thread_id}/requests",
+        json={
+            "actor": actor_payload,
+            "requests": [
+                {
+                    "title": "Need backend feedback",
+                    "questions": [{"prompt": "What blocks delivery?"}],
+                    "selectors": [{"type": "participant", "value": actor_payload["display_name"]}],
+                }
+            ],
+        },
+    )
+    assert create_resp.status_code == 200
+    request_id = create_resp.json()[0]["request"]["request_id"]
+
+    answer_resp = await client.post(
+        f"/v1/requests/{request_id}/answers",
+        json={
+            "actor": actor_payload,
+            "content": "API review is the blocker.",
+            "question_ids": [],
+        },
+    )
+    assert answer_resp.status_code == 200
+
+    log_resp = await client.get(
+        f"/v1/workspaces/{workspace_id}/communication-log",
+        params={"thread_id": thread_id, "limit": 10, "offset": 0},
+    )
+    assert log_resp.status_code == 200
+    body = log_resp.json()
+    assert body["workspace_id"] == workspace_id
+    assert body["total_count"] == 3
+    assert {entry["kind"] for entry in body["entries"]} == {
+        "message",
+        "interaction_request",
+        "interaction_answer",
+    }

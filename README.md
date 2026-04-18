@@ -86,9 +86,12 @@ The current thread-native request flow is:
 5. When the request is complete, `core-collab` creates a follow-up task targeted only to the original requesting agent.
 6. `agent-runtime` resumes that agent with the original request, targets, and accumulated answers in execution context.
 
+For workspace-level debugging, Open Talon now also exposes a communication log view backed by canonical `timeline_messages`. It aggregates thread messages, rendered interaction requests, and interaction answers across the workspace, and is intended for workspace `admin` or `supervisor` troubleshooting flows.
+
 Common collaboration endpoints:
 
 - `POST /v1/workspaces`
+- `GET /v1/workspaces/{workspace_id}/communication-log`
 - `GET /v1/workspaces/{workspace_id}/participants`
 - `POST /v1/workspaces/{workspace_id}/threads`
 - `GET /v1/threads/{thread_id}/timeline`

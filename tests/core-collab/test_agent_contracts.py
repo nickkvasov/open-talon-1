@@ -70,6 +70,8 @@ from open_talon_contracts.models import (  # noqa: E402
     UpdateLlmProviderRequest,
     UpsertRoleDefinitionRequest,
     Workspace,
+    WorkspaceCommunicationLogEntry,
+    WorkspaceCommunicationLogPage,
     WorkspaceTool,
 )
 from core_collab.kernel import CollaborationKernel  # noqa: E402
@@ -468,6 +470,63 @@ class FakeRepository:
                 if message.message_id == message_id:
                     return message
         return None
+
+    async def list_workspace_communication_log(
+        self,
+        workspace_id,
+        *,
+        thread_id=None,
+        limit=200,
+        offset=0,
+    ):
+        entries: list[WorkspaceCommunicationLogEntry] = []
+        for candidate_thread_id, messages in self._messages.items():
+            thread = self._threads.get(candidate_thread_id)
+            if thread is None or thread.workspace_id != workspace_id:
+                continue
+            if thread_id is not None and candidate_thread_id != thread_id:
+                continue
+            for message in messages:
+                actor_display_name = str(message.actor.id)
+                participant = self._participants.get((workspace_id, message.actor.id))
+                if participant is not None:
+                    actor_display_name = participant.display_name
+                metadata = dict(message.metadata)
+                if metadata.get("interaction_request_id") and "interaction_question_ids" in metadata:
+                    kind = "interaction_answer"
+                elif metadata.get("interaction_request_id"):
+                    kind = "interaction_request"
+                else:
+                    kind = "message"
+                entries.append(
+                    WorkspaceCommunicationLogEntry(
+                        message_id=message.message_id,
+                        workspace_id=message.workspace_id,
+                        thread_id=message.thread_id,
+                        thread_title=thread.title,
+                        actor=message.actor,
+                        actor_display_name=actor_display_name,
+                        visibility=message.visibility,
+                        kind=kind,
+                        content=message.content,
+                        status=message.status,
+                        correlation_id=message.correlation_id,
+                        causation_id=message.causation_id,
+                        sequence=message.sequence,
+                        interaction_request_id=metadata.get("interaction_request_id"),
+                        interaction_request_status=metadata.get("interaction_request_status"),
+                        interaction_question_ids=metadata.get("interaction_question_ids", []),
+                        metadata=metadata,
+                        created_at=message.created_at,
+                        updated_at=message.updated_at,
+                    )
+                )
+        entries.sort(key=lambda item: (item.created_at, item.sequence, item.message_id), reverse=True)
+        return WorkspaceCommunicationLogPage(
+            workspace_id=workspace_id,
+            entries=entries[offset : offset + limit],
+            total_count=len(entries),
+        )
 
     async def upsert_message(self, conn, message):
         messages = [
@@ -920,6 +979,39 @@ def test_participant_from_row_falls_back_when_user_display_name_is_missing():
     participant = CollaborationRepository._participant_from_row(row)  # noqa: SLF001
 
     assert participant.display_name == str(participant_id)
+
+
+def test_workspace_communication_log_entry_from_row_classifies_interaction_answer():
+    request_id = uuid4()
+    question_id = uuid4()
+    row = {
+        "message_id": uuid4(),
+        "workspace_id": uuid4(),
+        "thread_id": uuid4(),
+        "thread_title": "Coordination",
+        "actor_type": "user",
+        "actor_id": uuid4(),
+        "actor_display_name": "Alice",
+        "visibility": "workspace",
+        "content": "Backend is blocked on API review.",
+        "status": "completed",
+        "correlation_id": uuid4(),
+        "causation_id": request_id,
+        "sequence": 7,
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+        "metadata": {
+            "interaction_request_id": str(request_id),
+            "interaction_question_ids": [str(question_id)],
+        },
+    }
+
+    entry = CollaborationRepository._workspace_communication_log_entry_from_row(row)  # noqa: SLF001
+
+    assert entry.kind == "interaction_answer"
+    assert entry.actor_display_name == "Alice"
+    assert entry.interaction_request_id == request_id
+    assert entry.interaction_question_ids == [question_id]
 
 
 def test_build_default_interaction_contract_reflects_testing_role():
@@ -2518,3 +2610,69 @@ async def test_post_message_can_atomically_create_interaction_request():
     assert len(details) == 1
     assert details[0].request.requester_message_id == result.message.message_id
     assert details[0].questions[0].prompt == "What blocks backend delivery?"
+
+
+@pytest.mark.asyncio
+async def test_kernel_lists_workspace_communication_log_entries():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    seeded = _seed_interaction_workspace(
+        repository,
+        users=[("Alice", "backend")],
+    )
+
+    await kernel.post_message(
+        seeded["thread_id"],
+        CreateMessageRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["requester_id"],
+                participant_type="agent",
+                display_name="Research Agent",
+            ),
+            content="Please gather blockers.",
+            visibility="workspace",
+            create_task=False,
+        ),
+    )
+    create_result = await kernel.create_interaction_requests(
+        seeded["thread_id"],
+        CreateInteractionRequestsRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["requester_id"],
+                participant_type="agent",
+                display_name="Research Agent",
+            ),
+            requests=[
+                CreateInteractionRequest(
+                    title="Need backend input",
+                    questions=[CreateInteractionQuestionRequest(prompt="What blocks backend delivery?")],
+                    target_participant_ids=[seeded["users"]["Alice"]],
+                )
+            ],
+        ),
+    )
+    await kernel.answer_interaction_request(
+        create_result.details[0].request.request_id,
+        CreateInteractionAnswerRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["users"]["Alice"],
+                participant_type="user",
+                display_name="Alice",
+            ),
+            content="API review is blocking backend delivery.",
+        ),
+    )
+
+    page = await kernel.list_workspace_communication_log(
+        seeded["workspace_id"],
+        thread_id=seeded["thread_id"],
+        limit=10,
+        offset=0,
+    )
+
+    assert page.total_count == 3
+    assert {entry.kind for entry in page.entries} == {
+        "message",
+        "interaction_request",
+        "interaction_answer",
+    }

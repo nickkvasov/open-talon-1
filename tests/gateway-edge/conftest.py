@@ -1061,6 +1061,68 @@ class MockCollaborationService:
             messages=self.messages.get(str(thread_id), []),
         )
 
+    async def list_workspace_communication_log(
+        self,
+        workspace_id: UUID,
+        *,
+        thread_id: UUID | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ):
+        from gateway_edge.models import ActorRef, WorkspaceCommunicationLogEntry, WorkspaceCommunicationLogPage
+
+        if str(workspace_id) not in self.workspaces:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        participants = self.participants.get(str(workspace_id), {})
+        entries = []
+        for candidate_thread_id, messages in self.messages.items():
+            thread = self.threads.get(candidate_thread_id)
+            if thread is None or thread.workspace_id != workspace_id:
+                continue
+            if thread_id is not None and thread.thread_id != thread_id:
+                continue
+            for message in messages:
+                participant = participants.get(str(message.actor.id))
+                actor_display_name = (
+                    participant.display_name if participant is not None else str(message.actor.id)
+                )
+                metadata = dict(message.metadata)
+                if metadata.get("interaction_request_id") and "interaction_question_ids" in metadata:
+                    kind = "interaction_answer"
+                elif metadata.get("interaction_request_id"):
+                    kind = "interaction_request"
+                else:
+                    kind = "message"
+                entries.append(
+                    WorkspaceCommunicationLogEntry(
+                        message_id=message.message_id,
+                        workspace_id=message.workspace_id,
+                        thread_id=message.thread_id,
+                        thread_title=thread.title,
+                        actor=ActorRef(type=message.actor.type, id=message.actor.id),
+                        actor_display_name=actor_display_name,
+                        visibility=message.visibility,
+                        kind=kind,
+                        content=message.content,
+                        status=message.status,
+                        correlation_id=message.correlation_id,
+                        causation_id=message.causation_id,
+                        sequence=message.sequence,
+                        interaction_request_id=metadata.get("interaction_request_id"),
+                        interaction_request_status=metadata.get("interaction_request_status"),
+                        interaction_question_ids=metadata.get("interaction_question_ids", []),
+                        metadata=metadata,
+                        created_at=message.created_at,
+                        updated_at=message.updated_at,
+                    )
+                )
+        entries.sort(key=lambda item: (item.created_at, item.sequence, item.message_id), reverse=True)
+        return WorkspaceCommunicationLogPage(
+            workspace_id=workspace_id,
+            entries=entries[offset : offset + limit],
+            total_count=len(entries),
+        )
+
     async def post_message(self, thread_id: UUID, payload):
         from gateway_edge.models import ActorRef, EventEnvelope, TargetRef, TimelineMessage
 
@@ -1292,15 +1354,37 @@ class MockCollaborationService:
         return detail
 
     async def answer_interaction_request(self, request_id: UUID, payload):
-        from gateway_edge.models import InteractionAnswer
+        from gateway_edge.models import ActorRef, InteractionAnswer, TimelineMessage
 
         detail = await self.get_interaction_request(request_id)
         now = datetime.now(timezone.utc)
+        next_sequence = self.thread_sequences.get(str(detail.request.thread_id), 0) + 1
+        self.thread_sequences[str(detail.request.thread_id)] = next_sequence
+        answer_message = TimelineMessage(
+            message_id=uuid4(),
+            workspace_id=detail.request.workspace_id,
+            thread_id=detail.request.thread_id,
+            actor=ActorRef(type=payload.actor.participant_type, id=payload.actor.participant_id),
+            visibility="workspace",
+            content=payload.content,
+            status="completed",
+            correlation_id=uuid4(),
+            causation_id=request_id,
+            sequence=next_sequence,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                **payload.metadata,
+                "interaction_request_id": str(request_id),
+                "interaction_question_ids": list(payload.question_ids),
+            },
+        )
+        self.messages.setdefault(str(detail.request.thread_id), []).append(answer_message)
         answer = InteractionAnswer(
             answer_id=uuid4(),
             request_id=request_id,
             participant_id=payload.actor.participant_id,
-            message_id=uuid4(),
+            message_id=answer_message.message_id,
             question_ids=list(payload.question_ids),
             created_at=now,
             metadata=payload.metadata,

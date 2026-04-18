@@ -233,8 +233,11 @@ Current thread-native request flow:
 5. When complete, `core-collab` creates a follow-up task only for the original requesting agent.
 6. `agent-runtime` resumes that agent with the request and accumulated answers in context.
 
+For workspace debugging, there is also a workspace communication-log view backed by canonical `timeline_messages`. It aggregates regular thread messages, rendered interaction requests, and interaction answers across the workspace. The HTTP route is intended for workspace `admin` or `supervisor` users when using OIDC.
+
 Relevant collaboration APIs:
 
+- `GET /v1/workspaces/{workspace_id}/communication-log`
 - `POST /v1/threads/{thread_id}/messages`
 - `GET /v1/threads/{thread_id}/timeline`
 - `GET /v1/threads/{thread_id}/requests`

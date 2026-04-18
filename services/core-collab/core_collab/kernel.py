@@ -93,6 +93,7 @@ from .contracts import (
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    WorkspaceCommunicationLogPage,
     Run,
     StopReason,
     ToolCall,
@@ -1788,6 +1789,28 @@ class CollaborationKernel:
             raise KeyError(f"Thread {thread_id} not found")
         messages = await self._repository.list_timeline_messages(thread_id)
         return TimelinePage(thread_id=thread_id, messages=messages)
+
+    async def list_workspace_communication_log(
+        self,
+        workspace_id: UUID,
+        *,
+        thread_id: UUID | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> WorkspaceCommunicationLogPage:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        if thread_id is not None:
+            thread = await self._repository.fetch_thread(thread_id)
+            if thread is None or thread.workspace_id != workspace_id:
+                raise KeyError(f"Thread {thread_id} not found")
+        return await self._repository.list_workspace_communication_log(
+            workspace_id,
+            thread_id=thread_id,
+            limit=limit,
+            offset=offset,
+        )
 
     async def list_pending_tasks_for_system_agent(
         self, system_agent_id: UUID, *, limit: int = 10

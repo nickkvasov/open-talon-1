@@ -44,6 +44,8 @@ from .contracts import (
     ToolParameterContract,
     Thread,
     TimelineMessage,
+    WorkspaceCommunicationLogEntry,
+    WorkspaceCommunicationLogPage,
     Workspace,
     WorkspaceAsset,
     WorkspaceAssetVersion,
@@ -3181,6 +3183,69 @@ class CollaborationRepository:
         )
         return [self._timeline_message_from_row(row) for row in rows]
 
+    async def list_workspace_communication_log(
+        self,
+        workspace_id: UUID,
+        *,
+        thread_id: UUID | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> WorkspaceCommunicationLogPage:
+        total_count = await self._pool.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM timeline_messages
+            WHERE workspace_id = $1
+              AND ($2::uuid IS NULL OR thread_id = $2)
+            """,
+            workspace_id,
+            thread_id,
+        )
+        rows = await self._pool.fetch(
+            """
+            SELECT m.message_id,
+                   m.workspace_id,
+                   m.thread_id,
+                   t.title AS thread_title,
+                   m.actor_type,
+                   m.actor_id,
+                   COALESCE(u.display_name, sa.display_name, p.metadata->>'display_name', m.actor_id::text)
+                       AS actor_display_name,
+                   m.visibility,
+                   m.content,
+                   m.status,
+                   m.correlation_id,
+                   m.causation_id,
+                   m.sequence,
+                   m.created_at,
+                   m.updated_at,
+                   m.metadata
+            FROM timeline_messages AS m
+            JOIN threads AS t ON t.thread_id = m.thread_id
+            LEFT JOIN participants AS p
+                   ON p.participant_id = m.actor_id
+                  AND p.workspace_id = m.workspace_id
+            LEFT JOIN users AS u ON u.user_id = p.user_id
+            LEFT JOIN system_agents AS sa ON sa.agent_id = p.system_agent_id
+            WHERE m.workspace_id = $1
+              AND ($2::uuid IS NULL OR m.thread_id = $2)
+            ORDER BY m.created_at DESC, m.sequence DESC, m.message_id DESC
+            LIMIT $3 OFFSET $4
+            """,
+            workspace_id,
+            thread_id,
+            limit,
+            offset,
+        )
+        return WorkspaceCommunicationLogPage(
+            workspace_id=workspace_id,
+            entries=[
+                self._workspace_communication_log_entry_from_row(row)
+                for row in rows
+            ],
+            total_count=int(total_count or 0),
+        )
+
     async def list_thread_events(
         self, thread_id: UUID, *, after_sequence: int | None = None
     ) -> list[EventEnvelope]:
@@ -3786,6 +3851,45 @@ class CollaborationRepository:
         )
 
     @staticmethod
+    def _workspace_communication_log_entry_from_row(
+        row: asyncpg.Record,
+    ) -> WorkspaceCommunicationLogEntry:
+        metadata = CollaborationRepository._json_value(row["metadata"], default={})
+        interaction_request_id = CollaborationRepository._uuid_or_none(
+            metadata.get("interaction_request_id")
+        )
+        interaction_question_ids = CollaborationRepository._uuid_list(
+            metadata.get("interaction_question_ids", [])
+        )
+        if interaction_request_id is not None and "interaction_question_ids" in metadata:
+            kind = "interaction_answer"
+        elif interaction_request_id is not None:
+            kind = "interaction_request"
+        else:
+            kind = "message"
+        return WorkspaceCommunicationLogEntry(
+            message_id=row["message_id"],
+            workspace_id=row["workspace_id"],
+            thread_id=row["thread_id"],
+            thread_title=row["thread_title"],
+            actor=ActorRef(type=row["actor_type"], id=row["actor_id"]),
+            actor_display_name=str(row["actor_display_name"] or row["actor_id"]),
+            visibility=row["visibility"],
+            kind=kind,
+            content=row["content"],
+            status=row["status"],
+            correlation_id=row["correlation_id"],
+            causation_id=row["causation_id"],
+            sequence=row["sequence"],
+            interaction_request_id=interaction_request_id,
+            interaction_request_status=metadata.get("interaction_request_status"),
+            interaction_question_ids=interaction_question_ids,
+            metadata=metadata,
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
     def _event_from_row(row: asyncpg.Record) -> EventEnvelope:
         from open_talon_contracts.models import TargetRef
 
@@ -3937,3 +4041,25 @@ class CollaborationRepository:
         if isinstance(value, str):
             return json.loads(value)
         return value
+
+    @staticmethod
+    def _uuid_or_none(value: Any) -> UUID | None:
+        if value is None:
+            return None
+        if isinstance(value, UUID):
+            return value
+        try:
+            return UUID(str(value))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _uuid_list(values: Any) -> list[UUID]:
+        if not isinstance(values, list):
+            return []
+        converted: list[UUID] = []
+        for value in values:
+            item = CollaborationRepository._uuid_or_none(value)
+            if item is not None:
+                converted.append(item)
+        return converted

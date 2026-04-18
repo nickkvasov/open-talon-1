@@ -13,6 +13,7 @@ ParticipantType = Literal["user", "agent"]
 ParticipantStatus = Literal["active", "idle", "busy", "offline"]
 ThreadState = Literal["active", "paused", "resolved", "archived"]
 MessageStatus = Literal["draft", "streaming", "completed", "failed"]
+CommunicationLogKind = Literal["message", "interaction_request", "interaction_answer"]
 InteractionRequestStatus = Literal["open", "completed", "cancelled", "timed_out"]
 InteractionTargetStatus = Literal["pending", "acknowledged", "answered", "dismissed"]
 ParticipantSelectorType = Literal["participant", "role", "capability"]
@@ -1254,6 +1255,34 @@ class ThreadDetail(BaseModel):
 class TimelinePage(BaseModel):
     thread_id: UUID
     messages: list[TimelineMessage] = Field(default_factory=list)
+
+
+class WorkspaceCommunicationLogEntry(BaseModel):
+    message_id: UUID
+    workspace_id: UUID
+    thread_id: UUID
+    thread_title: str | None = None
+    actor: ActorRef
+    actor_display_name: str
+    visibility: Visibility = "workspace"
+    kind: CommunicationLogKind = "message"
+    content: str = ""
+    status: MessageStatus = "completed"
+    correlation_id: UUID
+    causation_id: UUID | None = None
+    sequence: int = 0
+    interaction_request_id: UUID | None = None
+    interaction_request_status: InteractionRequestStatus | None = None
+    interaction_question_ids: list[UUID] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class WorkspaceCommunicationLogPage(BaseModel):
+    workspace_id: UUID
+    entries: list[WorkspaceCommunicationLogEntry] = Field(default_factory=list)
+    total_count: int = 0
 
 
 class AgentExecutionContext(BaseModel):

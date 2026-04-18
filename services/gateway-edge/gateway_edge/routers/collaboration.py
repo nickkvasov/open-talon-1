@@ -69,6 +69,7 @@ from gateway_edge.models import (
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    WorkspaceCommunicationLogPage,
     UpdateSystemAgentRequest,
     UpdateInteractionRequestRequest,
     UpsertRoleDefinitionRequest,
@@ -1667,6 +1668,37 @@ async def create_thread(
     )
     try:
         return await collab_svc.collaboration_service.create_thread(workspace_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/workspaces/{workspace_id}/communication-log",
+    response_model=WorkspaceCommunicationLogPage,
+    summary="List workspace communication log for debugging",
+)
+async def list_workspace_communication_log(
+    request: Request,
+    workspace_id: UUID,
+    thread_id: UUID | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> WorkspaceCommunicationLogPage:
+    logger.debug(
+        "HTTP list_workspace_communication_log workspace_id=%s thread_id=%s limit=%s offset=%s",
+        workspace_id,
+        thread_id,
+        limit,
+        offset,
+    )
+    try:
+        await _require_workspace_admin_or_supervisor(request, workspace_id)
+        return await collab_svc.collaboration_service.list_workspace_communication_log(
+            workspace_id,
+            thread_id=thread_id,
+            limit=limit,
+            offset=offset,
+        )
     except Exception as exc:
         raise _http_error(exc) from exc
 

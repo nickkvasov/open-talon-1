@@ -67,6 +67,7 @@ from gateway_edge.models import (
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    WorkspaceCommunicationLogPage,
     UpdateInteractionRequestRequest,
     UpdateWorkspaceRequest,
     UpdateSystemAgentRequest,
@@ -667,6 +668,28 @@ class CollaborationService:
     async def get_timeline(self, thread_id: UUID) -> TimelinePage:
         logger.debug("Service get_timeline thread_id=%s", thread_id)
         return await self._require_kernel().get_thread_timeline(thread_id)
+
+    async def list_workspace_communication_log(
+        self,
+        workspace_id: UUID,
+        *,
+        thread_id: UUID | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> WorkspaceCommunicationLogPage:
+        logger.debug(
+            "Service list_workspace_communication_log workspace_id=%s thread_id=%s limit=%s offset=%s",
+            workspace_id,
+            thread_id,
+            limit,
+            offset,
+        )
+        return await self._require_kernel().list_workspace_communication_log(
+            workspace_id,
+            thread_id=thread_id,
+            limit=limit,
+            offset=offset,
+        )
 
     async def post_message(
         self, thread_id: UUID, payload: CreateMessageRequest
