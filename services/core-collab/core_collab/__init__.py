@@ -1,5 +1,5 @@
-from .kernel import (
-    CollaborationKernel,
+from .kernel import CollaborationKernel
+from .results import (
     CommandResult,
     MemoryCommandResult,
     MessageCommandResult,

@@ -484,6 +484,90 @@ class HttpEndpointExecutor:
         )
 
 
+def build_default_agent_executors(
+    *,
+    model_timeout_seconds: float,
+    observability: RuntimeObservability,
+    secret_resolver: SecretResolver,
+) -> dict[str, AgentExecutor]:
+    return {
+        "local": LocalOllamaExecutor(
+            timeout_seconds=model_timeout_seconds,
+            observability=observability,
+        ),
+        "remote": HttpEndpointExecutor(
+            timeout_seconds=model_timeout_seconds,
+            endpoint_scope="remote",
+            observability=observability,
+            secret_resolver=secret_resolver,
+        ),
+        "system": HttpEndpointExecutor(
+            timeout_seconds=model_timeout_seconds,
+            endpoint_scope="system",
+            observability=observability,
+            secret_resolver=secret_resolver,
+        ),
+    }
+
+
+class RuntimeExecutionManager:
+    def __init__(
+        self,
+        *,
+        model_timeout_seconds: float = 60.0,
+        executors: dict[str, AgentExecutor] | None = None,
+        observability: RuntimeObservability | None = None,
+        engine_registry: LlmEngineRegistry | None = None,
+        secret_resolver: SecretResolver | None = None,
+    ) -> None:
+        self._observability = observability or LangfuseRuntimeObserver.from_env()
+        self._engine_registry = engine_registry or build_default_llm_engine_registry()
+        self._secret_resolver = secret_resolver or build_default_secret_resolver()
+        self._executors = executors or build_default_agent_executors(
+            model_timeout_seconds=model_timeout_seconds,
+            observability=self._observability,
+            secret_resolver=self._secret_resolver,
+        )
+
+    @property
+    def observability(self) -> RuntimeObservability:
+        return self._observability
+
+    def flush(self) -> None:
+        self._observability.flush()
+
+    def executor_for(self, context: AgentExecutionContext) -> AgentExecutor:
+        kind = context.system_agent.endpoint.kind
+        try:
+            return self._executors[kind]
+        except KeyError as exc:  # pragma: no cover - defensive
+            raise ValueError(f"No executor configured for endpoint kind {kind!r}") from exc
+
+    async def resolve_context(
+        self,
+        kernel: RuntimeKernel,
+        context: AgentExecutionContext,
+    ) -> AgentExecutionContext:
+        managed = [
+            llm_engine_descriptor_from_provider_definition(item)
+            for item in await kernel.list_llm_providers()
+        ]
+        registry = LlmEngineRegistry.merged(self._engine_registry.list(), managed)
+        resolved = resolve_llm_engine_for_context(context, registry)
+        metadata = dict(context.system_agent.metadata)
+        if resolved.descriptor is not None:
+            metadata["_resolved_llm_engine"] = resolved.descriptor.model_dump(mode="json")
+        if (
+            resolved.endpoint == context.system_agent.endpoint
+            and metadata == context.system_agent.metadata
+        ):
+            return context
+        system_agent = context.system_agent.model_copy(
+            update={"endpoint": resolved.endpoint, "metadata": metadata}
+        )
+        return context.model_copy(update={"system_agent": system_agent})
+
+
 class AgentTaskRuntime:
     def __init__(
         self,
@@ -506,27 +590,13 @@ class AgentTaskRuntime:
         self._progress_events_enabled = progress_events_enabled
         self._loop_task: asyncio.Task[None] | None = None
         self._processing_tasks: dict[UUID, asyncio.Task[None]] = {}
-        self._observability = observability or LangfuseRuntimeObserver.from_env()
-        self._engine_registry = engine_registry or build_default_llm_engine_registry()
-        self._secret_resolver = secret_resolver or build_default_secret_resolver()
-        self._executors = executors or {
-            "local": LocalOllamaExecutor(
-                timeout_seconds=model_timeout_seconds,
-                observability=self._observability,
-            ),
-            "remote": HttpEndpointExecutor(
-                timeout_seconds=model_timeout_seconds,
-                endpoint_scope="remote",
-                observability=self._observability,
-                secret_resolver=self._secret_resolver,
-            ),
-            "system": HttpEndpointExecutor(
-                timeout_seconds=model_timeout_seconds,
-                endpoint_scope="system",
-                observability=self._observability,
-                secret_resolver=self._secret_resolver,
-            ),
-        }
+        self._execution = RuntimeExecutionManager(
+            model_timeout_seconds=model_timeout_seconds,
+            executors=executors,
+            observability=observability,
+            engine_registry=engine_registry,
+            secret_resolver=secret_resolver,
+        )
 
     async def start(self) -> None:
         if self._loop_task is not None and not self._loop_task.done():
@@ -545,7 +615,7 @@ class AgentTaskRuntime:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self._processing_tasks.clear()
-        self._observability.flush()
+        self._execution.flush()
         logger.info("Agent task runtime stopped")
 
     async def _run_loop(self) -> None:
@@ -602,8 +672,8 @@ class AgentTaskRuntime:
                     f"Task {task_id} did not produce a run/context during claim"
                 )
             run_id = claim.run.run_id
-            context = await self._resolve_execution_context(claim.context)
-            with self._observability.start_span(
+            context = await self._execution.resolve_context(self._kernel, claim.context)
+            with self._execution.observability.start_span(
                 name="agent-task-run",
                 input={
                     "task_id": str(task_id),
@@ -625,7 +695,7 @@ class AgentTaskRuntime:
                         f"Executing {context.system_agent.display_name}",
                     )
                     await self._publish_events(progress.events)
-                executor = self._executor_for(context)
+                executor = self._execution.executor_for(context)
                 result = await executor.execute(context)
                 result = _normalize_run_result(result, context=context)
                 observation.update(
@@ -665,37 +735,16 @@ class AgentTaskRuntime:
                 )
                 await self._publish_events(failed.events)
         finally:
-            self._observability.flush()
+            self._execution.flush()
 
     def _executor_for(self, context: AgentExecutionContext) -> AgentExecutor:
-        kind = context.system_agent.endpoint.kind
-        try:
-            return self._executors[kind]
-        except KeyError as exc:  # pragma: no cover - defensive
-            raise ValueError(f"No executor configured for endpoint kind {kind!r}") from exc
+        return self._execution.executor_for(context)
 
     async def _resolve_execution_context(
         self,
         context: AgentExecutionContext,
     ) -> AgentExecutionContext:
-        managed = [
-            llm_engine_descriptor_from_provider_definition(item)
-            for item in await self._kernel.list_llm_providers()
-        ]
-        registry = LlmEngineRegistry.merged(self._engine_registry.list(), managed)
-        resolved = resolve_llm_engine_for_context(context, registry)
-        metadata = dict(context.system_agent.metadata)
-        if resolved.descriptor is not None:
-            metadata["_resolved_llm_engine"] = resolved.descriptor.model_dump(mode="json")
-        if (
-            resolved.endpoint == context.system_agent.endpoint
-            and metadata == context.system_agent.metadata
-        ):
-            return context
-        system_agent = context.system_agent.model_copy(
-            update={"endpoint": resolved.endpoint, "metadata": metadata}
-        )
-        return context.model_copy(update={"system_agent": system_agent})
+        return await self._execution.resolve_context(self._kernel, context)
 
 
 def render_prompt(context: AgentExecutionContext) -> str:
