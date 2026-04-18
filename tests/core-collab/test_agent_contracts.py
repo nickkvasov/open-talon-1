@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -30,8 +32,11 @@ from open_talon_contracts.models import (  # noqa: E402
     AgentDefinition,
     AgentEndpoint,
     AgentRunResult,
+    AssumeParticipantRoleRequest,
     ArtifactRef,
+    CreateAgentParticipantRequest,
     CreateGitRepositoryRequest,
+    CreateThreadRequest,
     CreateLlmProviderRequest,
     CreateWorkspaceRequest,
     CreateSystemToolRequest,
@@ -46,8 +51,10 @@ from open_talon_contracts.models import (  # noqa: E402
     DeleteLlmProviderRequest,
     InteractionAnswer,
     InteractionQuestion,
+    InteractionQuestionDraft,
     InteractionRequest,
     InteractionRequestDetail,
+    InteractionRequestDraft,
     InteractionRequestTarget,
     LlmProviderDefinition,
     MemoryEntry,
@@ -105,9 +112,17 @@ class _FakePool:
 
 
 class FakeRepository:
-    def __init__(self, agents: list[AgentDefinition] | None = None) -> None:
+    def __init__(
+        self,
+        agents: list[AgentDefinition] | None = None,
+        *,
+        communication_log_dir: str | Path | None = None,
+    ) -> None:
         self._agents = {agent.agent_id: agent for agent in agents or []}
         self._pool = _FakePool()
+        self._communication_log_dir = (
+            Path(communication_log_dir) if communication_log_dir is not None else None
+        )
         self.setup_schema_calls = 0
         self.upserted_agents: list[AgentDefinition] = []
         self.recorded_events: list[EventEnvelope] = []
@@ -188,6 +203,30 @@ class FakeRepository:
 
     async def upsert_task(self, conn, task):
         self._tasks[task.task_id] = task
+
+    async def list_pending_tasks_for_system_agent(self, system_agent_id, *, limit=10):
+        tasks = [
+            task
+            for task in self._tasks.values()
+            if task.status in {"created", "released"}
+            and task.metadata.get("target_system_agent_id") == str(system_agent_id)
+        ]
+        tasks.sort(key=lambda item: item.created_at)
+        return tasks[:limit]
+
+    async def claim_task(self, conn, *, task_id, participant_id, updated_at):
+        task = self._tasks.get(task_id)
+        if task is None or task.status not in {"created", "released"}:
+            return None
+        claimed = task.model_copy(
+            update={
+                "status": "claimed",
+                "claimed_by": participant_id,
+                "updated_at": updated_at,
+            }
+        )
+        self._tasks[task_id] = claimed
+        return claimed
 
     async def fetch_run(self, run_id):
         return self._runs.get(run_id)
@@ -537,6 +576,61 @@ class FakeRepository:
         messages.append(message)
         self._messages[message.thread_id] = messages
 
+    async def persist_workspace_communication_messages(self, messages):
+        if self._communication_log_dir is None:
+            return
+        grouped_lines: dict[Path, list[str]] = {}
+        for message in messages:
+            if message.status in {"draft", "streaming"}:
+                continue
+            thread = self._threads.get(message.thread_id)
+            if thread is None:
+                continue
+            participant = self._participants.get((message.workspace_id, message.actor.id))
+            actor_display_name = (
+                participant.display_name if participant is not None else str(message.actor.id)
+            )
+            metadata = dict(message.metadata)
+            if metadata.get("interaction_request_id") and "interaction_question_ids" in metadata:
+                kind = "interaction_answer"
+            elif metadata.get("interaction_request_id"):
+                kind = "interaction_request"
+            else:
+                kind = "message"
+            entry = WorkspaceCommunicationLogEntry(
+                message_id=message.message_id,
+                workspace_id=message.workspace_id,
+                thread_id=message.thread_id,
+                thread_title=thread.title,
+                actor=message.actor,
+                actor_display_name=actor_display_name,
+                visibility=message.visibility,
+                kind=kind,
+                content=message.content,
+                status=message.status,
+                correlation_id=message.correlation_id,
+                causation_id=message.causation_id,
+                sequence=message.sequence,
+                interaction_request_id=metadata.get("interaction_request_id"),
+                interaction_request_status=metadata.get("interaction_request_status"),
+                interaction_question_ids=metadata.get("interaction_question_ids", []),
+                metadata=metadata,
+                created_at=message.created_at,
+                updated_at=message.updated_at,
+            )
+            file_path = self._communication_log_dir / f"{message.workspace_id}.jsonl"
+            grouped_lines.setdefault(file_path, []).append(
+                json.dumps(entry.model_dump(mode="json"), sort_keys=True)
+            )
+        for file_path, lines in grouped_lines.items():
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            existing = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
+            suffix = "\n".join(lines)
+            file_path.write_text(
+                f"{existing}{suffix}\n",
+                encoding="utf-8",
+            )
+
     async def upsert_interaction_request(self, conn, request):
         self._interaction_requests[request.request_id] = request
 
@@ -610,11 +704,17 @@ class FakeRepository:
     async def upsert_workspace(self, conn, workspace: Workspace) -> None:
         self._workspaces[workspace.workspace_id] = workspace
 
+    async def upsert_thread(self, conn, thread: Thread) -> None:
+        self._threads[thread.thread_id] = thread
+
     async def upsert_user(self, conn, user) -> None:
         return None
 
     async def upsert_participant(self, conn, participant: ParticipantProfile) -> None:
         self._participants[(participant.workspace_id, participant.participant_id)] = participant
+
+    async def upsert_run(self, conn, run: Run) -> None:
+        self._runs[run.run_id] = run
 
     async def upsert_run_step(self, conn, step: RunStep) -> None:
         self._run_steps[step.step_id] = step
@@ -2244,6 +2344,15 @@ def _seed_interaction_workspace(
     }
 
 
+async def _claim_single_pending_task(
+    kernel: CollaborationKernel,
+    system_agent_id,
+):
+    tasks = await kernel.list_pending_tasks_for_system_agent(system_agent_id)
+    assert len(tasks) == 1
+    return await kernel.claim_task_for_system_agent(tasks[0].task_id, system_agent_id)
+
+
 @pytest.mark.asyncio
 async def test_answer_interaction_request_minimum_answers_waits_for_quorum():
     repository = FakeRepository()
@@ -2676,3 +2785,73 @@ async def test_kernel_lists_workspace_communication_log_entries():
         "interaction_request",
         "interaction_answer",
     }
+
+
+@pytest.mark.asyncio
+async def test_kernel_persists_workspace_communication_log_to_jsonl(tmp_path):
+    repository = FakeRepository(communication_log_dir=tmp_path)
+    kernel = CollaborationKernel(repository)
+    seeded = _seed_interaction_workspace(
+        repository,
+        users=[("Alice", "backend")],
+    )
+
+    await kernel.post_message(
+        seeded["thread_id"],
+        CreateMessageRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["requester_id"],
+                participant_type="agent",
+                display_name="Research Agent",
+            ),
+            content="Please gather blockers.",
+            visibility="workspace",
+            create_task=False,
+        ),
+    )
+    create_result = await kernel.create_interaction_requests(
+        seeded["thread_id"],
+        CreateInteractionRequestsRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["requester_id"],
+                participant_type="agent",
+                display_name="Research Agent",
+            ),
+            requests=[
+                CreateInteractionRequest(
+                    title="Need backend input",
+                    questions=[CreateInteractionQuestionRequest(prompt="What blocks backend delivery?")],
+                    target_participant_ids=[seeded["users"]["Alice"]],
+                )
+            ],
+        ),
+    )
+    await kernel.answer_interaction_request(
+        create_result.details[0].request.request_id,
+        CreateInteractionAnswerRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["users"]["Alice"],
+                participant_type="user",
+                display_name="Alice",
+            ),
+            content="API review is blocking backend delivery.",
+        ),
+    )
+
+    log_file = tmp_path / f"{seeded['workspace_id']}.jsonl"
+    assert log_file.exists()
+    entries = [
+        json.loads(line)
+        for line in log_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert [entry["kind"] for entry in entries] == [
+        "message",
+        "interaction_request",
+        "interaction_answer",
+    ]
+    assert entries[0]["thread_title"] == "Coordination"
+    assert entries[0]["actor_display_name"] == "Research Agent"
+    assert entries[2]["actor_display_name"] == "Alice"
+    assert entries[2]["content"] == "API review is blocking backend delivery."

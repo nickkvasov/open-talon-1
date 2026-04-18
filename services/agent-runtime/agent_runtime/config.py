@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from pathlib import Path
 
 from open_talon_contracts.local_env import load_repo_local_env
+
+
+_ROOT_DIR = Path(__file__).resolve().parents[3]
 
 
 def _get_bool(name: str, default: bool) -> bool:
@@ -48,6 +52,7 @@ class RuntimeWorkerSettings:
     enable_kafka_wakeups: bool
     execution_root: str
     default_workspace_path: str | None
+    communication_log_dir: str | None = None
 
     @classmethod
     def from_env(cls) -> "RuntimeWorkerSettings":
@@ -88,4 +93,8 @@ class RuntimeWorkerSettings:
             enable_kafka_wakeups=_get_bool("ENABLE_KAFKA_WAKEUPS", True),
             execution_root=os.getenv("OPEN_TALON_EXECUTION_ROOT", "/tmp/open-talon-executions"),
             default_workspace_path=os.getenv("OPEN_TALON_DEFAULT_WORKSPACE_PATH"),
+            communication_log_dir=os.getenv(
+                "OPEN_TALON_COMMUNICATION_LOG_DIR",
+                str(_ROOT_DIR / "infrastructure" / "data" / "communication-logs"),
+            ),
         )

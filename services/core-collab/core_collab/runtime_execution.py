@@ -679,6 +679,8 @@ class RuntimeExecutionService:
                     )
                 for event in events:
                     await self._repository.record_event(conn, event)
+        if message is not None:
+            await self._repository.persist_workspace_communication_messages([message])
         return RunCommandResult(
             run=updated_run,
             task=updated_task,

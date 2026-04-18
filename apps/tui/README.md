@@ -9,6 +9,7 @@ The TUI can:
 - create or reuse a workspace
 - create or reuse a thread
 - post messages into the current thread
+- run a scriptable per-user client for multi-user end-to-end testing
 - inspect participants, roles, threads, and workspaces
 - create local agents and attach them to the current workspace
 - inspect system tools and attach or detach them from the current workspace
@@ -54,6 +55,14 @@ If you want reliable terminal mouse selection and terminal-native clickable link
 
 `tui2` is a scrollback-first client. It prints plain timeline lines into the normal terminal, so you can select text with the mouse the same way you would in any shell scrollback. URLs are printed as raw URLs and also emitted as terminal hyperlinks when supported by the terminal emulator.
 
+If you want one user-facing client instance per human profile for software-agent-driven end-to-end testing, use `user-client`:
+
+```bash
+./open-talon user-client --profile user1
+```
+
+`user-client` is a line-oriented REPL with stable commands and optional JSON output. It is designed for scenarios where several software development agents need to act as different human users at the same time without sharing local state.
+
 You can also trigger the same Keycloak device-login flow directly from the CLI:
 
 ```bash
@@ -62,6 +71,12 @@ python -m open_talon_tui.main auth login \
   --profile nikolay \
   --oidc-issuer-url http://127.0.0.1:8081/realms/open-talon \
   --oidc-client-id open-talon-tui
+```
+
+The same device-login flow is available for `user-client`:
+
+```bash
+./open-talon user-client auth login --profile user1
 ```
 
 ## Slash Commands
@@ -196,3 +211,69 @@ Useful commands in `tui2`:
 /copy
 /quit
 ```
+
+## User Client
+
+`user-client` is the recommended terminal client when you need software development agents to drive several human-user sessions end to end.
+
+Key properties:
+
+- one client instance maps to one local profile
+- one profile maps to one human user identity
+- state and tokens stay isolated under `~/.open-talon/profiles/<profile>/`
+- the command surface is explicit and stable enough for stdin/stdout automation
+- `--output json` produces machine-readable command results
+
+Typical multi-user setup:
+
+```bash
+./open-talon user-client auth login --profile admin
+./open-talon user-client auth login --profile user1
+./open-talon user-client auth login --profile user2
+```
+
+Then start one client instance per user:
+
+```bash
+./open-talon user-client --profile admin
+./open-talon user-client --profile user1
+./open-talon user-client --profile user2
+```
+
+Non-interactive command mode is available through repeated `--command` flags:
+
+```bash
+./open-talon user-client --profile admin --command "status"
+./open-talon user-client --profile admin --output json --command "workspace list"
+```
+
+Useful `user-client` commands:
+
+```text
+help
+status
+auth login
+auth logout
+workspace list
+workspace create <name>
+workspace use <id|name>
+thread list
+thread create <title>
+thread use <id|title>
+role list
+role use <role> [:: <description> :: <cap1,cap2>]
+send <text>
+timeline [limit]
+request list [open|all]
+request show <id|title|current>
+request answer <id|title|current> :: <text>
+log [limit]
+quit
+```
+
+Notes for end-to-end testing:
+
+- do not share a profile between users; each human test user needs its own client instance
+- `workspace use <uuid>` and `thread use <uuid>` accept direct ids, which is useful when another client already created the shared workspace or thread
+- plain message lines are sent directly; use `send <text>` when the line would otherwise be mistaken for a client command
+- selector mentions such as `@role:frontend_engineer` are parsed into atomic interaction-request payloads automatically when sending messages

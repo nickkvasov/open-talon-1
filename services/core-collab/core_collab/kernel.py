@@ -1703,7 +1703,7 @@ class CollaborationKernel:
         thread_id = uuid4()
         now = self._now()
         actor = self._actor_from_input(payload.actor)
-        participant = self._participant_profile(
+        participant = await self._participant_profile_for_actor(
             workspace_id=workspace_id,
             actor=payload.actor,
             now=now,
@@ -1811,6 +1811,14 @@ class CollaborationKernel:
             limit=limit,
             offset=offset,
         )
+
+    async def _persist_workspace_communication_messages(
+        self,
+        messages: list[TimelineMessage],
+    ) -> None:
+        if not messages:
+            return
+        await self._repository.persist_workspace_communication_messages(messages)
 
     async def list_pending_tasks_for_system_agent(
         self, system_agent_id: UUID, *, limit: int = 10
@@ -2465,10 +2473,10 @@ class CollaborationKernel:
             system_agent_id,
             result,
         )
-        if (
+        rendered_messages: list[TimelineMessage] = []
+        if completion.run is not None and completion.task is not None and (
             result.interaction_requests
-            and completion.run is not None
-            and completion.task is not None
+            or (completion.message is not None and result.metadata.get("create_task"))
         ):
             participant = await self._repository.fetch_participant(
                 completion.run.workspace_id,
@@ -2476,70 +2484,103 @@ class CollaborationKernel:
             )
             thread = await self._repository.fetch_thread(completion.task.thread_id)
             if participant is not None and thread is not None:
-                request_payloads = [
-                    CreateInteractionRequest(
-                        title=draft.title,
-                        summary=draft.summary,
-                        questions=[
-                            CreateInteractionQuestionRequest(
-                                prompt=question.prompt,
-                                kind=question.kind,
-                                expected_format=question.expected_format,
-                                metadata=question.metadata,
-                            )
-                            for question in draft.questions
-                        ],
-                        selectors=draft.selectors,
-                        target_participant_ids=draft.target_participant_ids,
-                        completion_rule=draft.completion_rule,
-                        timeout_at=draft.timeout_at,
-                        metadata=draft.metadata,
-                    )
-                    for draft in result.interaction_requests
-                ]
+                actor_input = ParticipantInput(
+                    participant_id=participant.participant_id,
+                    participant_type=participant.participant_type,
+                    user_id=participant.user_id,
+                    display_name=participant.display_name,
+                    description=participant.description,
+                    roles=participant.roles,
+                    capabilities=participant.capabilities,
+                    visibility_scope=participant.visibility_scope,
+                )
                 now = self._now()
+                extra_events: list[EventEnvelope] = []
                 async with self._repository._pool.acquire() as conn:  # noqa: SLF001
                     async with conn.transaction():
-                        request_result = await self._create_interaction_requests_in_transaction(
-                            conn,
-                            thread=thread,
-                            actor_input=ParticipantInput(
-                                participant_id=participant.participant_id,
-                                participant_type=participant.participant_type,
-                                user_id=participant.user_id,
-                                display_name=participant.display_name,
-                                description=participant.description,
-                                roles=participant.roles,
-                                capabilities=participant.capabilities,
-                                visibility_scope=participant.visibility_scope,
-                            ),
-                            requests=request_payloads,
-                            timestamp=now,
-                            correlation_id=completion.task.correlation_id,
-                            requester_message=completion.message,
-                            requester_run=completion.run,
-                            requester_task=completion.task,
-                        )
-                        for rendered_message in request_result.messages:
-                            await self._repository.upsert_message(conn, rendered_message)
-                            request_result.events.append(
-                                EventEnvelope(
-                                    event_type="message.created",
-                                    workspace_id=rendered_message.workspace_id,
-                                    thread_id=rendered_message.thread_id,
-                                    actor=rendered_message.actor,
-                                    target=TargetRef(type="message", id=rendered_message.message_id),
-                                    visibility=rendered_message.visibility,
-                                    correlation_id=rendered_message.correlation_id,
-                                    causation_id=rendered_message.causation_id,
-                                    sequence=rendered_message.sequence,
-                                    timestamp=now,
-                                    payload=rendered_message.model_dump(mode="json"),
+                        if completion.message is not None and result.metadata.get("create_task"):
+                            for task in await self._build_message_tasks(
+                                thread=thread,
+                                message=completion.message,
+                                actor_input=actor_input,
+                                visibility=completion.message.visibility,
+                                timestamp=now,
+                            ):
+                                await self._repository.upsert_task(conn, task)
+                                extra_events.append(
+                                    EventEnvelope(
+                                        event_type="task.created",
+                                        workspace_id=thread.workspace_id,
+                                        thread_id=thread.thread_id,
+                                        actor=completion.message.actor,
+                                        target=TargetRef(type="task", id=task.task_id),
+                                        visibility="agents_only",
+                                        correlation_id=completion.message.correlation_id,
+                                        causation_id=completion.message.message_id,
+                                        sequence=await self._repository.next_thread_sequence(
+                                            conn,
+                                            thread.thread_id,
+                                        ),
+                                        timestamp=now,
+                                        payload=task.model_dump(mode="json"),
+                                    )
                                 )
+                        if result.interaction_requests:
+                            request_payloads = [
+                                CreateInteractionRequest(
+                                    title=draft.title,
+                                    summary=draft.summary,
+                                    questions=[
+                                        CreateInteractionQuestionRequest(
+                                            prompt=question.prompt,
+                                            kind=question.kind,
+                                            expected_format=question.expected_format,
+                                            metadata=question.metadata,
+                                        )
+                                        for question in draft.questions
+                                    ],
+                                    selectors=draft.selectors,
+                                    target_participant_ids=draft.target_participant_ids,
+                                    completion_rule=draft.completion_rule,
+                                    timeout_at=draft.timeout_at,
+                                    metadata=draft.metadata,
                             )
-                        for event in request_result.events:
+                                for draft in result.interaction_requests
+                            ]
+                            request_result = await self._create_interaction_requests_in_transaction(
+                                conn,
+                                thread=thread,
+                                actor_input=actor_input,
+                                requests=request_payloads,
+                                timestamp=now,
+                                correlation_id=completion.task.correlation_id,
+                                requester_message=completion.message,
+                                requester_run=completion.run,
+                                requester_task=completion.task,
+                            )
+                            rendered_messages.extend(request_result.messages)
+                            for rendered_message in request_result.messages:
+                                await self._repository.upsert_message(conn, rendered_message)
+                                request_result.events.append(
+                                    EventEnvelope(
+                                        event_type="message.created",
+                                        workspace_id=rendered_message.workspace_id,
+                                        thread_id=rendered_message.thread_id,
+                                        actor=rendered_message.actor,
+                                        target=TargetRef(type="message", id=rendered_message.message_id),
+                                        visibility=rendered_message.visibility,
+                                        correlation_id=rendered_message.correlation_id,
+                                        causation_id=rendered_message.causation_id,
+                                        sequence=rendered_message.sequence,
+                                        timestamp=now,
+                                        payload=rendered_message.model_dump(mode="json"),
+                                    )
+                                )
+                            extra_events.extend(request_result.events)
+                        for event in extra_events:
                             await self._repository.record_event(conn, event)
-                completion.events.extend(request_result.events)
+                completion.events.extend(extra_events)
+        await self._persist_workspace_communication_messages(rendered_messages)
         return completion
 
     async def fail_run(
@@ -2573,7 +2614,7 @@ class CollaborationKernel:
             raise KeyError(f"Thread {thread_id} not found")
         now = self._now()
         actor = self._actor_from_input(payload.actor)
-        participant = self._participant_profile(
+        participant = await self._participant_profile_for_actor(
             workspace_id=thread.workspace_id,
             actor=payload.actor,
             now=now,
@@ -2701,6 +2742,11 @@ class CollaborationKernel:
                 for event in events:
                     await self._repository.record_event(conn, event)
 
+        persisted_messages = [message]
+        if payload.requests:
+            persisted_messages.extend(interaction_result.messages)
+        await self._persist_workspace_communication_messages(persisted_messages)
+
         logger.debug(
             "Kernel post_message complete thread_id=%s message_id=%s event_count=%s final_sequence=%s",
             thread_id,
@@ -2768,6 +2814,7 @@ class CollaborationKernel:
                     )
                 for event in result.events:
                     await self._repository.record_event(conn, event)
+        await self._persist_workspace_communication_messages(result.messages)
         return result
 
     async def update_interaction_request(
@@ -2785,7 +2832,7 @@ class CollaborationKernel:
             payload.actor.participant_id,
         )
         if participant is None:
-            participant = self._participant_profile(
+            participant = await self._participant_profile_for_actor(
                 workspace_id=existing.request.workspace_id,
                 actor=payload.actor,
                 now=now,
@@ -2958,7 +3005,7 @@ class CollaborationKernel:
             payload.actor.participant_id,
         )
         if participant is None:
-            participant = self._participant_profile(
+            participant = await self._participant_profile_for_actor(
                 workspace_id=thread.workspace_id,
                 actor=payload.actor,
                 now=now,
@@ -3104,6 +3151,7 @@ class CollaborationKernel:
                         )
                 for event in events:
                     await self._repository.record_event(conn, event)
+        await self._persist_workspace_communication_messages([answer_message])
         return InteractionRequestCommandResult(
             detail=await self.get_interaction_request(request_id),
             events=events,
@@ -3140,7 +3188,7 @@ class CollaborationKernel:
             raise KeyError(f"Workspace {workspace_id} not found")
         now = self._now()
         actor = self._actor_from_input(payload.actor)
-        participant = self._participant_profile(
+        participant = await self._participant_profile_for_actor(
             workspace_id=workspace_id,
             actor=payload.actor,
             now=now,
@@ -3192,7 +3240,7 @@ class CollaborationKernel:
             raise KeyError(f"Thread {thread_id} not found")
         now = self._now()
         actor = self._actor_from_input(payload.actor)
-        participant = self._participant_profile(
+        participant = await self._participant_profile_for_actor(
             workspace_id=thread.workspace_id,
             actor=payload.actor,
             now=now,
@@ -3250,7 +3298,7 @@ class CollaborationKernel:
             raise KeyError(f"Memory entry {payload.source_memory_entry_id} not found")
         now = self._now()
         actor = self._actor_from_input(payload.actor)
-        participant = self._participant_profile(
+        participant = await self._participant_profile_for_actor(
             workspace_id=workspace_id,
             actor=payload.actor,
             now=now,
@@ -3313,7 +3361,7 @@ class CollaborationKernel:
             raise KeyError(f"Memory entry {memory_entry_id} not found")
         now = self._now()
         actor = self._actor_from_input(payload.actor)
-        participant = self._participant_profile(
+        participant = await self._participant_profile_for_actor(
             workspace_id=workspace_id,
             actor=payload.actor,
             now=now,
@@ -3368,7 +3416,7 @@ class CollaborationKernel:
             raise KeyError(f"Memory entry {memory_entry_id} not found")
         now = self._now()
         actor = self._actor_from_input(payload.actor)
-        participant = self._participant_profile(
+        participant = await self._participant_profile_for_actor(
             workspace_id=thread.workspace_id,
             actor=payload.actor,
             now=now,
@@ -3423,7 +3471,7 @@ class CollaborationKernel:
             raise KeyError(f"Memory entry {memory_entry_id} not found")
         now = self._now()
         actor = self._actor_from_input(actor_input)
-        participant = self._participant_profile(
+        participant = await self._participant_profile_for_actor(
             workspace_id=workspace_id,
             actor=actor_input,
             now=now,
@@ -3471,7 +3519,7 @@ class CollaborationKernel:
             raise KeyError(f"Memory entry {memory_entry_id} not found")
         now = self._now()
         actor = self._actor_from_input(actor_input)
-        participant = self._participant_profile(
+        participant = await self._participant_profile_for_actor(
             workspace_id=thread.workspace_id,
             actor=actor_input,
             now=now,
@@ -3516,7 +3564,7 @@ class CollaborationKernel:
         provider = self._memory_provider_index.get(provider_definition.provider)
         if provider is None:
             raise ValueError(f"Unsupported memory provider {provider_definition.provider!r}")
-        viewer = self._participant_profile(
+        viewer = await self._participant_profile_for_actor(
             workspace_id=thread.workspace_id,
             actor=payload.actor,
             now=self._now(),
@@ -3572,7 +3620,7 @@ class CollaborationKernel:
         if run is None:
             raise KeyError(f"Run {run_id} not found")
         now = self._now()
-        participant = self._participant_profile(
+        participant = await self._participant_profile_for_actor(
             workspace_id=run.workspace_id,
             actor=actor_input,
             now=now,
@@ -3623,7 +3671,7 @@ class CollaborationKernel:
             raise KeyError(f"Thread {thread_id} not found")
         now = self._now()
         actor = self._actor_from_input(actor_input)
-        participant = self._participant_profile(
+        participant = await self._participant_profile_for_actor(
             workspace_id=thread.workspace_id,
             actor=actor_input,
             now=now,
@@ -3771,6 +3819,20 @@ class CollaborationKernel:
             and participant.status in {"active", "idle"}
             and participant.system_agent_id is not None
         ]
+        target_system_agent_id = self._metadata_uuid(message.metadata, "target_system_agent_id")
+        target_participant_id = self._metadata_uuid(message.metadata, "target_participant_id")
+        if target_system_agent_id is not None:
+            active_agents = [
+                participant
+                for participant in active_agents
+                if participant.system_agent_id == target_system_agent_id
+            ]
+        if target_participant_id is not None:
+            active_agents = [
+                participant
+                for participant in active_agents
+                if participant.participant_id == target_participant_id
+            ]
         tasks: list[Task] = []
         if not active_agents:
             tasks.append(
@@ -3819,6 +3881,18 @@ class CollaborationKernel:
                 )
             )
         return tasks
+
+    @staticmethod
+    def _metadata_uuid(metadata: dict[str, object], key: str) -> UUID | None:
+        value = metadata.get(key)
+        if value is None:
+            return None
+        if isinstance(value, UUID):
+            return value
+        try:
+            return UUID(str(value))
+        except (TypeError, ValueError):
+            return None
 
     async def _create_interaction_requests_in_transaction(
         self,
@@ -4854,20 +4928,63 @@ class CollaborationKernel:
         actor: ParticipantInput,
         now: datetime,
         status: str = "active",
+        existing: ParticipantProfile | None = None,
     ) -> ParticipantProfile:
+        roles = list(actor.roles) if actor.roles else list(existing.roles if existing is not None else [])
+        capabilities = (
+            list(actor.capabilities)
+            if actor.capabilities
+            else list(existing.capabilities if existing is not None else [])
+        )
+        description = actor.description if actor.description is not None else (
+            existing.description if existing is not None else None
+        )
+        if actor.participant_type == "user":
+            user_id = actor.user_id if actor.user_id is not None else (
+                existing.user_id if existing is not None else None
+            )
+        else:
+            user_id = None
+        visibility_scope = actor.visibility_scope
+        if (
+            existing is not None
+            and actor.visibility_scope == "workspace"
+            and existing.visibility_scope != "workspace"
+        ):
+            visibility_scope = existing.visibility_scope
         return ParticipantProfile(
             participant_id=actor.participant_id,
             workspace_id=workspace_id,
             participant_type=actor.participant_type,
-            user_id=(actor.user_id if actor.participant_type == "user" else None),
+            user_id=user_id,
+            system_agent_id=existing.system_agent_id if existing is not None else None,
             display_name=actor.display_name,
-            description=actor.description,
-            roles=actor.roles,
-            capabilities=actor.capabilities,
+            description=description,
+            roles=roles,
+            capabilities=capabilities,
             status=status,
-            visibility_scope=actor.visibility_scope,
-            created_at=now,
+            visibility_scope=visibility_scope,
+            agent_config=existing.agent_config if existing is not None else None,
+            created_at=existing.created_at if existing is not None else now,
             updated_at=now,
+            metadata=dict(existing.metadata) if existing is not None else {},
+        )
+
+    async def _participant_profile_for_actor(
+        self,
+        *,
+        workspace_id: UUID,
+        actor: ParticipantInput,
+        now: datetime,
+        status: str = "active",
+    ) -> ParticipantProfile:
+        existing = await self._repository.fetch_participant(workspace_id, actor.participant_id)
+        return self._participant_profile(
+            workspace_id=workspace_id,
+            actor=actor,
+            now=now,
+            status=status,
+            existing=existing,
         )
 
     @staticmethod

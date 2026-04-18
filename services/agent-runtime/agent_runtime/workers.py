@@ -98,7 +98,10 @@ class _HeartbeatTask:
 
 async def create_kernel(settings: RuntimeWorkerSettings) -> tuple[asyncpg.Pool, CollaborationKernel]:
     pool = await asyncpg.create_pool(dsn=settings.postgres_dsn, min_size=1, max_size=10)
-    repository = CollaborationRepository(pool)
+    repository = CollaborationRepository(
+        pool,
+        communication_log_dir=settings.communication_log_dir,
+    )
     kernel = CollaborationKernel(repository)
     await kernel.setup_schema()
     return pool, kernel

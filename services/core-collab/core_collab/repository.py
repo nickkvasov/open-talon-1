@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -91,8 +93,18 @@ class AuthIdentityRecord:
 
 
 class CollaborationRepository:
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    def __init__(
+        self,
+        pool: asyncpg.Pool,
+        *,
+        communication_log_dir: str | Path | None = None,
+    ) -> None:
         self._pool = pool
+        self._communication_log_dir = (
+            Path(communication_log_dir).expanduser()
+            if communication_log_dir is not None
+            else None
+        )
 
     async def setup_schema(self) -> None:
         await apply_pending_migrations(self._pool)
@@ -3246,6 +3258,40 @@ class CollaborationRepository:
             total_count=int(total_count or 0),
         )
 
+    async def persist_workspace_communication_messages(
+        self,
+        messages: Sequence[TimelineMessage],
+    ) -> None:
+        if self._communication_log_dir is None:
+            return
+        entries: list[WorkspaceCommunicationLogEntry] = []
+        for message in messages:
+            if message.status in {"draft", "streaming"}:
+                continue
+            thread = await self.fetch_thread(message.thread_id)
+            if thread is None:
+                continue
+            participant = await self.fetch_participant(
+                message.workspace_id,
+                message.actor.id,
+            )
+            actor_display_name = (
+                participant.display_name if participant is not None else str(message.actor.id)
+            )
+            entries.append(
+                self._workspace_communication_log_entry_from_message(
+                    message,
+                    thread_title=thread.title,
+                    actor_display_name=actor_display_name,
+                )
+            )
+        if not entries:
+            return
+        await asyncio.to_thread(
+            self._append_workspace_communication_log_entries_sync,
+            entries,
+        )
+
     async def list_thread_events(
         self, thread_id: UUID, *, after_sequence: int | None = None
     ) -> list[EventEnvelope]:
@@ -3888,6 +3934,68 @@ class CollaborationRepository:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
+
+    @staticmethod
+    def _workspace_communication_log_entry_from_message(
+        message: TimelineMessage,
+        *,
+        thread_title: str,
+        actor_display_name: str,
+    ) -> WorkspaceCommunicationLogEntry:
+        metadata = dict(message.metadata)
+        interaction_request_id = CollaborationRepository._uuid_or_none(
+            metadata.get("interaction_request_id")
+        )
+        interaction_question_ids = CollaborationRepository._uuid_list(
+            metadata.get("interaction_question_ids", [])
+        )
+        if interaction_request_id is not None and "interaction_question_ids" in metadata:
+            kind = "interaction_answer"
+        elif interaction_request_id is not None:
+            kind = "interaction_request"
+        else:
+            kind = "message"
+        return WorkspaceCommunicationLogEntry(
+            message_id=message.message_id,
+            workspace_id=message.workspace_id,
+            thread_id=message.thread_id,
+            thread_title=thread_title,
+            actor=message.actor,
+            actor_display_name=actor_display_name,
+            visibility=message.visibility,
+            kind=kind,
+            content=message.content,
+            status=message.status,
+            correlation_id=message.correlation_id,
+            causation_id=message.causation_id,
+            sequence=message.sequence,
+            interaction_request_id=interaction_request_id,
+            interaction_request_status=metadata.get("interaction_request_status"),
+            interaction_question_ids=interaction_question_ids,
+            metadata=metadata,
+            created_at=message.created_at,
+            updated_at=message.updated_at,
+        )
+
+    def _append_workspace_communication_log_entries_sync(
+        self,
+        entries: Sequence[WorkspaceCommunicationLogEntry],
+    ) -> None:
+        if self._communication_log_dir is None:
+            return
+        grouped_payloads: dict[Path, list[bytes]] = {}
+        for entry in entries:
+            file_path = self._communication_log_dir / f"{entry.workspace_id}.jsonl"
+            payload = (
+                json.dumps(entry.model_dump(mode="json"), sort_keys=True).encode("utf-8")
+                + b"\n"
+            )
+            grouped_payloads.setdefault(file_path, []).append(payload)
+        for file_path, payloads in grouped_payloads.items():
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            with file_path.open("ab") as handle:
+                for payload in payloads:
+                    handle.write(payload)
 
     @staticmethod
     def _event_from_row(row: asyncpg.Record) -> EventEnvelope:

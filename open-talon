@@ -342,6 +342,14 @@ tui2_cmd() {
   exec env PYTHONPATH="${pythonpath}" "${PYTHON_BIN}" -m open_talon_tui.tui2 --gateway http://127.0.0.1:8000 "$@"
 }
 
+user_client_cmd() {
+  ensure_python
+  load_local_env
+  local pythonpath
+  pythonpath="$(repo_pythonpath)"
+  exec env PYTHONPATH="${pythonpath}" "${PYTHON_BIN}" -m open_talon_tui.user_client --gateway http://127.0.0.1:8000 "$@"
+}
+
 usage() {
   cat <<EOF
 Usage:
@@ -351,6 +359,8 @@ Usage:
   ./open-talon tui auth login [auth args]
   ./open-talon tui2 [extra tui2 args]
   ./open-talon tui2 auth login [auth args]
+  ./open-talon user-client [extra client args]
+  ./open-talon user-client auth login [auth args]
 EOF
 }
 
@@ -370,6 +380,10 @@ case "${1:-}" in
   tui2)
     shift
     tui2_cmd "$@"
+    ;;
+  user-client)
+    shift
+    user_client_cmd "$@"
     ;;
   *)
     usage

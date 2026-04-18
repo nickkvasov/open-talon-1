@@ -2,6 +2,11 @@
 
 This is the fastest path to get the full local Open Talon system running with the current Keycloak-based auth flow.
 
+For full current-state reference material, use:
+
+- [system-api-reference.md](./system-api-reference.md)
+- [agent-operations-guide.md](./agent-operations-guide.md)
+
 ## Prerequisites
 
 - Docker with `docker compose`
@@ -233,7 +238,7 @@ Current thread-native request flow:
 5. When complete, `core-collab` creates a follow-up task only for the original requesting agent.
 6. `agent-runtime` resumes that agent with the request and accumulated answers in context.
 
-For workspace debugging, there is also a workspace communication-log view backed by canonical `timeline_messages`. It aggregates regular thread messages, rendered interaction requests, and interaction answers across the workspace. The HTTP route is intended for workspace `admin` or `supervisor` users when using OIDC.
+For workspace debugging, there is also a workspace communication-log view backed by canonical `timeline_messages`. It aggregates regular thread messages, rendered interaction requests, and interaction answers across the workspace. Finalized communication entries are also appended to workspace JSONL files under `OPEN_TALON_COMMUNICATION_LOG_DIR` so the collaboration trace can be inspected from disk. The HTTP route is intended for workspace `admin` or `supervisor` users when using OIDC.
 
 Relevant collaboration APIs:
 
@@ -279,10 +284,24 @@ For the most reliable terminal experience, start `tui2` with a named local profi
 
 That opens the scrollback-first terminal client in normal terminal mode. Mouse selection works like a regular shell session, and URLs are printed as plain text so they stay easy to copy or open.
 
+If you need software development agents to operate several human-user sessions end to end, start one `user-client` instance per user profile instead:
+
+```bash
+./open-talon user-client --profile user1
+```
+
+`user-client` is line-oriented and profile-isolated, so it is easier to drive over stdin/stdout than `tui2` when multiple automated users need to coordinate in parallel.
+
 If you want to authenticate a profile before opening the terminal client, trigger the same device-login flow directly from the CLI:
 
 ```bash
 ./open-talon tui2 auth login --profile admin
+```
+
+The same device-login flow is available for `user-client`:
+
+```bash
+./open-talon user-client auth login --profile user1
 ```
 
 Inside `tui2`, the basic first-run flow is:
@@ -332,6 +351,9 @@ Important behavior:
 - the gateway derives the authenticated human actor server-side
 - the TUI no longer owns human identity through a local `participant_id`
 - only the current per-profile TUI state/token format is supported; older local auth/state is not migrated and existing users must sign in again
+- `user-client` is the recommended entrypoint when one software agent needs to control each human test user separately
+- `user-client --output json` emits machine-readable command results for automation
+- `user-client` accepts direct `workspace use <uuid>` and `thread use <uuid>` commands, which helps multiple profiles join the same shared scenario explicitly
 
 Useful TUI commands:
 
@@ -363,12 +385,38 @@ Useful `tui2` commands:
 /quit
 ```
 
+Useful `user-client` commands:
+
+```text
+help
+status
+auth login
+auth logout
+workspace list
+workspace create <name>
+workspace use <id|name>
+thread list
+thread create <title>
+thread use <id|title>
+role list
+role use <role> [:: <description> :: <cap1,cap2>]
+send <text>
+timeline [limit]
+request list [open|all]
+request show <id|title|current>
+request answer <id|title|current> :: <text>
+log [limit]
+quit
+```
+
 Typical local usage examples:
 
 ```bash
 ./open-talon tui2 --profile supervisor
 ./open-talon tui2 --profile user1
 ./open-talon tui2 --profile user2
+./open-talon user-client --profile user1
+./open-talon user-client --profile user2
 ```
 
 That lets multiple humans use the same machine without sharing identity. Each profile gets its own state and token files under `~/.open-talon/profiles/<profile>/`.

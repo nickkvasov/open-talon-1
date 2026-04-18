@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Literal
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -8,6 +9,7 @@ from open_talon_contracts.local_env import load_repo_local_env
 
 
 load_repo_local_env()
+_ROOT_DIR = Path(__file__).resolve().parents[3]
 
 
 class Settings(BaseSettings):
@@ -126,6 +128,9 @@ class Settings(BaseSettings):
     asset_storage_force_path_style: bool = True
     asset_storage_presign_expiry_seconds: int = 900
     forgejo_base_url: str = "http://127.0.0.1:3001"
+    communication_log_dir: str = str(
+        _ROOT_DIR / "infrastructure" / "data" / "communication-logs"
+    )
 
     # ── Dev helpers ──────────────────────────────────────────────────────────
     # When True, an in-process echo consumer answers chat requests so you can

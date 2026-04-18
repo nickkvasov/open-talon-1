@@ -4,6 +4,15 @@ This repository contains the local infrastructure, Python services, and client a
 
 For coding-agent-specific project guidance, see [`AGENTS.md`](/Users/nikolay.kvasov/Development/open-talon-1/AGENTS.md).
 
+## Documentation Map
+
+- [docs/system-quickstart.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/system-quickstart.md): fastest path to a running local stack
+- [docs/system-api-reference.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/system-api-reference.md): current system and API reference for engineers and client builders
+- [docs/agent-operations-guide.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/agent-operations-guide.md): operating guide for software development agents and scripted test users
+- [docs/db-migrations.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/db-migrations.md): migration workflow and schema rules
+- [docs/collaboration-system-design.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/collaboration-system-design.md): design background and architecture evolution
+- [AGENTS.md](/Users/nikolay.kvasov/Development/open-talon-1/AGENTS.md): repository contribution rules for coding agents
+
 ## System Overview
 
 Open Talon is a local-first collaboration system where users and agents are first-class participants.
@@ -86,7 +95,7 @@ The current thread-native request flow is:
 5. When the request is complete, `core-collab` creates a follow-up task targeted only to the original requesting agent.
 6. `agent-runtime` resumes that agent with the original request, targets, and accumulated answers in execution context.
 
-For workspace-level debugging, Open Talon now also exposes a communication log view backed by canonical `timeline_messages`. It aggregates thread messages, rendered interaction requests, and interaction answers across the workspace, and is intended for workspace `admin` or `supervisor` troubleshooting flows.
+For workspace-level debugging, Open Talon now also exposes a communication log view backed by canonical `timeline_messages`. It aggregates thread messages, rendered interaction requests, and interaction answers across the workspace, and is intended for workspace `admin` or `supervisor` troubleshooting flows. Finalized communications are also appended to workspace JSONL files under `OPEN_TALON_COMMUNICATION_LOG_DIR` (default: `infrastructure/data/communication-logs/<workspace_id>.jsonl`) so end-to-end collaboration traces survive outside the database.
 
 Common collaboration endpoints:
 
@@ -715,11 +724,21 @@ For terminal-first usage, prefer `tui2`:
 
 `tui2` runs in normal terminal scrollback instead of a full-screen widget layout, so mouse selection works like a regular shell session and raw URLs remain easy to copy or open.
 
+For multi-user end-to-end testing driven by software development agents, use `user-client` instead:
+
+```bash
+./open-talon user-client --profile user1
+```
+
+`user-client` is a scriptable per-user terminal client. One client instance should be used per human test user, and each instance should have its own local profile.
+
 Useful local flows:
 
 ```bash
 ./open-talon tui2 --profile admin
 ./open-talon tui2 auth login --profile admin
+./open-talon user-client --profile user1
+./open-talon user-client auth login --profile user1
 ```
 
 Inside `tui2`, the minimum auth path is:
@@ -727,6 +746,16 @@ Inside `tui2`, the minimum auth path is:
 ```text
 /auth login
 /account whoami
+```
+
+Inside `user-client`, the minimum multi-user path is:
+
+```text
+auth login
+status
+workspace use <id|name>
+thread use <id|title>
+timeline
 ```
 
 ## Database Migrations
@@ -801,6 +830,9 @@ pytest -q
 
 # Gateway tests only
 pytest tests/gateway-edge -q
+
+# Business case scenarios only
+pytest tests/business-cases -q
 
 # Infrastructure integration tests
 pytest -m integration tests/infrastructure/test_infrastructure.py -v -s

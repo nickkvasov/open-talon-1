@@ -112,7 +112,10 @@ class CollaborationService:
 
     async def start(self) -> None:
         pool = await get_pool()
-        repository = CollaborationRepository(pool)
+        repository = CollaborationRepository(
+            pool,
+            communication_log_dir=settings.communication_log_dir,
+        )
         self._kernel = CollaborationKernel(repository)
         await self._kernel.setup_schema()
         event_service.set_event_handler(self._handle_published_event)
