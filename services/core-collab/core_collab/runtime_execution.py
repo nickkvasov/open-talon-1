@@ -294,6 +294,12 @@ class RuntimeExecutionService:
             viewer=participant,
         )
         tool_results = await self._repository.list_completed_tool_calls_for_run(run.run_id)
+        interaction_requests = []
+        request_id = task.metadata.get("request_id")
+        if isinstance(request_id, str):
+            detail = await self._repository.get_interaction_request_detail(UUID(request_id))
+            if detail is not None:
+                interaction_requests.append(detail)
         return AgentExecutionContext(
             workspace=workspace,
             thread=thread,
@@ -306,6 +312,7 @@ class RuntimeExecutionService:
             role_definitions=self._role_definitions_from_workspace(workspace),
             workspace_tools=workspace_tools,
             messages=visible_messages,
+            interaction_requests=interaction_requests,
             run_memory=visible_run_memory,
             thread_memory=visible_thread_memory,
             workspace_memory=visible_workspace_memory,

@@ -48,6 +48,57 @@ Important implications:
 - the local Keycloak dev setup is intended to allow HTTP during development; `keycloak-init` normalizes `sslRequired=none` for both `master` and `open-talon`, and you can re-apply that with `docker compose up -d keycloak keycloak-init`
 - browser-based admin flows use the `open-talon-web` public Keycloak client with authorization code + PKCE; terminal flows use `open-talon-tui` with device flow
 
+## Collaboration Model
+
+Open Talon’s collaboration model is workspace-first and thread-native.
+
+Core entities:
+
+- `workspace`: the top-level collaboration boundary for participants, roles, tools, memory, and execution policy
+- `participant`: the workspace-local materialization of a human or system agent, including status, roles, capabilities, and visibility
+- `thread`: the shared collaboration stream inside a workspace
+- `timeline_message`: an ordered message in a thread, visible to users, agents, or both depending on `visibility`
+- `interaction_request`: a tracked question workflow attached to a thread
+- `task` and `run`: the durable execution handoff from collaboration into agent-runtime
+
+Important rules:
+
+- `users` and `system_agents` are global identity/configuration records; `participants` are workspace-local state
+- thread activity is ordered by a monotonic thread-local `sequence`
+- Postgres is the source of truth for collaboration and execution state; Kafka is the wake-up and fanout bus
+- threads are the shared surface in v1; tracked requests are rendered into the same thread instead of using private DM semantics
+- plain messages can create agent work, but tracked requests are the resumable path when answers need to be correlated back into an agent loop
+
+Tracked interaction requests support:
+
+- one request containing one or more ordered questions
+- explicit participant targets plus selector-based routing with `@participant`, `@role:<name>`, and `@capability:<name>`
+- aggregated answers from multiple participants
+- completion rules including `all_targets`, `minimum_answers`, `one_per_selector_bucket`, and `custom_targets`
+- agent resume only when the request becomes complete, not on every partial answer
+
+The current thread-native request flow is:
+
+1. A user or agent posts a message or structured interaction request into a thread.
+2. `core-collab` persists the request, resolved targets, rendered thread message, and collaboration events.
+3. Participants answer through normal thread messages linked to the request.
+4. `core-collab` aggregates answers against the request’s completion rule.
+5. When the request is complete, `core-collab` creates a follow-up task targeted only to the original requesting agent.
+6. `agent-runtime` resumes that agent with the original request, targets, and accumulated answers in execution context.
+
+Common collaboration endpoints:
+
+- `POST /v1/workspaces`
+- `GET /v1/workspaces/{workspace_id}/participants`
+- `POST /v1/workspaces/{workspace_id}/threads`
+- `GET /v1/threads/{thread_id}/timeline`
+- `POST /v1/threads/{thread_id}/messages`
+- `GET /v1/threads/{thread_id}/requests`
+- `POST /v1/threads/{thread_id}/requests`
+- `GET /v1/requests/{request_id}`
+- `PATCH /v1/requests/{request_id}`
+- `POST /v1/requests/{request_id}/answers`
+
 ## Admin Web
 
 The admin web app lives in [apps/admin-web](/Users/nikolay.kvasov/Development/open-talon-1/apps/admin-web) and is the main browser surface for:

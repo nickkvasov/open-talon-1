@@ -51,6 +51,8 @@ class MockCollaborationService:
         self.threads = {}
         self.memberships = {}
         self.messages = {}
+        self.interaction_requests = {}
+        self.interaction_request_answers = {}
         self.memory_entries = {}
         self.events = {}
         self.workspace_sequences = {}
@@ -1097,6 +1099,19 @@ class MockCollaborationService:
         )
         self.events.setdefault(str(thread_id), []).append(event)
         await self._fan_out(thread_id, event)
+        if getattr(payload, "requests", None):
+            created = await self.create_interaction_requests(
+                thread_id,
+                type(
+                    "CreateInteractionRequestsPayload",
+                    (),
+                    {"actor": payload.actor, "requests": payload.requests, "metadata": {}},
+                )(),
+            )
+            for detail in created:
+                message.metadata.setdefault("interaction_request_ids", []).append(
+                    str(detail.request.request_id)
+                )
         if payload.create_task:
             task_event = EventEnvelope(
                 event_type="task.created",
@@ -1115,6 +1130,198 @@ class MockCollaborationService:
             self.events[str(thread_id)].append(task_event)
             await self._fan_out(thread_id, task_event)
         return message
+
+    async def list_interaction_requests(self, thread_id: UUID):
+        if str(thread_id) not in self.threads:
+            raise KeyError(f"Thread {thread_id} not found")
+        return list(self.interaction_requests.get(str(thread_id), {}).values())
+
+    async def get_interaction_request(self, request_id: UUID):
+        for requests in self.interaction_requests.values():
+            detail = requests.get(str(request_id))
+            if detail is not None:
+                return detail
+        raise KeyError(f"Interaction request {request_id} not found")
+
+    async def create_interaction_requests(self, thread_id: UUID, payload):
+        from gateway_edge.models import (
+            ActorRef,
+            CompletionRule,
+            InteractionQuestion,
+            InteractionRequest,
+            InteractionRequestDetail,
+            InteractionRequestTarget,
+            TimelineMessage,
+        )
+
+        thread = self.threads.get(str(thread_id))
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
+        now = datetime.now(timezone.utc)
+        details = []
+        participants = self.participants.get(str(thread.workspace_id), {})
+        for request_payload in payload.requests:
+            request = InteractionRequest(
+                request_id=uuid4(),
+                workspace_id=thread.workspace_id,
+                thread_id=thread_id,
+                requester_participant_id=payload.actor.participant_id,
+                title=request_payload.title,
+                summary=request_payload.summary,
+                completion_rule=request_payload.completion_rule or CompletionRule(),
+                created_at=now,
+                updated_at=now,
+                metadata={"selectors": [selector.model_dump(mode="json") for selector in request_payload.selectors]},
+            )
+            questions = [
+                InteractionQuestion(
+                    question_id=uuid4(),
+                    request_id=request.request_id,
+                    prompt=question.prompt,
+                    kind=question.kind,
+                    expected_format=question.expected_format,
+                    order=index,
+                    metadata=question.metadata,
+                )
+                for index, question in enumerate(request_payload.questions)
+            ]
+            targets = []
+            for selector in request_payload.selectors:
+                if selector.type == "participant":
+                    matched = next(
+                        (
+                            participant
+                            for participant in participants.values()
+                            if participant.display_name.lower() == selector.value.lower()
+                        ),
+                        None,
+                    )
+                    if matched is not None:
+                        targets.append(
+                            InteractionRequestTarget(
+                                target_id=uuid4(),
+                                request_id=request.request_id,
+                                participant_id=matched.participant_id,
+                                selector_type="participant",
+                                selector_value=selector.value,
+                                selection_source="selector",
+                                created_at=now,
+                                updated_at=now,
+                            )
+                        )
+            detail = InteractionRequestDetail(
+                request=request,
+                questions=questions,
+                targets=targets,
+                answers=[],
+            )
+            self.interaction_requests.setdefault(str(thread_id), {})[str(request.request_id)] = detail
+            next_sequence = self.thread_sequences.get(str(thread_id), 0) + 1
+            self.thread_sequences[str(thread_id)] = next_sequence
+            rendered = TimelineMessage(
+                message_id=uuid4(),
+                workspace_id=thread.workspace_id,
+                thread_id=thread_id,
+                actor=ActorRef(type=payload.actor.participant_type, id=payload.actor.participant_id),
+                visibility="workspace",
+                content=request.title,
+                correlation_id=uuid4(),
+                sequence=next_sequence,
+                created_at=now,
+                updated_at=now,
+                metadata={
+                    "interaction_request_id": str(request.request_id),
+                    "interaction_request_status": request.status,
+                    "interaction_aggregate": {"answered_count": 0, "target_count": len(targets)},
+                },
+            )
+            self.messages.setdefault(str(thread_id), []).append(rendered)
+            details.append(detail)
+        return details
+
+    async def update_interaction_request(self, request_id: UUID, payload):
+        detail = await self.get_interaction_request(request_id)
+        now = datetime.now(timezone.utc)
+        if payload.action == "cancel":
+            detail = detail.model_copy(
+                update={
+                    "request": detail.request.model_copy(
+                        update={"status": "cancelled", "updated_at": now}
+                    )
+                }
+            )
+        elif payload.action == "timeout":
+            detail = detail.model_copy(
+                update={
+                    "request": detail.request.model_copy(
+                        update={"status": "timed_out", "updated_at": now}
+                    )
+                }
+            )
+        elif payload.action in {"acknowledge_target", "dismiss_target"}:
+            if payload.target_id is None:
+                raise ValueError("target_id is required for target actions")
+            target_found = False
+            updated_targets = []
+            for target in detail.targets:
+                if target.target_id == payload.target_id:
+                    target_found = True
+                    updated_targets.append(
+                        target.model_copy(
+                            update={
+                                "status": (
+                                    "acknowledged"
+                                    if payload.action == "acknowledge_target"
+                                    else "dismissed"
+                                ),
+                                "updated_at": now,
+                            }
+                        )
+                    )
+                else:
+                    updated_targets.append(target)
+            if not target_found:
+                raise KeyError(f"Interaction request target {payload.target_id} not found")
+            detail = detail.model_copy(
+                update={
+                    "request": detail.request.model_copy(update={"updated_at": now}),
+                    "targets": updated_targets,
+                }
+            )
+        self.interaction_requests[str(detail.request.thread_id)][str(request_id)] = detail
+        return detail
+
+    async def answer_interaction_request(self, request_id: UUID, payload):
+        from gateway_edge.models import InteractionAnswer
+
+        detail = await self.get_interaction_request(request_id)
+        now = datetime.now(timezone.utc)
+        answer = InteractionAnswer(
+            answer_id=uuid4(),
+            request_id=request_id,
+            participant_id=payload.actor.participant_id,
+            message_id=uuid4(),
+            question_ids=list(payload.question_ids),
+            created_at=now,
+            metadata=payload.metadata,
+        )
+        updated_targets = []
+        for target in detail.targets:
+            if target.participant_id == payload.actor.participant_id:
+                updated_targets.append(
+                    target.model_copy(update={"status": "answered", "updated_at": now})
+                )
+            else:
+                updated_targets.append(target)
+        updated = detail.model_copy(
+            update={
+                "request": detail.request.model_copy(update={"updated_at": now}),
+                "targets": updated_targets,
+                "answers": [*detail.answers, answer],
+            }
+        )
+        self.interaction_requests[str(detail.request.thread_id)][str(request_id)] = updated
+        return updated
 
     def _memory_entry_matches(
         self,

@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -65,6 +66,33 @@ def _render_terminal_links(text: str) -> str:
 def _format_timestamp(raw_timestamp: str | None) -> str:
     if not raw_timestamp:
         return "--:--"
+
+
+_INTERACTION_SELECTOR_PATTERN = re.compile(r"@(?:(role|capability):)?([A-Za-z0-9_.-]+)")
+
+
+def _build_interaction_requests_from_text(text: str) -> list[dict]:
+    selectors: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for match in _INTERACTION_SELECTOR_PATTERN.finditer(text):
+        selector_type = match.group(1) or "participant"
+        selector_value = match.group(2)
+        key = (selector_type, selector_value.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        selectors.append({"type": selector_type, "value": selector_value})
+    if not selectors:
+        return []
+    prompt = _INTERACTION_SELECTOR_PATTERN.sub("", text)
+    prompt = re.sub(r"\s+", " ", prompt).strip() or text.strip()
+    return [
+        {
+            "title": "Participant Question",
+            "questions": [{"prompt": prompt}],
+            "selectors": selectors,
+        }
+    ]
     try:
         normalized = raw_timestamp.replace("Z", "+00:00")
         timestamp = datetime.fromisoformat(normalized)
@@ -1056,6 +1084,20 @@ class ScrollbackTUI2:
         actor_id = actor.get("id", "")
         prefix = "You" if actor_id == self.state.participant_id else f"Peer {actor_id[:8]}"
         content = message.get("content", "")
+        metadata = message.get("metadata", {})
+        if isinstance(metadata, dict):
+            request_id = metadata.get("interaction_request_id")
+            request_status = metadata.get("interaction_request_status")
+            aggregate = metadata.get("interaction_aggregate")
+            if request_id:
+                coverage = ""
+                if isinstance(aggregate, dict):
+                    coverage = (
+                        f" {aggregate.get('answered_count', 0)}/{aggregate.get('target_count', 0)}"
+                    )
+                prefix = f"{prefix} [request {request_status or 'open'}{coverage}]"
+            elif metadata.get("interaction_question_ids"):
+                prefix = f"{prefix} [answer]"
         time_mark = _format_timestamp(message.get("created_at") or message.get("updated_at"))
         self._record_line(f"{time_mark} {prefix}: {content}")
 
@@ -1218,6 +1260,7 @@ class ScrollbackTUI2:
             self._write_system("thread not ready yet")
             return
         assert self._http_client is not None
+        requests = _build_interaction_requests_from_text(text)
         response = await self._http_client.post(
             f"{self.gateway}/v1/threads/{self.state.thread_id}/messages",
             json={
@@ -1225,6 +1268,7 @@ class ScrollbackTUI2:
                 "content": text,
                 "visibility": "public",
                 "create_task": True,
+                "requests": requests,
             },
         )
         response.raise_for_status()

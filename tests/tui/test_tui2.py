@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import builtins
 import os
 import sys
@@ -849,3 +850,122 @@ async def test_tui2_start_adds_prompt_entries_to_input_history(tmp_path, monkeyp
     await client.start()
 
     assert client._input_history == ["/help"]
+
+
+def test_build_interaction_requests_from_text_parses_selectors():
+    requests = tui2._build_interaction_requests_from_text(
+        "@role:reviewer @capability:backend What blocks delivery?"
+    )
+
+    assert len(requests) == 1
+    assert requests[0]["questions"][0]["prompt"] == "What blocks delivery?"
+    assert requests[0]["selectors"] == [
+        {"type": "role", "value": "reviewer"},
+        {"type": "capability", "value": "backend"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_message_includes_parsed_interaction_requests(monkeypatch):
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="admin",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Admin",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+    client.state.thread_id = "thread-123"
+    client.state.workspace_id = "workspace-123"
+    client.state.participant_id = "participant-123"
+    client.current_user = {"user_id": "user-123", "display_name": "Admin"}
+    client.tokens = TokenState(
+        access_token="token",
+        refresh_token=None,
+        expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        issuer="http://127.0.0.1:8081/realms/open-talon",
+        client_id="open-talon-tui",
+    )
+
+    captured = {}
+
+    class _CapturingClient(_FakeAsyncClient):
+        async def post(self, url: str, json=None):
+            captured["url"] = url
+            captured["json"] = json
+            return _FakeResponse(200, {})
+
+    client._http_client = _CapturingClient()
+    monkeypatch.setattr(client, "_ensure_bearer_token", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(client, "_validate_current_user_session", lambda: asyncio.sleep(0))
+
+    await client._send_message("@role:reviewer Need feedback")
+
+    assert captured["json"]["requests"][0]["selectors"] == [{"type": "role", "value": "reviewer"}]
+
+
+def test_render_message_marks_interaction_request_progress(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+    lines: list[str] = []
+    monkeypatch.setattr(client, "_record_line", lambda line: lines.append(line))
+
+    client._render_message(
+        {
+            "message_id": "msg-1",
+            "actor": {"id": "peer-123"},
+            "content": "Need blockers from reviewers.",
+            "created_at": "2026-04-18T08:00:00Z",
+            "metadata": {
+                "interaction_request_id": "request-1",
+                "interaction_request_status": "open",
+                "interaction_aggregate": {"answered_count": 2, "target_count": 3},
+            },
+        }
+    )
+
+    assert len(lines) == 1
+    assert "[request open 2/3]" in lines[0]
+    assert "Need blockers from reviewers." in lines[0]
+
+
+def test_render_message_marks_interaction_answers(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+    lines: list[str] = []
+    monkeypatch.setattr(client, "_record_line", lambda line: lines.append(line))
+
+    client._render_message(
+        {
+            "message_id": "msg-2",
+            "actor": {"id": "peer-456"},
+            "content": "Backend is blocked on review.",
+            "created_at": "2026-04-18T08:01:00Z",
+            "metadata": {
+                "interaction_question_ids": ["question-1"],
+            },
+        }
+    )
+
+    assert len(lines) == 1
+    assert "[answer]" in lines[0]
+    assert "Backend is blocked on review." in lines[0]

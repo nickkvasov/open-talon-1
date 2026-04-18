@@ -37,7 +37,18 @@ from open_talon_contracts.models import (  # noqa: E402
     CreateSystemToolRequest,
     EventEnvelope,
     ExecutionSpec,
+    CompletionRule,
+    CreateInteractionAnswerRequest,
+    CreateInteractionQuestionRequest,
+    CreateInteractionRequest,
+    CreateInteractionRequestsRequest,
+    CreateMessageRequest,
     DeleteLlmProviderRequest,
+    InteractionAnswer,
+    InteractionQuestion,
+    InteractionRequest,
+    InteractionRequestDetail,
+    InteractionRequestTarget,
     LlmProviderDefinition,
     MemoryEntry,
     MemoryProviderDefinition,
@@ -55,6 +66,7 @@ from open_talon_contracts.models import (  # noqa: E402
     Task,
     Thread,
     TimelineMessage,
+    UpdateInteractionRequestRequest,
     UpdateLlmProviderRequest,
     UpsertRoleDefinitionRequest,
     Workspace,
@@ -113,6 +125,7 @@ class FakeRepository:
         self._runtime_queue_stats = {}
         self._global_token_total = 0
         self._workspace_token_totals = {}
+        self._memberships = {}
         now = datetime.now(timezone.utc)
         postgres_provider = MemoryProviderDefinition(
             provider_id=uuid4(),
@@ -133,6 +146,10 @@ class FakeRepository:
         self._memory_provider_records = {}
         self._workspace_tools = {}
         self._tool_calls = {}
+        self._interaction_requests = {}
+        self._interaction_questions = {}
+        self._interaction_targets = {}
+        self._interaction_answers = {}
 
     async def setup_schema(self) -> None:
         self.setup_schema_calls += 1
@@ -167,6 +184,9 @@ class FakeRepository:
     async def fetch_task(self, task_id):
         return self._tasks.get(task_id)
 
+    async def upsert_task(self, conn, task):
+        self._tasks[task.task_id] = task
+
     async def fetch_run(self, run_id):
         return self._runs.get(run_id)
 
@@ -190,6 +210,83 @@ class FakeRepository:
 
     async def fetch_thread(self, thread_id):
         return self._threads.get(thread_id)
+
+    async def list_memberships(self, thread_id):
+        return list(self._memberships.get(thread_id, []))
+
+    async def fetch_active_membership(self, conn, *, thread_id, participant_id):
+        for membership in self._memberships.get(thread_id, []):
+            if membership.participant_id == participant_id and membership.left_at is None:
+                return membership
+        return None
+
+    async def upsert_membership(self, conn, membership):
+        memberships = [
+            existing
+            for existing in self._memberships.get(membership.thread_id, [])
+            if existing.membership_id != membership.membership_id
+        ]
+        memberships.append(membership)
+        self._memberships[membership.thread_id] = memberships
+
+    async def fetch_interaction_request(self, request_id):
+        return self._interaction_requests.get(request_id)
+
+    async def list_interaction_requests_for_thread(self, thread_id):
+        return [
+            request
+            for request in self._interaction_requests.values()
+            if request.thread_id == thread_id
+        ]
+
+    async def list_open_interaction_requests_for_run(self, requester_run_id):
+        return [
+            request
+            for request in self._interaction_requests.values()
+            if request.requester_run_id == requester_run_id and request.status == "open"
+        ]
+
+    async def list_interaction_request_questions(self, request_id):
+        return sorted(
+            self._interaction_questions.get(request_id, []),
+            key=lambda item: item.order,
+        )
+
+    async def list_interaction_request_targets(self, request_id):
+        return list(self._interaction_targets.get(request_id, []))
+
+    async def fetch_interaction_request_target(self, target_id):
+        for targets in self._interaction_targets.values():
+            for target in targets:
+                if target.target_id == target_id:
+                    return target
+        return None
+
+    async def list_interaction_answers(self, request_id):
+        return list(self._interaction_answers.get(request_id, []))
+
+    async def get_interaction_request_detail(self, request_id):
+        request = self._interaction_requests.get(request_id)
+        if request is None:
+            return None
+        return InteractionRequestDetail(
+            request=request,
+            questions=await self.list_interaction_request_questions(request_id),
+            targets=await self.list_interaction_request_targets(request_id),
+            answers=await self.list_interaction_answers(request_id),
+        )
+
+    async def list_interaction_request_details_for_thread(self, thread_id):
+        requests = await self.list_interaction_requests_for_thread(thread_id)
+        return [
+            InteractionRequestDetail(
+                request=request,
+                questions=await self.list_interaction_request_questions(request.request_id),
+                targets=await self.list_interaction_request_targets(request.request_id),
+                answers=await self.list_interaction_answers(request.request_id),
+            )
+            for request in requests
+        ]
 
     async def fetch_participant(self, workspace_id, participant_id):
         return self._participants.get((workspace_id, participant_id))
@@ -371,6 +468,45 @@ class FakeRepository:
                 if message.message_id == message_id:
                     return message
         return None
+
+    async def upsert_message(self, conn, message):
+        messages = [
+            existing
+            for existing in self._messages.get(message.thread_id, [])
+            if existing.message_id != message.message_id
+        ]
+        messages.append(message)
+        self._messages[message.thread_id] = messages
+
+    async def upsert_interaction_request(self, conn, request):
+        self._interaction_requests[request.request_id] = request
+
+    async def upsert_interaction_request_question(self, conn, question):
+        questions = [
+            existing
+            for existing in self._interaction_questions.get(question.request_id, [])
+            if existing.question_id != question.question_id
+        ]
+        questions.append(question)
+        self._interaction_questions[question.request_id] = questions
+
+    async def upsert_interaction_request_target(self, conn, target):
+        targets = [
+            existing
+            for existing in self._interaction_targets.get(target.request_id, [])
+            if existing.target_id != target.target_id
+        ]
+        targets.append(target)
+        self._interaction_targets[target.request_id] = targets
+
+    async def upsert_interaction_answer(self, conn, answer):
+        answers = [
+            existing
+            for existing in self._interaction_answers.get(answer.request_id, [])
+            if existing.answer_id != answer.answer_id
+        ]
+        answers.append(answer)
+        self._interaction_answers[answer.request_id] = answers
 
     async def fetch_tool_call(self, tool_call_id):
         for tool_calls in self._tool_calls.values():
@@ -1866,3 +2002,519 @@ async def test_build_requeued_execution_events_emits_run_step_and_tool_call_wake
     assert all(event.correlation_id == repository._runs[run_id].correlation_id for event in events)
     assert events[0].target.type == "run_step"
     assert events[1].target.type == "tool_call"
+
+
+@pytest.mark.asyncio
+async def test_kernel_create_interaction_request_resolves_capability_targets_and_renders_message():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    requester_id = uuid4()
+    user_one_id = uuid4()
+    user_two_id = uuid4()
+    repository._workspaces[workspace_id] = Workspace(
+        workspace_id=workspace_id,
+        name="Questions",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._threads[thread_id] = Thread(
+        thread_id=thread_id,
+        workspace_id=workspace_id,
+        title="Coordination",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, requester_id)] = ParticipantProfile(
+        participant_id=requester_id,
+        workspace_id=workspace_id,
+        participant_type="agent",
+        system_agent_id=uuid4(),
+        display_name="Research Agent",
+        roles=["research"],
+        capabilities=["analysis"],
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, user_one_id)] = ParticipantProfile(
+        participant_id=user_one_id,
+        workspace_id=workspace_id,
+        participant_type="user",
+        user_id=uuid4(),
+        display_name="Alice",
+        roles=["reviewer"],
+        capabilities=["frontend"],
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, user_two_id)] = ParticipantProfile(
+        participant_id=user_two_id,
+        workspace_id=workspace_id,
+        participant_type="user",
+        user_id=uuid4(),
+        display_name="Bob",
+        roles=["reviewer"],
+        capabilities=["backend"],
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+
+    result = await kernel.create_interaction_requests(
+        thread_id,
+        CreateInteractionRequestsRequest(
+            actor=ParticipantInput(
+                participant_id=requester_id,
+                participant_type="agent",
+                display_name="Research Agent",
+            ),
+            requests=[
+                CreateInteractionRequest(
+                    title="Need implementation feedback",
+                    questions=[
+                        CreateInteractionQuestionRequest(prompt="What blocks backend delivery?"),
+                    ],
+                    selectors=[{"type": "capability", "value": "backend"}],
+                    completion_rule=CompletionRule(mode="all_targets"),
+                )
+            ],
+        ),
+    )
+
+    assert len(result.details) == 1
+    detail = result.details[0]
+    assert detail.targets[0].participant_id == user_two_id
+    assert result.messages[0].metadata["interaction_request_id"] == str(detail.request.request_id)
+    assert "What blocks backend delivery?" in result.messages[0].content
+
+
+def _seed_interaction_workspace(
+    repository: FakeRepository,
+    *,
+    users: list[tuple[str, str]],
+) -> dict[str, object]:
+    now = datetime.now(timezone.utc)
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    requester_id = uuid4()
+    requester_system_agent_id = uuid4()
+    repository._workspaces[workspace_id] = Workspace(
+        workspace_id=workspace_id,
+        name="Questions",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._threads[thread_id] = Thread(
+        thread_id=thread_id,
+        workspace_id=workspace_id,
+        title="Coordination",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, requester_id)] = ParticipantProfile(
+        participant_id=requester_id,
+        workspace_id=workspace_id,
+        participant_type="agent",
+        system_agent_id=requester_system_agent_id,
+        display_name="Research Agent",
+        roles=["research"],
+        capabilities=["analysis"],
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    user_ids: dict[str, UUID] = {}
+    for display_name, capability in users:
+        participant_id = uuid4()
+        repository._participants[(workspace_id, participant_id)] = ParticipantProfile(
+            participant_id=participant_id,
+            workspace_id=workspace_id,
+            participant_type="user",
+            user_id=uuid4(),
+            display_name=display_name,
+            roles=["reviewer"],
+            capabilities=[capability],
+            status="active",
+            created_at=now,
+            updated_at=now,
+        )
+        user_ids[display_name] = participant_id
+    return {
+        "workspace_id": workspace_id,
+        "thread_id": thread_id,
+        "requester_id": requester_id,
+        "requester_system_agent_id": requester_system_agent_id,
+        "users": user_ids,
+    }
+
+
+@pytest.mark.asyncio
+async def test_answer_interaction_request_minimum_answers_waits_for_quorum():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    seeded = _seed_interaction_workspace(
+        repository,
+        users=[
+            ("Alice", "frontend"),
+            ("Bob", "backend"),
+            ("Carol", "qa"),
+        ],
+    )
+
+    create_result = await kernel.create_interaction_requests(
+        seeded["thread_id"],
+        CreateInteractionRequestsRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["requester_id"],
+                participant_type="agent",
+                display_name="Research Agent",
+            ),
+            requests=[
+                CreateInteractionRequest(
+                    title="Need two viewpoints",
+                    questions=[
+                        CreateInteractionQuestionRequest(prompt="What is your blocker?"),
+                    ],
+                    target_participant_ids=list(seeded["users"].values()),
+                    completion_rule=CompletionRule(mode="minimum_answers", minimum_answers=2),
+                )
+            ],
+        ),
+    )
+    request_id = create_result.details[0].request.request_id
+
+    first_answer = await kernel.answer_interaction_request(
+        request_id,
+        CreateInteractionAnswerRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["users"]["Alice"],
+                participant_type="user",
+                display_name="Alice",
+            ),
+            content="Frontend is blocked on design review.",
+        ),
+    )
+    assert first_answer.detail.request.status == "open"
+    assert first_answer.resumed_task is None
+
+    second_answer = await kernel.answer_interaction_request(
+        request_id,
+        CreateInteractionAnswerRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["users"]["Bob"],
+                participant_type="user",
+                display_name="Bob",
+            ),
+            content="Backend is blocked on API pagination.",
+        ),
+    )
+
+    assert second_answer.detail.request.status == "completed"
+    assert second_answer.resumed_task is not None
+    assert second_answer.detail.request.metadata["aggregate"]["answered_count"] == 2
+    pending_targets = [
+        target
+        for target in second_answer.detail.targets
+        if target.status == "pending"
+    ]
+    assert len(pending_targets) == 1
+    assert pending_targets[0].participant_id == seeded["users"]["Carol"]
+
+
+@pytest.mark.asyncio
+async def test_answer_interaction_request_one_per_selector_bucket_tracks_bucket_coverage():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    seeded = _seed_interaction_workspace(
+        repository,
+        users=[
+            ("Alice", "frontend"),
+            ("Bob", "backend"),
+        ],
+    )
+
+    create_result = await kernel.create_interaction_requests(
+        seeded["thread_id"],
+        CreateInteractionRequestsRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["requester_id"],
+                participant_type="agent",
+                display_name="Research Agent",
+            ),
+            requests=[
+                CreateInteractionRequest(
+                    title="Need frontend and backend feedback",
+                    questions=[
+                        CreateInteractionQuestionRequest(prompt="What blocks your area?"),
+                    ],
+                    selectors=[
+                        {"type": "capability", "value": "frontend"},
+                        {"type": "capability", "value": "backend"},
+                    ],
+                    completion_rule=CompletionRule(mode="one_per_selector_bucket"),
+                )
+            ],
+        ),
+    )
+    request_id = create_result.details[0].request.request_id
+
+    first_answer = await kernel.answer_interaction_request(
+        request_id,
+        CreateInteractionAnswerRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["users"]["Alice"],
+                participant_type="user",
+                display_name="Alice",
+            ),
+            content="Frontend is blocked on responsive QA.",
+        ),
+    )
+    assert first_answer.detail.request.status == "open"
+    assert set(first_answer.detail.request.metadata["aggregate"]["covered_selector_buckets"]) == {
+        "capability:frontend",
+    }
+
+    second_answer = await kernel.answer_interaction_request(
+        request_id,
+        CreateInteractionAnswerRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["users"]["Bob"],
+                participant_type="user",
+                display_name="Bob",
+            ),
+            content="Backend is blocked on API review.",
+        ),
+    )
+
+    assert second_answer.detail.request.status == "completed"
+    assert set(second_answer.detail.request.metadata["aggregate"]["covered_selector_buckets"]) == {
+        "capability:frontend",
+        "capability:backend",
+    }
+
+
+@pytest.mark.asyncio
+async def test_dismiss_interaction_target_reduces_all_targets_quorum():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    seeded = _seed_interaction_workspace(
+        repository,
+        users=[
+            ("Alice", "frontend"),
+            ("Bob", "backend"),
+        ],
+    )
+
+    create_result = await kernel.create_interaction_requests(
+        seeded["thread_id"],
+        CreateInteractionRequestsRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["requester_id"],
+                participant_type="agent",
+                display_name="Research Agent",
+            ),
+            requests=[
+                CreateInteractionRequest(
+                    title="Need both viewpoints",
+                    questions=[
+                        CreateInteractionQuestionRequest(prompt="What blocks delivery?"),
+                    ],
+                    target_participant_ids=list(seeded["users"].values()),
+                    completion_rule=CompletionRule(mode="all_targets"),
+                )
+            ],
+        ),
+    )
+    request_id = create_result.details[0].request.request_id
+
+    answer_result = await kernel.answer_interaction_request(
+        request_id,
+        CreateInteractionAnswerRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["users"]["Alice"],
+                participant_type="user",
+                display_name="Alice",
+            ),
+            content="Frontend is blocked on approvals.",
+        ),
+    )
+    assert answer_result.detail.request.status == "open"
+
+    bob_target = next(
+        target
+        for target in answer_result.detail.targets
+        if target.participant_id == seeded["users"]["Bob"]
+    )
+    dismiss_result = await kernel.update_interaction_request(
+        request_id,
+        UpdateInteractionRequestRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["requester_id"],
+                participant_type="agent",
+                display_name="Research Agent",
+            ),
+            action="dismiss_target",
+            target_id=bob_target.target_id,
+        ),
+    )
+
+    assert dismiss_result.detail.request.status == "completed"
+    assert dismiss_result.resumed_task is not None
+    assert dismiss_result.detail.request.metadata["aggregate"]["target_count"] == 1
+    dismissed_target = next(
+        target
+        for target in dismiss_result.detail.targets
+        if target.target_id == bob_target.target_id
+    )
+    assert dismissed_target.status == "dismissed"
+
+
+@pytest.mark.asyncio
+async def test_answer_interaction_request_completes_and_requeues_requesting_agent():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    requester_id = uuid4()
+    requester_system_agent_id = uuid4()
+    user_one_id = uuid4()
+    user_two_id = uuid4()
+    repository._workspaces[workspace_id] = Workspace(
+        workspace_id=workspace_id,
+        name="Questions",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._threads[thread_id] = Thread(
+        thread_id=thread_id,
+        workspace_id=workspace_id,
+        title="Coordination",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, requester_id)] = ParticipantProfile(
+        participant_id=requester_id,
+        workspace_id=workspace_id,
+        participant_type="agent",
+        system_agent_id=requester_system_agent_id,
+        display_name="Research Agent",
+        roles=["research"],
+        capabilities=["analysis"],
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    for participant_id, display_name, capability in (
+        (user_one_id, "Alice", "frontend"),
+        (user_two_id, "Bob", "backend"),
+    ):
+        repository._participants[(workspace_id, participant_id)] = ParticipantProfile(
+            participant_id=participant_id,
+            workspace_id=workspace_id,
+            participant_type="user",
+            user_id=uuid4(),
+            display_name=display_name,
+            roles=["reviewer"],
+            capabilities=[capability],
+            status="active",
+            created_at=now,
+            updated_at=now,
+        )
+
+    create_result = await kernel.create_interaction_requests(
+        thread_id,
+        CreateInteractionRequestsRequest(
+            actor=ParticipantInput(
+                participant_id=requester_id,
+                participant_type="agent",
+                display_name="Research Agent",
+            ),
+            requests=[
+                CreateInteractionRequest(
+                    title="Need both perspectives",
+                    questions=[
+                        CreateInteractionQuestionRequest(prompt="Frontend concerns?"),
+                        CreateInteractionQuestionRequest(prompt="Backend concerns?"),
+                    ],
+                    target_participant_ids=[user_one_id, user_two_id],
+                    completion_rule=CompletionRule(mode="all_targets"),
+                )
+            ],
+        ),
+    )
+    request_id = create_result.details[0].request.request_id
+
+    first_answer = await kernel.answer_interaction_request(
+        request_id,
+        CreateInteractionAnswerRequest(
+            actor=ParticipantInput(
+                participant_id=user_one_id,
+                participant_type="user",
+                display_name="Alice",
+            ),
+            content="Frontend is blocked on responsive states.",
+        ),
+    )
+    assert first_answer.detail.request.status == "open"
+
+    second_answer = await kernel.answer_interaction_request(
+        request_id,
+        CreateInteractionAnswerRequest(
+            actor=ParticipantInput(
+                participant_id=user_two_id,
+                participant_type="user",
+                display_name="Bob",
+            ),
+            content="Backend needs API pagination.",
+        ),
+    )
+
+    assert second_answer.detail.request.status == "completed"
+    assert second_answer.resumed_task is not None
+    assert second_answer.resumed_task.metadata["routing_reason"] == "interaction_request_completed"
+    assert second_answer.resumed_task.metadata["target_system_agent_id"] == str(requester_system_agent_id)
+
+
+@pytest.mark.asyncio
+async def test_post_message_can_atomically_create_interaction_request():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    seeded = _seed_interaction_workspace(
+        repository,
+        users=[("Alice", "backend")],
+    )
+
+    result = await kernel.post_message(
+        seeded["thread_id"],
+        CreateMessageRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["requester_id"],
+                participant_type="agent",
+                display_name="Research Agent",
+            ),
+            content="Please coordinate feedback.",
+            visibility="workspace",
+            create_task=False,
+            requests=[
+                CreateInteractionRequest(
+                    title="Need backend input",
+                    questions=[
+                        CreateInteractionQuestionRequest(prompt="What blocks backend delivery?"),
+                    ],
+                    target_participant_ids=[seeded["users"]["Alice"]],
+                )
+            ],
+        ),
+    )
+
+    assert result.message.content == "Please coordinate feedback."
+    assert len(repository._messages[seeded["thread_id"]]) == 2
+    details = await kernel.list_interaction_requests(seeded["thread_id"])
+    assert len(details) == 1
+    assert details[0].request.requester_message_id == result.message.message_id
+    assert details[0].questions[0].prompt == "What blocks backend delivery?"

@@ -28,6 +28,8 @@ from gateway_edge.models import (
     AssetLink,
     CreateGitRepositoryRequest,
     CreateAgentParticipantRequest,
+    CreateInteractionAnswerRequest,
+    CreateInteractionRequestsRequest,
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
     CreateSystemAgentRequest,
@@ -55,6 +57,7 @@ from gateway_edge.models import (
     LlmProviderDefinition,
     LlmProviderHealthReport,
     GitRepository,
+    InteractionRequestDetail,
     LinkAssetRequest,
     ParticipantInput,
     ParticipantProfile,
@@ -67,6 +70,7 @@ from gateway_edge.models import (
     TimelineMessage,
     TimelinePage,
     UpdateSystemAgentRequest,
+    UpdateInteractionRequestRequest,
     UpsertRoleDefinitionRequest,
     UpdateSystemToolRequest,
     UpdateAgentParticipantRequest,
@@ -1736,6 +1740,145 @@ async def post_message(
     )
     try:
         return await collab_svc.collaboration_service.post_message(thread_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/threads/{thread_id}/requests",
+    response_model=list[InteractionRequestDetail],
+    summary="List tracked interaction requests for a thread",
+)
+async def list_interaction_requests(
+    request: Request,
+    thread_id: UUID,
+) -> list[InteractionRequestDetail]:
+    logger.debug("HTTP list_interaction_requests thread_id=%s", thread_id)
+    try:
+        await _require_thread_membership(request, thread_id)
+        return await collab_svc.collaboration_service.list_interaction_requests(thread_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/threads/{thread_id}/requests",
+    response_model=list[InteractionRequestDetail],
+    summary="Create tracked interaction requests in a thread",
+)
+async def create_interaction_requests(
+    request: Request,
+    thread_id: UUID,
+    payload: CreateInteractionRequestsRequest,
+) -> list[InteractionRequestDetail]:
+    payload = payload.model_copy(
+        update={
+            "actor": await _resolve_thread_actor(
+                request,
+                payload.actor,
+                thread_id=thread_id,
+            )
+        }
+    )
+    logger.debug(
+        "HTTP create_interaction_requests thread_id=%s actor=%s request_count=%s",
+        thread_id,
+        _actor_log(payload.actor),
+        len(payload.requests),
+    )
+    try:
+        return await collab_svc.collaboration_service.create_interaction_requests(
+            thread_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/requests/{request_id}",
+    response_model=InteractionRequestDetail,
+    summary="Get a tracked interaction request",
+)
+async def get_interaction_request(
+    request: Request,
+    request_id: UUID,
+) -> InteractionRequestDetail:
+    logger.debug("HTTP get_interaction_request request_id=%s", request_id)
+    try:
+        detail = await collab_svc.collaboration_service.get_interaction_request(request_id)
+        await _require_thread_membership(request, detail.request.thread_id)
+        return detail
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch(
+    "/requests/{request_id}",
+    response_model=InteractionRequestDetail,
+    summary="Update tracked interaction request state",
+)
+async def update_interaction_request(
+    request: Request,
+    request_id: UUID,
+    payload: UpdateInteractionRequestRequest,
+) -> InteractionRequestDetail:
+    detail = await collab_svc.collaboration_service.get_interaction_request(request_id)
+    payload = payload.model_copy(
+        update={
+            "actor": await _resolve_thread_actor(
+                request,
+                payload.actor,
+                thread_id=detail.request.thread_id,
+            )
+        }
+    )
+    logger.debug(
+        "HTTP update_interaction_request request_id=%s actor=%s action=%s",
+        request_id,
+        _actor_log(payload.actor),
+        payload.action,
+    )
+    try:
+        return await collab_svc.collaboration_service.update_interaction_request(
+            request_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/requests/{request_id}/answers",
+    response_model=InteractionRequestDetail,
+    summary="Answer a tracked interaction request",
+)
+async def answer_interaction_request(
+    request: Request,
+    request_id: UUID,
+    payload: CreateInteractionAnswerRequest,
+) -> InteractionRequestDetail:
+    detail = await collab_svc.collaboration_service.get_interaction_request(request_id)
+    payload = payload.model_copy(
+        update={
+            "actor": await _resolve_thread_actor(
+                request,
+                payload.actor,
+                thread_id=detail.request.thread_id,
+            )
+        }
+    )
+    logger.debug(
+        "HTTP answer_interaction_request request_id=%s actor=%s question_count=%s",
+        request_id,
+        _actor_log(payload.actor),
+        len(payload.question_ids),
+    )
+    try:
+        return await collab_svc.collaboration_service.answer_interaction_request(
+            request_id,
+            payload,
+        )
     except Exception as exc:
         raise _http_error(exc) from exc
 

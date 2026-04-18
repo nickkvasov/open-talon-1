@@ -27,6 +27,7 @@ from .contracts import (
     AgentDefinition,
     AgentExecutionContext,
     AgentRunResult,
+    CompletionRule,
     AgentToolCallDraft,
     AgentTaskRouting,
     AuditChainVerificationResult,
@@ -40,6 +41,10 @@ from .contracts import (
     ActivateAssetVersionRequest,
     CreateAgentParticipantRequest,
     CreateGitRepositoryRequest,
+    CreateInteractionAnswerRequest,
+    CreateInteractionQuestionRequest,
+    CreateInteractionRequest,
+    CreateInteractionRequestsRequest,
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
     CreateSystemAgentRequest,
@@ -58,6 +63,12 @@ from .contracts import (
     DeleteWorkspaceRequest,
     ExecutionWorkspaceRef,
     EventEnvelope,
+    InteractionAnswer,
+    InteractionQuestion,
+    InteractionRequest,
+    InteractionRequestDetail,
+    InteractionRequestDraft,
+    InteractionRequestTarget,
     Membership,
     MemoryEntry,
     MemoryProviderDefinition,
@@ -65,6 +76,7 @@ from .contracts import (
     MemorySearchHit,
     MemorySearchResponse,
     LlmProviderDefinition,
+    ParticipantSelector,
     ParticipantInput,
     ParticipantProfile,
     PublishAssetFromGitRequest,
@@ -86,6 +98,7 @@ from .contracts import (
     ToolCall,
     ToolCallResult,
     UpdateSystemAgentRequest,
+    UpdateInteractionRequestRequest,
     LinkAssetRequest,
     UpdateLlmProviderRequest,
     UpdateMemoryProviderRequest,
@@ -108,6 +121,7 @@ from .results import (
     AgentDefinitionCommandResult,
     CommandResult,
     GitRepositoryCommandResult,
+    InteractionRequestCommandResult,
     LeaseReconciliationResult,
     LlmProviderCommandResult,
     MemoryCommandResult,
@@ -2423,11 +2437,87 @@ class CollaborationKernel:
         system_agent_id: UUID,
         result: AgentRunResult,
     ) -> RunCommandResult:
-        return await self._runtime_execution.complete_run(
+        completion = await self._runtime_execution.complete_run(
             run_id,
             system_agent_id,
             result,
         )
+        if (
+            result.interaction_requests
+            and completion.run is not None
+            and completion.task is not None
+        ):
+            participant = await self._repository.fetch_participant(
+                completion.run.workspace_id,
+                completion.run.participant_id,
+            )
+            thread = await self._repository.fetch_thread(completion.task.thread_id)
+            if participant is not None and thread is not None:
+                request_payloads = [
+                    CreateInteractionRequest(
+                        title=draft.title,
+                        summary=draft.summary,
+                        questions=[
+                            CreateInteractionQuestionRequest(
+                                prompt=question.prompt,
+                                kind=question.kind,
+                                expected_format=question.expected_format,
+                                metadata=question.metadata,
+                            )
+                            for question in draft.questions
+                        ],
+                        selectors=draft.selectors,
+                        target_participant_ids=draft.target_participant_ids,
+                        completion_rule=draft.completion_rule,
+                        timeout_at=draft.timeout_at,
+                        metadata=draft.metadata,
+                    )
+                    for draft in result.interaction_requests
+                ]
+                now = self._now()
+                async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+                    async with conn.transaction():
+                        request_result = await self._create_interaction_requests_in_transaction(
+                            conn,
+                            thread=thread,
+                            actor_input=ParticipantInput(
+                                participant_id=participant.participant_id,
+                                participant_type=participant.participant_type,
+                                user_id=participant.user_id,
+                                display_name=participant.display_name,
+                                description=participant.description,
+                                roles=participant.roles,
+                                capabilities=participant.capabilities,
+                                visibility_scope=participant.visibility_scope,
+                            ),
+                            requests=request_payloads,
+                            timestamp=now,
+                            correlation_id=completion.task.correlation_id,
+                            requester_message=completion.message,
+                            requester_run=completion.run,
+                            requester_task=completion.task,
+                        )
+                        for rendered_message in request_result.messages:
+                            await self._repository.upsert_message(conn, rendered_message)
+                            request_result.events.append(
+                                EventEnvelope(
+                                    event_type="message.created",
+                                    workspace_id=rendered_message.workspace_id,
+                                    thread_id=rendered_message.thread_id,
+                                    actor=rendered_message.actor,
+                                    target=TargetRef(type="message", id=rendered_message.message_id),
+                                    visibility=rendered_message.visibility,
+                                    correlation_id=rendered_message.correlation_id,
+                                    causation_id=rendered_message.causation_id,
+                                    sequence=rendered_message.sequence,
+                                    timestamp=now,
+                                    payload=rendered_message.model_dump(mode="json"),
+                                )
+                            )
+                        for event in request_result.events:
+                            await self._repository.record_event(conn, event)
+                completion.events.extend(request_result.events)
+        return completion
 
     async def fail_run(
         self,
@@ -2556,6 +2646,35 @@ class CollaborationKernel:
                             )
                         )
 
+                if payload.requests:
+                    interaction_result = await self._create_interaction_requests_in_transaction(
+                        conn,
+                        thread=thread,
+                        actor_input=payload.actor,
+                        requests=payload.requests,
+                        timestamp=now,
+                        correlation_id=correlation_id,
+                        requester_message=message,
+                    )
+                    for rendered_message in interaction_result.messages:
+                        await self._repository.upsert_message(conn, rendered_message)
+                        events.append(
+                            EventEnvelope(
+                                event_type="message.created",
+                                workspace_id=rendered_message.workspace_id,
+                                thread_id=rendered_message.thread_id,
+                                actor=rendered_message.actor,
+                                target=TargetRef(type="message", id=rendered_message.message_id),
+                                visibility=rendered_message.visibility,
+                                correlation_id=rendered_message.correlation_id,
+                                causation_id=rendered_message.causation_id,
+                                sequence=rendered_message.sequence,
+                                timestamp=now,
+                                payload=rendered_message.model_dump(mode="json"),
+                            )
+                        )
+                    events.extend(interaction_result.events)
+
                 for event in events:
                     await self._repository.record_event(conn, event)
 
@@ -2567,6 +2686,407 @@ class CollaborationKernel:
             message.sequence,
         )
         return MessageCommandResult(message=message, events=events)
+
+    async def list_interaction_requests(
+        self,
+        thread_id: UUID,
+    ) -> list[InteractionRequestDetail]:
+        thread = await self._repository.fetch_thread(thread_id)
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
+        return await self._repository.list_interaction_request_details_for_thread(thread_id)
+
+    async def get_interaction_request(
+        self,
+        request_id: UUID,
+    ) -> InteractionRequestDetail:
+        detail = await self._repository.get_interaction_request_detail(request_id)
+        if detail is None:
+            raise KeyError(f"Interaction request {request_id} not found")
+        return detail
+
+    async def create_interaction_requests(
+        self,
+        thread_id: UUID,
+        payload: CreateInteractionRequestsRequest,
+    ) -> InteractionRequestCommandResult:
+        thread = await self._repository.fetch_thread(thread_id)
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
+        now = self._now()
+        correlation_id = uuid4()
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                result = await self._create_interaction_requests_in_transaction(
+                    conn,
+                    thread=thread,
+                    actor_input=payload.actor,
+                    requests=payload.requests,
+                    timestamp=now,
+                    correlation_id=correlation_id,
+                    requester_message=None,
+                )
+                for rendered_message in result.messages:
+                    await self._repository.upsert_message(conn, rendered_message)
+                    result.events.append(
+                        EventEnvelope(
+                            event_type="message.created",
+                            workspace_id=rendered_message.workspace_id,
+                            thread_id=rendered_message.thread_id,
+                            actor=rendered_message.actor,
+                            target=TargetRef(type="message", id=rendered_message.message_id),
+                            visibility=rendered_message.visibility,
+                            correlation_id=rendered_message.correlation_id,
+                            causation_id=rendered_message.causation_id,
+                            sequence=rendered_message.sequence,
+                            timestamp=now,
+                            payload=rendered_message.model_dump(mode="json"),
+                        )
+                    )
+                for event in result.events:
+                    await self._repository.record_event(conn, event)
+        return result
+
+    async def update_interaction_request(
+        self,
+        request_id: UUID,
+        payload: UpdateInteractionRequestRequest,
+    ) -> InteractionRequestCommandResult:
+        existing = await self._repository.get_interaction_request_detail(request_id)
+        if existing is None:
+            raise KeyError(f"Interaction request {request_id} not found")
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+        participant = await self._repository.fetch_participant(
+            existing.request.workspace_id,
+            payload.actor.participant_id,
+        )
+        if participant is None:
+            participant = self._participant_profile(
+                workspace_id=existing.request.workspace_id,
+                actor=payload.actor,
+                now=now,
+            )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._ensure_participant_identity(conn, participant)
+                await self._repository.upsert_participant(conn, participant)
+                detail = await self._repository.get_interaction_request_detail(request_id)
+                assert detail is not None
+                request = detail.request
+                events: list[EventEnvelope] = []
+                resumed_task: Task | None = None
+
+                if payload.action == "cancel":
+                    request = request.model_copy(
+                        update={
+                            "status": "cancelled",
+                            "updated_at": now,
+                            "metadata": {**request.metadata, **payload.metadata},
+                        }
+                    )
+                    await self._repository.upsert_interaction_request(conn, request)
+                    events.append(
+                        await self._build_thread_event(
+                            conn,
+                            request.workspace_id,
+                            request.thread_id,
+                            "interaction_request.cancelled",
+                            actor=actor,
+                            target=TargetRef(type="interaction_request", id=request.request_id),
+                            visibility="workspace",
+                            payload={"request_id": str(request.request_id)},
+                            timestamp=now,
+                        )
+                    )
+                elif payload.action == "timeout":
+                    request = request.model_copy(
+                        update={
+                            "status": "timed_out",
+                            "updated_at": now,
+                            "metadata": {**request.metadata, **payload.metadata},
+                        }
+                    )
+                    await self._repository.upsert_interaction_request(conn, request)
+                    events.append(
+                        await self._build_thread_event(
+                            conn,
+                            request.workspace_id,
+                            request.thread_id,
+                            "interaction_request.timed_out",
+                            actor=actor,
+                            target=TargetRef(type="interaction_request", id=request.request_id),
+                            visibility="workspace",
+                            payload={"request_id": str(request.request_id)},
+                            timestamp=now,
+                        )
+                    )
+                else:
+                    if payload.target_id is None:
+                        raise ValueError("target_id is required for target actions")
+                    target = await self._repository.fetch_interaction_request_target(payload.target_id)
+                    if target is None or target.request_id != request_id:
+                        raise KeyError(f"Interaction request target {payload.target_id} not found")
+                    updated_target = target.model_copy(
+                        update={
+                            "status": (
+                                "acknowledged"
+                                if payload.action == "acknowledge_target"
+                                else "dismissed"
+                            ),
+                            "updated_at": now,
+                            "metadata": {**target.metadata, **payload.metadata},
+                        }
+                    )
+                    await self._repository.upsert_interaction_request_target(conn, updated_target)
+                    detail = await self._repository.get_interaction_request_detail(request_id)
+                    assert detail is not None
+                    request = detail.request
+                    aggregate, completed = await self._interaction_request_aggregate_state(detail)
+                    request = request.model_copy(
+                        update={
+                            "status": "completed" if completed else request.status,
+                            "completed_at": now if completed else request.completed_at,
+                            "updated_at": now,
+                            "metadata": {**request.metadata, "aggregate": aggregate},
+                        }
+                    )
+                    await self._repository.upsert_interaction_request(conn, request)
+                    events.append(
+                        await self._build_thread_event(
+                            conn,
+                            request.workspace_id,
+                            request.thread_id,
+                            (
+                                "interaction_request.target_acknowledged"
+                                if payload.action == "acknowledge_target"
+                                else "interaction_request.target_dismissed"
+                            ),
+                            actor=actor,
+                            target=TargetRef(type="interaction_request_target", id=updated_target.target_id),
+                            visibility="workspace",
+                            payload={
+                                "request_id": str(request.request_id),
+                                "target_id": str(updated_target.target_id),
+                                "status": updated_target.status,
+                            },
+                            timestamp=now,
+                        )
+                    )
+                    if completed:
+                        resumed_task = await self._create_interaction_request_followup_task(
+                            conn,
+                            request=request,
+                            detail=detail.model_copy(update={"request": request}),
+                            answer_message=None,
+                            timestamp=now,
+                        )
+                        if resumed_task is not None:
+                            events.append(
+                                EventEnvelope(
+                                    event_type="task.created",
+                                    workspace_id=resumed_task.workspace_id,
+                                    thread_id=resumed_task.thread_id,
+                                    actor=actor,
+                                    target=TargetRef(type="task", id=resumed_task.task_id),
+                                    visibility="agents_only",
+                                    correlation_id=resumed_task.correlation_id,
+                                    causation_id=request.request_id,
+                                    sequence=await self._repository.next_thread_sequence(conn, resumed_task.thread_id),
+                                    timestamp=now,
+                                    payload=resumed_task.model_dump(mode="json"),
+                                )
+                            )
+                for event in events:
+                    await self._repository.record_event(conn, event)
+        return InteractionRequestCommandResult(
+            detail=await self.get_interaction_request(request_id),
+            events=events,
+            resumed_task=resumed_task,
+        )
+
+    async def answer_interaction_request(
+        self,
+        request_id: UUID,
+        payload: CreateInteractionAnswerRequest,
+    ) -> InteractionRequestCommandResult:
+        detail = await self._repository.get_interaction_request_detail(request_id)
+        if detail is None:
+            raise KeyError(f"Interaction request {request_id} not found")
+        if detail.request.status != "open":
+            raise ValueError("Only open interaction requests can be answered")
+        thread = await self._repository.fetch_thread(detail.request.thread_id)
+        if thread is None:
+            raise KeyError(f"Thread {detail.request.thread_id} not found")
+        if payload.question_ids:
+            valid_question_ids = {question.question_id for question in detail.questions}
+            invalid = [question_id for question_id in payload.question_ids if question_id not in valid_question_ids]
+            if invalid:
+                raise ValueError(f"Unknown interaction question ids: {invalid}")
+        if detail.targets:
+            if payload.actor.participant_id not in {
+                target.participant_id for target in detail.targets if target.participant_id is not None
+            }:
+                raise PermissionError("Only a targeted participant can answer this request")
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+        participant = await self._repository.fetch_participant(
+            thread.workspace_id,
+            payload.actor.participant_id,
+        )
+        if participant is None:
+            participant = self._participant_profile(
+                workspace_id=thread.workspace_id,
+                actor=payload.actor,
+                now=now,
+            )
+        correlation_id = detail.request.requester_message_id or uuid4()
+        answer_message = TimelineMessage(
+            message_id=uuid4(),
+            workspace_id=thread.workspace_id,
+            thread_id=thread.thread_id,
+            actor=actor,
+            visibility="workspace",
+            content=payload.content,
+            status="completed",
+            correlation_id=detail.request.requester_message_id or uuid4(),
+            causation_id=detail.request.request_id,
+            sequence=0,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                **payload.metadata,
+                "interaction_request_id": str(detail.request.request_id),
+                "interaction_question_ids": [str(question_id) for question_id in payload.question_ids],
+            },
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._ensure_participant_identity(conn, participant)
+                await self._repository.upsert_participant(conn, participant)
+                membership = await self._repository.fetch_active_membership(
+                    conn,
+                    thread_id=thread.thread_id,
+                    participant_id=payload.actor.participant_id,
+                )
+                if membership is None:
+                    membership = Membership(
+                        membership_id=uuid4(),
+                        workspace_id=thread.workspace_id,
+                        thread_id=thread.thread_id,
+                        participant_id=payload.actor.participant_id,
+                        role="participant",
+                        permissions=["post_messages"],
+                        joined_at=now,
+                    )
+                    await self._repository.upsert_membership(conn, membership)
+                answer_message.sequence = await self._repository.next_thread_sequence(conn, thread.thread_id)
+                await self._repository.upsert_message(conn, answer_message)
+                answer = InteractionAnswer(
+                    answer_id=uuid4(),
+                    request_id=request_id,
+                    participant_id=payload.actor.participant_id,
+                    message_id=answer_message.message_id,
+                    question_ids=list(payload.question_ids),
+                    created_at=now,
+                    metadata=payload.metadata,
+                )
+                await self._repository.upsert_interaction_answer(conn, answer)
+                target = next(
+                    (
+                        item
+                        for item in detail.targets
+                        if item.participant_id == payload.actor.participant_id
+                    ),
+                    None,
+                )
+                if target is not None:
+                    updated_target = target.model_copy(
+                        update={
+                            "status": "answered",
+                            "answered_message_id": answer_message.message_id,
+                            "updated_at": now,
+                        }
+                    )
+                    await self._repository.upsert_interaction_request_target(conn, updated_target)
+                refreshed = await self._repository.get_interaction_request_detail(request_id)
+                assert refreshed is not None
+                aggregate, completed = await self._interaction_request_aggregate_state(refreshed)
+                updated_request = refreshed.request.model_copy(
+                    update={
+                        "status": "completed" if completed else refreshed.request.status,
+                        "completed_at": now if completed else refreshed.request.completed_at,
+                        "updated_at": now,
+                        "metadata": {**refreshed.request.metadata, "aggregate": aggregate},
+                    }
+                )
+                await self._repository.upsert_interaction_request(conn, updated_request)
+                events = [
+                    EventEnvelope(
+                        event_type="message.created",
+                        workspace_id=answer_message.workspace_id,
+                        thread_id=answer_message.thread_id,
+                        actor=answer_message.actor,
+                        target=TargetRef(type="message", id=answer_message.message_id),
+                        visibility=answer_message.visibility,
+                        correlation_id=answer_message.correlation_id,
+                        causation_id=answer_message.causation_id,
+                        sequence=answer_message.sequence,
+                        timestamp=now,
+                        payload=answer_message.model_dump(mode="json"),
+                    ),
+                    await self._build_thread_event(
+                        conn,
+                        updated_request.workspace_id,
+                        updated_request.thread_id,
+                        "interaction_request.answered",
+                        actor=actor,
+                        target=TargetRef(type="message", id=answer_message.message_id),
+                        visibility="workspace",
+                        payload={
+                            "request_id": str(updated_request.request_id),
+                            "answer_id": str(answer.answer_id),
+                            "participant_id": str(answer.participant_id),
+                            "completed": completed,
+                        },
+                        timestamp=now,
+                        correlation_id=answer_message.correlation_id,
+                        causation_id=updated_request.request_id,
+                    ),
+                ]
+                resumed_task: Task | None = None
+                if completed:
+                    resumed_task = await self._create_interaction_request_followup_task(
+                        conn,
+                        request=updated_request,
+                        detail=refreshed.model_copy(update={"request": updated_request}),
+                        answer_message=answer_message,
+                        timestamp=now,
+                    )
+                    if resumed_task is not None:
+                        events.append(
+                            EventEnvelope(
+                                event_type="task.created",
+                                workspace_id=resumed_task.workspace_id,
+                                thread_id=resumed_task.thread_id,
+                                actor=ActorRef(type=payload.actor.participant_type, id=payload.actor.participant_id),
+                                target=TargetRef(type="task", id=resumed_task.task_id),
+                                visibility="agents_only",
+                                correlation_id=resumed_task.correlation_id,
+                                causation_id=updated_request.request_id,
+                                sequence=await self._repository.next_thread_sequence(conn, resumed_task.thread_id),
+                                timestamp=now,
+                                payload=resumed_task.model_dump(mode="json"),
+                            )
+                        )
+                for event in events:
+                    await self._repository.record_event(conn, event)
+        return InteractionRequestCommandResult(
+            detail=await self.get_interaction_request(request_id),
+            events=events,
+            answer_message=answer_message,
+            resumed_task=resumed_task,
+        )
 
     async def list_memory_entries(self, workspace_id: UUID) -> list[MemoryEntry]:
         workspace = await self._repository.fetch_workspace(workspace_id)
@@ -3276,6 +3796,580 @@ class CollaborationKernel:
                 )
             )
         return tasks
+
+    async def _create_interaction_requests_in_transaction(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        thread: Thread,
+        actor_input: ParticipantInput,
+        requests: list[CreateInteractionRequest],
+        timestamp: datetime,
+        correlation_id: UUID,
+        requester_message: TimelineMessage | None,
+        requester_run: Run | None = None,
+        requester_task: Task | None = None,
+    ) -> InteractionRequestCommandResult:
+        actor = self._actor_from_input(actor_input)
+        requester = await self._repository.fetch_participant(
+            thread.workspace_id,
+            actor_input.participant_id,
+        )
+        if requester is None:
+            requester = self._participant_profile(
+                workspace_id=thread.workspace_id,
+                actor=actor_input,
+                now=timestamp,
+            )
+        await self._ensure_participant_identity(conn, requester)
+        await self._repository.upsert_participant(conn, requester)
+        details: list[InteractionRequestDetail] = []
+        rendered_messages: list[TimelineMessage] = []
+        events: list[EventEnvelope] = []
+        for request_input in requests:
+            detail, rendered_message, request_events = await self._create_interaction_request_in_transaction(
+                conn,
+                thread=thread,
+                requester=requester,
+                request_input=request_input,
+                timestamp=timestamp,
+                correlation_id=correlation_id,
+                requester_message=requester_message,
+                requester_run=requester_run,
+                requester_task=requester_task,
+            )
+            details.append(detail)
+            rendered_messages.append(rendered_message)
+            events.extend(request_events)
+        return InteractionRequestCommandResult(
+            details=details,
+            messages=rendered_messages,
+            events=events,
+        )
+
+    async def _create_interaction_request_in_transaction(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        thread: Thread,
+        requester: ParticipantProfile,
+        request_input: CreateInteractionRequest,
+        timestamp: datetime,
+        correlation_id: UUID,
+        requester_message: TimelineMessage | None,
+        requester_run: Run | None,
+        requester_task: Task | None,
+    ) -> tuple[InteractionRequestDetail, TimelineMessage, list[EventEnvelope]]:
+        if not request_input.questions:
+            raise ValueError("Interaction requests must include at least one question")
+        resolved_targets = await self._resolve_interaction_request_targets(
+            thread=thread,
+            requester=requester,
+            request_input=request_input,
+        )
+        completion_rule = self._normalize_completion_rule(
+            request_input.completion_rule,
+            resolved_targets=resolved_targets,
+        )
+        request = InteractionRequest(
+            request_id=uuid4(),
+            workspace_id=thread.workspace_id,
+            thread_id=thread.thread_id,
+            requester_participant_id=requester.participant_id,
+            requester_message_id=(
+                requester_message.message_id if requester_message is not None else None
+            ),
+            requester_run_id=requester_run.run_id if requester_run is not None else None,
+            requester_task_id=requester_task.task_id if requester_task is not None else None,
+            title=request_input.title,
+            summary=request_input.summary,
+            completion_rule=completion_rule,
+            timeout_at=request_input.timeout_at,
+            created_at=timestamp,
+            updated_at=timestamp,
+            metadata={
+                **request_input.metadata,
+                "selectors": [
+                    selector.model_dump(mode="json") for selector in request_input.selectors
+                ],
+                "input_target_participant_ids": [
+                    str(participant_id)
+                    for participant_id in request_input.target_participant_ids
+                ],
+            },
+        )
+        await self._repository.upsert_interaction_request(conn, request)
+        questions: list[InteractionQuestion] = []
+        for index, question_input in enumerate(request_input.questions):
+            question = InteractionQuestion(
+                question_id=uuid4(),
+                request_id=request.request_id,
+                prompt=question_input.prompt,
+                kind=question_input.kind,
+                expected_format=question_input.expected_format,
+                order=index,
+                metadata=question_input.metadata,
+            )
+            questions.append(question)
+            await self._repository.upsert_interaction_request_question(conn, question)
+        targets: list[InteractionRequestTarget] = []
+        for resolved in resolved_targets:
+            target = InteractionRequestTarget(
+                target_id=uuid4(),
+                request_id=request.request_id,
+                participant_id=resolved["participant"].participant_id,
+                selector_type=resolved["selector_type"],
+                selector_value=resolved["selector_value"],
+                selection_source=resolved["selection_source"],
+                score=resolved["score"],
+                created_at=timestamp,
+                updated_at=timestamp,
+                metadata=resolved["metadata"],
+            )
+            targets.append(target)
+            await self._repository.upsert_interaction_request_target(conn, target)
+        detail = InteractionRequestDetail(
+            request=request,
+            questions=questions,
+            targets=targets,
+            answers=[],
+        )
+        aggregate, completed = await self._interaction_request_aggregate_state(detail)
+        if completed:
+            request = request.model_copy(
+                update={
+                    "status": "completed",
+                    "completed_at": timestamp,
+                    "metadata": {**request.metadata, "aggregate": aggregate},
+                }
+            )
+        else:
+            request = request.model_copy(
+                update={"metadata": {**request.metadata, "aggregate": aggregate}}
+            )
+        await self._repository.upsert_interaction_request(conn, request)
+        detail = detail.model_copy(update={"request": request})
+        rendered_message = TimelineMessage(
+            message_id=uuid4(),
+            workspace_id=thread.workspace_id,
+            thread_id=thread.thread_id,
+            actor=ActorRef(type=requester.participant_type, id=requester.participant_id),
+            visibility="workspace",
+            content=self._render_interaction_request_message(detail),
+            status="completed",
+            correlation_id=correlation_id,
+            causation_id=request.request_id,
+            sequence=await self._repository.next_thread_sequence(conn, thread.thread_id),
+            created_at=timestamp,
+            updated_at=timestamp,
+            metadata={
+                "interaction_request_id": str(request.request_id),
+                "interaction_request_status": request.status,
+                "interaction_request_title": request.title,
+                "interaction_target_count": len(targets),
+                "interaction_questions": [
+                    question.model_dump(mode="json") for question in questions
+                ],
+                "interaction_aggregate": aggregate,
+            },
+        )
+        events = [
+            await self._build_thread_event(
+                conn,
+                request.workspace_id,
+                request.thread_id,
+                "interaction_request.created",
+                actor=ActorRef(type=requester.participant_type, id=requester.participant_id),
+                target=TargetRef(type="interaction_request", id=request.request_id),
+                visibility="workspace",
+                payload={
+                    "request": request.model_dump(mode="json"),
+                    "questions": [question.model_dump(mode="json") for question in questions],
+                    "targets": [target.model_dump(mode="json") for target in targets],
+                },
+                timestamp=timestamp,
+                correlation_id=correlation_id,
+                causation_id=request.request_id,
+            )
+        ]
+        return detail, rendered_message, events
+
+    async def _resolve_interaction_request_targets(
+        self,
+        *,
+        thread: Thread,
+        requester: ParticipantProfile,
+        request_input: CreateInteractionRequest,
+    ) -> list[dict[str, object]]:
+        participants = await self._repository.list_participants(thread.workspace_id)
+        memberships = await self._repository.list_memberships(thread.thread_id)
+        active_member_ids = {
+            membership.participant_id for membership in memberships if membership.left_at is None
+        }
+        desired_responder_types = list(
+            request_input.metadata.get("desired_responder_types", [])
+        )
+        if not desired_responder_types:
+            desired_responder_types = ["user"] if requester.participant_type == "agent" else ["agent"]
+
+        participant_index = {
+            participant.participant_id: participant for participant in participants
+        }
+        explicit_targets: dict[UUID, dict[str, object]] = {}
+        for participant_id in request_input.target_participant_ids:
+            participant = participant_index.get(participant_id)
+            if participant is None:
+                raise KeyError(f"Participant {participant_id} not found in workspace {thread.workspace_id}")
+            explicit_targets[participant_id] = {
+                "participant": participant,
+                "selector_type": "participant",
+                "selector_value": str(participant_id),
+                "selection_source": "explicit_participant_id",
+                "score": 1000.0,
+                "metadata": {"matched_selectors": [str(participant_id)]},
+            }
+
+        for selector in request_input.selectors:
+            if selector.type == "participant":
+                participant = self._resolve_participant_selector_match(
+                    selector=selector,
+                    participants=participants,
+                )
+                if participant is None:
+                    continue
+                explicit_targets[participant.participant_id] = {
+                    "participant": participant,
+                    "selector_type": "participant",
+                    "selector_value": selector.value,
+                    "selection_source": "participant_selector",
+                    "score": 1000.0,
+                    "metadata": {"matched_selectors": [selector.value]},
+                }
+
+        if explicit_targets:
+            return list(explicit_targets.values())
+
+        selector_targets: dict[UUID, dict[str, object]] = {}
+        role_or_capability_selectors = [
+            selector for selector in request_input.selectors if selector.type in {"role", "capability"}
+        ]
+        if role_or_capability_selectors:
+            for selector in role_or_capability_selectors:
+                best = self._best_participant_for_selector(
+                    selector=selector,
+                    participants=participants,
+                    desired_responder_types=desired_responder_types,
+                    requester=requester,
+                    active_member_ids=active_member_ids,
+                )
+                if best is None:
+                    continue
+                existing = selector_targets.get(best.participant_id)
+                if existing is None:
+                    selector_targets[best.participant_id] = {
+                        "participant": best,
+                        "selector_type": selector.type,
+                        "selector_value": selector.value,
+                        "selection_source": "selector",
+                        "score": self._interaction_candidate_score(
+                            participant=best,
+                            selector=selector,
+                            requester=requester,
+                            active_member_ids=active_member_ids,
+                        ),
+                        "metadata": {"matched_selectors": [selector.model_dump(mode="json")]},
+                    }
+                else:
+                    existing["metadata"]["matched_selectors"].append(selector.model_dump(mode="json"))  # type: ignore[index]
+            if selector_targets:
+                return list(selector_targets.values())
+
+        fallback_candidates = [
+            participant
+            for participant in participants
+            if participant.participant_id != requester.participant_id
+            and participant.participant_type in desired_responder_types
+        ]
+        fallback_candidates.sort(
+            key=lambda participant: (
+                -self._interaction_candidate_score(
+                    participant=participant,
+                    selector=None,
+                    requester=requester,
+                    active_member_ids=active_member_ids,
+                ),
+                participant.display_name.lower(),
+            )
+        )
+        if fallback_candidates:
+            best = fallback_candidates[0]
+            return [
+                {
+                    "participant": best,
+                    "selector_type": None,
+                    "selector_value": None,
+                    "selection_source": "auto_best_match",
+                    "score": self._interaction_candidate_score(
+                        participant=best,
+                        selector=None,
+                        requester=requester,
+                        active_member_ids=active_member_ids,
+                    ),
+                    "metadata": {},
+                }
+            ]
+        if requester.participant_type == "agent":
+            fallback_managers = [
+                participant
+                for participant in participants
+                if participant.participant_type == "user"
+                and {"admin", "supervisor"}.intersection(participant.roles)
+            ]
+            fallback_managers.sort(key=lambda participant: participant.display_name.lower())
+            if fallback_managers:
+                best = fallback_managers[0]
+                return [
+                    {
+                        "participant": best,
+                        "selector_type": None,
+                        "selector_value": None,
+                        "selection_source": "workspace_manager_fallback",
+                        "score": 50.0,
+                        "metadata": {},
+                    }
+                ]
+        return []
+
+    @staticmethod
+    def _resolve_participant_selector_match(
+        *,
+        selector: ParticipantSelector,
+        participants: list[ParticipantProfile],
+    ) -> ParticipantProfile | None:
+        if selector.participant_id is not None:
+            for participant in participants:
+                if participant.participant_id == selector.participant_id:
+                    return participant
+        normalized = selector.value.strip().lower()
+        for participant in participants:
+            if str(participant.participant_id).lower() == normalized:
+                return participant
+            if participant.display_name.lower() == normalized:
+                return participant
+        return None
+
+    def _best_participant_for_selector(
+        self,
+        *,
+        selector: ParticipantSelector,
+        participants: list[ParticipantProfile],
+        desired_responder_types: list[str],
+        requester: ParticipantProfile,
+        active_member_ids: set[UUID],
+    ) -> ParticipantProfile | None:
+        candidates = [
+            participant
+            for participant in participants
+            if participant.participant_id != requester.participant_id
+            and participant.participant_type in desired_responder_types
+            and self._participant_matches_selector(participant, selector)
+        ]
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda participant: (
+                -self._interaction_candidate_score(
+                    participant=participant,
+                    selector=selector,
+                    requester=requester,
+                    active_member_ids=active_member_ids,
+                ),
+                participant.display_name.lower(),
+            )
+        )
+        return candidates[0]
+
+    @staticmethod
+    def _participant_matches_selector(
+        participant: ParticipantProfile,
+        selector: ParticipantSelector,
+    ) -> bool:
+        normalized = selector.value.strip().lower()
+        if selector.type == "role":
+            return normalized in {role.lower() for role in participant.roles}
+        if selector.type == "capability":
+            return normalized in {capability.lower() for capability in participant.capabilities}
+        return False
+
+    def _interaction_candidate_score(
+        self,
+        *,
+        participant: ParticipantProfile,
+        selector: ParticipantSelector | None,
+        requester: ParticipantProfile,
+        active_member_ids: set[UUID],
+    ) -> float:
+        score = 0.0
+        if participant.participant_id in active_member_ids:
+            score += 25.0
+        score += {
+            "active": 20.0,
+            "idle": 15.0,
+            "busy": 5.0,
+            "offline": 0.0,
+        }.get(participant.status, 0.0)
+        if selector is not None and self._participant_matches_selector(participant, selector):
+            score += 50.0
+        if requester.participant_type == "agent" and {"admin", "supervisor"}.intersection(participant.roles):
+            score += 5.0
+        return score
+
+    @staticmethod
+    def _normalize_completion_rule(
+        completion_rule: CompletionRule | None,
+        *,
+        resolved_targets: list[dict[str, object]],
+    ) -> CompletionRule:
+        if completion_rule is not None:
+            return completion_rule
+        return CompletionRule(
+            mode="all_targets",
+            target_participant_ids=[
+                resolved["participant"].participant_id  # type: ignore[index]
+                for resolved in resolved_targets
+            ],
+        )
+
+    async def _interaction_request_aggregate_state(
+        self,
+        detail: InteractionRequestDetail,
+    ) -> tuple[dict[str, object], bool]:
+        participants = {
+            participant.participant_id: participant
+            for participant in await self._repository.list_participants(detail.request.workspace_id)
+        }
+        active_targets = [
+            target for target in detail.targets if target.status != "dismissed"
+        ]
+        answered_target_ids = {
+            target.participant_id
+            for target in detail.targets
+            if target.status == "answered" and target.participant_id is not None
+        }
+        answered_participant_ids = {
+            answer.participant_id for answer in detail.answers
+        } | answered_target_ids
+        completion_rule = detail.request.completion_rule
+        selector_buckets = [
+            selector
+            for selector in detail.request.metadata.get("selectors", [])
+            if selector.get("type") in {"role", "capability"}
+        ]
+        covered_buckets: list[str] = []
+        for selector in selector_buckets:
+            bucket_type = str(selector["type"])
+            bucket_value = str(selector["value"])
+            if any(
+                self._participant_matches_selector(
+                    participants[participant_id],
+                    ParticipantSelector(type=bucket_type, value=bucket_value),
+                )
+                for participant_id in answered_participant_ids
+                if participant_id in participants
+            ):
+                covered_buckets.append(f"{bucket_type}:{bucket_value}")
+        completed = False
+        if completion_rule.mode == "all_targets":
+            required_ids = {
+                target.participant_id for target in active_targets if target.participant_id is not None
+            }
+            completed = required_ids.issubset(answered_participant_ids)
+        elif completion_rule.mode == "minimum_answers":
+            minimum_answers = completion_rule.minimum_answers or 1
+            completed = len(answered_participant_ids) >= minimum_answers
+        elif completion_rule.mode == "one_per_selector_bucket":
+            required_buckets = {
+                f"{selector['type']}:{selector['value']}" for selector in selector_buckets
+            }
+            completed = required_buckets.issubset(set(covered_buckets))
+        elif completion_rule.mode == "custom_targets":
+            required_ids = set(completion_rule.target_participant_ids)
+            completed = required_ids.issubset(answered_participant_ids)
+        aggregate = {
+            "answered_participant_ids": [str(participant_id) for participant_id in sorted(answered_participant_ids)],
+            "answered_count": len(answered_participant_ids),
+            "target_count": len(active_targets),
+            "covered_selector_buckets": covered_buckets,
+            "completion_rule": completion_rule.model_dump(mode="json"),
+            "completed": completed,
+        }
+        return aggregate, completed
+
+    def _render_interaction_request_message(
+        self,
+        detail: InteractionRequestDetail,
+    ) -> str:
+        lines = [f"[Request] {detail.request.title}"]
+        if detail.request.summary:
+            lines.extend(["", detail.request.summary])
+        if detail.questions:
+            lines.append("")
+            for index, question in enumerate(detail.questions, start=1):
+                lines.append(f"{index}. {question.prompt}")
+        if detail.targets:
+            lines.append("")
+            lines.append("Targets:")
+            for target in detail.targets:
+                label = str(target.participant_id)
+                lines.append(f"- {label}")
+        return "\n".join(lines)
+
+    async def _create_interaction_request_followup_task(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        request: InteractionRequest,
+        detail: InteractionRequestDetail,
+        answer_message: TimelineMessage | None,
+        timestamp: datetime,
+    ) -> Task | None:
+        requester = await self._repository.fetch_participant(
+            request.workspace_id,
+            request.requester_participant_id,
+        )
+        if requester is None or requester.participant_type != "agent" or requester.system_agent_id is None:
+            return None
+        existing = await self._repository.list_open_interaction_requests_for_run(
+            request.requester_run_id
+        ) if request.requester_run_id is not None else []
+        if request.status != "completed":
+            return None
+        task = Task(
+            task_id=uuid4(),
+            workspace_id=request.workspace_id,
+            thread_id=request.thread_id,
+            title=f"Continue request {request.request_id}",
+            description="Interaction request completed and ready for aggregation.",
+            requested_by=request.requester_participant_id,
+            correlation_id=answer_message.correlation_id if answer_message is not None else uuid4(),
+            causation_id=request.request_id,
+            created_at=timestamp,
+            updated_at=timestamp,
+            metadata={
+                "target_system_agent_id": str(requester.system_agent_id),
+                "target_participant_id": str(requester.participant_id),
+                "request_id": str(request.request_id),
+                "trigger_message_id": (
+                    str(answer_message.message_id) if answer_message is not None else None
+                ),
+                "sequence_ceiling": answer_message.sequence if answer_message is not None else 0,
+                "response_visibility": "workspace",
+                "routing_reason": "interaction_request_completed",
+                "open_request_count_for_run": len(existing),
+            },
+        )
+        await self._repository.upsert_task(conn, task)
+        return task
 
     async def _resolve_run_for_context(
         self,

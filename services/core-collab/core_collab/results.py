@@ -9,6 +9,7 @@ from .contracts import (
     AssetLink,
     EventEnvelope,
     GitRepository,
+    InteractionRequestDetail,
     LlmProviderDefinition,
     MemoryEntry,
     MemoryProviderDefinition,
@@ -51,6 +52,16 @@ class ThreadCommandResult(CommandResult):
 @dataclass
 class MessageCommandResult(CommandResult):
     message: TimelineMessage | None = None
+
+
+@dataclass
+class InteractionRequestCommandResult(CommandResult):
+    detail: InteractionRequestDetail | None = None
+    details: list[InteractionRequestDetail] = field(default_factory=list)
+    message: TimelineMessage | None = None
+    messages: list[TimelineMessage] = field(default_factory=list)
+    answer_message: TimelineMessage | None = None
+    resumed_task: Task | None = None
 
 
 @dataclass
@@ -147,6 +158,7 @@ __all__ = [
     "AgentDefinitionCommandResult",
     "CommandResult",
     "GitRepositoryCommandResult",
+    "InteractionRequestCommandResult",
     "LeaseReconciliationResult",
     "LlmProviderCommandResult",
     "MemoryCommandResult",

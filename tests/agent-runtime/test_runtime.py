@@ -54,6 +54,11 @@ from open_talon_contracts.models import (
     AgentRunResult,
     AgentResponseContract,
     AgentTaskRouting,
+    InteractionAnswer,
+    InteractionQuestion,
+    InteractionRequest,
+    InteractionRequestDetail,
+    InteractionRequestTarget,
     EventEnvelope,
     MemoryEntry,
     LlmProviderDefinition,
@@ -872,6 +877,58 @@ def test_render_prompt_includes_participants_memory_and_thread_context():
     assert "Response contract:" in prompt
     assert "Validation Summary" in prompt
     assert "required sections: Summary, Checks performed, Findings, Residual risk, Next action" in prompt
+
+
+def test_render_prompt_includes_interaction_request_summary():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    now = _now()
+    request_id = uuid4()
+    responder_id = kernel.context.participants[0].participant_id
+    kernel.context.interaction_requests = [
+        InteractionRequestDetail(
+            request=InteractionRequest(
+                request_id=request_id,
+                workspace_id=kernel.context.workspace.workspace_id,
+                thread_id=kernel.context.thread.thread_id,
+                requester_participant_id=kernel.context.participant.participant_id,
+                title="Need coordinated feedback",
+                status="open",
+                created_at=now,
+                updated_at=now,
+            ),
+            questions=[
+                InteractionQuestion(
+                    question_id=uuid4(),
+                    request_id=request_id,
+                    prompt="What blocks release?",
+                    order=0,
+                )
+            ],
+            targets=[
+                InteractionRequestTarget(
+                    target_id=uuid4(),
+                    request_id=request_id,
+                    participant_id=responder_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+            ],
+            answers=[
+                InteractionAnswer(
+                    answer_id=uuid4(),
+                    request_id=request_id,
+                    participant_id=responder_id,
+                    message_id=uuid4(),
+                    created_at=now,
+                )
+            ],
+        )
+    ]
+
+    prompt = render_prompt(kernel.context)
+
+    assert "Interaction requests:" in prompt
+    assert "- Need coordinated feedback | status: open | questions: 1 | targets: 1 | answers: 1" in prompt
 
 
 def kernel_safe_processing_tasks(runtime: AgentTaskRuntime) -> list[asyncio.Task[None]]:

@@ -776,6 +776,14 @@ def render_prompt(context: AgentExecutionContext) -> str:
             f"[{message.sequence}] {author}: {message.content}"
         )
 
+    interaction_request_lines = []
+    for detail in context.interaction_requests:
+        interaction_request_lines.append(
+            f"- {detail.request.title} | status: {detail.request.status} | "
+            f"questions: {len(detail.questions)} | targets: {len(detail.targets)} | "
+            f"answers: {len(detail.answers)}"
+        )
+
     role_lines = []
     for role_definition in context.role_definitions:
         role_lines.append(f"- {role_definition.name}: {role_definition.definition}")
@@ -830,6 +838,9 @@ def render_prompt(context: AgentExecutionContext) -> str:
         "",
         "Visible thread messages:",
         "\n".join(message_lines) or "- none",
+        "",
+        "Interaction requests:",
+        "\n".join(interaction_request_lines) or "- none",
         "",
         "Triggering message:",
         trigger_text or "- none",

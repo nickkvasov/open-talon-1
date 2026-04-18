@@ -13,6 +13,15 @@ ParticipantType = Literal["user", "agent"]
 ParticipantStatus = Literal["active", "idle", "busy", "offline"]
 ThreadState = Literal["active", "paused", "resolved", "archived"]
 MessageStatus = Literal["draft", "streaming", "completed", "failed"]
+InteractionRequestStatus = Literal["open", "completed", "cancelled", "timed_out"]
+InteractionTargetStatus = Literal["pending", "acknowledged", "answered", "dismissed"]
+ParticipantSelectorType = Literal["participant", "role", "capability"]
+CompletionRuleMode = Literal[
+    "all_targets",
+    "minimum_answers",
+    "one_per_selector_bucket",
+    "custom_targets",
+]
 MemoryScope = Literal["run", "thread", "workspace"]
 MemoryState = Literal["scratch", "candidate", "confirmed", "archived"]
 TaskStatus = Literal["created", "claimed", "released", "completed", "failed"]
@@ -69,6 +78,9 @@ class TargetRef(BaseModel):
         "participant",
         "run_step",
         "tool_call",
+        "interaction_request",
+        "interaction_request_target",
+        "interaction_answer",
     ]
     id: UUID
 
@@ -482,6 +494,81 @@ class TimelineMessage(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ParticipantSelector(BaseModel):
+    type: ParticipantSelectorType
+    value: str
+    participant_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CompletionRule(BaseModel):
+    mode: CompletionRuleMode = "all_targets"
+    minimum_answers: int | None = None
+    target_participant_ids: list[UUID] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class InteractionQuestion(BaseModel):
+    question_id: UUID
+    request_id: UUID
+    prompt: str
+    kind: str | None = None
+    expected_format: str | None = None
+    order: int = 0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class InteractionRequestTarget(BaseModel):
+    target_id: UUID
+    request_id: UUID
+    participant_id: UUID | None = None
+    selector_type: ParticipantSelectorType | None = None
+    selector_value: str | None = None
+    selection_source: str = "explicit"
+    score: float | None = None
+    status: InteractionTargetStatus = "pending"
+    answered_message_id: UUID | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class InteractionAnswer(BaseModel):
+    answer_id: UUID
+    request_id: UUID
+    participant_id: UUID
+    message_id: UUID
+    question_ids: list[UUID] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class InteractionRequest(BaseModel):
+    request_id: UUID
+    workspace_id: UUID
+    thread_id: UUID
+    status: InteractionRequestStatus = "open"
+    requester_participant_id: UUID
+    requester_message_id: UUID | None = None
+    requester_run_id: UUID | None = None
+    requester_task_id: UUID | None = None
+    title: str
+    summary: str | None = None
+    completion_rule: CompletionRule = Field(default_factory=CompletionRule)
+    timeout_at: datetime | None = None
+    completed_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class InteractionRequestDetail(BaseModel):
+    request: InteractionRequest
+    questions: list[InteractionQuestion] = Field(default_factory=list)
+    targets: list[InteractionRequestTarget] = Field(default_factory=list)
+    answers: list[InteractionAnswer] = Field(default_factory=list)
+
+
 class Task(BaseModel):
     task_id: UUID
     workspace_id: UUID
@@ -658,6 +745,24 @@ class AgentToolCallDraft(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class InteractionQuestionDraft(BaseModel):
+    prompt: str
+    kind: str | None = None
+    expected_format: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class InteractionRequestDraft(BaseModel):
+    title: str
+    summary: str | None = None
+    questions: list[InteractionQuestionDraft] = Field(default_factory=list)
+    selectors: list[ParticipantSelector] = Field(default_factory=list)
+    target_participant_ids: list[UUID] = Field(default_factory=list)
+    completion_rule: CompletionRule | None = None
+    timeout_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentArtifactDraft(BaseModel):
     kind: str
     title: str
@@ -671,6 +776,7 @@ class AgentRunResult(BaseModel):
     message: str | None = None
     summary: str | None = None
     tool_calls: list[AgentToolCallDraft] = Field(default_factory=list)
+    interaction_requests: list[InteractionRequestDraft] = Field(default_factory=list)
     artifacts: list[AgentArtifactDraft] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -1046,6 +1152,45 @@ class CreateMessageRequest(BaseModel):
     content: str
     visibility: Visibility = "public"
     create_task: bool = True
+    requests: list["CreateInteractionRequest"] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateInteractionQuestionRequest(BaseModel):
+    prompt: str
+    kind: str | None = None
+    expected_format: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateInteractionRequest(BaseModel):
+    title: str
+    summary: str | None = None
+    questions: list[CreateInteractionQuestionRequest] = Field(default_factory=list)
+    selectors: list[ParticipantSelector] = Field(default_factory=list)
+    target_participant_ids: list[UUID] = Field(default_factory=list)
+    completion_rule: CompletionRule | None = None
+    timeout_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateInteractionRequestsRequest(BaseModel):
+    actor: ParticipantInput
+    requests: list[CreateInteractionRequest] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateInteractionAnswerRequest(BaseModel):
+    actor: ParticipantInput
+    content: str
+    question_ids: list[UUID] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateInteractionRequestRequest(BaseModel):
+    actor: ParticipantInput
+    action: Literal["acknowledge_target", "dismiss_target", "cancel", "timeout"]
+    target_id: UUID | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -1124,6 +1269,7 @@ class AgentExecutionContext(BaseModel):
     role_definitions: list[RoleDefinition] = Field(default_factory=list)
     workspace_tools: list[WorkspaceTool] = Field(default_factory=list)
     messages: list[TimelineMessage] = Field(default_factory=list)
+    interaction_requests: list[InteractionRequestDetail] = Field(default_factory=list)
     run_memory: list[MemoryEntry] = Field(default_factory=list)
     thread_memory: list[MemoryEntry] = Field(default_factory=list)
     workspace_memory: list[MemoryEntry] = Field(default_factory=list)

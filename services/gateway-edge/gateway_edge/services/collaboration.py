@@ -29,6 +29,8 @@ from gateway_edge.models import (
     AssetLink,
     CreateGitRepositoryRequest,
     CreateAgentParticipantRequest,
+    CreateInteractionAnswerRequest,
+    CreateInteractionRequestsRequest,
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
     CreateSystemAgentRequest,
@@ -50,6 +52,7 @@ from gateway_edge.models import (
     DeleteWorkspaceRequest,
     EventEnvelope,
     GitRepository,
+    InteractionRequestDetail,
     LinkAssetRequest,
     MemoryEntry,
     MemoryProviderDefinition,
@@ -64,6 +67,7 @@ from gateway_edge.models import (
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    UpdateInteractionRequestRequest,
     UpdateWorkspaceRequest,
     UpdateSystemAgentRequest,
     UpsertRoleDefinitionRequest,
@@ -678,6 +682,67 @@ class CollaborationService:
         await self._publish_events(result.events)
         assert result.message is not None
         return result.message
+
+    async def list_interaction_requests(
+        self,
+        thread_id: UUID,
+    ) -> list[InteractionRequestDetail]:
+        logger.debug("Service list_interaction_requests thread_id=%s", thread_id)
+        return await self._require_kernel().list_interaction_requests(thread_id)
+
+    async def get_interaction_request(
+        self,
+        request_id: UUID,
+    ) -> InteractionRequestDetail:
+        logger.debug("Service get_interaction_request request_id=%s", request_id)
+        return await self._require_kernel().get_interaction_request(request_id)
+
+    async def create_interaction_requests(
+        self,
+        thread_id: UUID,
+        payload: CreateInteractionRequestsRequest,
+    ) -> list[InteractionRequestDetail]:
+        logger.debug(
+            "Service create_interaction_requests thread_id=%s participant_id=%s request_count=%s",
+            thread_id,
+            payload.actor.participant_id,
+            len(payload.requests),
+        )
+        result = await self._require_kernel().create_interaction_requests(thread_id, payload)
+        await self._publish_events(result.events)
+        return result.details
+
+    async def update_interaction_request(
+        self,
+        request_id: UUID,
+        payload: UpdateInteractionRequestRequest,
+    ) -> InteractionRequestDetail:
+        logger.debug(
+            "Service update_interaction_request request_id=%s participant_id=%s action=%s",
+            request_id,
+            payload.actor.participant_id,
+            payload.action,
+        )
+        result = await self._require_kernel().update_interaction_request(request_id, payload)
+        await self._publish_events(result.events)
+        assert result.detail is not None
+        return result.detail
+
+    async def answer_interaction_request(
+        self,
+        request_id: UUID,
+        payload: CreateInteractionAnswerRequest,
+    ) -> InteractionRequestDetail:
+        logger.debug(
+            "Service answer_interaction_request request_id=%s participant_id=%s question_count=%s",
+            request_id,
+            payload.actor.participant_id,
+            len(payload.question_ids),
+        )
+        result = await self._require_kernel().answer_interaction_request(request_id, payload)
+        await self._publish_events(result.events)
+        assert result.detail is not None
+        return result.detail
 
     async def list_memory_entries(self, workspace_id: UUID) -> list[MemoryEntry]:
         logger.debug("Service list_memory_entries workspace_id=%s", workspace_id)

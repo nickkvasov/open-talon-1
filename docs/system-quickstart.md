@@ -198,6 +198,51 @@ Current local hardening defaults:
 - workspace `admin` or `supervisor` is required for workspace role-definition changes, workspace tool management, workspace Git repository creation, and workspace asset publishing
 - risky tools must be created as `trust_level="trusted"` if they use `workspace_access=read_write`, `network=full`, or `local_process`
 
+## 6A. Collaboration Domain Model
+
+The running system uses a workspace-first collaboration model:
+
+- `workspace` is the top-level collaboration boundary
+- `participant` is the workspace-local state for a human or agent
+- `thread` is the shared conversation and event stream inside a workspace
+- `timeline_message` is the ordered thread-visible message record
+- `interaction_request` is the tracked question workflow attached to a thread
+- `task`, `run`, `run_step`, and `tool_call` are the durable execution records owned by the collaboration kernel and consumed by `agent-runtime`
+
+Identity and execution boundaries:
+
+- human identity is global in `users` and `auth_identities`
+- agent identity/configuration is global in `system_agents`
+- workspace-local presence, roles, capabilities, and visibility live in `participants`
+- Postgres is the source of truth for collaboration and execution state
+- Kafka is the fanout and worker wake-up bus, not the canonical store
+
+Tracked interaction requests are the resumable collaboration path when one participant, often an agent, needs answers from one or more other participants before continuing work. Each request may contain multiple ordered questions, target explicit participants or selector buckets, and wait for a completion rule such as:
+
+- `all_targets`
+- `minimum_answers`
+- `one_per_selector_bucket`
+- `custom_targets`
+
+Current thread-native request flow:
+
+1. A user or agent posts a message or structured request to a thread.
+2. `core-collab` persists the request, resolved targets, rendered thread message, and collaboration events.
+3. Participants answer in-thread with normal messages linked to the request.
+4. `core-collab` aggregates answers until the completion rule is satisfied.
+5. When complete, `core-collab` creates a follow-up task only for the original requesting agent.
+6. `agent-runtime` resumes that agent with the request and accumulated answers in context.
+
+Relevant collaboration APIs:
+
+- `POST /v1/threads/{thread_id}/messages`
+- `GET /v1/threads/{thread_id}/timeline`
+- `GET /v1/threads/{thread_id}/requests`
+- `POST /v1/threads/{thread_id}/requests`
+- `GET /v1/requests/{request_id}`
+- `PATCH /v1/requests/{request_id}`
+- `POST /v1/requests/{request_id}/answers`
+
 ## 7. First Keycloak Sign-In
 
 If you want to inspect the realm in the Keycloak UI before using the TUI:

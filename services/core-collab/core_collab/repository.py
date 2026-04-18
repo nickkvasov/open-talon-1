@@ -22,6 +22,11 @@ from .contracts import (
     AssetLink,
     EventEnvelope,
     GitRepository,
+    InteractionAnswer,
+    InteractionQuestion,
+    InteractionRequest,
+    InteractionRequestDetail,
+    InteractionRequestTarget,
     Membership,
     MemoryEntry,
     MemoryProviderDefinition,
@@ -2660,6 +2665,283 @@ class CollaborationRepository:
             for row in rows
         ]
 
+    async def upsert_interaction_request(
+        self,
+        conn: asyncpg.Connection,
+        request: InteractionRequest,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO interaction_requests (
+                request_id, workspace_id, thread_id, status, requester_participant_id,
+                requester_message_id, requester_run_id, requester_task_id, title, summary,
+                completion_rule, timeout_at, completed_at, created_at, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16
+            )
+            ON CONFLICT (request_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    title = EXCLUDED.title,
+                    summary = EXCLUDED.summary,
+                    completion_rule = EXCLUDED.completion_rule,
+                    timeout_at = EXCLUDED.timeout_at,
+                    completed_at = EXCLUDED.completed_at,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            request.request_id,
+            request.workspace_id,
+            request.thread_id,
+            request.status,
+            request.requester_participant_id,
+            request.requester_message_id,
+            request.requester_run_id,
+            request.requester_task_id,
+            request.title,
+            request.summary,
+            self._json_dumps(request.completion_rule.model_dump(mode="json")),
+            request.timeout_at,
+            request.completed_at,
+            request.created_at,
+            request.updated_at,
+            self._json_dumps(request.metadata),
+        )
+
+    async def upsert_interaction_request_question(
+        self,
+        conn: asyncpg.Connection,
+        question: InteractionQuestion,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO interaction_request_questions (
+                question_id, request_id, prompt, kind, expected_format, question_order, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (question_id) DO UPDATE
+                SET prompt = EXCLUDED.prompt,
+                    kind = EXCLUDED.kind,
+                    expected_format = EXCLUDED.expected_format,
+                    question_order = EXCLUDED.question_order,
+                    metadata = EXCLUDED.metadata
+            """,
+            question.question_id,
+            question.request_id,
+            question.prompt,
+            question.kind,
+            question.expected_format,
+            question.order,
+            self._json_dumps(question.metadata),
+        )
+
+    async def upsert_interaction_request_target(
+        self,
+        conn: asyncpg.Connection,
+        target: InteractionRequestTarget,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO interaction_request_targets (
+                target_id, request_id, participant_id, selector_type, selector_value,
+                selection_source, score, status, answered_message_id, created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (target_id) DO UPDATE
+                SET participant_id = EXCLUDED.participant_id,
+                    selector_type = EXCLUDED.selector_type,
+                    selector_value = EXCLUDED.selector_value,
+                    selection_source = EXCLUDED.selection_source,
+                    score = EXCLUDED.score,
+                    status = EXCLUDED.status,
+                    answered_message_id = EXCLUDED.answered_message_id,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            target.target_id,
+            target.request_id,
+            target.participant_id,
+            target.selector_type,
+            target.selector_value,
+            target.selection_source,
+            target.score,
+            target.status,
+            target.answered_message_id,
+            target.created_at,
+            target.updated_at,
+            self._json_dumps(target.metadata),
+        )
+
+    async def upsert_interaction_answer(
+        self,
+        conn: asyncpg.Connection,
+        answer: InteractionAnswer,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO interaction_answers (
+                answer_id, request_id, participant_id, message_id, question_ids, created_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (answer_id) DO UPDATE
+                SET message_id = EXCLUDED.message_id,
+                    question_ids = EXCLUDED.question_ids,
+                    metadata = EXCLUDED.metadata
+            """,
+            answer.answer_id,
+            answer.request_id,
+            answer.participant_id,
+            answer.message_id,
+            answer.question_ids,
+            answer.created_at,
+            self._json_dumps(answer.metadata),
+        )
+
+    async def fetch_interaction_request(
+        self,
+        request_id: UUID,
+    ) -> InteractionRequest | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT request_id, workspace_id, thread_id, status, requester_participant_id,
+                   requester_message_id, requester_run_id, requester_task_id, title, summary,
+                   completion_rule, timeout_at, completed_at, created_at, updated_at, metadata
+            FROM interaction_requests
+            WHERE request_id = $1
+            """,
+            request_id,
+        )
+        return self._interaction_request_from_row(row) if row else None
+
+    async def list_interaction_requests_for_thread(
+        self,
+        thread_id: UUID,
+    ) -> list[InteractionRequest]:
+        rows = await self._pool.fetch(
+            """
+            SELECT request_id, workspace_id, thread_id, status, requester_participant_id,
+                   requester_message_id, requester_run_id, requester_task_id, title, summary,
+                   completion_rule, timeout_at, completed_at, created_at, updated_at, metadata
+            FROM interaction_requests
+            WHERE thread_id = $1
+            ORDER BY created_at ASC
+            """,
+            thread_id,
+        )
+        return [self._interaction_request_from_row(row) for row in rows]
+
+    async def list_open_interaction_requests_for_run(
+        self,
+        requester_run_id: UUID,
+    ) -> list[InteractionRequest]:
+        rows = await self._pool.fetch(
+            """
+            SELECT request_id, workspace_id, thread_id, status, requester_participant_id,
+                   requester_message_id, requester_run_id, requester_task_id, title, summary,
+                   completion_rule, timeout_at, completed_at, created_at, updated_at, metadata
+            FROM interaction_requests
+            WHERE requester_run_id = $1
+              AND status = 'open'
+            ORDER BY created_at ASC
+            """,
+            requester_run_id,
+        )
+        return [self._interaction_request_from_row(row) for row in rows]
+
+    async def list_interaction_request_questions(
+        self,
+        request_id: UUID,
+    ) -> list[InteractionQuestion]:
+        rows = await self._pool.fetch(
+            """
+            SELECT question_id, request_id, prompt, kind, expected_format, question_order, metadata
+            FROM interaction_request_questions
+            WHERE request_id = $1
+            ORDER BY question_order ASC, question_id ASC
+            """,
+            request_id,
+        )
+        return [self._interaction_question_from_row(row) for row in rows]
+
+    async def list_interaction_request_targets(
+        self,
+        request_id: UUID,
+    ) -> list[InteractionRequestTarget]:
+        rows = await self._pool.fetch(
+            """
+            SELECT target_id, request_id, participant_id, selector_type, selector_value,
+                   selection_source, score, status, answered_message_id, created_at, updated_at, metadata
+            FROM interaction_request_targets
+            WHERE request_id = $1
+            ORDER BY created_at ASC, target_id ASC
+            """,
+            request_id,
+        )
+        return [self._interaction_request_target_from_row(row) for row in rows]
+
+    async def fetch_interaction_request_target(
+        self,
+        target_id: UUID,
+    ) -> InteractionRequestTarget | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT target_id, request_id, participant_id, selector_type, selector_value,
+                   selection_source, score, status, answered_message_id, created_at, updated_at, metadata
+            FROM interaction_request_targets
+            WHERE target_id = $1
+            """,
+            target_id,
+        )
+        return self._interaction_request_target_from_row(row) if row else None
+
+    async def list_interaction_answers(
+        self,
+        request_id: UUID,
+    ) -> list[InteractionAnswer]:
+        rows = await self._pool.fetch(
+            """
+            SELECT answer_id, request_id, participant_id, message_id, question_ids, created_at, metadata
+            FROM interaction_answers
+            WHERE request_id = $1
+            ORDER BY created_at ASC, answer_id ASC
+            """,
+            request_id,
+        )
+        return [self._interaction_answer_from_row(row) for row in rows]
+
+    async def get_interaction_request_detail(
+        self,
+        request_id: UUID,
+    ) -> InteractionRequestDetail | None:
+        request = await self.fetch_interaction_request(request_id)
+        if request is None:
+            return None
+        return InteractionRequestDetail(
+            request=request,
+            questions=await self.list_interaction_request_questions(request_id),
+            targets=await self.list_interaction_request_targets(request_id),
+            answers=await self.list_interaction_answers(request_id),
+        )
+
+    async def list_interaction_request_details_for_thread(
+        self,
+        thread_id: UUID,
+    ) -> list[InteractionRequestDetail]:
+        requests = await self.list_interaction_requests_for_thread(thread_id)
+        details: list[InteractionRequestDetail] = []
+        for request in requests:
+            details.append(
+                InteractionRequestDetail(
+                    request=request,
+                    questions=await self.list_interaction_request_questions(request.request_id),
+                    targets=await self.list_interaction_request_targets(request.request_id),
+                    answers=await self.list_interaction_answers(request.request_id),
+                )
+            )
+        return details
+
     async def fetch_message(self, message_id: UUID) -> TimelineMessage | None:
         row = await self._pool.fetchrow(
             """
@@ -3341,6 +3623,75 @@ class CollaborationRepository:
                 metadata=CollaborationRepository._json_value(row["version_metadata"], default={}),
             ),
             link=CollaborationRepository._asset_link_from_alias_row(row),
+        )
+
+    @staticmethod
+    def _interaction_request_from_row(row: asyncpg.Record) -> InteractionRequest:
+        from open_talon_contracts.models import CompletionRule
+
+        return InteractionRequest(
+            request_id=row["request_id"],
+            workspace_id=row["workspace_id"],
+            thread_id=row["thread_id"],
+            status=row["status"],
+            requester_participant_id=row["requester_participant_id"],
+            requester_message_id=row["requester_message_id"],
+            requester_run_id=row["requester_run_id"],
+            requester_task_id=row["requester_task_id"],
+            title=row["title"],
+            summary=row["summary"],
+            completion_rule=CompletionRule.model_validate(
+                CollaborationRepository._json_value(row["completion_rule"], default={})
+            ),
+            timeout_at=row["timeout_at"],
+            completed_at=row["completed_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _interaction_question_from_row(row: asyncpg.Record) -> InteractionQuestion:
+        return InteractionQuestion(
+            question_id=row["question_id"],
+            request_id=row["request_id"],
+            prompt=row["prompt"],
+            kind=row["kind"],
+            expected_format=row["expected_format"],
+            order=row["question_order"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _interaction_request_target_from_row(
+        row: asyncpg.Record,
+    ) -> InteractionRequestTarget:
+        return InteractionRequestTarget(
+            target_id=row["target_id"],
+            request_id=row["request_id"],
+            participant_id=row["participant_id"],
+            selector_type=row["selector_type"],
+            selector_value=row["selector_value"],
+            selection_source=row["selection_source"],
+            score=row["score"],
+            status=row["status"],
+            answered_message_id=row["answered_message_id"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _interaction_answer_from_row(row: asyncpg.Record) -> InteractionAnswer:
+        question_ids = row["question_ids"] or []
+        return InteractionAnswer(
+            answer_id=row["answer_id"],
+            request_id=row["request_id"],
+            participant_id=row["participant_id"],
+            message_id=row["message_id"],
+            question_ids=list(question_ids),
+            created_at=row["created_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
         )
 
     @staticmethod
