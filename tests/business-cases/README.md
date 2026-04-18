@@ -1,0 +1,117 @@
+# Business Case Test Suite
+
+This directory contains end-to-end collaboration scenarios that exercise the system as a business workflow instead of as isolated unit behavior.
+
+These tests are intended to answer questions like:
+
+- Can several humans and several agents collaborate in one workspace?
+- Are tracked interaction requests routed correctly?
+- Do completion rules gate agent resume correctly?
+- Does the workspace communication log provide a debuggable trail of the collaboration?
+
+## Scope
+
+Business-case tests should stay focused on realistic workflow behavior across multiple collaboration steps:
+
+- workspace creation and participant setup
+- human and agent participants in the same workspace
+- thread creation and message posting
+- tracked `interaction_request` creation and answering
+- agent task/run/resume behavior
+- final communication-log validation when relevant
+
+They are higher-level than the `tests/core-collab` suite, but they still run in-process with the fake repository unless a scenario explicitly needs infrastructure.
+
+## Current Case
+
+### Role-Based Daily Coordination
+
+Implemented in [test_daily_coordination.py](/Users/nikolay.kvasov/Development/open-talon-1/tests/business-cases/test_daily_coordination.py:1).
+
+This pilot validates a simple delivery-team coordination loop:
+
+- Workspace: `Delivery Team`
+- Thread: `Daily Coordination`
+- Humans:
+  - `Team Lead`
+  - `Frontend Engineer`
+  - `Backend Engineer`
+- Agents:
+  - `Standup Coordinator Agent`
+  - `Risk Review Agent`
+
+The case intentionally uses advertised participant roles for targeting instead of named user selection:
+
+- `@role:frontend_engineer`
+- `@role:backend_engineer`
+- `@role:team_lead`
+
+The scenario covers three tracked collaborations:
+
+1. The standup coordinator requests engineering updates using `one_per_selector_bucket`.
+2. The standup coordinator requests lead prioritization using `all_targets`.
+3. The risk review agent requests mitigation ownership using `minimum_answers = 2`.
+
+The case then verifies:
+
+- role-based target resolution
+- partial vs complete request state transitions
+- gated agent resume behavior
+- targeted follow-up task routing
+- workspace communication-log ordering
+
+## Running The Suite
+
+From the repository root:
+
+```bash
+source .venv/bin/activate
+pytest tests/business-cases -q
+```
+
+Run only business-case-marked tests:
+
+```bash
+pytest -m business_case -q
+```
+
+Run only the current pilot:
+
+```bash
+pytest tests/business-cases/test_daily_coordination.py -q
+```
+
+## Adding A New Business Case
+
+When adding a new scenario:
+
+- keep it in this directory
+- mark it with `@pytest.mark.business_case`
+- prefer one file per business workflow
+- name the file after the workflow, not the subsystem
+- keep the scenario readable from top to bottom as a narrative
+
+Recommended structure:
+
+1. Create the workspace and participants.
+2. Attach any required agents.
+3. Assign participant roles/capabilities needed for routing.
+4. Create the thread.
+5. Post the initiating human or agent message.
+6. Drive the collaboration through requests, answers, and resumes.
+7. Assert final state, task routing, and communication history.
+
+## Design Guidelines
+
+Use business-case tests for scenarios where the value comes from interaction between subsystems. Keep lower-level matching, persistence, or contract edge cases in:
+
+- [tests/core-collab](/Users/nikolay.kvasov/Development/open-talon-1/tests/core-collab)
+- [tests/gateway-edge](/Users/nikolay.kvasov/Development/open-talon-1/tests/gateway-edge)
+- [tests/tui](/Users/nikolay.kvasov/Development/open-talon-1/tests/tui)
+
+Prefer deterministic scenarios:
+
+- use explicit role assignments
+- avoid ambiguous multi-match selector routing unless that is the point of the test
+- assert both intermediate and final collaboration state
+- include communication-log assertions when the workflow should be auditable
