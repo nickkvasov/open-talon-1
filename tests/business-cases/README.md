@@ -81,6 +81,27 @@ Run only the current pilot:
 pytest tests/business-cases/test_daily_coordination.py -q
 ```
 
+## Communication Logs
+
+Each business-case test run now writes persistent workspace communication-log artifacts under:
+
+- [tests/business-cases/logs](/Users/nikolay.kvasov/Development/open-talon-1/tests/business-cases/logs/README.md)
+
+The layout is organized for browsing by scenario, then by test, then by individual run:
+
+```text
+tests/business-cases/logs/
+  <scenario>/
+    <test_name>/
+      latest.json
+      runs/
+        <timestamp>_pid<pid>/
+          manifest.json
+          <workspace_id>.jsonl
+```
+
+Use `latest.json` when you want the newest run quickly, and the `runs/` directory when you want to compare several executions of the same scenario over time.
+
 ## Adding A New Business Case
 
 When adding a new scenario:
@@ -90,6 +111,7 @@ When adding a new scenario:
 - prefer one file per business workflow
 - name the file after the workflow, not the subsystem
 - keep the scenario readable from top to bottom as a narrative
+- use the `business_case_log_dir` fixture when the scenario should persist communication logs
 
 Recommended structure:
 

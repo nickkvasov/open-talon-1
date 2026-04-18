@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -35,8 +36,8 @@ from test_agent_contracts import (  # noqa: E402
 
 @pytest.mark.asyncio
 @pytest.mark.business_case
-async def test_role_based_daily_coordination_pilot_flow():
-    repository = FakeRepository()
+async def test_role_based_daily_coordination_pilot_flow(business_case_log_dir: Path):
+    repository = FakeRepository(communication_log_dir=business_case_log_dir)
     kernel = CollaborationKernel(repository)
 
     lead_user_id = uuid4()
@@ -435,3 +436,4 @@ async def test_role_based_daily_coordination_pilot_flow():
         == "Risk note: backend owns mitigation and plans to ship the fallback by 2pm today."
         for entry in page.entries
     )
+    assert (business_case_log_dir / f"{workspace_id}.jsonl").exists()
