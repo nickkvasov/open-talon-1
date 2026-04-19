@@ -248,6 +248,8 @@ class UserClient:
                 self._invalidate_saved_session("saved login expired; run `auth login`")
                 return
             raise
+        if self.current_user is not None:
+            await self._refresh_selected_organization()
 
     async def _request(
         self,
@@ -293,6 +295,14 @@ class UserClient:
         if current is not None:
             self.state.participant_id = current.get("participant_id")
             self.state.display_name = current.get("display_name", self.state.display_name)
+            save_state(self.profile, self.state)
+
+    def _clear_workspace_context(self, *, persist: bool = True) -> None:
+        self.state.participant_id = None
+        self.state.workspace_id = None
+        self.state.thread_id = None
+        self.state.last_sequence = 0
+        if persist:
             save_state(self.profile, self.state)
 
     def _update_state_from_message(self, message: dict[str, Any]) -> None:
@@ -348,6 +358,35 @@ class UserClient:
                 return workspace
         return None
 
+    def _resolve_organization_target(
+        self,
+        organizations: list[dict[str, Any]],
+        target: str,
+    ) -> dict[str, Any] | None:
+        normalized = target.strip()
+        if not normalized or normalized == "current":
+            return next(
+                (
+                    organization
+                    for organization in organizations
+                    if organization["organization_id"] == self.state.organization_id
+                ),
+                None,
+            )
+        for organization in organizations:
+            organization_id = organization["organization_id"]
+            if organization_id == normalized or organization_id.startswith(normalized):
+                return organization
+        lowered = normalized.lower()
+        for organization in organizations:
+            slug = organization.get("slug", "")
+            name = organization.get("name", "")
+            if isinstance(slug, str) and slug.lower() == lowered:
+                return organization
+            if isinstance(name, str) and name.lower() == lowered:
+                return organization
+        return None
+
     def _resolve_thread_target(
         self,
         threads: list[dict[str, Any]],
@@ -396,15 +435,50 @@ class UserClient:
             return False
         return True
 
-    async def _list_workspaces(self) -> list[dict[str, Any]]:
-        body = await self._request("GET", "/v1/workspaces")
+    async def _list_organizations(self) -> list[dict[str, Any]]:
+        body = await self._request("GET", "/v1/organizations")
+        assert isinstance(body, list)
+        return body
+
+    async def _organization_detail(self, organization_id: str) -> dict[str, Any]:
+        body = await self._request("GET", f"/v1/organizations/{organization_id}")
+        assert isinstance(body, dict)
+        return body
+
+    async def _refresh_selected_organization(self) -> list[dict[str, Any]]:
+        organizations = await self._list_organizations()
+        changed = False
+        if self.state.organization_id and self._resolve_organization_target(
+            organizations,
+            self.state.organization_id,
+        ) is None:
+            self.state.organization_id = None
+            self._clear_workspace_context(persist=False)
+            changed = True
+        if self.state.organization_id is None and len(organizations) == 1:
+            self.state.organization_id = organizations[0]["organization_id"]
+            changed = True
+        if changed:
+            save_state(self.profile, self.state)
+        return organizations
+
+    async def _list_workspaces(
+        self,
+        organization_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params = {"organization_id": organization_id} if organization_id else None
+        body = await self._request("GET", "/v1/workspaces", params=params)
         assert isinstance(body, list)
         return body
 
     async def _workspace_detail(self, workspace_id: str) -> dict[str, Any]:
         body = await self._request("GET", f"/v1/workspaces/{workspace_id}")
         assert isinstance(body, dict)
+        workspace = body.get("workspace", {})
+        if isinstance(workspace, dict) and workspace.get("organization_id"):
+            self.state.organization_id = workspace["organization_id"]
         self._set_current_participant(body.get("participants", []))
+        save_state(self.profile, self.state)
         return body
 
     async def _list_threads(self, workspace_id: str) -> list[dict[str, Any]]:
@@ -507,6 +581,7 @@ class UserClient:
             "help",
             "status",
             "auth",
+            "organization",
             "workspace",
             "thread",
             "role",
@@ -529,7 +604,8 @@ class UserClient:
                     "status",
                     "auth login",
                     "auth logout",
-                    "workspace list|show|create <name>|use <id|name>|clear",
+                    "organization list|show [id|slug|name]|use <id|slug|name>",
+                    "workspace list [all]|show|create <name>|use <id|name>|clear",
                     "thread list|show|create <title>|use <id|title>|clear",
                     "role list|use <role> [:: <description> :: <cap1,cap2>]",
                     "send <text>",
@@ -557,6 +633,7 @@ class UserClient:
                     "display_name": self.state.display_name,
                     "user_id": self.state.user_id,
                     "participant_id": self.state.participant_id,
+                    "organization_id": self.state.organization_id,
                     "workspace_id": self.state.workspace_id,
                     "thread_id": self.state.thread_id,
                 },
@@ -595,10 +672,82 @@ class UserClient:
         if not self._is_authenticated:
             raise RuntimeError("sign in first with `auth login`")
 
-        if normalized.startswith("workspace "):
-            remainder = normalized.split(maxsplit=1)[1].strip()
-            if remainder == "list":
-                workspaces = await self._list_workspaces()
+        if command_name == "organization" or normalized.startswith("organization "):
+            parts = shlex.split(normalized)
+            if len(parts) < 2:
+                raise ValueError(
+                    "supported organization commands: list, show [id|slug|name], use <id|slug|name>"
+                )
+            action = parts[1].lower()
+            organizations = await self._refresh_selected_organization()
+            if action == "list":
+                self._emit(
+                    command="organization.list",
+                    data=[
+                        f"{'*' if item['organization_id'] == self.state.organization_id else '-'} {item['name']} ({item['slug']})"
+                        for item in organizations
+                    ],
+                )
+                return
+            if action == "show":
+                target = parts[2] if len(parts) > 2 else "current"
+                selected = self._resolve_organization_target(organizations, target)
+                if selected is None:
+                    if target == "current":
+                        raise RuntimeError("no organization selected")
+                    raise KeyError(f"organization not found: {target}")
+                detail = await self._organization_detail(selected["organization_id"])
+                self._emit(
+                    command="organization.show",
+                    data={
+                        "organization_id": detail["organization_id"],
+                        "slug": detail["slug"],
+                        "name": detail["name"],
+                        "description": detail.get("description"),
+                    },
+                )
+                return
+            if action == "use":
+                target = parts[2].strip() if len(parts) > 2 else ""
+                if not target:
+                    raise ValueError("usage: `organization use <id|slug|name>`")
+                selected = self._resolve_organization_target(organizations, target)
+                if selected is None:
+                    raise KeyError(f"organization not found: {target}")
+                previous_organization_id = self.state.organization_id
+                self.state.organization_id = selected["organization_id"]
+                if previous_organization_id != self.state.organization_id:
+                    self._clear_workspace_context(persist=False)
+                save_state(self.profile, self.state)
+                self._emit(
+                    command="organization.use",
+                    data=selected,
+                    message=f"selected organization {selected['name']}",
+                )
+                return
+            raise ValueError(
+                "supported organization commands: list, show [id|slug|name], use <id|slug|name>"
+            )
+
+        if command_name == "workspace" or normalized.startswith("workspace "):
+            parts = normalized.split(maxsplit=1)
+            if len(parts) < 2:
+                raise ValueError("supported workspace commands: list [all], show, create, use, clear")
+            remainder = parts[1].strip()
+            if remainder == "list" or remainder.startswith("list "):
+                parts = shlex.split(remainder)
+                show_all = len(parts) > 1 and parts[1].lower() == "all"
+                if len(parts) > 1 and not show_all:
+                    raise ValueError("usage: `workspace list [all]`")
+                if not show_all and not self.state.organization_id:
+                    await self._refresh_selected_organization()
+                if not show_all and not self.state.organization_id:
+                    raise RuntimeError(
+                        "select an organization first with `organization use` or run `workspace list all`"
+                    )
+                workspaces = await self._list_workspaces(
+                    None if show_all else self.state.organization_id
+                )
                 self._emit(
                     command="workspace.list",
                     data=[
@@ -631,10 +780,15 @@ class UserClient:
                 name = remainder[len("create ") :].strip()
                 if not name:
                     raise ValueError("usage: `workspace create <name>`")
+                if not self.state.organization_id:
+                    await self._refresh_selected_organization()
+                if not self.state.organization_id:
+                    raise RuntimeError("select an organization first with `organization use`")
                 body = await self._request(
                     "POST",
                     "/v1/workspaces",
                     json_body={
+                        "organization_id": self.state.organization_id,
                         "name": name,
                         "description": "Workspace created by the Open Talon user client",
                         "actor": self.actor_payload,
@@ -651,7 +805,7 @@ class UserClient:
                 target = remainder[len("use ") :].strip()
                 if not target:
                     raise ValueError("usage: `workspace use <id|name>`")
-                workspaces = await self._list_workspaces()
+                workspaces = await self._list_workspaces(self.state.organization_id)
                 selected = self._resolve_workspace_target(workspaces, target)
                 if selected is not None:
                     self.state.workspace_id = selected["workspace_id"]

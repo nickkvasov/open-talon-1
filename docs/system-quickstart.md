@@ -32,6 +32,8 @@ Launch the local infrastructure and the supported Python processes:
 ./open-talon start
 ```
 
+The launcher now waits for both the gateway readiness endpoint and the Keycloak OIDC discovery document before it exits successfully, so browser and terminal auth flows should be ready when the command returns.
+
 This starts:
 
 - `gateway-edge`
@@ -145,6 +147,13 @@ npm run test:e2e
 
 See [apps/admin-web/README.md](/Users/nikolay.kvasov/Development/open-talon-1/apps/admin-web/README.md) for the full browser test matrix.
 
+Current admin-web highlights:
+
+- `Organizations` manages org creation and org memberships
+- `Workspaces` filters by organization and creates workspaces in the selected org
+- `Providers` switches between `Platform Global` and `Organization` scope
+- `Swarm Resources` switches between `Platform Global` and `Organization` scope
+
 ## 5. Default Local Credentials
 
 - Postgres: `admin` / `password`
@@ -193,7 +202,14 @@ Relevant runtime-guardrail defaults from [`infrastructure/.env.example`](/Users/
 - The TUI uses the `open-talon-tui` public client and authenticates with OIDC device flow.
 - The admin web uses the `open-talon-web` public client with authorization code + PKCE.
 - Human identity is global in `users` and `auth_identities`.
+- Organization membership and org roles are stored in `organization_memberships`.
 - Workspace-local membership and roles are stored in `participants`.
+
+Local multi-tenant defaults:
+
+- the migration seeds one organization named `Default Organization` with slug `default`
+- every workspace belongs to an organization
+- `tui2`, `user-client`, and the admin web auto-select the org when exactly one organization is visible
 
 Current local hardening defaults:
 
@@ -205,9 +221,10 @@ Current local hardening defaults:
 
 ## 6A. Collaboration Domain Model
 
-The running system uses a workspace-first collaboration model:
+The running system uses the tenant hierarchy `platform > organization > workspace > thread`:
 
-- `workspace` is the top-level collaboration boundary
+- `organization` is the tenant boundary above workspaces
+- `workspace` is the collaboration boundary inside an organization
 - `participant` is the workspace-local state for a human or agent
 - `thread` is the shared conversation and event stream inside a workspace
 - `timeline_message` is the ordered thread-visible message record
@@ -217,6 +234,7 @@ The running system uses a workspace-first collaboration model:
 Identity and execution boundaries:
 
 - human identity is global in `users` and `auth_identities`
+- organization membership and org roles live in `organizations` and `organization_memberships`
 - agent identity/configuration is global in `system_agents`
 - workspace-local presence, roles, capabilities, and visibility live in `participants`
 - Postgres is the source of truth for collaboration and execution state
@@ -309,8 +327,12 @@ Inside `tui2`, the basic first-run flow is:
 ```text
 /auth login
 /account whoami
+/organization list
+/organization use <id|slug|name>
 /workspace list
 ```
+
+If your user can only see one organization, `tui2` auto-selects it after login. On a fresh local stack that is usually the seeded `Default Organization`.
 
 The full-screen Textual UI is still available:
 
@@ -353,6 +375,8 @@ Important behavior:
 - only the current per-profile TUI state/token format is supported; older local auth/state is not migrated and existing users must sign in again
 - `user-client` is the recommended entrypoint when one software agent needs to control each human test user separately
 - `user-client --output json` emits machine-readable command results for automation
+- `workspace list` defaults to the selected organization in `tui2` and `user-client`; use `workspace list all` to see every visible workspace
+- `workspace create` requires a selected organization in `tui2` and `user-client`
 - `user-client` accepts direct `workspace use <uuid>` and `thread use <uuid>` commands, which helps multiple profiles join the same shared scenario explicitly
 
 Useful TUI commands:
@@ -373,7 +397,10 @@ Useful `tui2` commands:
 /help
 /auth login
 /auth logout
-/workspace list
+/organization list
+/organization show [id|slug|name]
+/organization use <id|slug|name>
+/workspace list [all]
 /workspace create <name>
 /workspace use <id|name>
 /thread list
@@ -392,7 +419,10 @@ help
 status
 auth login
 auth logout
-workspace list
+organization list
+organization show [id|slug|name]
+organization use <id|slug|name>
+workspace list [all]
 workspace create <name>
 workspace use <id|name>
 thread list
@@ -496,6 +526,7 @@ Current model:
 
 - Postgres `audit_event_ledger` is the source of truth
 - workspace-scoped chains use `workspace:{workspace_id}`
+- organization-scoped chains use `organization:{organization_id}`
 - global/system audit uses the `global` partition
 - ClickHouse stores the searchable projection in `default.audit_events`
 - MinIO stores exports in `audit/exports/` and chain checkpoints in `audit/checkpoints/`
@@ -511,6 +542,9 @@ curl -H "Authorization: Bearer <admin-token>" \
 curl -H "Authorization: Bearer <admin-token>" \
   "http://127.0.0.1:8000/v1/audit/chains/global/verify"
 
+curl -H "Authorization: Bearer <org-admin-token>" \
+  "http://127.0.0.1:8000/v1/organizations/<organization_id>/audit/events?limit=20"
+
 curl -X POST http://127.0.0.1:8000/v1/audit/events/export \
   -H "Authorization: Bearer <admin-token>" \
   -H 'Content-Type: application/json' \
@@ -520,6 +554,7 @@ curl -X POST http://127.0.0.1:8000/v1/audit/events/export \
 Current access model:
 
 - system `admin` can query, verify, and export globally
+- organization `owner` and `admin` can query and export organization-scoped audit
 - workspace `admin` and `supervisor` can read workspace-scoped audit
 - regular `user` cannot read audit
 

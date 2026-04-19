@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -237,3 +238,57 @@ async def test_audit_service_retention_once_exports_and_prunes(monkeypatch):
     assert recorded["snapshot"]["last_pruned_sequence"] == 10
     assert recorded["pruned"]["max_ledger_offset"] == 10
     assert recorded["snapshot"]["object_key"].startswith(settings.audit_retention_prefix)
+
+
+@pytest.mark.asyncio
+async def test_export_chain_checkpoint_serializes_datetime_and_uuid(monkeypatch):
+    checkpoint_payload = {}
+
+    class _Repository:
+        async def list_audit_chain_heads(self):
+            return [
+                {
+                    "chain_partition": "organization:test",
+                    "last_sequence": 7,
+                    "last_event_hash": "a" * 64,
+                    "updated_at": datetime.now(timezone.utc),
+                    "organization_id": uuid4(),
+                }
+            ]
+
+    async def _put_object(**kwargs):
+        checkpoint_payload["payload"] = json.loads(kwargs["payload"].decode("utf-8"))
+        return StoredObject(
+            bucket="open-talon-assets",
+            object_key=kwargs["object_key"],
+            size_bytes=len(kwargs["payload"]),
+            sha256="b" * 64,
+            content_type=kwargs.get("content_type"),
+        )
+
+    service = AuditService()
+    service._repository = _Repository()
+    service._storage = SimpleNamespace(put_object=_put_object)
+
+    await service._export_chain_checkpoint("2026-04-19")
+
+    exported_head = checkpoint_payload["payload"]["chain_heads"][0]
+    assert exported_head["organization_id"]
+    assert exported_head["updated_at"].endswith("+00:00")
+
+
+@pytest.mark.asyncio
+async def test_ensure_clickhouse_schema_uses_datetime_ttl(monkeypatch):
+    recorded = {}
+    service = AuditService()
+
+    async def _clickhouse_query(statement, *, body=None):
+        recorded["statement"] = statement
+        recorded["body"] = body
+
+    monkeypatch.setattr(service, "_clickhouse_query", _clickhouse_query)
+    monkeypatch.setattr(settings, "audit_clickhouse_retention_days", 365)
+
+    await service._ensure_clickhouse_schema()
+
+    assert "TTL toDateTime(recorded_at) + toIntervalDay(365)" in recorded["statement"]

@@ -20,7 +20,7 @@ Open Talon is a local-first collaboration system where users and agents are firs
 At a high level:
 
 - `services/gateway-edge` is the main entrypoint for clients and developer tools
-- `apps/admin-web` provides the browser-based admin console for runtime overview, provider management, workspace policy edits, swarm resource management, and API key operations
+- `apps/admin-web` provides the browser-based admin console for organizations, workspace policy edits, provider management, swarm resource management, runtime overview, and API key operations
 - `apps/tui` provides a terminal UI that talks to the gateway
   - `tui2` is the recommended scrollback-first terminal client for reliable mouse copy/select and terminal-native link handling
 - `services/core-collab` manages shared collaboration concepts like workspaces, threads, participants, presence, and timelines across both humans and agents
@@ -43,6 +43,7 @@ Open Talon now separates:
 
 - `users`: stable human identity records
 - `auth_identities`: external IdP mappings for authenticated humans
+- `organizations` and `organization_memberships`: organization tenancy, membership, and org roles stored in Postgres
 - `participants`: workspace-local materializations of a human or agent inside a workspace
 
 Human authentication is handled through **Keycloak** over OIDC. `gateway-edge` validates bearer tokens, maps `(issuer, subject)` to a local `users.user_id`, and then resolves or creates the caller's workspace participant server-side.
@@ -51,7 +52,9 @@ Important implications:
 
 - client apps should not treat `participant_id` as a global human identity
 - authenticated human requests may still include an `actor` object for compatibility, but the gateway derives the effective human actor from the bearer token
+- organization membership and org roles live in Postgres, not in Keycloak claims
 - OIDC workspace listing and workspace-scoped reads are membership-scoped; non-members should see `404` for workspace, thread, memory, and workspace-scoped asset reads
+- organization-scoped reads are also membership-scoped; non-members should see `404` there as well
 - global system-definition, global publish, and provider-management routes are admin-only for OIDC users; API-key and other system-admin operator flows keep their existing semantics
 - OpenBao remains part of the local stack for secrets and other internal uses, not as the primary end-user login system
 - the local Keycloak dev setup is intended to allow HTTP during development; `keycloak-init` normalizes `sslRequired=none` for both `master` and `open-talon`, and you can re-apply that with `docker compose up -d keycloak keycloak-init`
@@ -59,11 +62,12 @@ Important implications:
 
 ## Collaboration Model
 
-Open Talon’s collaboration model is workspace-first and thread-native.
+Open Talon’s collaboration model is organization-aware and thread-native.
 
 Core entities:
 
-- `workspace`: the top-level collaboration boundary for participants, roles, tools, memory, and execution policy
+- `organization`: the tenant boundary above workspaces
+- `workspace`: the collaboration boundary inside an organization for participants, roles, attached tools, memory, and execution policy
 - `participant`: the workspace-local materialization of a human or system agent, including status, roles, capabilities, and visibility
 - `thread`: the shared collaboration stream inside a workspace
 - `timeline_message`: an ordered message in a thread, visible to users, agents, or both depending on `visibility`
@@ -72,7 +76,9 @@ Core entities:
 
 Important rules:
 
-- `users` and `system_agents` are global identity/configuration records; `participants` are workspace-local state
+- the effective tenant hierarchy is `platform > organization > workspace > thread`
+- `users` are global human identities, `organization_memberships` hold org-level access, and `participants` remain workspace-local state
+- `system_agents`, `system_tools`, `llm_providers`, and `memory_providers` can now be platform-global or organization-scoped
 - thread activity is ordered by a monotonic thread-local `sequence`
 - Postgres is the source of truth for collaboration and execution state; Kafka is the wake-up and fanout bus
 - threads are the shared surface in v1; tracked requests are rendered into the same thread instead of using private DM semantics
@@ -99,9 +105,17 @@ For workspace-level debugging, Open Talon now also exposes a communication log v
 
 Common collaboration endpoints:
 
+- `GET /v1/organizations`
+- `POST /v1/organizations`
+- `GET /v1/organizations/{organization_id}`
+- `PATCH /v1/organizations/{organization_id}`
+- `GET /v1/organizations/{organization_id}/members`
+- `POST /v1/organizations/{organization_id}/members`
 - `POST /v1/workspaces`
 - `GET /v1/workspaces/{workspace_id}/communication-log`
 - `GET /v1/workspaces/{workspace_id}/participants`
+- `GET /v1/workspaces/{workspace_id}/catalog/agents`
+- `GET /v1/workspaces/{workspace_id}/catalog/tools`
 - `POST /v1/workspaces/{workspace_id}/threads`
 - `GET /v1/threads/{thread_id}/timeline`
 - `POST /v1/threads/{thread_id}/messages`
@@ -115,10 +129,11 @@ Common collaboration endpoints:
 
 The admin web app lives in [apps/admin-web](/Users/nikolay.kvasov/Development/open-talon-1/apps/admin-web) and is the main browser surface for:
 
+- organization creation and membership management
 - runtime overview and operator visibility
-- global LLM and memory provider management
-- system agent and system tool management
-- workspace create, update, role override, and delete flows
+- platform-global and organization-scoped LLM and memory provider management
+- platform-global and organization-scoped system agent and system tool management
+- workspace create, update, role override, and delete flows inside the selected organization
 - admin API key management
 
 Local usage:
@@ -130,6 +145,8 @@ npm run dev
 ```
 
 With the local stack running, the default browser entrypoint is [http://localhost:5173](http://localhost:5173).
+
+The local stack seeds a single backfilled organization named `Default Organization`, so the browser auto-selects it until you create more organizations.
 
 The app expects:
 
@@ -152,7 +169,10 @@ See [apps/admin-web/README.md](/Users/nikolay.kvasov/Development/open-talon-1/ap
 The current defaults are aimed at a single medium-sized internal company deployment.
 
 - global reads and writes for system agents, system tools, global Git repositories, global asset publish/link/activate flows, and provider management are admin-only for OIDC users
+- organization CRUD and organization membership changes require org `owner` or `admin`, unless the caller is a platform admin
 - workspace role-definition changes, workspace tool attach/update/delete, workspace Git repository creation, and workspace asset publishing require workspace `admin` or `supervisor`
+- human workspace access depends on organization membership first, then workspace participation
+- workspace catalogs resolve as the union of platform-global resources and same-organization resources
 - `GET /v1/workspaces` only returns workspaces where the authenticated human already has a participant record
 - workspace-scoped reads intentionally return `404` for non-members so valid workspace and thread IDs are not enumerable
 - risky tool execution profiles require `trust_level="trusted"`: `workspace_access=read_write`, `network=full`, and `local_process`
@@ -179,6 +199,7 @@ Security and integrity rules:
 
 - audit rows are append-only in steady-state code
 - workspace-scoped chains use `workspace:{workspace_id}`
+- organization-scoped chains use `organization:{organization_id}`
 - system/global chains use `global`
 - `prev_hash` and `event_hash` form the tamper-evident chain
 - raw bearer tokens, prompt bodies, tool arguments, and message bodies must not be stored inline in audit metadata
@@ -193,6 +214,7 @@ Audit APIs:
 Audit access model:
 
 - system `admin` can query, verify, and export globally
+- organization `owner` and `admin` can access organization audit within their organization scope
 - workspace `admin` and `supervisor` can access audit within their workspace scope
 - regular `user` cannot read audit data
 
@@ -209,10 +231,10 @@ That profile is operational/investigative only. The canonical audit source remai
 
 Open Talon models tools in two layers:
 
-- `system_tools`: global tool definitions available across the installation
+- `system_tools`: platform-global or organization-scoped tool definitions
 - `workspace_tools`: workspace-scoped attachments that enable a system tool for a specific workspace
 
-This means a tool is defined once, then added to any workspace that wants to advertise it to attached agents.
+This means a tool is defined once at the platform or organization layer, then added to any compatible workspace that wants to advertise it to attached agents.
 
 Each system tool includes:
 
@@ -221,7 +243,7 @@ Each system tool includes:
 - an `input_schema` for structured validation/integration use
 - an explicit `execution` binding that selects the execution backend, handler, execution profile, and trust level
 
-When a tool is attached to a workspace, attached agent participants advertise it as a capability using the `tool:<name>` form, and the runtime includes the attached tool definitions in the agent execution context.
+When a tool is attached to a workspace, attached agent participants advertise it as a capability using the `tool:<name>` form, and the runtime includes the attached tool definitions in the agent execution context. Workspace catalog APIs expose the union of global and same-organization definitions visible to that workspace.
 
 ## Execution Infrastructure
 
@@ -410,6 +432,8 @@ That provider can then be exposed by registering it in `build_provider_index(...
 ## Infrastructure
 
 `./open-talon start` brings up the full local infrastructure stack and then starts the supported local processes for:
+
+It now waits for both the gateway readiness endpoint and Keycloak OIDC discovery before returning success, so the browser and device-flow auth clients should already have their dependencies online when the command exits.
 
 - `gateway-edge`
 - `agent-task-worker`
@@ -712,6 +736,7 @@ For TUI setup, usage, and slash command documentation, see [`apps/tui/README.md`
 In the current auth model, the TUI is a **multi-profile** client:
 
 - each local profile lives under `~/.open-talon/profiles/<profile>/`
+- `tui2` and `user-client` also persist the selected `organization_id` in that profile state
 - each profile stores separate workspace/thread state and bearer tokens
 - human login is designed around Keycloak device flow
 - two users on the same device should use different TUI profiles rather than sharing one local participant identity
@@ -732,6 +757,8 @@ For multi-user end-to-end testing driven by software development agents, use `us
 
 `user-client` is a scriptable per-user terminal client. One client instance should be used per human test user, and each instance should have its own local profile.
 
+In multi-tenant flows, `tui2` and `user-client` expose explicit `organization` commands and default `workspace list` to the selected organization. If the authenticated user can only see one organization, the clients auto-select it.
+
 Useful local flows:
 
 ```bash
@@ -746,6 +773,9 @@ Inside `tui2`, the minimum auth path is:
 ```text
 /auth login
 /account whoami
+/organization list
+/organization use <id|slug|name>
+/workspace list
 ```
 
 Inside `user-client`, the minimum multi-user path is:
@@ -753,6 +783,8 @@ Inside `user-client`, the minimum multi-user path is:
 ```text
 auth login
 status
+organization list
+organization use <id|slug|name>
 workspace use <id|name>
 thread use <id|title>
 timeline

@@ -180,6 +180,44 @@ async def test_repository_migrations_seed_default_reasoning_planner_agent():
 
 
 @pytest.mark.asyncio
+async def test_repository_runtime_queue_stats_query_executes_with_org_filter():
+    try:
+        pool = await asyncpg.create_pool(dsn=_postgres_dsn(), min_size=1, max_size=2)
+    except Exception as exc:  # pragma: no cover - integration environment dependent
+        pytest.skip(f"Postgres not available for repository integration test: {exc}")
+
+    repository = CollaborationRepository(pool)
+    await apply_pending_migrations(pool)
+
+    try:
+        now = datetime.now(timezone.utc)
+        stats = await repository.get_runtime_queue_stats(
+            now=now,
+            since=now,
+            organization_id=uuid4(),
+        )
+        global_tokens = await repository.get_global_token_total(
+            day_start=now,
+            day_end=now,
+            organization_id=uuid4(),
+        )
+        workspace_totals = await repository.list_workspace_token_totals(
+            day_start=now,
+            day_end=now,
+            organization_id=uuid4(),
+        )
+
+        assert stats["tasks_pending"] == 0
+        assert stats["tasks_claimed"] == 0
+        assert stats["run_steps_pending"] == 0
+        assert stats["tool_calls_pending"] == 0
+        assert global_tokens == 0
+        assert workspace_totals == []
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
 async def test_repository_workspace_assets_round_trip_and_resolve_workspace_override():
     try:
         pool = await asyncpg.create_pool(dsn=_postgres_dsn(), min_size=1, max_size=2)

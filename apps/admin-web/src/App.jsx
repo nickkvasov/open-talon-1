@@ -7,6 +7,7 @@ import Header from './components/Layout/Header';
 import Dashboard from './pages/Dashboard';
 
 import IdentityManager from './pages/IdentityManager';
+import Organizations from './pages/Organizations';
 import SwarmResources from './pages/SwarmResources';
 import Workspaces from './pages/Workspaces';
 import Providers from './pages/Providers';
@@ -49,6 +50,7 @@ const App = () => {
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/identity" element={<IdentityManager />} />
+            <Route path="/organizations" element={<Organizations />} />
             <Route path="/swarm" element={<SwarmResources />} />
             <Route path="/workspaces" element={<Workspaces />} />
             <Route path="/providers" element={<Providers />} />

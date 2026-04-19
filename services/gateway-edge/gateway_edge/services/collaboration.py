@@ -33,6 +33,7 @@ from gateway_edge.models import (
     CreateInteractionRequestsRequest,
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
+    CreateOrganizationRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
     ConfirmWorkspaceMemoryRequest,
@@ -58,6 +59,8 @@ from gateway_edge.models import (
     MemoryProviderDefinition,
     MemorySearchResponse,
     LlmProviderDefinition,
+    Organization,
+    OrganizationMembership,
     ParticipantInput,
     RoleDefinition,
     PublishAssetFromGitRequest,
@@ -77,12 +80,15 @@ from gateway_edge.models import (
     UpdateLlmProviderRequest,
     UpdateMemoryProviderRequest,
     UpdateMemoryEntryRequest,
+    UpdateOrganizationRequest,
     UpdateWorkspaceToolRequest,
     Workspace,
     WorkspaceAsset,
     WorkspaceAssetVersion,
     WorkspaceDetail,
     WorkspaceTool,
+    AddOrganizationMemberRequest,
+    RemoveOrganizationMemberRequest,
 )
 from gateway_edge.services.git_publish import GitPublishService
 from gateway_edge.services.object_storage import MinioObjectStorage
@@ -127,17 +133,97 @@ class CollaborationService:
         self._kernel = None
         logger.info("Collaboration service stopped")
 
-    async def create_workspace(self, payload: CreateWorkspaceRequest) -> WorkspaceDetail:
+    async def create_workspace(
+        self,
+        payload: CreateWorkspaceRequest,
+        *,
+        allow_platform_admin: bool = False,
+    ) -> WorkspaceDetail:
         logger.debug(
             "Service create_workspace participant_id=%s name=%r",
             payload.actor.participant_id,
             payload.name,
         )
         kernel = self._require_kernel()
-        result = await kernel.create_workspace(payload)
+        result = await kernel.create_workspace(
+            payload,
+            allow_platform_admin=allow_platform_admin,
+        )
         await self._publish_events(result.events)
         assert result.detail is not None
         return result.detail
+
+    async def create_organization(
+        self,
+        payload: CreateOrganizationRequest,
+    ) -> Organization:
+        result = await self._require_kernel().create_organization(payload)
+        assert result.organization is not None
+        return result.organization
+
+    async def list_organizations(
+        self,
+        *,
+        user_id: UUID | None = None,
+    ) -> list[Organization]:
+        return await self._require_kernel().list_organizations(user_id=user_id)
+
+    async def get_organization(self, organization_id: UUID) -> Organization:
+        organization = await self._require_kernel().get_organization(organization_id)
+        if organization is None:
+            raise KeyError(f"Organization {organization_id} not found")
+        return organization
+
+    async def update_organization(
+        self,
+        organization_id: UUID,
+        payload: UpdateOrganizationRequest,
+        *,
+        allow_platform_admin: bool = False,
+    ) -> Organization:
+        result = await self._require_kernel().update_organization(
+            organization_id,
+            payload,
+            allow_platform_admin=allow_platform_admin,
+        )
+        assert result.organization is not None
+        return result.organization
+
+    async def list_organization_memberships(
+        self,
+        organization_id: UUID,
+    ) -> list[OrganizationMembership]:
+        return await self._require_kernel().list_organization_memberships(organization_id)
+
+    async def add_organization_member(
+        self,
+        organization_id: UUID,
+        payload: AddOrganizationMemberRequest,
+        *,
+        allow_platform_admin: bool = False,
+    ) -> OrganizationMembership:
+        result = await self._require_kernel().add_organization_member(
+            organization_id,
+            payload,
+            allow_platform_admin=allow_platform_admin,
+        )
+        assert result.membership is not None
+        return result.membership
+
+    async def remove_organization_member(
+        self,
+        organization_id: UUID,
+        user_id: UUID,
+        payload: RemoveOrganizationMemberRequest,
+        *,
+        allow_platform_admin: bool = False,
+    ) -> dict[str, bool | str]:
+        return await self._require_kernel().remove_organization_member(
+            organization_id,
+            user_id,
+            payload,
+            allow_platform_admin=allow_platform_admin,
+        )
 
     async def resolve_authenticated_user_actor(
         self,
@@ -169,8 +255,16 @@ class CollaborationService:
             auto_create=auto_create,
         )
 
-    async def list_workspaces(self, *, user_id: UUID | None = None) -> list[Workspace]:
-        return await self._require_kernel().list_workspaces(user_id=user_id)
+    async def list_workspaces(
+        self,
+        *,
+        user_id: UUID | None = None,
+        organization_id: UUID | None = None,
+    ) -> list[Workspace]:
+        return await self._require_kernel().list_workspaces(
+            user_id=user_id,
+            organization_id=organization_id,
+        )
 
     async def delete_workspace(
         self, workspace_id: UUID, payload: DeleteWorkspaceRequest
@@ -224,34 +318,88 @@ class CollaborationService:
         )
 
     async def create_system_agent(
-        self, payload: CreateSystemAgentRequest
+        self,
+        payload: CreateSystemAgentRequest,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
     ) -> AgentDefinition:
-        result = await self._require_kernel().create_system_agent(payload)
+        result = await self._require_kernel().create_system_agent(
+            payload,
+            scope=scope,
+            organization_id=organization_id,
+        )
         assert result.agent is not None
         return result.agent
 
     async def create_llm_provider(
-        self, payload: CreateLlmProviderRequest
+        self,
+        payload: CreateLlmProviderRequest,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
     ) -> LlmProviderDefinition:
-        result = await self._require_kernel().create_llm_provider(payload)
+        result = await self._require_kernel().create_llm_provider(
+            payload,
+            scope=scope,
+            organization_id=organization_id,
+        )
         assert result.provider is not None
         return result.provider
 
     async def create_memory_provider(
-        self, payload: CreateMemoryProviderRequest
+        self,
+        payload: CreateMemoryProviderRequest,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
     ) -> MemoryProviderDefinition:
-        result = await self._require_kernel().create_memory_provider(payload)
+        result = await self._require_kernel().create_memory_provider(
+            payload,
+            scope=scope,
+            organization_id=organization_id,
+        )
         assert result.provider is not None
         return result.provider
 
-    async def list_system_agents(self) -> list[AgentDefinition]:
-        return await self._require_kernel().list_system_agents()
+    async def list_system_agents(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[AgentDefinition]:
+        return await self._require_kernel().list_system_agents(
+            scope=scope,
+            organization_id=organization_id,
+        )
 
-    async def list_llm_providers(self) -> list[LlmProviderDefinition]:
-        return await self._require_kernel().list_llm_providers()
+    async def list_workspace_catalog_agents(
+        self,
+        workspace_id: UUID,
+    ) -> list[AgentDefinition]:
+        return await self._require_kernel().list_workspace_catalog_agents(workspace_id)
 
-    async def list_memory_providers(self) -> list[MemoryProviderDefinition]:
-        return await self._require_kernel().list_memory_providers()
+    async def list_llm_providers(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[LlmProviderDefinition]:
+        return await self._require_kernel().list_llm_providers(
+            scope=scope,
+            organization_id=organization_id,
+        )
+
+    async def list_memory_providers(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[MemoryProviderDefinition]:
+        return await self._require_kernel().list_memory_providers(
+            scope=scope,
+            organization_id=organization_id,
+        )
 
     async def get_llm_provider(self, provider_id: UUID) -> LlmProviderDefinition:
         provider = await self._require_kernel().get_llm_provider(provider_id)
@@ -266,14 +414,36 @@ class CollaborationService:
         return provider
 
     async def create_system_tool(
-        self, payload: CreateSystemToolRequest
+        self,
+        payload: CreateSystemToolRequest,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
     ) -> SystemToolDefinition:
-        result = await self._require_kernel().create_system_tool(payload)
+        result = await self._require_kernel().create_system_tool(
+            payload,
+            scope=scope,
+            organization_id=organization_id,
+        )
         assert result.tool is not None
         return result.tool
 
-    async def list_system_tools(self) -> list[SystemToolDefinition]:
-        return await self._require_kernel().list_system_tools()
+    async def list_system_tools(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[SystemToolDefinition]:
+        return await self._require_kernel().list_system_tools(
+            scope=scope,
+            organization_id=organization_id,
+        )
+
+    async def list_workspace_catalog_tools(
+        self,
+        workspace_id: UUID,
+    ) -> list[SystemToolDefinition]:
+        return await self._require_kernel().list_workspace_catalog_tools(workspace_id)
 
     async def update_system_tool(
         self, tool_id: UUID, payload: UpdateSystemToolRequest
@@ -321,12 +491,14 @@ class CollaborationService:
         self,
         *,
         scope: str,
+        organization_id: UUID | None = None,
         workspace_id: UUID | None,
         payload: CreateGitRepositoryRequest,
     ) -> GitRepository:
         await self._git_publish.validate_repository(payload.local_path)
         result = await self._require_kernel().create_git_repository(
             scope=scope,
+            organization_id=organization_id,
             workspace_id=workspace_id,
             payload=payload,
         )
@@ -337,10 +509,12 @@ class CollaborationService:
         self,
         *,
         scope: str,
+        organization_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[GitRepository]:
         return await self._require_kernel().list_git_repositories(
             scope=scope,
+            organization_id=organization_id,
             workspace_id=workspace_id,
         )
 
@@ -348,9 +522,14 @@ class CollaborationService:
         self,
         *,
         scope: str,
+        organization_id: UUID | None = None,
         workspace_id: UUID | None,
         payload: PublishAssetFromGitRequest,
     ) -> WorkspaceAssetVersion:
+        resolved_organization_id = organization_id
+        if scope == "workspace" and resolved_organization_id is None and workspace_id is not None:
+            workspace = await self._require_kernel().get_workspace_detail(workspace_id)
+            resolved_organization_id = workspace.workspace.organization_id
         repository = await self._require_kernel().get_git_repository(payload.repository_id)
         if repository is None:
             raise KeyError(f"Git repository {payload.repository_id} not found")
@@ -362,6 +541,7 @@ class CollaborationService:
         content_type = payload.content_type or self._content_type_for_path(payload.git_path)
         object_key = self._asset_object_key(
             scope=scope,
+            organization_id=resolved_organization_id,
             workspace_id=workspace_id,
             logical_name=payload.logical_name,
             git_path=payload.git_path,
@@ -374,6 +554,7 @@ class CollaborationService:
         )
         result = await self._require_kernel().publish_asset_from_git(
             scope=scope,
+            organization_id=resolved_organization_id,
             workspace_id=workspace_id,
             payload=payload.model_copy(update={"revision": resolved_revision}),
             storage_backend="minio",
@@ -390,10 +571,12 @@ class CollaborationService:
         self,
         *,
         scope: str | None = None,
+        organization_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[WorkspaceAsset]:
         return await self._require_kernel().list_workspace_assets(
             scope=scope,
+            organization_id=organization_id,
             workspace_id=workspace_id,
         )
 
@@ -585,8 +768,14 @@ class CollaborationService:
             payload,
         )
 
-    async def get_runtime_overview(self) -> dict[str, object]:
-        return await self._require_kernel().get_runtime_overview()
+    async def get_runtime_overview(
+        self,
+        *,
+        organization_id: UUID | None = None,
+    ) -> dict[str, object]:
+        return await self._require_kernel().get_runtime_overview(
+            organization_id=organization_id,
+        )
 
     async def assume_participant_role(
         self,
@@ -1095,6 +1284,7 @@ class CollaborationService:
     def _asset_object_key(
         *,
         scope: str,
+        organization_id: UUID | None,
         workspace_id: UUID | None,
         logical_name: str,
         git_path: str,
@@ -1102,7 +1292,12 @@ class CollaborationService:
     ) -> str:
         normalized_name = logical_name.replace("/", "_")
         file_name = git_path.rsplit("/", 1)[-1]
-        prefix = "global" if workspace_id is None else f"workspaces/{workspace_id}"
+        if scope == "global":
+            prefix = "global"
+        elif scope == "organization":
+            prefix = f"organizations/{organization_id}"
+        else:
+            prefix = f"organizations/{organization_id}/workspaces/{workspace_id}"
         return f"{prefix}/assets/{normalized_name}/{revision}/{file_name}"
 
     @staticmethod

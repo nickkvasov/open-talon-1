@@ -101,6 +101,104 @@ async def test_list_workspaces_filters_to_authenticated_user_membership_in_oidc_
     assert [workspace["name"] for workspace in response.json()] == ["Visible Workspace"]
 
 
+async def test_list_workspaces_allows_platform_admin_to_see_all_visible_org_workspaces(
+    client,
+    actor_payload,
+    monkeypatch,
+):
+    owner_context = _oidc_context(roles=["workspace-user"])
+    admin_context = _oidc_context(roles=["admin"])
+    _patch_oidc_tokens(
+        monkeypatch,
+        {
+            "owner-token": owner_context,
+            "admin-token": admin_context,
+        },
+    )
+
+    membership_response = await client.post(
+        "/v1/organizations/11111111-1111-1111-1111-111111111111/members",
+        headers={"Authorization": "Bearer admin-token"},
+        json={
+            "actor": actor_payload,
+            "user_id": str(owner_context.user_id),
+            "role": "admin",
+        },
+    )
+
+    assert membership_response.status_code == 200
+
+    create_response = await client.post(
+        "/v1/workspaces",
+        headers={"Authorization": "Bearer owner-token"},
+        json={
+            "name": "Admin Visible Workspace",
+            "organization_id": "11111111-1111-1111-1111-111111111111",
+            "actor": actor_payload,
+        },
+    )
+
+    assert create_response.status_code == 200
+
+    response = await client.get(
+        "/v1/workspaces",
+        headers={"Authorization": "Bearer admin-token"},
+        params={"organization_id": "11111111-1111-1111-1111-111111111111"},
+    )
+
+    assert response.status_code == 200
+    assert [workspace["name"] for workspace in response.json()] == ["Admin Visible Workspace"]
+
+
+async def test_delete_workspace_allows_platform_admin_without_workspace_membership(
+    client,
+    actor_payload,
+    monkeypatch,
+):
+    owner_context = _oidc_context(roles=["workspace-user"])
+    admin_context = _oidc_context(roles=["admin"])
+    _patch_oidc_tokens(
+        monkeypatch,
+        {
+            "owner-token": owner_context,
+            "admin-token": admin_context,
+        },
+    )
+
+    membership_response = await client.post(
+        "/v1/organizations/11111111-1111-1111-1111-111111111111/members",
+        headers={"Authorization": "Bearer admin-token"},
+        json={
+            "actor": actor_payload,
+            "user_id": str(owner_context.user_id),
+            "role": "admin",
+        },
+    )
+    assert membership_response.status_code == 200
+
+    create_response = await client.post(
+        "/v1/workspaces",
+        headers={"Authorization": "Bearer owner-token"},
+        json={
+            "name": "Admin Delete Workspace",
+            "organization_id": "11111111-1111-1111-1111-111111111111",
+            "actor": actor_payload,
+        },
+    )
+    assert create_response.status_code == 200
+    workspace_id = create_response.json()["workspace"]["workspace_id"]
+
+    delete_response = await client.request(
+        "DELETE",
+        f"/v1/workspaces/{workspace_id}",
+        headers={"Authorization": "Bearer admin-token"},
+        json={"actor": actor_payload},
+    )
+
+    assert delete_response.status_code == 200
+    assert delete_response.json()["deleted"] is True
+
+
 async def test_list_llm_engines_returns_registered_engines(client, actor_payload):
     await client.post(
         "/v1/llm-providers",

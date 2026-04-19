@@ -40,6 +40,25 @@ async def _null_lifespan(app: FastAPI):  # type: ignore[type-arg]
 
 class MockCollaborationService:
     def __init__(self) -> None:
+        from gateway_edge.models import Organization
+
+        now = datetime.now(timezone.utc)
+        self.default_organization = Organization(
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            slug="default",
+            name="Default Organization",
+            description="Default test organization",
+            created_by=UUID("11111111-1111-1111-1111-111111111111"),
+            created_at=now,
+            updated_at=now,
+            metadata={},
+        )
+        self.organizations = {
+            str(self.default_organization.organization_id): self.default_organization
+        }
+        self.organization_memberships = {
+            str(self.default_organization.organization_id): {}
+        }
         self.workspaces = {}
         self.system_agents = {}
         self.system_tools = {}
@@ -66,10 +85,12 @@ class MockCollaborationService:
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
 
-    async def create_workspace(self, payload):
+    async def create_workspace(self, payload, *, allow_platform_admin: bool = False):
+        _ = allow_platform_admin
         from gateway_edge.models import Workspace, WorkspaceDetail, ParticipantProfile
         from open_talon_contracts.models import RoleDefinition
 
+        organization_id = payload.organization_id or self.default_organization.organization_id
         now = datetime.now(timezone.utc)
         role_definitions = {
             "admin": RoleDefinition(
@@ -93,6 +114,7 @@ class MockCollaborationService:
         }
         workspace = Workspace(
             workspace_id=uuid4(),
+            organization_id=organization_id,
             name=payload.name,
             description=payload.description,
             owner_user_id=payload.actor.user_id,
@@ -120,6 +142,18 @@ class MockCollaborationService:
             updated_at=now,
         )
         self.workspaces[str(workspace.workspace_id)] = workspace
+        membership_key = str(organization_id)
+        if payload.actor.user_id is not None:
+            self.organization_memberships.setdefault(membership_key, {})[
+                str(payload.actor.user_id)
+            ] = {
+                "organization_id": organization_id,
+                "user_id": payload.actor.user_id,
+                "role": "owner",
+                "joined_at": now,
+                "updated_at": now,
+                "metadata": {},
+            }
         self.participants.setdefault(str(workspace.workspace_id), {})[
             str(participant.participant_id)
         ] = participant
@@ -135,8 +169,14 @@ class MockCollaborationService:
             tools=[],
         )
 
-    async def list_workspaces(self, *, user_id=None):
+    async def list_workspaces(self, *, user_id=None, organization_id=None):
         workspaces = list(self.workspaces.values())
+        if organization_id is not None:
+            workspaces = [
+                workspace
+                for workspace in workspaces
+                if workspace.organization_id == organization_id
+            ]
         if user_id is None:
             return workspaces
         visible: list = []
@@ -145,6 +185,74 @@ class MockCollaborationService:
             if any(participant.user_id == user_id for participant in participants.values()):
                 visible.append(workspace)
         return visible
+
+    async def list_organizations(self, *, user_id=None):
+        organizations = list(self.organizations.values())
+        if user_id is None:
+            return organizations
+        visible = []
+        for organization in organizations:
+            memberships = self.organization_memberships.get(str(organization.organization_id), {})
+            if str(user_id) in memberships:
+                visible.append(organization)
+        return visible
+
+    async def get_organization(self, organization_id: UUID):
+        organization = self.organizations.get(str(organization_id))
+        if organization is None:
+            raise KeyError(f"Organization {organization_id} not found")
+        return organization
+
+    async def list_organization_memberships(self, organization_id: UUID):
+        from gateway_edge.models import OrganizationMembership
+
+        organization = await self.get_organization(organization_id)
+        _ = organization
+        memberships = self.organization_memberships.get(str(organization_id), {})
+        return [
+            OrganizationMembership.model_validate(item)
+            for item in memberships.values()
+        ]
+
+    async def add_organization_member(
+        self,
+        organization_id: UUID,
+        payload,
+        *,
+        allow_platform_admin: bool = False,
+    ):
+        _ = allow_platform_admin
+        from gateway_edge.models import OrganizationMembership
+
+        await self.get_organization(organization_id)
+        now = datetime.now(timezone.utc)
+        membership = OrganizationMembership(
+            organization_id=organization_id,
+            user_id=payload.user_id,
+            role=payload.role,
+            joined_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        self.organization_memberships.setdefault(str(organization_id), {})[
+            str(payload.user_id)
+        ] = membership.model_dump(mode="json")
+        return membership
+
+    async def remove_organization_member(
+        self,
+        organization_id: UUID,
+        user_id: UUID,
+        payload,
+        *,
+        allow_platform_admin: bool = False,
+    ):
+        _ = payload
+        _ = allow_platform_admin
+        await self.get_organization(organization_id)
+        memberships = self.organization_memberships.setdefault(str(organization_id), {})
+        memberships.pop(str(user_id), None)
+        return {"deleted": True, "organization_id": str(organization_id), "user_id": str(user_id)}
 
     async def resolve_authenticated_user_actor(
         self,
@@ -280,7 +388,7 @@ class MockCollaborationService:
             "participant_id": str(participant_id),
         }
 
-    async def create_system_agent(self, payload):
+    async def create_system_agent(self, payload, *, scope="global", organization_id=None):
         from gateway_edge.models import AgentDefinition
 
         interaction_contract = (
@@ -295,6 +403,8 @@ class MockCollaborationService:
         )
         agent = AgentDefinition(
             agent_id=uuid4(),
+            scope=scope,
+            organization_id=organization_id,
             display_name=payload.display_name,
             description=payload.description,
             role=payload.role,
@@ -317,8 +427,12 @@ class MockCollaborationService:
         self.system_agents.pop(str(agent_id), None)
         return {"deleted": True, "agent_id": str(agent_id)}
 
-    async def list_system_agents(self):
-        return list(self.system_agents.values())
+    async def list_system_agents(self, *, scope="global", organization_id=None):
+        return [
+            agent
+            for agent in self.system_agents.values()
+            if agent.scope == scope and agent.organization_id == organization_id
+        ]
 
     def _system_agents_referencing_engine(self, engine_id: str):
         referenced = []
@@ -337,12 +451,14 @@ class MockCollaborationService:
                 referenced.append(agent)
         return referenced
 
-    async def create_llm_provider(self, payload):
+    async def create_llm_provider(self, payload, *, scope="global", organization_id=None):
         from gateway_edge.models import LlmProviderDefinition
 
         now = datetime.now(timezone.utc)
         provider = LlmProviderDefinition(
             provider_id=uuid4(),
+            scope=scope,
+            organization_id=organization_id,
             engine_id=payload.engine_id,
             display_name=payload.display_name,
             description=payload.description,
@@ -364,8 +480,12 @@ class MockCollaborationService:
         self.llm_providers[str(provider.provider_id)] = provider
         return provider
 
-    async def list_llm_providers(self):
-        return list(self.llm_providers.values())
+    async def list_llm_providers(self, *, scope="global", organization_id=None):
+        return [
+            provider
+            for provider in self.llm_providers.values()
+            if provider.scope == scope and provider.organization_id == organization_id
+        ]
 
     async def get_llm_provider(self, provider_id: UUID):
         provider = self.llm_providers.get(str(provider_id))
@@ -373,12 +493,14 @@ class MockCollaborationService:
             raise KeyError(f"LLM provider {provider_id} not found")
         return provider
 
-    async def create_system_tool(self, payload):
+    async def create_system_tool(self, payload, *, scope="global", organization_id=None):
         from gateway_edge.models import SystemToolDefinition
 
         now = datetime.now(timezone.utc)
         tool = SystemToolDefinition(
             tool_id=uuid4(),
+            scope=scope,
+            organization_id=organization_id,
             name=payload.name,
             description=payload.description,
             parameter_contract=payload.parameter_contract,
@@ -401,8 +523,12 @@ class MockCollaborationService:
         self.system_tools.pop(str(tool_id), None)
         return {"deleted": True, "tool_id": str(tool_id)}
 
-    async def list_system_tools(self):
-        return list(self.system_tools.values())
+    async def list_system_tools(self, *, scope="global", organization_id=None):
+        return [
+            tool
+            for tool in self.system_tools.values()
+            if tool.scope == scope and tool.organization_id == organization_id
+        ]
 
     async def update_system_tool(self, tool_id: UUID, payload):
         tool = self.system_tools.get(str(tool_id))
@@ -463,14 +589,24 @@ class MockCollaborationService:
         self.system_agents[str(agent_id)] = updated
         return updated
 
-    async def create_git_repository(self, *, scope: str, workspace_id: UUID | None, payload):
+    async def create_git_repository(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None,
+        payload,
+    ):
         from gateway_edge.models import GitRepository
 
         now = datetime.now(timezone.utc)
         if scope == "workspace" and workspace_id is not None and str(workspace_id) not in self.workspaces:
             raise KeyError(f"Workspace {workspace_id} not found")
+        if scope == "workspace" and workspace_id is not None:
+            organization_id = self.workspaces[str(workspace_id)].organization_id
         repository = GitRepository(
             repo_id=uuid4(),
+            organization_id=organization_id,
             workspace_id=workspace_id,
             scope=scope,
             name=payload.name,
@@ -486,23 +622,41 @@ class MockCollaborationService:
         self.git_repositories[str(repository.repo_id)] = repository
         return repository
 
-    async def list_git_repositories(self, *, scope: str, workspace_id: UUID | None = None):
+    async def list_git_repositories(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+    ):
         repos = list(self.git_repositories.values())
         return [
             repo
             for repo in repos
-            if repo.scope == scope and repo.workspace_id == workspace_id
+            if repo.scope == scope
+            and repo.workspace_id == workspace_id
+            and repo.organization_id == organization_id
         ]
 
-    async def publish_asset_from_git(self, *, scope: str, workspace_id: UUID | None, payload):
+    async def publish_asset_from_git(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None,
+        payload,
+    ):
         from gateway_edge.models import WorkspaceAsset, WorkspaceAssetVersion
 
         now = datetime.now(timezone.utc)
+        if scope == "workspace" and workspace_id is not None:
+            organization_id = self.workspaces[str(workspace_id)].organization_id
         asset = next(
             (
                 item
                 for item in self.assets.values()
                 if item.scope == scope
+                and item.organization_id == organization_id
                 and item.workspace_id == workspace_id
                 and item.logical_name == payload.logical_name
             ),
@@ -511,6 +665,7 @@ class MockCollaborationService:
         if asset is None:
             asset = WorkspaceAsset(
                 asset_id=uuid4(),
+                organization_id=organization_id,
                 workspace_id=workspace_id,
                 scope=scope,
                 asset_type=payload.asset_type,
@@ -546,12 +701,19 @@ class MockCollaborationService:
         versions.append(version)
         return version
 
-    async def list_workspace_assets(self, *, scope: str | None = None, workspace_id: UUID | None = None):
+    async def list_workspace_assets(
+        self,
+        *,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+    ):
         assets = list(self.assets.values())
         return [
             asset
             for asset in assets
             if (scope is None or asset.scope == scope)
+            and (organization_id is None or asset.organization_id == organization_id)
             and (workspace_id is None or asset.workspace_id in {None, workspace_id})
         ]
 
@@ -716,12 +878,14 @@ class MockCollaborationService:
         self.llm_providers.pop(str(provider_id), None)
         return {"deleted": True, "provider_id": str(provider_id)}
 
-    async def create_memory_provider(self, payload):
+    async def create_memory_provider(self, payload, *, scope="global", organization_id=None):
         from gateway_edge.models import MemoryProviderDefinition
 
         now = datetime.now(timezone.utc)
         provider = MemoryProviderDefinition(
             provider_id=uuid4(),
+            scope=scope,
+            organization_id=organization_id,
             provider_key=payload.provider_key,
             display_name=payload.display_name,
             description=payload.description,
@@ -738,8 +902,12 @@ class MockCollaborationService:
         self.memory_providers[str(provider.provider_id)] = provider
         return provider
 
-    async def list_memory_providers(self):
-        return list(self.memory_providers.values())
+    async def list_memory_providers(self, *, scope="global", organization_id=None):
+        return [
+            provider
+            for provider in self.memory_providers.values()
+            if provider.scope == scope and provider.organization_id == organization_id
+        ]
 
     async def get_memory_provider(self, provider_id: UUID):
         provider = self.memory_providers.get(str(provider_id))
@@ -864,7 +1032,7 @@ class MockCollaborationService:
             raise KeyError(f"Workspace tool {tool_id!r} not found")
         return {"deleted": True, "workspace_id": str(workspace_id), "tool_id": str(tool_id)}
 
-    async def get_runtime_overview(self):
+    async def get_runtime_overview(self, *, organization_id=None):
         return {
             "tasks": {"pending": 0, "claimed": 0},
             "run_steps": {"pending": 0, "claimed": 0},
@@ -873,6 +1041,14 @@ class MockCollaborationService:
             "oldest_pending_age_seconds": {"run_steps": None, "tool_calls": None},
             "token_totals": {"global_total_tokens": 0, "by_workspace": []},
         }
+
+    async def list_workspace_catalog_agents(self, workspace_id: UUID):
+        _ = workspace_id
+        return list(self.system_agents.values())
+
+    async def list_workspace_catalog_tools(self, workspace_id: UUID):
+        _ = workspace_id
+        return list(self.system_tools.values())
 
     async def assume_participant_role(self, workspace_id: UUID, participant_id: UUID, payload):
         from gateway_edge.models import ParticipantProfile

@@ -386,11 +386,19 @@ class RuntimeExecutionService:
                 )
         return None
 
-    async def get_runtime_overview(self) -> dict[str, object]:
+    async def get_runtime_overview(
+        self,
+        *,
+        organization_id: UUID | None = None,
+    ) -> dict[str, object]:
         now = self._now()
         since = now - timedelta(hours=24)
         day_start, day_end = self._utc_day_window(now)
-        stats = await self._repository.get_runtime_queue_stats(now=now, since=since)
+        stats = await self._repository.get_runtime_queue_stats(
+            now=now,
+            since=since,
+            organization_id=organization_id,
+        )
         return {
             "tasks": {
                 "pending": int(stats.get("tasks_pending") or 0),
@@ -425,10 +433,12 @@ class RuntimeExecutionService:
                 "global_total_tokens": await self._repository.get_global_token_total(
                     day_start=day_start,
                     day_end=day_end,
+                    organization_id=organization_id,
                 ),
                 "by_workspace": await self._repository.list_workspace_token_totals(
                     day_start=day_start,
                     day_end=day_end,
+                    organization_id=organization_id,
                 ),
             },
         }

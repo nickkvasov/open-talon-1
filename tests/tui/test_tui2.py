@@ -73,7 +73,7 @@ class _FakeAsyncClient:
         self._get_responses = list(get_responses or [])
         self._post_responses = list(post_responses or [])
 
-    async def get(self, _url: str):
+    async def get(self, _url: str, params=None):
         if not self._get_responses:
             raise AssertionError("unexpected GET")
         return self._get_responses.pop(0)
@@ -143,6 +143,7 @@ def test_tui2_status_lines_reflect_current_context(tmp_path, monkeypatch):
         issuer="http://127.0.0.1:8081/realms/open-talon",
         client_id="open-talon-tui",
     )
+    client.state.organization_id = "org-1234"
     client.state.workspace_id = "workspace-1234"
     client.state.thread_id = "thread-5678"
     client.state.participant_id = "participant-9012"
@@ -157,6 +158,7 @@ def test_tui2_status_lines_reflect_current_context(tmp_path, monkeypatch):
     assert any("Profile: alice" in line for line in lines)
     assert any("Auth: Alice Example" in line for line in lines)
     assert any("Conn: connected | Links: 2" in line for line in lines)
+    assert any("Organization: org-1234" in line for line in lines)
     assert any("Workspace: workspac" in line for line in lines)
     assert any("Thread: thread-5" in line for line in lines)
     assert any("Participant: particip" in line for line in lines)
@@ -711,11 +713,27 @@ async def test_tui2_ensure_context_accepts_workspace_detail_shape(tmp_path, monk
     )
     client.state.user_id = "user-123"
     client._http_client = _FakeAsyncClient(
+        get_responses=[
+            _FakeResponse(
+                200,
+                [
+                    {
+                        "organization_id": "org-123",
+                        "slug": "default",
+                        "name": "Default Org",
+                    }
+                ],
+            )
+        ],
         post_responses=[
             _FakeResponse(
                 200,
                 {
-                    "workspace": {"workspace_id": "workspace-123", "name": "Workspace"},
+                    "workspace": {
+                        "workspace_id": "workspace-123",
+                        "organization_id": "org-123",
+                        "name": "Workspace",
+                    },
                     "participants": [{"participant_id": "participant-111", "user_id": "user-123"}],
                 },
             ),
@@ -734,6 +752,7 @@ async def test_tui2_ensure_context_accepts_workspace_detail_shape(tmp_path, monk
     assert client.state.workspace_id == "workspace-123"
     assert client.state.thread_id == "thread-456"
     assert client.state.participant_id == "participant-111"
+    assert client.state.organization_id == "org-123"
 
 
 @pytest.mark.asyncio

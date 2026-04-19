@@ -13,6 +13,8 @@ from .contracts import (
     LlmProviderDefinition,
     MemoryEntry,
     MemoryProviderDefinition,
+    Organization,
+    OrganizationMembership,
     ParticipantProfile,
     ResolvedAssetBinding,
     RoleDefinition,
@@ -41,6 +43,16 @@ class CommandResult:
 class WorkspaceCommandResult(CommandResult):
     workspace: Workspace | None = None
     detail: WorkspaceDetail | None = None
+
+
+@dataclass
+class OrganizationCommandResult(CommandResult):
+    organization: Organization | None = None
+
+
+@dataclass
+class OrganizationMembershipCommandResult(CommandResult):
+    membership: OrganizationMembership | None = None
 
 
 @dataclass
@@ -164,6 +176,8 @@ __all__ = [
     "MemoryCommandResult",
     "MemoryProviderCommandResult",
     "MessageCommandResult",
+    "OrganizationCommandResult",
+    "OrganizationMembershipCommandResult",
     "ParticipantCommandResult",
     "RoleDefinitionCommandResult",
     "RunCommandResult",

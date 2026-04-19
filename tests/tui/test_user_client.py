@@ -176,6 +176,92 @@ async def test_user_client_workspace_use_accepts_direct_uuid_without_visibility(
 
 
 @pytest.mark.asyncio
+async def test_user_client_organization_use_clears_workspace_context(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = user_client.UserClient(
+        gateway="http://127.0.0.1:8000",
+        profile="org-user",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Org User",
+        output_format="text",
+    )
+    client.tokens = _token()
+    client.current_user = {"user_id": "user-456", "display_name": "Org User"}
+    client.state.organization_id = "org-old"
+    client.state.workspace_id = "workspace-123"
+    client.state.thread_id = "thread-456"
+    client.state.participant_id = "participant-789"
+    fake_http = _FakeAsyncClient(
+        responses=[
+            _FakeResponse(
+                200,
+                [
+                    {
+                        "organization_id": "org-123",
+                        "slug": "default",
+                        "name": "Default Org",
+                    }
+                ],
+            )
+        ]
+    )
+    client._http_client = fake_http
+    emitted = []
+    monkeypatch.setattr(client, "_emit", lambda **payload: emitted.append(payload))
+    monkeypatch.setattr(client, "_ensure_bearer_token", lambda: __import__("asyncio").sleep(0))
+
+    await client.handle_command("organization use default")
+
+    assert client.state.organization_id == "org-123"
+    assert client.state.workspace_id is None
+    assert client.state.thread_id is None
+    assert client.state.participant_id is None
+    assert emitted[0]["command"] == "organization.use"
+
+
+@pytest.mark.asyncio
+async def test_user_client_workspace_list_defaults_to_selected_organization(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = user_client.UserClient(
+        gateway="http://127.0.0.1:8000",
+        profile="org-scope",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Org Scope",
+        output_format="text",
+    )
+    client.tokens = _token()
+    client.current_user = {"user_id": "user-987", "display_name": "Org Scope"}
+    client.state.organization_id = "org-555"
+    fake_http = _FakeAsyncClient(
+        responses=[
+            _FakeResponse(
+                200,
+                [
+                    {
+                        "workspace_id": "workspace-123",
+                        "organization_id": "org-555",
+                        "name": "Scoped Workspace",
+                    }
+                ],
+            )
+        ]
+    )
+    client._http_client = fake_http
+    emitted = []
+    monkeypatch.setattr(client, "_emit", lambda **payload: emitted.append(payload))
+    monkeypatch.setattr(client, "_ensure_bearer_token", lambda: __import__("asyncio").sleep(0))
+
+    await client.handle_command("workspace list")
+
+    assert fake_http.calls[0]["params"] == {"organization_id": "org-555"}
+    assert emitted[0]["command"] == "workspace.list"
+
+
+@pytest.mark.asyncio
 async def test_user_client_role_use_calls_participant_role_endpoint(tmp_path, monkeypatch):
     monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
 

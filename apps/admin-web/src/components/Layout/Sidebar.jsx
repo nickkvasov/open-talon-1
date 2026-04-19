@@ -1,10 +1,11 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Users, Bot, FolderKanban, KeySquare, Server } from 'lucide-react';
+import { LayoutDashboard, Users, Bot, FolderKanban, KeySquare, Server, Building2 } from 'lucide-react';
 
 const navItems = [
   { path: '/dashboard', label: 'Overview', icon: LayoutDashboard },
   { path: '/identity', label: 'Identity & Users', icon: Users },
+  { path: '/organizations', label: 'Organizations', icon: Building2 },
   { path: '/swarm', label: 'Swarm Resources', icon: Bot },
   { path: '/workspaces', label: 'Workspaces', icon: FolderKanban },
   { path: '/providers', label: 'Providers', icon: Server },

@@ -12,6 +12,8 @@ source .venv/bin/activate
 ./open-talon start
 ```
 
+`./open-talon start` now waits for both the gateway readiness check and the Keycloak OIDC discovery document, so the browser suite should not race the local auth stack on a clean startup.
+
 That should make these endpoints available:
 
 - Gateway: `http://127.0.0.1:8000`
@@ -102,13 +104,16 @@ For a deployed environment, replace the generated `runtime-config.json` with val
 
 - browser sign-in through Keycloak
 - dashboard load and page-level navigation checks
+- organization page load and membership management surface
 - API key create and revoke flow
-- workspace create and delete flow
+- workspace create and delete flow inside the selected organization
+- swarm resource `Platform Global` and `Organization` scope switching
 - swarm resource agent create/delete flow
 - swarm resource tool create/delete flow
-- provider tab switching plus memory provider create/delete flow
+- provider tab switching, scope switching, and memory provider create/delete flow
 
 ## Notes
 
 - The test expects the gateway and Keycloak to already be running.
+- The local stack seeds a single organization named `Default Organization`, so org-aware pages auto-select it until more organizations exist.
 - If the browser closes immediately with auth errors, confirm the gateway is running with OIDC enabled and Keycloak is healthy.

@@ -34,6 +34,8 @@ from .contracts import (
     MemoryProviderDefinition,
     MemoryProviderRecord,
     LlmProviderDefinition,
+    Organization,
+    OrganizationMembership,
     ParticipantProfile,
     ResolvedAssetBinding,
     Run,
@@ -325,6 +327,7 @@ class CollaborationRepository:
     async def list_audit_events(
         self,
         *,
+        organization_id: UUID | None = None,
         workspace_id: UUID | None = None,
         thread_id: UUID | None = None,
         actor_user_id: UUID | None = None,
@@ -343,21 +346,23 @@ class CollaborationRepository:
             """
             SELECT *
             FROM audit_event_ledger
-            WHERE ($1::uuid IS NULL OR workspace_id = $1)
-              AND ($2::uuid IS NULL OR thread_id = $2)
-              AND ($3::uuid IS NULL OR user_id = $3)
-              AND ($4::uuid IS NULL OR system_agent_id = $4)
-              AND ($5::text IS NULL OR action_name LIKE $5 || '%')
-              AND ($6::text IS NULL OR outcome = $6)
-              AND ($7::text IS NULL OR target_type = $7)
-              AND ($8::uuid IS NULL OR target_id = $8)
-              AND ($9::uuid IS NULL OR correlation_id = $9)
-              AND ($10::uuid IS NULL OR request_id = $10)
-              AND ($11::timestamptz IS NULL OR occurred_at >= $11)
-              AND ($12::timestamptz IS NULL OR occurred_at <= $12)
+            WHERE ($1::uuid IS NULL OR organization_id = $1)
+              AND ($2::uuid IS NULL OR workspace_id = $2)
+              AND ($3::uuid IS NULL OR thread_id = $3)
+              AND ($4::uuid IS NULL OR user_id = $4)
+              AND ($5::uuid IS NULL OR system_agent_id = $5)
+              AND ($6::text IS NULL OR action_name LIKE $6 || '%')
+              AND ($7::text IS NULL OR outcome = $7)
+              AND ($8::text IS NULL OR target_type = $8)
+              AND ($9::uuid IS NULL OR target_id = $9)
+              AND ($10::uuid IS NULL OR correlation_id = $10)
+              AND ($11::uuid IS NULL OR request_id = $11)
+              AND ($12::timestamptz IS NULL OR occurred_at >= $12)
+              AND ($13::timestamptz IS NULL OR occurred_at <= $13)
             ORDER BY recorded_at DESC, ledger_offset DESC
-            LIMIT $13
+            LIMIT $14
             """,
+            organization_id,
             workspace_id,
             thread_id,
             actor_user_id,
@@ -632,26 +637,202 @@ class CollaborationRepository:
     async def upsert_workspace(
         self, conn: asyncpg.Connection, workspace: Workspace
     ) -> None:
+        organization_id = workspace.organization_id or await self._default_organization_id(conn)
         await conn.execute(
             """
             INSERT INTO workspaces (
-                workspace_id, name, description, owner_user_id, created_at, updated_at, metadata
+                workspace_id, organization_id, name, description, owner_user_id, created_at, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (workspace_id) DO UPDATE
-                SET name = EXCLUDED.name,
+                SET organization_id = EXCLUDED.organization_id,
+                    name = EXCLUDED.name,
                     description = EXCLUDED.description,
                     owner_user_id = EXCLUDED.owner_user_id,
                     updated_at = EXCLUDED.updated_at,
                     metadata = EXCLUDED.metadata
             """,
             workspace.workspace_id,
+            organization_id,
             workspace.name,
             workspace.description,
             workspace.owner_user_id,
             workspace.created_at,
             workspace.updated_at,
             self._json_dumps(workspace.metadata),
+        )
+
+    async def upsert_organization(
+        self,
+        conn: asyncpg.Connection,
+        organization: Organization,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO organizations (
+                organization_id, slug, name, description, created_by, created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (organization_id) DO UPDATE
+                SET slug = EXCLUDED.slug,
+                    name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            organization.organization_id,
+            organization.slug,
+            organization.name,
+            organization.description,
+            organization.created_by,
+            organization.created_at,
+            organization.updated_at,
+            self._json_dumps(organization.metadata),
+        )
+
+    async def fetch_organization(self, organization_id: UUID) -> Organization | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT organization_id, slug, name, description, created_by, created_at, updated_at, metadata
+            FROM organizations
+            WHERE organization_id = $1
+            """,
+            organization_id,
+        )
+        return self._organization_from_row(row) if row else None
+
+    async def list_organizations(self) -> list[Organization]:
+        rows = await self._pool.fetch(
+            """
+            SELECT organization_id, slug, name, description, created_by, created_at, updated_at, metadata
+            FROM organizations
+            ORDER BY created_at ASC
+            """
+        )
+        return [self._organization_from_row(row) for row in rows]
+
+    async def list_organizations_for_user(self, user_id: UUID) -> list[Organization]:
+        rows = await self._pool.fetch(
+            """
+            SELECT o.organization_id, o.slug, o.name, o.description, o.created_by,
+                   o.created_at, o.updated_at, o.metadata
+            FROM organizations AS o
+            JOIN organization_memberships AS membership
+              ON membership.organization_id = o.organization_id
+            WHERE membership.user_id = $1
+            ORDER BY o.created_at ASC
+            """,
+            user_id,
+        )
+        return [self._organization_from_row(row) for row in rows]
+
+    async def fetch_organization_membership(
+        self,
+        organization_id: UUID,
+        user_id: UUID,
+    ) -> OrganizationMembership | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT organization_id, user_id, role, joined_at, updated_at, metadata
+            FROM organization_memberships
+            WHERE organization_id = $1
+              AND user_id = $2
+            """,
+            organization_id,
+            user_id,
+        )
+        return self._organization_membership_from_row(row) if row else None
+
+    async def list_organization_memberships(
+        self,
+        organization_id: UUID,
+    ) -> list[OrganizationMembership]:
+        rows = await self._pool.fetch(
+            """
+            SELECT organization_id, user_id, role, joined_at, updated_at, metadata
+            FROM organization_memberships
+            WHERE organization_id = $1
+            ORDER BY joined_at ASC, user_id ASC
+            """,
+            organization_id,
+        )
+        return [self._organization_membership_from_row(row) for row in rows]
+
+    async def upsert_organization_membership(
+        self,
+        conn: asyncpg.Connection,
+        membership: OrganizationMembership,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO organization_memberships (
+                organization_id, user_id, role, joined_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (organization_id, user_id) DO UPDATE
+                SET role = EXCLUDED.role,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = organization_memberships.metadata || EXCLUDED.metadata
+            """,
+            membership.organization_id,
+            membership.user_id,
+            membership.role,
+            membership.joined_at,
+            membership.updated_at,
+            self._json_dumps(membership.metadata),
+        )
+
+    async def delete_organization_membership(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        organization_id: UUID,
+        user_id: UUID,
+    ) -> bool:
+        result = await conn.execute(
+            """
+            DELETE FROM organization_memberships
+            WHERE organization_id = $1
+              AND user_id = $2
+            """,
+            organization_id,
+            user_id,
+        )
+        return result.endswith("1")
+
+    async def remove_user_participants_for_organization(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        organization_id: UUID,
+        user_id: UUID,
+    ) -> None:
+        await conn.execute(
+            """
+            UPDATE memberships AS membership
+            SET left_at = NOW()
+            FROM participants AS participant
+            JOIN workspaces AS workspace
+              ON workspace.workspace_id = participant.workspace_id
+            WHERE membership.workspace_id = participant.workspace_id
+              AND membership.participant_id = participant.participant_id
+              AND membership.left_at IS NULL
+              AND workspace.organization_id = $1
+              AND participant.user_id = $2
+            """,
+            organization_id,
+            user_id,
+        )
+        await conn.execute(
+            """
+            DELETE FROM participants AS participant
+            USING workspaces AS workspace
+            WHERE participant.workspace_id = workspace.workspace_id
+              AND workspace.organization_id = $1
+              AND participant.user_id = $2
+            """,
+            organization_id,
+            user_id,
         )
 
     async def upsert_user(
@@ -722,12 +903,14 @@ class CollaborationRepository:
         await conn.execute(
             """
             INSERT INTO system_agents (
-                agent_id, display_name, description, role, capabilities, endpoint,
+                agent_id, scope, organization_id, display_name, description, role, capabilities, endpoint,
                 system_prompt, interaction_contract, definition, created_by, created_at, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             ON CONFLICT (agent_id) DO UPDATE
-                SET display_name = EXCLUDED.display_name,
+                SET scope = EXCLUDED.scope,
+                    organization_id = EXCLUDED.organization_id,
+                    display_name = EXCLUDED.display_name,
                     description = EXCLUDED.description,
                     role = EXCLUDED.role,
                     capabilities = EXCLUDED.capabilities,
@@ -739,6 +922,8 @@ class CollaborationRepository:
                     metadata = EXCLUDED.metadata
             """,
             agent.agent_id,
+            agent.scope,
+            agent.organization_id,
             agent.display_name,
             agent.description,
             agent.role,
@@ -759,13 +944,15 @@ class CollaborationRepository:
         await conn.execute(
             """
             INSERT INTO system_tools (
-                tool_id, name, description, parameter_contract, input_schema,
+                tool_id, scope, organization_id, name, description, parameter_contract, input_schema,
                 backend_kind, handler_ref, execution_profile, trust_level,
                 created_by, created_at, updated_by, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             ON CONFLICT (tool_id) DO UPDATE
-                SET name = EXCLUDED.name,
+                SET scope = EXCLUDED.scope,
+                    organization_id = EXCLUDED.organization_id,
+                    name = EXCLUDED.name,
                     description = EXCLUDED.description,
                     parameter_contract = EXCLUDED.parameter_contract,
                     input_schema = EXCLUDED.input_schema,
@@ -778,6 +965,8 @@ class CollaborationRepository:
                     metadata = EXCLUDED.metadata
             """,
             tool.tool_id,
+            tool.scope,
+            tool.organization_id,
             tool.name,
             tool.description,
             self._json_dumps(tool.parameter_contract.model_dump(mode="json")),
@@ -799,17 +988,19 @@ class CollaborationRepository:
         await conn.execute(
             """
             INSERT INTO llm_providers (
-                provider_id, engine_id, display_name, description, provider, endpoint_kind,
+                provider_id, scope, organization_id, engine_id, display_name, description, provider, endpoint_kind,
                 url, default_model, capabilities, locality, priority, enabled, secret_config,
                 created_by, created_at, updated_by, updated_at, metadata
             )
             VALUES (
-                $1, $2, $3, $4, $5, $6,
-                $7, $8, $9, $10, $11, $12, $13,
-                $14, $15, $16, $17, $18
+                $1, $2, $3, $4, $5, $6, $7, $8,
+                $9, $10, $11, $12, $13, $14, $15,
+                $16, $17, $18, $19, $20
             )
             ON CONFLICT (provider_id) DO UPDATE
-                SET engine_id = EXCLUDED.engine_id,
+                SET scope = EXCLUDED.scope,
+                    organization_id = EXCLUDED.organization_id,
+                    engine_id = EXCLUDED.engine_id,
                     display_name = EXCLUDED.display_name,
                     description = EXCLUDED.description,
                     provider = EXCLUDED.provider,
@@ -826,6 +1017,8 @@ class CollaborationRepository:
                     metadata = EXCLUDED.metadata
             """,
             provider.provider_id,
+            provider.scope,
+            provider.organization_id,
             provider.engine_id,
             provider.display_name,
             provider.description,
@@ -848,15 +1041,24 @@ class CollaborationRepository:
     async def upsert_git_repository(
         self, conn: asyncpg.Connection, repository: GitRepository
     ) -> None:
+        organization_id = repository.organization_id
+        if organization_id is None and repository.workspace_id is not None:
+            organization_id = await self._workspace_organization_id(
+                conn,
+                repository.workspace_id,
+            )
+        if organization_id is None and repository.scope == "organization":
+            organization_id = await self._default_organization_id(conn)
         await conn.execute(
             """
             INSERT INTO git_repositories (
-                repo_id, workspace_id, scope, name, forgejo_url, clone_url, local_path,
+                repo_id, organization_id, workspace_id, scope, name, forgejo_url, clone_url, local_path,
                 default_branch, created_by, created_at, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (repo_id) DO UPDATE
-                SET workspace_id = EXCLUDED.workspace_id,
+                SET organization_id = EXCLUDED.organization_id,
+                    workspace_id = EXCLUDED.workspace_id,
                     scope = EXCLUDED.scope,
                     name = EXCLUDED.name,
                     forgejo_url = EXCLUDED.forgejo_url,
@@ -867,6 +1069,7 @@ class CollaborationRepository:
                     metadata = EXCLUDED.metadata
             """,
             repository.repo_id,
+            organization_id,
             repository.workspace_id,
             repository.scope,
             repository.name,
@@ -883,15 +1086,21 @@ class CollaborationRepository:
     async def upsert_workspace_asset(
         self, conn: asyncpg.Connection, asset: WorkspaceAsset
     ) -> None:
+        organization_id = asset.organization_id
+        if organization_id is None and asset.workspace_id is not None:
+            organization_id = await self._workspace_organization_id(conn, asset.workspace_id)
+        if organization_id is None and asset.scope == "organization":
+            organization_id = await self._default_organization_id(conn)
         await conn.execute(
             """
             INSERT INTO workspace_assets (
-                asset_id, workspace_id, scope, asset_type, logical_name, logical_path,
+                asset_id, organization_id, workspace_id, scope, asset_type, logical_name, logical_path,
                 title, description, created_by, created_at, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (asset_id) DO UPDATE
-                SET workspace_id = EXCLUDED.workspace_id,
+                SET organization_id = EXCLUDED.organization_id,
+                    workspace_id = EXCLUDED.workspace_id,
                     scope = EXCLUDED.scope,
                     asset_type = EXCLUDED.asset_type,
                     logical_name = EXCLUDED.logical_name,
@@ -902,6 +1111,7 @@ class CollaborationRepository:
                     metadata = EXCLUDED.metadata
             """,
             asset.asset_id,
+            organization_id,
             asset.workspace_id,
             asset.scope,
             asset.asset_type,
@@ -965,16 +1175,22 @@ class CollaborationRepository:
     async def upsert_asset_link(
         self, conn: asyncpg.Connection, link: AssetLink
     ) -> None:
+        organization_id = link.organization_id
+        if organization_id is None and link.workspace_id is not None:
+            organization_id = await self._workspace_organization_id(conn, link.workspace_id)
+        if organization_id is None:
+            organization_id = await self._asset_organization_id(conn, link.asset_id)
         await conn.execute(
             """
             INSERT INTO asset_links (
-                link_id, asset_id, asset_version_id, workspace_id, target_type, target_id,
-                purpose, active, created_by, created_at, updated_at, metadata
+                link_id, asset_id, asset_version_id, organization_id, workspace_id, target_type,
+                target_id, purpose, active, created_by, created_at, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (link_id) DO UPDATE
                 SET asset_id = EXCLUDED.asset_id,
                     asset_version_id = EXCLUDED.asset_version_id,
+                    organization_id = EXCLUDED.organization_id,
                     workspace_id = EXCLUDED.workspace_id,
                     target_type = EXCLUDED.target_type,
                     target_id = EXCLUDED.target_id,
@@ -986,6 +1202,7 @@ class CollaborationRepository:
             link.link_id,
             link.asset_id,
             link.asset_version_id,
+            organization_id,
             link.workspace_id,
             link.target_type,
             link.target_id,
@@ -1001,6 +1218,7 @@ class CollaborationRepository:
         self,
         conn: asyncpg.Connection,
         *,
+        organization_id: UUID | None,
         workspace_id: UUID | None,
         target_type: str,
         target_id: UUID,
@@ -1012,19 +1230,87 @@ class CollaborationRepository:
             SET active = FALSE,
                 updated_at = NOW()
             WHERE (
-                    ($1::uuid IS NULL AND workspace_id IS NULL)
-                 OR workspace_id = $1
+                    ($1::uuid IS NULL AND organization_id IS NULL)
+                 OR organization_id = $1
             )
-              AND target_type = $2
-              AND target_id = $3
-              AND purpose = $4
+              AND (
+                    ($2::uuid IS NULL AND workspace_id IS NULL)
+                 OR workspace_id = $2
+            )
+              AND target_type = $3
+              AND target_id = $4
+              AND purpose = $5
               AND active = TRUE
             """,
+            organization_id,
             workspace_id,
             target_type,
             target_id,
             purpose,
         )
+
+    async def _default_organization_id(
+        self,
+        conn: asyncpg.Connection | asyncpg.Pool,
+    ) -> UUID:
+        row = await conn.fetchrow(
+            """
+            SELECT organization_id
+            FROM organizations
+            ORDER BY CASE WHEN slug = 'default' THEN 0 ELSE 1 END, created_at ASC
+            LIMIT 1
+            """
+        )
+        if row is None:
+            raise ValueError("No organizations configured")
+        return row["organization_id"]
+
+    async def _workspace_organization_id(
+        self,
+        conn: asyncpg.Connection | asyncpg.Pool,
+        workspace_id: UUID,
+    ) -> UUID:
+        row = await conn.fetchrow(
+            """
+            SELECT organization_id
+            FROM workspaces
+            WHERE workspace_id = $1
+            """,
+            workspace_id,
+        )
+        if row is None or row["organization_id"] is None:
+            return await self._default_organization_id(conn)
+        return row["organization_id"]
+
+    async def _asset_organization_id(
+        self,
+        conn: asyncpg.Connection | asyncpg.Pool,
+        asset_id: UUID,
+    ) -> UUID | None:
+        row = await conn.fetchrow(
+            """
+            SELECT organization_id
+            FROM workspace_assets
+            WHERE asset_id = $1
+            """,
+            asset_id,
+        )
+        return row["organization_id"] if row is not None else None
+
+    async def _effective_organization_filter(
+        self,
+        *,
+        organization_id: UUID | None,
+        workspace_id: UUID | None = None,
+        asset_id: UUID | None = None,
+    ) -> UUID | None:
+        if organization_id is not None:
+            return organization_id
+        if workspace_id is not None:
+            return await self._workspace_organization_id(self._pool, workspace_id)
+        if asset_id is not None:
+            return await self._asset_organization_id(self._pool, asset_id)
+        return None
 
     async def upsert_workspace_tool(
         self,
@@ -1353,15 +1639,17 @@ class CollaborationRepository:
         await conn.execute(
             """
             INSERT INTO memory_providers (
-                provider_id, provider_key, display_name, description, provider, enabled,
+                provider_id, scope, organization_id, provider_key, display_name, description, provider, enabled,
                 config, secret_config, created_by, created_at, updated_by, updated_at, metadata
             )
             VALUES (
-                $1, $2, $3, $4, $5, $6,
-                $7, $8, $9, $10, $11, $12, $13
+                $1, $2, $3, $4, $5, $6, $7, $8,
+                $9, $10, $11, $12, $13, $14, $15
             )
             ON CONFLICT (provider_id) DO UPDATE
-                SET provider_key = EXCLUDED.provider_key,
+                SET scope = EXCLUDED.scope,
+                    organization_id = EXCLUDED.organization_id,
+                    provider_key = EXCLUDED.provider_key,
                     display_name = EXCLUDED.display_name,
                     description = EXCLUDED.description,
                     provider = EXCLUDED.provider,
@@ -1373,6 +1661,8 @@ class CollaborationRepository:
                     metadata = EXCLUDED.metadata
             """,
             provider.provider_id,
+            provider.scope,
+            provider.organization_id,
             provider.provider_key,
             provider.display_name,
             provider.description,
@@ -1682,7 +1972,7 @@ class CollaborationRepository:
     async def fetch_workspace(self, workspace_id: UUID) -> Workspace | None:
         row = await self._pool.fetchrow(
             """
-            SELECT workspace_id, name, description, owner_user_id, created_at, updated_at, metadata
+            SELECT workspace_id, organization_id, name, description, owner_user_id, created_at, updated_at, metadata
             FROM workspaces
             WHERE workspace_id = $1
             """,
@@ -1690,43 +1980,67 @@ class CollaborationRepository:
         )
         return self._workspace_from_row(row) if row else None
 
-    async def list_workspaces(self) -> list[Workspace]:
+    async def list_workspaces(self, *, organization_id: UUID | None = None) -> list[Workspace]:
         rows = await self._pool.fetch(
             """
-            SELECT workspace_id, name, description, owner_user_id, created_at, updated_at, metadata
+            SELECT workspace_id, organization_id, name, description, owner_user_id, created_at, updated_at, metadata
             FROM workspaces
+            WHERE ($1::uuid IS NULL OR organization_id = $1)
             ORDER BY created_at ASC
-            """
+            """,
+            organization_id,
         )
         return [self._workspace_from_row(row) for row in rows]
 
-    async def list_workspaces_for_user(self, user_id: UUID) -> list[Workspace]:
+    async def list_workspaces_for_user(
+        self,
+        user_id: UUID,
+        *,
+        organization_id: UUID | None = None,
+    ) -> list[Workspace]:
         rows = await self._pool.fetch(
             """
-            SELECT w.workspace_id, w.name, w.description, w.owner_user_id,
+            SELECT w.workspace_id, w.organization_id, w.name, w.description, w.owner_user_id,
                    w.created_at, w.updated_at, w.metadata
-            FROM workspaces w
+            FROM workspaces AS w
+            JOIN organization_memberships AS membership
+              ON membership.organization_id = w.organization_id
+             AND membership.user_id = $1
             WHERE EXISTS (
                 SELECT 1
-                FROM participants p
+                FROM participants AS p
                 WHERE p.workspace_id = w.workspace_id
                   AND p.participant_type = 'user'
                   AND p.user_id = $1
             )
+              AND ($2::uuid IS NULL OR w.organization_id = $2)
             ORDER BY w.created_at ASC
             """,
             user_id,
+            organization_id,
         )
         return [self._workspace_from_row(row) for row in rows]
 
-    async def list_system_agents(self) -> list[AgentDefinition]:
+    async def list_system_agents(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[AgentDefinition]:
         rows = await self._pool.fetch(
             """
-            SELECT agent_id, display_name, description, role, capabilities, endpoint,
+            SELECT agent_id, scope, organization_id, display_name, description, role, capabilities, endpoint,
                    system_prompt, interaction_contract, definition, created_by, created_at, updated_at, metadata
             FROM system_agents
+            WHERE scope = $1
+              AND (
+                    ($2::uuid IS NULL AND organization_id IS NULL)
+                 OR organization_id = $2
+              )
             ORDER BY created_at ASC
-            """
+            """,
+            scope,
+            organization_id,
         )
         return [self._system_agent_from_row(row) for row in rows]
 
@@ -1736,7 +2050,7 @@ class CollaborationRepository:
     ) -> list[AgentDefinition]:
         rows = await self._pool.fetch(
             """
-            SELECT agent_id, display_name, description, role, capabilities, endpoint,
+            SELECT agent_id, scope, organization_id, display_name, description, role, capabilities, endpoint,
                    system_prompt, interaction_contract, definition, created_by, created_at, updated_at, metadata
             FROM system_agents
             WHERE endpoint->>'engine_id' = $1
@@ -1759,33 +2073,60 @@ class CollaborationRepository:
         return [self._system_agent_from_row(row) for row in rows]
 
     async def list_system_tools(self) -> list[SystemToolDefinition]:
+        return await self.list_system_tools_by_scope()
+
+    async def list_system_tools_by_scope(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[SystemToolDefinition]:
         rows = await self._pool.fetch(
             """
-            SELECT tool_id, name, description, parameter_contract, input_schema,
+            SELECT tool_id, scope, organization_id, name, description, parameter_contract, input_schema,
                    backend_kind, handler_ref, execution_profile, trust_level,
                    created_by, created_at, updated_by, updated_at, metadata
             FROM system_tools
+            WHERE scope = $1
+              AND (
+                    ($2::uuid IS NULL AND organization_id IS NULL)
+                 OR organization_id = $2
+              )
             ORDER BY created_at ASC
-            """
+            """,
+            scope,
+            organization_id,
         )
         return [self._system_tool_from_row(row) for row in rows]
 
-    async def list_llm_providers(self) -> list[LlmProviderDefinition]:
+    async def list_llm_providers(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[LlmProviderDefinition]:
         rows = await self._pool.fetch(
             """
-            SELECT provider_id, engine_id, display_name, description, provider, endpoint_kind,
+            SELECT provider_id, scope, organization_id, engine_id, display_name, description, provider, endpoint_kind,
                    url, default_model, capabilities, locality, priority, enabled, secret_config,
                    created_by, created_at, updated_by, updated_at, metadata
             FROM llm_providers
+            WHERE scope = $1
+              AND (
+                    ($2::uuid IS NULL AND organization_id IS NULL)
+                 OR organization_id = $2
+              )
             ORDER BY created_at ASC
-            """
+            """,
+            scope,
+            organization_id,
         )
         return [self._llm_provider_from_row(row) for row in rows]
 
     async def fetch_system_agent(self, agent_id: UUID) -> AgentDefinition | None:
         row = await self._pool.fetchrow(
             """
-            SELECT agent_id, display_name, description, role, capabilities, endpoint,
+            SELECT agent_id, scope, organization_id, display_name, description, role, capabilities, endpoint,
                    system_prompt, interaction_contract, definition, created_by, created_at, updated_at, metadata
             FROM system_agents
             WHERE agent_id = $1
@@ -1797,7 +2138,7 @@ class CollaborationRepository:
     async def fetch_system_tool(self, tool_id: UUID) -> SystemToolDefinition | None:
         row = await self._pool.fetchrow(
             """
-            SELECT tool_id, name, description, parameter_contract, input_schema,
+            SELECT tool_id, scope, organization_id, name, description, parameter_contract, input_schema,
                    backend_kind, handler_ref, execution_profile, trust_level,
                    created_by, created_at, updated_by, updated_at, metadata
             FROM system_tools
@@ -1810,7 +2151,7 @@ class CollaborationRepository:
     async def fetch_llm_provider(self, provider_id: UUID) -> LlmProviderDefinition | None:
         row = await self._pool.fetchrow(
             """
-            SELECT provider_id, engine_id, display_name, description, provider, endpoint_kind,
+            SELECT provider_id, scope, organization_id, engine_id, display_name, description, provider, endpoint_kind,
                    url, default_model, capabilities, locality, priority, enabled, secret_config,
                    created_by, created_at, updated_by, updated_at, metadata
             FROM llm_providers
@@ -1824,21 +2165,33 @@ class CollaborationRepository:
         self,
         *,
         scope: str,
+        organization_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[GitRepository]:
+        effective_organization_id = organization_id
+        if scope in {"organization", "workspace"}:
+            effective_organization_id = await self._effective_organization_filter(
+                organization_id=organization_id,
+                workspace_id=workspace_id,
+            )
         rows = await self._pool.fetch(
             """
-            SELECT repo_id, workspace_id, scope, name, forgejo_url, clone_url, local_path,
+            SELECT repo_id, organization_id, workspace_id, scope, name, forgejo_url, clone_url, local_path,
                    default_branch, created_by, created_at, updated_at, metadata
             FROM git_repositories
             WHERE scope = $1
               AND (
-                    ($2::uuid IS NULL AND workspace_id IS NULL)
-                 OR workspace_id = $2
+                    ($2::uuid IS NULL AND organization_id IS NULL)
+                 OR organization_id = $2
+              )
+              AND (
+                    ($3::uuid IS NULL AND workspace_id IS NULL)
+                 OR workspace_id = $3
               )
             ORDER BY created_at ASC
             """,
             scope,
+            effective_organization_id,
             workspace_id,
         )
         return [self._git_repository_from_row(row) for row in rows]
@@ -1846,7 +2199,7 @@ class CollaborationRepository:
     async def fetch_git_repository(self, repo_id: UUID) -> GitRepository | None:
         row = await self._pool.fetchrow(
             """
-            SELECT repo_id, workspace_id, scope, name, forgejo_url, clone_url, local_path,
+            SELECT repo_id, organization_id, workspace_id, scope, name, forgejo_url, clone_url, local_path,
                    default_branch, created_by, created_at, updated_at, metadata
             FROM git_repositories
             WHERE repo_id = $1
@@ -1858,7 +2211,7 @@ class CollaborationRepository:
     async def fetch_workspace_asset(self, asset_id: UUID) -> WorkspaceAsset | None:
         row = await self._pool.fetchrow(
             """
-            SELECT asset_id, workspace_id, scope, asset_type, logical_name, logical_path,
+            SELECT asset_id, organization_id, workspace_id, scope, asset_type, logical_name, logical_path,
                    title, description, created_by, created_at, updated_at, metadata
             FROM workspace_assets
             WHERE asset_id = $1
@@ -1871,22 +2224,34 @@ class CollaborationRepository:
         self,
         *,
         scope: str,
+        organization_id: UUID | None,
         workspace_id: UUID | None,
         logical_name: str,
     ) -> WorkspaceAsset | None:
+        effective_organization_id = organization_id
+        if scope in {"organization", "workspace"}:
+            effective_organization_id = await self._effective_organization_filter(
+                organization_id=organization_id,
+                workspace_id=workspace_id,
+            )
         row = await self._pool.fetchrow(
             """
-            SELECT asset_id, workspace_id, scope, asset_type, logical_name, logical_path,
+            SELECT asset_id, organization_id, workspace_id, scope, asset_type, logical_name, logical_path,
                    title, description, created_by, created_at, updated_at, metadata
             FROM workspace_assets
             WHERE scope = $1
               AND (
-                    ($2::uuid IS NULL AND workspace_id IS NULL)
-                 OR workspace_id = $2
+                    ($2::uuid IS NULL AND organization_id IS NULL)
+                 OR organization_id = $2
               )
-              AND logical_name = $3
+              AND (
+                    ($3::uuid IS NULL AND workspace_id IS NULL)
+                 OR workspace_id = $3
+              )
+              AND logical_name = $4
             """,
             scope,
+            effective_organization_id,
             workspace_id,
             logical_name,
         )
@@ -1896,22 +2261,33 @@ class CollaborationRepository:
         self,
         *,
         scope: str | None = None,
+        organization_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[WorkspaceAsset]:
+        effective_organization_id = organization_id
+        if scope in {None, "organization", "workspace"} and workspace_id is not None:
+            effective_organization_id = await self._effective_organization_filter(
+                organization_id=organization_id,
+                workspace_id=workspace_id,
+            )
         rows = await self._pool.fetch(
             """
-            SELECT asset_id, workspace_id, scope, asset_type, logical_name, logical_path,
+            SELECT asset_id, organization_id, workspace_id, scope, asset_type, logical_name, logical_path,
                    title, description, created_by, created_at, updated_at, metadata
             FROM workspace_assets
             WHERE ($1::text IS NULL OR scope = $1)
               AND (
-                    $2::uuid IS NULL
-                 OR workspace_id = $2
-                 OR (scope = 'global' AND workspace_id IS NULL)
+                    ($2::uuid IS NULL AND organization_id IS NULL)
+                 OR organization_id = $2
+              )
+              AND (
+                    ($3::uuid IS NULL AND workspace_id IS NULL)
+                 OR workspace_id = $3
               )
             ORDER BY created_at ASC
             """,
             scope,
+            effective_organization_id,
             workspace_id,
         )
         return [self._workspace_asset_from_row(row) for row in rows]
@@ -1965,16 +2341,23 @@ class CollaborationRepository:
         *,
         target_type: str,
         target_id: UUID,
+        organization_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[ResolvedAssetBinding]:
+        effective_organization_id = await self._effective_organization_filter(
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+        )
         rows = await self._pool.fetch(
             """
             SELECT
                 al.link_id, al.asset_id AS link_asset_id, al.asset_version_id AS link_asset_version_id,
-                al.workspace_id AS link_workspace_id, al.target_type, al.target_id, al.purpose,
+                al.organization_id AS link_organization_id, al.workspace_id AS link_workspace_id,
+                al.target_type, al.target_id, al.purpose,
                 al.active, al.created_by AS link_created_by, al.created_at AS link_created_at,
                 al.updated_at AS link_updated_at, al.metadata AS link_metadata,
-                wa.asset_id, wa.workspace_id AS asset_workspace_id, wa.scope, wa.asset_type,
+                wa.asset_id, wa.organization_id AS asset_organization_id, wa.workspace_id AS asset_workspace_id,
+                wa.scope, wa.asset_type,
                 wa.logical_name, wa.logical_path, wa.title, wa.description, wa.created_by AS asset_created_by,
                 wa.created_at AS asset_created_at, wa.updated_at AS asset_updated_at, wa.metadata AS asset_metadata,
                 wav.asset_version_id, wav.version, wav.source_kind, wav.git_repository_id, wav.git_revision,
@@ -1988,14 +2371,25 @@ class CollaborationRepository:
               AND al.target_id = $2
               AND al.active = TRUE
               AND (
-                    ($3::uuid IS NULL AND al.workspace_id IS NULL)
-                 OR al.workspace_id = $3
-                 OR ($3::uuid IS NOT NULL AND al.workspace_id IS NULL)
+                    ($3::uuid IS NULL AND $4::uuid IS NULL AND al.organization_id IS NULL AND al.workspace_id IS NULL)
+                 OR (
+                        $3::uuid IS NOT NULL
+                    AND (
+                            al.organization_id = $3
+                         OR al.organization_id IS NULL
+                    )
+                    AND (
+                            $4::uuid IS NULL
+                         OR al.workspace_id = $4
+                         OR al.workspace_id IS NULL
+                    )
+                 )
               )
             ORDER BY al.updated_at DESC
             """,
             target_type,
             target_id,
+            effective_organization_id,
             workspace_id,
         )
         by_purpose: dict[str, ResolvedAssetBinding] = {}
@@ -2005,7 +2399,7 @@ class CollaborationRepository:
             if existing is None:
                 by_purpose[binding.purpose] = binding
                 continue
-            if existing.workspace_id is None and binding.workspace_id is not None:
+            if self._asset_binding_specificity(binding) > self._asset_binding_specificity(existing):
                 by_purpose[binding.purpose] = binding
         return list(by_purpose.values())
 
@@ -2529,63 +2923,114 @@ class CollaborationRepository:
         )
         return [self._tool_call_from_row(row) for row in rows]
 
-    async def get_runtime_queue_stats(self, *, now, since) -> dict[str, int | None]:
+    async def get_runtime_queue_stats(
+        self,
+        *,
+        now,
+        since,
+        organization_id: UUID | None = None,
+    ) -> dict[str, int | None]:
         row = await self._pool.fetchrow(
             """
             SELECT
-                (SELECT COUNT(*) FROM tasks WHERE status IN ('created', 'released')) AS tasks_pending,
-                (SELECT COUNT(*) FROM tasks WHERE status = 'claimed') AS tasks_claimed,
-                (
-                    SELECT COUNT(*)
-                    FROM run_steps
-                    WHERE status = 'created'
-                      AND (next_retry_at IS NULL OR next_retry_at <= $1)
-                ) AS run_steps_pending,
-                (SELECT COUNT(*) FROM run_steps WHERE status = 'claimed') AS run_steps_claimed,
-                (
-                    SELECT COUNT(*)
-                    FROM tool_calls
-                    WHERE status = 'created'
-                      AND (next_retry_at IS NULL OR next_retry_at <= $1)
-                ) AS tool_calls_pending,
-                (SELECT COUNT(*) FROM tool_calls WHERE status = 'claimed') AS tool_calls_claimed,
                 (
                     SELECT COUNT(*)
                     FROM tasks
-                    WHERE status = 'failed'
-                      AND updated_at >= $2
+                    JOIN workspaces ON workspaces.workspace_id = tasks.workspace_id
+                    WHERE tasks.status IN ('created', 'released')
+                      AND ($3::uuid IS NULL OR workspaces.organization_id = $3)
+                ) AS tasks_pending,
+                (
+                    SELECT COUNT(*)
+                    FROM tasks
+                    JOIN workspaces ON workspaces.workspace_id = tasks.workspace_id
+                    WHERE tasks.status = 'claimed'
+                      AND ($3::uuid IS NULL OR workspaces.organization_id = $3)
+                ) AS tasks_claimed,
+                (
+                    SELECT COUNT(*)
+                    FROM run_steps
+                    JOIN workspaces ON workspaces.workspace_id = run_steps.workspace_id
+                    WHERE run_steps.status = 'created'
+                      AND (run_steps.next_retry_at IS NULL OR run_steps.next_retry_at <= $1)
+                      AND ($3::uuid IS NULL OR workspaces.organization_id = $3)
+                ) AS run_steps_pending,
+                (
+                    SELECT COUNT(*)
+                    FROM run_steps
+                    JOIN workspaces ON workspaces.workspace_id = run_steps.workspace_id
+                    WHERE run_steps.status = 'claimed'
+                      AND ($3::uuid IS NULL OR workspaces.organization_id = $3)
+                ) AS run_steps_claimed,
+                (
+                    SELECT COUNT(*)
+                    FROM tool_calls
+                    JOIN workspaces ON workspaces.workspace_id = tool_calls.workspace_id
+                    WHERE tool_calls.status = 'created'
+                      AND (tool_calls.next_retry_at IS NULL OR tool_calls.next_retry_at <= $1)
+                      AND ($3::uuid IS NULL OR workspaces.organization_id = $3)
+                ) AS tool_calls_pending,
+                (
+                    SELECT COUNT(*)
+                    FROM tool_calls
+                    JOIN workspaces ON workspaces.workspace_id = tool_calls.workspace_id
+                    WHERE tool_calls.status = 'claimed'
+                      AND ($3::uuid IS NULL OR workspaces.organization_id = $3)
+                ) AS tool_calls_claimed,
+                (
+                    SELECT COUNT(*)
+                    FROM tasks
+                    JOIN workspaces ON workspaces.workspace_id = tasks.workspace_id
+                    WHERE tasks.status = 'failed'
+                      AND tasks.updated_at >= $2
+                      AND ($3::uuid IS NULL OR workspaces.organization_id = $3)
                 ) AS tasks_failed_last_24h,
                 (
                     SELECT COUNT(*)
                     FROM run_steps
-                    WHERE status = 'failed'
-                      AND updated_at >= $2
+                    JOIN workspaces ON workspaces.workspace_id = run_steps.workspace_id
+                    WHERE run_steps.status = 'failed'
+                      AND run_steps.updated_at >= $2
+                      AND ($3::uuid IS NULL OR workspaces.organization_id = $3)
                 ) AS run_steps_failed_last_24h,
                 (
                     SELECT COUNT(*)
                     FROM tool_calls
-                    WHERE status = 'failed'
-                      AND updated_at >= $2
+                    JOIN workspaces ON workspaces.workspace_id = tool_calls.workspace_id
+                    WHERE tool_calls.status = 'failed'
+                      AND tool_calls.updated_at >= $2
+                      AND ($3::uuid IS NULL OR workspaces.organization_id = $3)
                 ) AS tool_calls_failed_last_24h,
                 (
                     SELECT EXTRACT(EPOCH FROM ($1 - MIN(submitted_at)))::bigint
                     FROM run_steps
-                    WHERE status = 'created'
-                      AND (next_retry_at IS NULL OR next_retry_at <= $1)
+                    JOIN workspaces ON workspaces.workspace_id = run_steps.workspace_id
+                    WHERE run_steps.status = 'created'
+                      AND (run_steps.next_retry_at IS NULL OR run_steps.next_retry_at <= $1)
+                      AND ($3::uuid IS NULL OR workspaces.organization_id = $3)
                 ) AS oldest_run_step_pending_age_seconds,
                 (
                     SELECT EXTRACT(EPOCH FROM ($1 - MIN(submitted_at)))::bigint
                     FROM tool_calls
-                    WHERE status = 'created'
-                      AND (next_retry_at IS NULL OR next_retry_at <= $1)
+                    JOIN workspaces ON workspaces.workspace_id = tool_calls.workspace_id
+                    WHERE tool_calls.status = 'created'
+                      AND (tool_calls.next_retry_at IS NULL OR tool_calls.next_retry_at <= $1)
+                      AND ($3::uuid IS NULL OR workspaces.organization_id = $3)
                 ) AS oldest_tool_call_pending_age_seconds
             """,
             now,
             since,
+            organization_id,
         )
         return dict(row or {})
 
-    async def get_global_token_total(self, *, day_start, day_end) -> int:
+    async def get_global_token_total(
+        self,
+        *,
+        day_start,
+        day_end,
+        organization_id: UUID | None = None,
+    ) -> int:
         total = await self._pool.fetchval(
             """
             SELECT COALESCE(
@@ -2600,11 +3045,14 @@ class CollaborationRepository:
                 0
             )
             FROM runs
-            WHERE updated_at >= $1
-              AND updated_at < $2
+            JOIN workspaces ON workspaces.workspace_id = runs.workspace_id
+            WHERE runs.updated_at >= $1
+              AND runs.updated_at < $2
+              AND ($3::uuid IS NULL OR workspaces.organization_id = $3)
             """,
             day_start,
             day_end,
+            organization_id,
         )
         return int(total or 0)
 
@@ -2630,8 +3078,8 @@ class CollaborationRepository:
             )
             FROM runs
             WHERE workspace_id = $1
-              AND updated_at >= $2
-              AND updated_at < $3
+              AND runs.updated_at >= $2
+              AND runs.updated_at < $3
             """,
             workspace_id,
             day_start,
@@ -2639,10 +3087,16 @@ class CollaborationRepository:
         )
         return int(total or 0)
 
-    async def list_workspace_token_totals(self, *, day_start, day_end) -> list[dict[str, int | UUID]]:
+    async def list_workspace_token_totals(
+        self,
+        *,
+        day_start,
+        day_end,
+        organization_id: UUID | None = None,
+    ) -> list[dict[str, int | UUID]]:
         rows = await self._pool.fetch(
             """
-            SELECT workspace_id,
+            SELECT runs.workspace_id,
                    COALESCE(
                        SUM(
                            CASE
@@ -2653,11 +3107,13 @@ class CollaborationRepository:
                            END
                        ),
                        0
-                   ) AS total_tokens
+            ) AS total_tokens
             FROM runs
-            WHERE updated_at >= $1
-              AND updated_at < $2
-            GROUP BY workspace_id
+            JOIN workspaces ON workspaces.workspace_id = runs.workspace_id
+            WHERE runs.updated_at >= $1
+              AND runs.updated_at < $2
+              AND ($3::uuid IS NULL OR workspaces.organization_id = $3)
+            GROUP BY runs.workspace_id
             HAVING COALESCE(
                 SUM(
                     CASE
@@ -2669,10 +3125,11 @@ class CollaborationRepository:
                 ),
                 0
             ) > 0
-            ORDER BY total_tokens DESC, workspace_id ASC
+            ORDER BY total_tokens DESC, runs.workspace_id ASC
             """,
             day_start,
             day_end,
+            organization_id,
         )
         return [
             {"workspace_id": row["workspace_id"], "total_tokens": int(row["total_tokens"] or 0)}
@@ -3097,26 +3554,50 @@ class CollaborationRepository:
         )
         return self._memory_entry_from_row(row) if row else None
 
-    async def list_memory_providers(self) -> list[MemoryProviderDefinition]:
+    async def list_memory_providers(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[MemoryProviderDefinition]:
         rows = await self._pool.fetch(
             """
-            SELECT provider_id, provider_key, display_name, description, provider, enabled,
+            SELECT provider_id, scope, organization_id, provider_key, display_name, description, provider, enabled,
                    config, secret_config, created_by, created_at, updated_by, updated_at, metadata
             FROM memory_providers
+            WHERE scope = $1
+              AND (
+                    ($2::uuid IS NULL AND organization_id IS NULL)
+                 OR organization_id = $2
+              )
             ORDER BY created_at ASC
-            """
+            """,
+            scope,
+            organization_id,
         )
         return [self._memory_provider_from_row(row) for row in rows]
 
-    async def list_enabled_memory_providers(self) -> list[MemoryProviderDefinition]:
+    async def list_enabled_memory_providers(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[MemoryProviderDefinition]:
         rows = await self._pool.fetch(
             """
-            SELECT provider_id, provider_key, display_name, description, provider, enabled,
+            SELECT provider_id, scope, organization_id, provider_key, display_name, description, provider, enabled,
                    config, secret_config, created_by, created_at, updated_by, updated_at, metadata
             FROM memory_providers
             WHERE enabled = TRUE
+              AND scope = $1
+              AND (
+                    ($2::uuid IS NULL AND organization_id IS NULL)
+                 OR organization_id = $2
+              )
             ORDER BY created_at ASC
-            """
+            """,
+            scope,
+            organization_id,
         )
         return [self._memory_provider_from_row(row) for row in rows]
 
@@ -3125,7 +3606,7 @@ class CollaborationRepository:
     ) -> MemoryProviderDefinition | None:
         row = await self._pool.fetchrow(
             """
-            SELECT provider_id, provider_key, display_name, description, provider, enabled,
+            SELECT provider_id, scope, organization_id, provider_key, display_name, description, provider, enabled,
                    config, secret_config, created_by, created_at, updated_by, updated_at, metadata
             FROM memory_providers
             WHERE provider_id = $1
@@ -3135,16 +3616,27 @@ class CollaborationRepository:
         return self._memory_provider_from_row(row) if row else None
 
     async def fetch_memory_provider_by_key(
-        self, provider_key: str
+        self,
+        provider_key: str,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
     ) -> MemoryProviderDefinition | None:
         row = await self._pool.fetchrow(
             """
-            SELECT provider_id, provider_key, display_name, description, provider, enabled,
+            SELECT provider_id, scope, organization_id, provider_key, display_name, description, provider, enabled,
                    config, secret_config, created_by, created_at, updated_by, updated_at, metadata
             FROM memory_providers
             WHERE provider_key = $1
+              AND scope = $2
+              AND (
+                    ($3::uuid IS NULL AND organization_id IS NULL)
+                 OR organization_id = $3
+              )
             """,
             provider_key,
+            scope,
+            organization_id,
         )
         return self._memory_provider_from_row(row) if row else None
 
@@ -3418,10 +3910,37 @@ class CollaborationRepository:
     def _workspace_from_row(row: asyncpg.Record) -> Workspace:
         return Workspace(
             workspace_id=row["workspace_id"],
+            organization_id=row["organization_id"],
             name=row["name"],
             description=row["description"],
             owner_user_id=row["owner_user_id"],
             created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _organization_from_row(row: asyncpg.Record) -> Organization:
+        return Organization(
+            organization_id=row["organization_id"],
+            slug=row["slug"],
+            name=row["name"],
+            description=row["description"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _organization_membership_from_row(
+        row: asyncpg.Record,
+    ) -> OrganizationMembership:
+        return OrganizationMembership(
+            organization_id=row["organization_id"],
+            user_id=row["user_id"],
+            role=row["role"],
+            joined_at=row["joined_at"],
             updated_at=row["updated_at"],
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),
         )
@@ -3515,6 +4034,8 @@ class CollaborationRepository:
     def _system_agent_from_row(row: asyncpg.Record) -> AgentDefinition:
         return AgentDefinition(
             agent_id=row["agent_id"],
+            scope=row["scope"],
+            organization_id=row["organization_id"],
             display_name=row["display_name"],
             description=row["description"],
             role=row["role"],
@@ -3542,6 +4063,8 @@ class CollaborationRepository:
     def _system_tool_from_row(row: asyncpg.Record) -> SystemToolDefinition:
         return SystemToolDefinition(
             tool_id=row["tool_id"],
+            scope=row["scope"],
+            organization_id=row["organization_id"],
             name=row["name"],
             description=row["description"],
             parameter_contract=ToolParameterContract.model_validate(
@@ -3571,6 +4094,8 @@ class CollaborationRepository:
     def _llm_provider_from_row(row: asyncpg.Record) -> LlmProviderDefinition:
         return LlmProviderDefinition(
             provider_id=row["provider_id"],
+            scope=row["scope"],
+            organization_id=row["organization_id"],
             engine_id=row["engine_id"],
             display_name=row["display_name"],
             description=row["description"],
@@ -3628,6 +4153,7 @@ class CollaborationRepository:
     def _git_repository_from_row(row: asyncpg.Record) -> GitRepository:
         return GitRepository(
             repo_id=row["repo_id"],
+            organization_id=row["organization_id"],
             workspace_id=row["workspace_id"],
             scope=row["scope"],
             name=row["name"],
@@ -3645,6 +4171,7 @@ class CollaborationRepository:
     def _workspace_asset_from_row(row: asyncpg.Record) -> WorkspaceAsset:
         return WorkspaceAsset(
             asset_id=row["asset_id"],
+            organization_id=row["organization_id"],
             workspace_id=row["workspace_id"],
             scope=row["scope"],
             asset_type=row["asset_type"],
@@ -3685,6 +4212,7 @@ class CollaborationRepository:
             link_id=row["link_id"],
             asset_id=row["link_asset_id"],
             asset_version_id=row["link_asset_version_id"],
+            organization_id=row["link_organization_id"],
             workspace_id=row["link_workspace_id"],
             target_type=row["target_type"],
             target_id=row["target_id"],
@@ -3700,9 +4228,11 @@ class CollaborationRepository:
     def _resolved_asset_binding_from_row(row: asyncpg.Record) -> ResolvedAssetBinding:
         return ResolvedAssetBinding(
             purpose=row["purpose"],
+            organization_id=row["link_organization_id"],
             workspace_id=row["link_workspace_id"],
             asset=WorkspaceAsset(
                 asset_id=row["asset_id"],
+                organization_id=row["asset_organization_id"],
                 workspace_id=row["asset_workspace_id"],
                 scope=row["scope"],
                 asset_type=row["asset_type"],
@@ -3849,6 +4379,8 @@ class CollaborationRepository:
     def _memory_provider_from_row(row: asyncpg.Record) -> MemoryProviderDefinition:
         return MemoryProviderDefinition(
             provider_id=row["provider_id"],
+            scope=row["scope"],
+            organization_id=row["organization_id"],
             provider_key=row["provider_key"],
             display_name=row["display_name"],
             description=row["description"],
@@ -4025,6 +4557,7 @@ class CollaborationRepository:
             occurred_at=row["occurred_at"],
             recorded_at=row["recorded_at"],
             scope_type=row["scope_type"],
+            organization_id=row["organization_id"],
             workspace_id=row["workspace_id"],
             thread_id=row["thread_id"],
             actor_type=row["actor_type"],
@@ -4061,6 +4594,14 @@ class CollaborationRepository:
         conn: asyncpg.Connection,
         event: EventEnvelope,
     ) -> AuditEventDraft:
+        workspace_row = await conn.fetchrow(
+            """
+            SELECT organization_id
+            FROM workspaces
+            WHERE workspace_id = $1
+            """,
+            event.workspace_id,
+        )
         actor_row = await conn.fetchrow(
             """
             SELECT user_id, system_agent_id
@@ -4080,6 +4621,7 @@ class CollaborationRepository:
             occurred_at=event.timestamp,
             recorded_at=event.timestamp,
             scope_type=scope_type,
+            organization_id=workspace_row["organization_id"] if workspace_row else None,
             workspace_id=event.workspace_id,
             thread_id=event.thread_id,
             actor_type=event.actor.type,
@@ -4104,15 +4646,31 @@ class CollaborationRepository:
             },
             chain_partition=self._audit_chain_partition(
                 scope_type=scope_type,
+                organization_id=workspace_row["organization_id"] if workspace_row else None,
                 workspace_id=event.workspace_id,
             ),
         )
 
     @staticmethod
-    def _audit_chain_partition(*, scope_type: str, workspace_id: UUID | None) -> str:
+    def _audit_chain_partition(
+        *,
+        scope_type: str,
+        organization_id: UUID | None,
+        workspace_id: UUID | None,
+    ) -> str:
+        if scope_type == "organization" and organization_id is not None:
+            return f"organization:{organization_id}"
         if scope_type in {"workspace", "thread"} and workspace_id is not None:
             return f"workspace:{workspace_id}"
         return "global"
+
+    @staticmethod
+    def _asset_binding_specificity(binding: ResolvedAssetBinding) -> int:
+        if binding.workspace_id is not None:
+            return 3
+        if binding.organization_id is not None:
+            return 2
+        return 1
 
     @staticmethod
     def _audit_outcome_for_action(action_name: str) -> str:

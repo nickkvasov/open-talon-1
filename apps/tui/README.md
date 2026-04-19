@@ -11,6 +11,7 @@ The TUI can:
 - post messages into the current thread
 - run a scriptable per-user client for multi-user end-to-end testing
 - inspect participants, roles, threads, and workspaces
+- select an organization before listing or creating workspaces in `tui2` and `user-client`
 - create local agents and attach them to the current workspace
 - inspect system tools and attach or detach them from the current workspace
 
@@ -54,6 +55,8 @@ If you want reliable terminal mouse selection and terminal-native clickable link
 ```
 
 `tui2` is a scrollback-first client. It prints plain timeline lines into the normal terminal, so you can select text with the mouse the same way you would in any shell scrollback. URLs are printed as raw URLs and also emitted as terminal hyperlinks when supported by the terminal emulator.
+
+`tui2` and `user-client` are the preferred clients for multi-organization setups. They track `organization_id`, expose explicit `organization` commands, and default workspace listing to the selected organization.
 
 If you want one user-facing client instance per human profile for software-agent-driven end-to-end testing, use `user-client`:
 
@@ -137,6 +140,8 @@ Current built-in agent flow:
 /workspace delete <id|name|current>
 ```
 
+These are the legacy full-screen `tui` workspace commands. The full-screen client does not expose `/organization ...` commands yet. Workspace creation through this path only works cleanly when the authenticated user resolves to exactly one visible organization.
+
 ### Account Commands
 
 ```text
@@ -200,7 +205,10 @@ Useful commands in `tui2`:
 /account whoami
 /account list
 /account switch <profile>
-/workspace list
+/organization list
+/organization show [id|slug|name]
+/organization use <id|slug|name>
+/workspace list [all]
 /workspace create <name>
 /workspace use <id|name>
 /thread list
@@ -211,6 +219,8 @@ Useful commands in `tui2`:
 /copy
 /quit
 ```
+
+If the authenticated user can see exactly one organization, `tui2` auto-selects it after login. On a fresh local stack that is usually `Default Organization`.
 
 ## User Client
 
@@ -244,7 +254,8 @@ Non-interactive command mode is available through repeated `--command` flags:
 
 ```bash
 ./open-talon user-client --profile admin --command "status"
-./open-talon user-client --profile admin --output json --command "workspace list"
+./open-talon user-client --profile admin --output json --command "organization list"
+./open-talon user-client --profile admin --output json --command "workspace list all"
 ```
 
 Useful `user-client` commands:
@@ -254,7 +265,10 @@ help
 status
 auth login
 auth logout
-workspace list
+organization list
+organization show [id|slug|name]
+organization use <id|slug|name>
+workspace list [all]
 workspace create <name>
 workspace use <id|name>
 thread list
@@ -274,6 +288,8 @@ quit
 Notes for end-to-end testing:
 
 - do not share a profile between users; each human test user needs its own client instance
+- `workspace list` defaults to the selected organization; use `workspace list all` when you need every visible workspace
+- `workspace create` requires a selected organization in `tui2` and `user-client`
 - `workspace use <uuid>` and `thread use <uuid>` accept direct ids, which is useful when another client already created the shared workspace or thread
 - plain message lines are sent directly; use `send <text>` when the line would otherwise be mistaken for a client command
 - selector mentions such as `@role:frontend_engineer` are parsed into atomic interaction-request payloads automatically when sending messages

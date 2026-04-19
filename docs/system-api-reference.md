@@ -29,7 +29,7 @@ This reference is written for two audiences:
 
 ## System At A Glance
 
-Open Talon is a local-first collaboration system where humans and agents are first-class participants inside shared workspaces.
+Open Talon is a local-first collaboration system where humans and agents are first-class participants inside shared organization-owned workspaces.
 
 The main runtime components are:
 
@@ -78,7 +78,8 @@ The most important ownership rules are:
 
 - `users` stores global human identity
 - `auth_identities` maps external identity providers to `users`
-- `system_agents` stores global agent definitions
+- `organizations` and `organization_memberships` store the tenant layer above workspaces
+- `system_agents` stores platform-global and organization-scoped agent definitions
 - `participants` stores workspace-local attachment and state for both humans and agents
 - `threads` and `timeline_messages` are the shared collaboration surface
 - `interaction_requests` and related tables implement tracked, resumable question workflows
@@ -96,6 +97,12 @@ Open Talon separates identity from workspace presence.
 - Humans are identified globally by `users.user_id`
 - External identity mappings live in `auth_identities`
 - Agents are identified globally by `system_agents.agent_id`
+
+### Organization Membership
+
+- Organizations are identified by `organizations.organization_id`
+- Human org membership and org roles live in `organization_memberships`
+- Keycloak remains the identity provider, but it is not the source of truth for org membership
 
 ### Workspace Presence
 
@@ -124,8 +131,11 @@ Current local development defaults are Keycloak/OIDC for humans and admin/API-ke
 
 - authenticated human identity is derived server-side from the bearer token
 - do not treat `participant_id` as a global human identifier
+- organization membership is resolved from Postgres, not bearer-token claims
+- non-member organization-scoped reads return `404`, not `403`
 - non-member workspace-scoped reads return `404`, not `403`
 - global system-definition and provider-management APIs are admin-only under OIDC
+- organization-scoped management flows require org `owner` or `admin`
 - workspace role/tool/publish flows require workspace `admin` or `supervisor`
 
 ### Auth And Session APIs
@@ -138,13 +148,14 @@ Current local development defaults are Keycloak/OIDC for humans and admin/API-ke
 
 ## Collaboration Domain Model
 
-The current collaboration model is workspace-first and thread-native.
+The current collaboration model uses the tenant hierarchy `platform > organization > workspace > thread`.
 
 ### Core Entities
 
 | Entity | Meaning |
 | --- | --- |
-| `workspace` | top-level collaboration boundary |
+| `organization` | tenant boundary above workspaces |
+| `workspace` | collaboration boundary inside an organization |
 | `participant` | workspace-local user or agent presence |
 | `thread` | shared collaboration stream inside a workspace |
 | `timeline_message` | ordered thread message |
@@ -179,6 +190,8 @@ The canonical model definitions live in `packages/contracts/open_talon_contracts
 
 Important contracts:
 
+- `Organization`
+- `OrganizationMembership`
 - `ParticipantInput`
 - `ParticipantProfile`
 - `RoleDefinition`
@@ -286,6 +299,7 @@ The current business collaboration flow uses thread-native shared messages, most
 
 Important behavior to rely on:
 
+- `404` for non-member organization-scoped reads
 - `404` for non-member workspace-scoped reads
 - `403` for membership-present but insufficient role
 - validation errors for malformed request payloads
@@ -324,12 +338,24 @@ The `chat` APIs are the older session/chat surface. New collaboration work shoul
 
 | Method | Path | Summary |
 | --- | --- | --- |
+| `GET` | `/v1/organizations` | list visible organizations |
+| `POST` | `/v1/organizations` | create organization |
+| `GET` | `/v1/organizations/{organization_id}` | organization detail |
+| `PATCH` | `/v1/organizations/{organization_id}` | update organization |
+| `GET` | `/v1/organizations/{organization_id}/members` | list org memberships |
+| `POST` | `/v1/organizations/{organization_id}/members` | add org member |
+| `DELETE` | `/v1/organizations/{organization_id}/members/{user_id}` | remove org member |
 | `POST` | `/v1/workspaces` | create workspace |
 | `GET` | `/v1/workspaces` | list visible workspaces |
+| `POST` | `/v1/organizations/{organization_id}/workspaces` | create workspace in organization |
+| `GET` | `/v1/organizations/{organization_id}/workspaces` | list organization workspaces |
+| `GET` | `/v1/organizations/{organization_id}/runtime/overview` | organization runtime overview |
 | `GET` | `/v1/workspaces/{workspace_id}` | workspace detail |
 | `PATCH` | `/v1/workspaces/{workspace_id}` | workspace metadata update |
 | `DELETE` | `/v1/workspaces/{workspace_id}` | delete workspace |
 | `GET` | `/v1/workspaces/{workspace_id}/participants` | list participant advertisements |
+| `GET` | `/v1/workspaces/{workspace_id}/catalog/agents` | list agents visible to workspace |
+| `GET` | `/v1/workspaces/{workspace_id}/catalog/tools` | list tools visible to workspace |
 | `DELETE` | `/v1/workspaces/{workspace_id}/participants/{participant_id}` | remove participant |
 | `PATCH` | `/v1/workspaces/{workspace_id}/participants/{participant_id}/role` | assume participant role |
 | `POST` | `/v1/workspaces/{workspace_id}/agents` | attach a system agent to a workspace |
@@ -346,24 +372,34 @@ Global system-definition APIs are operator/admin APIs.
 | `GET` | `/v1/llm-engines` | list registered LLM engines |
 | `POST` | `/v1/agents` | create system agent definition |
 | `GET` | `/v1/agents` | list system agent definitions |
+| `POST` | `/v1/organizations/{organization_id}/agents` | create org-scoped agent definition |
+| `GET` | `/v1/organizations/{organization_id}/agents` | list org-scoped agent definitions |
 | `PATCH` | `/v1/agents/{agent_id}` | update system agent definition |
 | `DELETE` | `/v1/agents/{agent_id}` | delete system agent definition |
 | `POST` | `/v1/tools` | create system tool |
 | `GET` | `/v1/tools` | list system tools |
+| `POST` | `/v1/organizations/{organization_id}/tools` | create org-scoped system tool |
+| `GET` | `/v1/organizations/{organization_id}/tools` | list org-scoped system tools |
 | `PATCH` | `/v1/tools/{tool_id}` | update system tool |
 | `DELETE` | `/v1/tools/{tool_id}` | delete system tool |
 | `POST` | `/v1/llm-providers` | create LLM provider definition |
+| `POST` | `/v1/organizations/{organization_id}/llm-providers` | create org-scoped LLM provider |
 | `POST` | `/v1/llm-providers/validate` | validate LLM provider without persisting |
 | `GET` | `/v1/llm-providers` | list LLM providers |
+| `GET` | `/v1/organizations/{organization_id}/llm-providers` | list org-scoped LLM providers |
 | `PATCH` | `/v1/llm-providers/{provider_id}` | update LLM provider |
 | `DELETE` | `/v1/llm-providers/{provider_id}` | delete LLM provider |
 | `POST` | `/v1/llm-providers/{provider_id}/health-check` | validate stored LLM provider |
 | `POST` | `/v1/memory-providers` | create memory provider definition |
+| `POST` | `/v1/organizations/{organization_id}/memory-providers` | create org-scoped memory provider |
 | `POST` | `/v1/memory-providers/validate` | validate memory provider without persisting |
 | `GET` | `/v1/memory-providers` | list memory providers |
+| `GET` | `/v1/organizations/{organization_id}/memory-providers` | list org-scoped memory providers |
 | `PATCH` | `/v1/memory-providers/{provider_id}` | update memory provider |
 | `DELETE` | `/v1/memory-providers/{provider_id}` | delete memory provider |
 | `POST` | `/v1/memory-providers/{provider_id}/health-check` | validate stored memory provider |
+
+In the current implementation, org-scoped create/list routes are explicit. Update and delete endpoints for providers, tools, and agents still live on the top-level admin surface.
 
 ### Git Repositories, Assets, And Tool Attachments
 
@@ -371,7 +407,11 @@ Global system-definition APIs are operator/admin APIs.
 | --- | --- | --- |
 | `POST` | `/v1/git-repositories` | register global Git repository |
 | `GET` | `/v1/git-repositories` | list global Git repositories |
+| `POST` | `/v1/organizations/{organization_id}/git-repositories` | register org Git repository |
+| `GET` | `/v1/organizations/{organization_id}/git-repositories` | list org Git repositories |
 | `POST` | `/v1/assets/publish-from-git` | publish global asset version |
+| `POST` | `/v1/organizations/{organization_id}/assets/publish-from-git` | publish org asset version |
+| `GET` | `/v1/organizations/{organization_id}/assets` | list org assets |
 | `GET` | `/v1/assets` | list assets |
 | `GET` | `/v1/assets/{asset_id}/versions` | list asset versions |
 | `POST` | `/v1/assets/{asset_id}/links` | link asset version to target |
@@ -435,9 +475,11 @@ Important request behavior:
 | Method | Path | Summary |
 | --- | --- | --- |
 | `GET` | `/v1/audit/events` | list audit events |
+| `GET` | `/v1/organizations/{organization_id}/audit/events` | list org audit events |
 | `GET` | `/v1/audit/events/{audit_event_id}` | fetch one audit event |
 | `GET` | `/v1/audit/chains/{chain_partition}/verify` | verify audit chain |
 | `POST` | `/v1/audit/events/export` | export audit events to object storage |
+| `POST` | `/v1/organizations/{organization_id}/audit/events/export` | export org audit events |
 
 ### Admin APIs
 
@@ -456,6 +498,7 @@ Important request behavior:
 curl -X POST http://127.0.0.1:8000/v1/workspaces \
   -H 'Content-Type: application/json' \
   -d '{
+    "organization_id": "11111111-1111-1111-1111-111111111111",
     "name": "Delivery Team",
     "actor": {
       "participant_id": "11111111-1111-1111-1111-111111111111",
@@ -582,6 +625,7 @@ Recommended rules:
 
 - use one client instance per user profile
 - prefer `./open-talon user-client --profile <name>` for scripted human-user simulation
+- select or auto-resolve the organization before creating workspaces in `tui2` or `user-client`
 - rely on server-derived actor identity for OIDC-authenticated humans
 - do not invent participant IDs as durable human identifiers
 - prefer tracked interaction requests when answers must be correlated back into an agent loop

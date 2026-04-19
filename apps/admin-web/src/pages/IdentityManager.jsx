@@ -15,8 +15,7 @@ export default function IdentityManager() {
         </div>
         <h2 className="text-xl font-bold text-slate-900 dark:text-white mb-4">Keycloak Integration Required</h2>
         <p className="text-slate-600 dark:text-slate-400 mb-6">
-          Open Talon strictly delegates broad global identity and role boundaries to the configured Keycloak OIDC provider.
-          To create users, reset passwords, or assign global <code>admin</code> or <code>supervisor</code> roles, please use the Keycloak Administration console.
+          Keycloak remains the source of truth for human identity and platform-wide roles. Open Talon now stores organization membership and organization roles in Postgres, so Keycloak is still where you create users, reset passwords, and assign platform-global <code>admin</code> access, while organization ownership and membership are managed inside Open Talon.
         </p>
         <a 
           href={runtimeConfig.keycloakBaseUrl}

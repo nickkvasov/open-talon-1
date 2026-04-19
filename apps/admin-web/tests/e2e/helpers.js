@@ -18,7 +18,13 @@ export async function signInIfNeeded(page) {
   await page.goto('/');
 
   const signInButton = page.getByRole('button', { name: /sign in with keycloak/i });
-  if (await signInButton.isVisible()) {
+  const runtimeOverviewHeading = page.getByRole('heading', { name: /runtime overview/i });
+  await Promise.race([
+    signInButton.waitFor({ state: 'visible', timeout: 5000 }).catch(() => null),
+    runtimeOverviewHeading.waitFor({ state: 'visible', timeout: 5000 }).catch(() => null),
+  ]);
+
+  if (await signInButton.isVisible().catch(() => false)) {
     await signInButton.click();
     await page.waitForURL(/realms\/open-talon/i);
     await page.locator('input[name="username"]').fill(username);
@@ -26,7 +32,7 @@ export async function signInIfNeeded(page) {
     await page.locator('button[type="submit"], input[type="submit"]').click();
   }
 
-  await expect(page.getByRole('heading', { name: /runtime overview/i })).toBeVisible();
+  await expect(runtimeOverviewHeading).toBeVisible();
 }
 
 export async function openAdminPage(page, linkName, headingName) {

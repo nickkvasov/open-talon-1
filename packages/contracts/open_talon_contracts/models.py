@@ -38,13 +38,15 @@ NetworkPolicy = Literal["none", "full"]
 WorkspaceAccessMode = Literal["none", "read_only", "read_write"]
 ExecutionInvocationKind = Literal["tool_call"]
 ExecutionStatus = Literal["queued", "running", "completed", "failed", "cancelled", "timed_out"]
-AssetScope = Literal["global", "workspace"]
+RegistryScope = Literal["global", "organization"]
+AssetScope = Literal["global", "organization", "workspace"]
 AssetStorageBackend = Literal["minio"]
 AssetTargetType = Literal["system_agent", "system_tool", "workspace", "workspace_tool"]
-AuditScopeType = Literal["global", "workspace", "thread"]
+AuditScopeType = Literal["global", "organization", "workspace", "thread"]
 AuditActorType = Literal["user", "agent", "system", "api_key", "unknown"]
 AuditOutcome = Literal["success", "failure", "denied", "error"]
 AuditPayloadMode = Literal["metadata_only"]
+OrganizationRole = Literal["owner", "admin", "member"]
 StopReason = Literal[
     "completed",
     "needs_user_input",
@@ -129,6 +131,8 @@ class AgentInteractionContract(BaseModel):
 
 class AgentDefinition(BaseModel):
     agent_id: UUID
+    scope: RegistryScope = "global"
+    organization_id: UUID | None = None
     display_name: str
     description: str
     role: str
@@ -147,10 +151,31 @@ class AgentDefinition(BaseModel):
 
 class Workspace(BaseModel):
     workspace_id: UUID
+    organization_id: UUID | None = None
     name: str
     description: str | None = None
     owner_user_id: UUID | None = None
     created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class Organization(BaseModel):
+    organization_id: UUID
+    slug: str
+    name: str
+    description: str | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OrganizationMembership(BaseModel):
+    organization_id: UUID
+    user_id: UUID
+    role: OrganizationRole = "member"
+    joined_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -253,6 +278,8 @@ class ToolExecutionBinding(BaseModel):
 
 class SystemToolDefinition(BaseModel):
     tool_id: UUID
+    scope: RegistryScope = "global"
+    organization_id: UUID | None = None
     name: str
     description: str
     parameter_contract: ToolParameterContract = Field(default_factory=ToolParameterContract)
@@ -267,6 +294,8 @@ class SystemToolDefinition(BaseModel):
 
 class LlmProviderDefinition(BaseModel):
     provider_id: UUID
+    scope: RegistryScope = "global"
+    organization_id: UUID | None = None
     engine_id: str
     display_name: str
     description: str
@@ -304,6 +333,8 @@ class LlmProviderHealthReport(BaseModel):
 
 class MemoryProviderDefinition(BaseModel):
     provider_id: UUID
+    scope: RegistryScope = "global"
+    organization_id: UUID | None = None
     provider_key: str
     display_name: str
     description: str
@@ -361,6 +392,7 @@ class WorkspaceTool(BaseModel):
 
 class GitRepository(BaseModel):
     repo_id: UUID
+    organization_id: UUID | None = None
     workspace_id: UUID | None = None
     scope: AssetScope = "global"
     name: str
@@ -376,6 +408,7 @@ class GitRepository(BaseModel):
 
 class WorkspaceAsset(BaseModel):
     asset_id: UUID
+    organization_id: UUID | None = None
     workspace_id: UUID | None = None
     scope: AssetScope = "global"
     asset_type: str
@@ -412,6 +445,7 @@ class AssetLink(BaseModel):
     link_id: UUID
     asset_id: UUID
     asset_version_id: UUID
+    organization_id: UUID | None = None
     workspace_id: UUID | None = None
     target_type: AssetTargetType
     target_id: UUID
@@ -425,6 +459,7 @@ class AssetLink(BaseModel):
 
 class ResolvedAssetBinding(BaseModel):
     purpose: str
+    organization_id: UUID | None = None
     workspace_id: UUID | None = None
     asset: WorkspaceAsset
     version: WorkspaceAssetVersion
@@ -813,6 +848,7 @@ class AuditEventDraft(BaseModel):
     occurred_at: datetime = Field(default_factory=utcnow)
     recorded_at: datetime = Field(default_factory=utcnow)
     scope_type: AuditScopeType = "global"
+    organization_id: UUID | None = None
     workspace_id: UUID | None = None
     thread_id: UUID | None = None
     actor_type: AuditActorType = "unknown"
@@ -866,6 +902,7 @@ class AuditChainVerificationResult(BaseModel):
 
 
 class AuditExportRequest(BaseModel):
+    organization_id: UUID | None = None
     workspace_id: UUID | None = None
     thread_id: UUID | None = None
     actor_user_id: UUID | None = None
@@ -908,8 +945,36 @@ class CommandEnvelope(BaseModel):
 class CreateWorkspaceRequest(BaseModel):
     name: str
     description: str | None = None
+    organization_id: UUID | None = None
     actor: ParticipantInput
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateOrganizationRequest(BaseModel):
+    actor: ParticipantInput
+    slug: str
+    name: str
+    description: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateOrganizationRequest(BaseModel):
+    actor: ParticipantInput
+    slug: str | None = None
+    name: str | None = None
+    description: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class AddOrganizationMemberRequest(BaseModel):
+    actor: ParticipantInput
+    user_id: UUID
+    role: OrganizationRole = "member"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RemoveOrganizationMemberRequest(BaseModel):
+    actor: ParticipantInput
 
 
 class DeleteWorkspaceRequest(BaseModel):

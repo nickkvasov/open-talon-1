@@ -12,7 +12,7 @@ Main components:
 - `services/core-collab`: canonical collaboration domain logic and Postgres repository layer
 - `services/agent-runtime`: stateless workers for task dispatch, agent-loop execution, tool execution, and lease reconciliation
 - `packages/contracts`: shared Pydantic contracts used across services
-- `apps/admin-web`: browser-based admin console for runtime overview, providers, swarm resources, workspaces, and API keys
+- `apps/admin-web`: browser-based admin console for organizations, runtime overview, providers, swarm resources, workspaces, and API keys
 - `apps/tui`: terminal UI client for workspace/thread collaboration
   - `open_talon_tui.tui2` is the preferred human terminal client when copy/select/link behavior matters
 - `infrastructure`: local Docker-based backing services
@@ -32,6 +32,8 @@ Primary local flow:
 - Do not reintroduce monolithic in-code DDL strings.
 - Postgres is the source of truth for execution state; Kafka is the wake-up and fanout bus.
 - Do not move agent loop execution back into `gateway-edge`.
+- The tenant hierarchy is `platform > organization > workspace`.
+- Organization membership and org roles live in Postgres, not in Keycloak claims.
 - `participants` is a workspace-scoped attachment/state table.
 - Human identity lives in `users`.
 - External identity mappings live in `auth_identities`.
@@ -42,15 +44,21 @@ Primary local flow:
 - Keep workspace-local state on `participants`: status, visibility scope, roles, capabilities, timestamps, and metadata.
 - Keep execution-side workspace materialization separate from collaboration `Workspace` models. Use `ExecutionWorkspaceRef` for executor payloads.
 - Authenticated human identity should be derived in `gateway-edge` from OIDC auth context, not trusted from client-provided actor fields.
+- Require organization membership before resolving workspace actors for authenticated humans.
 - Keep OIDC workspace reads membership-scoped. Non-members should get `404` for workspace-scoped reads rather than `403`.
+- Keep OIDC organization reads membership-scoped. Non-members should get `404` for organization-scoped reads rather than `403`.
 - Global system-definition, global publish, and provider-management routes are admin-only for OIDC users unless the request is coming through an existing operator/system-auth path.
+- Organization CRUD and organization-scoped management routes require org `owner` or `admin`, unless the caller is a platform admin.
 - Workspace role-definition changes, workspace tool management, workspace Git repository creation, and workspace asset publishing require workspace `admin` or `supervisor`.
+- Organization-scoped agents, tools, providers, repositories, and assets must stay inside the same organization as the consuming workspace.
 - Treat `collab_event_log` and `audit_event_ledger` as separate concerns: collaboration fanout vs. compliance/investigation.
 - `audit_event_ledger` is append-only in steady-state code; do not add update/delete flows for audit rows.
 - Audit integrity depends on `chain_partition`, `chain_sequence`, `prev_hash`, and `event_hash`; preserve chain semantics when changing audit writes.
+- Organization audit chains use `organization:<id>` partitions; workspace chains stay `workspace:<id>` and platform/global chains stay `global`.
 - Audit v1 is metadata-only. Do not store raw bearer tokens, prompt bodies, tool arguments, or message bodies inline in audit metadata.
 - LLM providers are persistent records in `llm_providers`; do not reintroduce env-defined engine registries.
 - Memory providers are persistent records in `memory_providers`; do not hardcode provider definitions in application logic after bootstrapping.
+- `system_agents`, `system_tools`, `llm_providers`, and `memory_providers` support `global` and `organization` scope; `git_repositories`, `workspace_assets`, and `asset_links` support `global`, `organization`, and `workspace` scope.
 - Local OpenBao now uses persistent file storage under `infrastructure/data/openbao`; do not assume `docker compose down` clears local secrets.
 - Postgres is the canonical memory store. Mem0 and optional graph backends such as Memgraph are derived retrieval projections, not the source of truth.
 - Risky tool execution profiles require `trust_level="trusted"`: `workspace_access=read_write`, `network=full`, and `local_process`.
@@ -147,6 +155,7 @@ pytest -q
 pytest tests/gateway-edge -q
 pytest tests/core-collab -q
 pytest tests/tui -q
+pytest tests/business-cases -q
 pytest -m integration tests/infrastructure/test_infrastructure.py -v -s
 ```
 
@@ -181,7 +190,9 @@ If a change touches workspace authz, global admin routes, or workspace membershi
 
 - run relevant `tests/gateway-edge/test_workspaces.py`
 - run relevant `tests/gateway-edge/test_admin.py`
+- run relevant organization route and org-membership tests when tenant boundaries changed
 - make sure non-member workspace reads still return `404`
+- make sure non-member organization reads still return `404`
 - make sure global OIDC reads/writes still require `admin`
 
 If a change touches audit logging, audit APIs, event relays, or runtime failure reporting:
@@ -190,6 +201,7 @@ If a change touches audit logging, audit APIs, event relays, or runtime failure 
 - verify Postgres remains the canonical audit store even if Kafka or ClickHouse is unavailable
 - keep relay/projector failures non-blocking for canonical audit writes
 - run at least one gateway audit test and one repository chain-verification test
+- verify `organization:<id>` and `workspace:<id>` chains both still verify when tenant-aware audit behavior changes
 - keep MinIO export/checkpoint behavior aligned with docs and env defaults
 
 If a change touches execution lease recovery, budget enforcement, or runtime overview behavior:
@@ -226,6 +238,7 @@ If a change touches execution lease recovery, budget enforcement, or runtime ove
   - command handling
   - suggestion/help text
   - tests when behavior is nontrivial
+- Keep `tui2` and `user-client` organization-selection flows aligned with the org-aware workspace APIs.
 - The TUI is profile-based, not single-user-per-device.
 - Do not reintroduce a single global local participant identity file for human users.
 - Human TUI sessions should authenticate with bearer tokens and rely on server-derived participant identity.

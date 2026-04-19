@@ -32,7 +32,7 @@ async def setup_postgres() -> None:
                 max_size=settings.postgres_max_pool,
             )
             break
-        except OSError as exc:
+        except (OSError, asyncpg.CannotConnectNowError) as exc:
             if time.monotonic() >= deadline:
                 logger.error("Postgres failed to start after %s attempts", attempt)
                 raise

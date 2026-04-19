@@ -213,6 +213,7 @@ class ClientState:
     user_id: str | None
     display_name: str
     participant_type: str
+    organization_id: str | None = None
     workspace_id: str | None = None
     thread_id: str | None = None
     last_sequence: int = 0
@@ -353,6 +354,7 @@ def load_state(profile: str, display_name: str, participant_type: str) -> Client
             user_id=data.get("user_id"),
             display_name=data.get("display_name", display_name),
             participant_type=data.get("participant_type", participant_type),
+            organization_id=data.get("organization_id"),
             workspace_id=data.get("workspace_id"),
             thread_id=data.get("thread_id"),
             last_sequence=data.get("last_sequence", 0),
@@ -384,6 +386,7 @@ def reset_profile_session_state(
         user_id=None,
         display_name=display_name,
         participant_type=participant_type,
+        organization_id=None,
         workspace_id=None,
         thread_id=None,
         last_sequence=0,

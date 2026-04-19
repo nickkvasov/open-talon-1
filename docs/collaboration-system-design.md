@@ -61,8 +61,10 @@ The collaboration design should therefore move from `request -> response` to `sh
 
 ### Primary entities
 
+- `Organization`
+  - tenant boundary above workspaces
 - `Workspace`
-  - top-level collaboration boundary
+  - collaboration boundary inside an organization
 - `Thread`
   - a shared room for users and agents
 - `Participant`
@@ -811,7 +813,7 @@ This lets the current UI continue working while the underlying collaboration mod
 If we want the fastest path that will still scale into true collaboration:
 
 - implement a new collaboration kernel service
-- make `workspace_id` the top-level collaboration boundary
+- keep `organization_id` as the tenant boundary and `workspace_id` as the collaboration boundary
 - make `thread_id` the ordering key
 - add versioned workspace whiteboard memory as a first-class projection
 - use one canonical event envelope for both humans and agents

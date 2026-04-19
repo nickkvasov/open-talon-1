@@ -18,6 +18,8 @@ import { buildAdminActor } from '../config/adminActor';
 
 export default function Workspaces() {
   const api = useApi();
+  const [organizations, setOrganizations] = useState([]);
+  const [selectedOrganizationId, setSelectedOrganizationId] = useState('');
   const [workspaces, setWorkspaces] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -46,7 +48,9 @@ export default function Workspaces() {
   const fetchWorkspaces = async () => {
     try {
       setLoading(true);
-      const res = await api.get('/v1/workspaces');
+      const res = await api.get('/v1/workspaces', {
+        params: selectedOrganizationId ? { organization_id: selectedOrganizationId } : {},
+      });
       setWorkspaces(res.data);
       setError(null);
     } catch (err) {
@@ -57,8 +61,23 @@ export default function Workspaces() {
   };
 
   useEffect(() => {
+    const load = async () => {
+      try {
+        const res = await api.get('/v1/organizations');
+        setOrganizations(res.data);
+        if (!selectedOrganizationId && res.data.length === 1) {
+          setSelectedOrganizationId(res.data[0].organization_id);
+        }
+      } catch (err) {
+        setError(err.message || 'Failed to fetch organizations');
+      }
+    };
+    load();
+  }, [api, selectedOrganizationId]);
+
+  useEffect(() => {
     fetchWorkspaces();
-  }, [api]);
+  }, [api, selectedOrganizationId]);
 
   const resetForm = () => {
     setWorkspaceFormData({
@@ -116,12 +135,16 @@ export default function Workspaces() {
     try {
       const payload = {
         actor: buildAdminActor(),
+        organization_id: selectedOrganizationId || null,
         name: workspaceFormData.name,
         description: workspaceFormData.description,
         metadata: JSON.parse(workspaceFormData.metadata || '{}')
       };
 
       if (modalMode === 'create') {
+        if (!payload.organization_id) {
+          throw new Error('Select an organization before creating a workspace');
+        }
         await api.post('/v1/workspaces', payload);
       } else {
         await api.patch(`/v1/workspaces/${selectedWorkspace.workspace_id}`, payload);
@@ -190,13 +213,27 @@ export default function Workspaces() {
           </h1>
           <p className="text-slate-500 mt-1">Orchestrate collaboration boundaries and role policies</p>
         </div>
-        <button 
-          onClick={handleOpenCreate}
-          className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center transition-all shadow-lg shadow-blue-500/20 font-medium"
-        >
-          <Plus className="w-5 h-5 mr-2" />
-          Create Workspace
-        </button>
+        <div className="flex items-center gap-3">
+          <select
+            value={selectedOrganizationId}
+            onChange={(e) => setSelectedOrganizationId(e.target.value)}
+            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm"
+          >
+            <option value="">All Organizations</option>
+            {organizations.map((organization) => (
+              <option key={organization.organization_id} value={organization.organization_id}>
+                {organization.name}
+              </option>
+            ))}
+          </select>
+          <button 
+            onClick={handleOpenCreate}
+            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center transition-all shadow-lg shadow-blue-500/20 font-medium"
+          >
+            <Plus className="w-5 h-5 mr-2" />
+            Create Workspace
+          </button>
+        </div>
       </div>
       
       {error && (

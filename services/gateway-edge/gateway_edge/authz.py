@@ -6,7 +6,7 @@ from gateway_edge.config import settings
 from gateway_edge.models import AuthContext
 
 
-def has_admin_access(request: Request) -> bool:
+def has_platform_admin_access(request: Request) -> bool:
     if settings.auth_mode == "none":
         return True
     auth_context = getattr(request.state, "auth_context", None)
@@ -18,7 +18,15 @@ def has_admin_access(request: Request) -> bool:
     return False
 
 
-def require_admin_access(request: Request) -> None:
-    if has_admin_access(request):
+def require_platform_admin_access(request: Request) -> None:
+    if has_platform_admin_access(request):
         return
     raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def has_admin_access(request: Request) -> bool:
+    return has_platform_admin_access(request)
+
+
+def require_admin_access(request: Request) -> None:
+    require_platform_admin_access(request)

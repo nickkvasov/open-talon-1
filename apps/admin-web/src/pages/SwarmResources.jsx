@@ -20,8 +20,11 @@ export default function SwarmResources() {
   const api = useApi();
   const [agents, setAgents] = useState([]);
   const [tools, setTools] = useState([]);
+  const [organizations, setOrganizations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [scopeMode, setScopeMode] = useState('global');
+  const [selectedOrganizationId, setSelectedOrganizationId] = useState('');
 
   // Modal states
   const [isAgentModalOpen, setIsAgentModalOpen] = useState(false);
@@ -49,12 +52,38 @@ export default function SwarmResources() {
     onConfirm: () => {} 
   });
 
+  const fetchOrganizations = async () => {
+    try {
+      const res = await api.get('/v1/organizations');
+      setOrganizations(res.data);
+      if (!selectedOrganizationId && res.data.length === 1) {
+        setSelectedOrganizationId(res.data[0].organization_id);
+      }
+    } catch (err) {
+      setError(err.message || 'Failed to fetch organizations');
+    }
+  };
+
   const fetchResources = async () => {
     try {
       setLoading(true);
+      if (scopeMode === 'organization' && !selectedOrganizationId) {
+        setAgents([]);
+        setTools([]);
+        setError(null);
+        return;
+      }
+      const agentsEndpoint =
+        scopeMode === 'organization'
+          ? `/v1/organizations/${selectedOrganizationId}/agents`
+          : '/v1/agents';
+      const toolsEndpoint =
+        scopeMode === 'organization'
+          ? `/v1/organizations/${selectedOrganizationId}/tools`
+          : '/v1/tools';
       const [agentsRes, toolsRes] = await Promise.all([
-        api.get('/v1/agents'),
-        api.get('/v1/tools')
+        api.get(agentsEndpoint),
+        api.get(toolsEndpoint)
       ]);
       setAgents(agentsRes.data);
       setTools(toolsRes.data);
@@ -67,8 +96,18 @@ export default function SwarmResources() {
   };
 
   useEffect(() => {
-    fetchResources();
+    void fetchOrganizations();
   }, [api]);
+
+  useEffect(() => {
+    if (scopeMode === 'organization' && !selectedOrganizationId && organizations.length === 1) {
+      setSelectedOrganizationId(organizations[0].organization_id);
+    }
+  }, [organizations, scopeMode, selectedOrganizationId]);
+
+  useEffect(() => {
+    void fetchResources();
+  }, [api, scopeMode, selectedOrganizationId]);
 
   const resetAgentForm = () => {
     setAgentData({
@@ -179,7 +218,15 @@ export default function SwarmResources() {
       };
 
       if (agentModalMode === 'create') {
-        await api.post('/v1/agents', payload);
+        if (scopeMode === 'organization' && !selectedOrganizationId) {
+          throw new Error('Select an organization before creating an org-scoped agent.');
+        }
+        await api.post(
+          scopeMode === 'organization'
+            ? `/v1/organizations/${selectedOrganizationId}/agents`
+            : '/v1/agents',
+          payload
+        );
       } else {
         await api.patch(`/v1/agents/${editingAgent.agent_id}`, payload);
       }
@@ -204,7 +251,15 @@ export default function SwarmResources() {
       };
 
       if (toolModalMode === 'create') {
-        await api.post('/v1/tools', payload);
+        if (scopeMode === 'organization' && !selectedOrganizationId) {
+          throw new Error('Select an organization before creating an org-scoped tool.');
+        }
+        await api.post(
+          scopeMode === 'organization'
+            ? `/v1/organizations/${selectedOrganizationId}/tools`
+            : '/v1/tools',
+          payload
+        );
       } else {
         await api.patch(`/v1/tools/${editingTool.tool_id}`, payload);
       }
@@ -227,8 +282,39 @@ export default function SwarmResources() {
             <Bot className="w-6 h-6 mr-3 text-blue-500" />
             Swarm Resources
           </h1>
-          <p className="text-slate-500 mt-1">Manage system-wide agent and tool definitions</p>
+          <p className="text-slate-500 mt-1">
+            Manage {scopeMode === 'organization' ? 'organization-scoped' : 'platform-global'} agent and tool definitions
+          </p>
         </div>
+        <div className="flex items-center gap-3">
+          <div className="flex space-x-1 bg-slate-100 dark:bg-slate-800/50 p-1 rounded-xl border border-slate-200 dark:border-slate-700">
+            <button
+              onClick={() => setScopeMode('global')}
+              className={`px-3 py-2 rounded-lg text-sm font-medium transition-all ${scopeMode === 'global' ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}
+            >
+              Platform Global
+            </button>
+            <button
+              onClick={() => setScopeMode('organization')}
+              className={`px-3 py-2 rounded-lg text-sm font-medium transition-all ${scopeMode === 'organization' ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}
+            >
+              Organization
+            </button>
+          </div>
+          {scopeMode === 'organization' && (
+            <select
+              value={selectedOrganizationId}
+              onChange={(e) => setSelectedOrganizationId(e.target.value)}
+              className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm"
+            >
+              <option value="">Select organization</option>
+              {organizations.map((organization) => (
+                <option key={organization.organization_id} value={organization.organization_id}>
+                  {organization.name}
+                </option>
+              ))}
+            </select>
+          )}
         <div className="flex gap-4">
           <button 
             onClick={() => { resetAgentForm(); setIsAgentModalOpen(true); }}
@@ -244,6 +330,7 @@ export default function SwarmResources() {
             <Plus className="w-5 h-5 mr-2" />
             Add Tool
           </button>
+        </div>
         </div>
       </div>
       
@@ -275,6 +362,9 @@ export default function SwarmResources() {
                       <span className="font-bold text-slate-900 dark:text-white text-lg">{agent.display_name}</span>
                       <span className="text-[10px] bg-blue-50 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400 px-2 py-0.5 rounded-full font-mono border border-blue-100 dark:border-blue-800 uppercase tracking-tight">
                         {agent.endpoint.kind}
+                      </span>
+                      <span className="text-[10px] bg-slate-100 dark:bg-slate-700 text-slate-500 px-2 py-0.5 rounded-full uppercase tracking-tight">
+                        {agent.scope || 'global'}
                       </span>
                     </div>
                     <p className="text-sm text-slate-500 dark:text-slate-400 line-clamp-1">{agent.description}</p>
@@ -329,6 +419,9 @@ export default function SwarmResources() {
                       <span className="font-bold text-slate-900 dark:text-white text-lg">{tool.name}</span>
                       <span className="text-[10px] bg-emerald-50 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400 px-2 py-0.5 rounded-full font-mono border border-emerald-100 dark:border-emerald-800 uppercase tracking-tight">
                         {tool.execution.strategy}
+                      </span>
+                      <span className="text-[10px] bg-slate-100 dark:bg-slate-700 text-slate-500 px-2 py-0.5 rounded-full uppercase tracking-tight">
+                        {tool.scope || 'global'}
                       </span>
                     </div>
                     <p className="text-sm text-slate-500 dark:text-slate-400 line-clamp-1">{tool.description}</p>

@@ -119,7 +119,9 @@ class AuditService:
             return
         status_code = 500 if error is not None else getattr(response, "status_code", 200)
         auth_context = getattr(request.state, "auth_context", None)
-        workspace_id, thread_id, scope_type = await self._resolve_scope(request.path_params)
+        organization_id, workspace_id, thread_id, scope_type = await self._resolve_scope(
+            request.path_params
+        )
         action_category, action_name, outcome = self._http_action_details(status_code=status_code, error=error)
         route = request.scope.get("route")
         route_template = getattr(route, "path", request.url.path)
@@ -127,6 +129,7 @@ class AuditService:
             occurred_at=started_at,
             recorded_at=datetime.now(UTC),
             scope_type=scope_type,
+            organization_id=organization_id,
             workspace_id=workspace_id,
             thread_id=thread_id,
             actor_type=self._actor_type_from_auth(auth_context),
@@ -150,7 +153,10 @@ class AuditService:
                 "client_host": request.client.host if request.client else None,
                 "user_agent": request.headers.get("user-agent"),
             },
-            chain_partition=self._chain_partition(workspace_id),
+            chain_partition=self._chain_partition(
+                organization_id=organization_id,
+                workspace_id=workspace_id,
+            ),
         )
         await self._record_audit_draft(draft)
 
@@ -169,10 +175,18 @@ class AuditService:
         metadata: dict[str, object] | None = None,
         error_message: str | None = None,
     ) -> None:
+        organization_id = None
+        if workspace_id is not None:
+            try:
+                workspace = await self._require_kernel().get_workspace_detail(workspace_id)
+                organization_id = workspace.workspace.organization_id
+            except Exception:
+                organization_id = None
         draft = AuditEventDraft(
             occurred_at=datetime.now(UTC),
             recorded_at=datetime.now(UTC),
             scope_type="thread",
+            organization_id=organization_id,
             workspace_id=workspace_id,
             thread_id=thread_id,
             actor_type=actor_type,
@@ -187,12 +201,16 @@ class AuditService:
             request_id=request_id,
             error_message_redacted=self._redact_error(error_message) if error_message else None,
             metadata=metadata or {},
-            chain_partition=self._chain_partition(workspace_id),
+            chain_partition=self._chain_partition(
+                organization_id=organization_id,
+                workspace_id=workspace_id,
+            ),
         )
         await self._record_audit_draft(draft)
 
     async def list_audit_events(self, payload: AuditExportRequest) -> AuditEventPage:
         return await self._require_kernel().list_audit_events(
+            organization_id=payload.organization_id,
             workspace_id=payload.workspace_id,
             thread_id=payload.thread_id,
             actor_user_id=payload.actor_user_id,
@@ -258,22 +276,43 @@ class AuditService:
     async def _resolve_scope(
         self,
         path_params: dict[str, object],
-    ) -> tuple[UUID | None, UUID | None, str]:
+    ) -> tuple[UUID | None, UUID | None, UUID | None, str]:
+        organization_id = path_params.get("organization_id")
         workspace_id = path_params.get("workspace_id")
         thread_id = path_params.get("thread_id")
         if isinstance(thread_id, UUID):
             try:
                 thread = await self._require_kernel().get_thread_detail(thread_id)
-                return thread.thread.workspace_id, thread_id, "thread"
+                workspace = await self._require_kernel().get_workspace_detail(
+                    thread.thread.workspace_id
+                )
+                return (
+                    workspace.workspace.organization_id,
+                    thread.thread.workspace_id,
+                    thread_id,
+                    "thread",
+                )
             except Exception:
                 return (
+                    organization_id if isinstance(organization_id, UUID) else None,
                     workspace_id if isinstance(workspace_id, UUID) else None,
                     thread_id,
                     "thread",
                 )
         if isinstance(workspace_id, UUID):
-            return workspace_id, None, "workspace"
-        return None, None, "global"
+            try:
+                workspace = await self._require_kernel().get_workspace_detail(workspace_id)
+                return workspace.workspace.organization_id, workspace_id, None, "workspace"
+            except Exception:
+                return (
+                    organization_id if isinstance(organization_id, UUID) else None,
+                    workspace_id,
+                    None,
+                    "workspace",
+                )
+        if isinstance(organization_id, UUID):
+            return organization_id, None, None, "organization"
+        return None, None, None, "global"
 
     async def _relay_loop(self) -> None:
         try:
@@ -460,6 +499,7 @@ class AuditService:
                 "chain_heads": heads,
             },
             sort_keys=True,
+            default=self._json_default,
         ).encode("utf-8")
         object_key = f"{settings.audit_checkpoint_bucket_prefix}/{day_key}.json"
         try:
@@ -480,6 +520,7 @@ class AuditService:
             occurred_at DateTime64(3, 'UTC'),
             recorded_at DateTime64(3, 'UTC'),
             scope_type String,
+            organization_id Nullable(UUID),
             workspace_id Nullable(UUID),
             thread_id Nullable(UUID),
             actor_type String,
@@ -513,7 +554,7 @@ class AuditService:
         ENGINE = ReplacingMergeTree(recorded_at)
         PARTITION BY toYYYYMM(recorded_at)
         ORDER BY (recorded_at, chain_partition, chain_sequence, audit_event_id)
-        TTL recorded_at + toIntervalDay({ttl_days})
+        TTL toDateTime(recorded_at) + toIntervalDay({ttl_days})
         """
         await self._clickhouse_query(statement)
 
@@ -608,7 +649,15 @@ class AuditService:
         return None
 
     @staticmethod
-    def _chain_partition(workspace_id: UUID | None) -> str:
+    def _chain_partition(
+        *,
+        organization_id: UUID | None,
+        workspace_id: UUID | None,
+    ) -> str:
+        if workspace_id is not None:
+            return f"workspace:{workspace_id}"
+        if organization_id is not None:
+            return f"organization:{organization_id}"
         if workspace_id is None:
             return "global"
         return f"workspace:{workspace_id}"
@@ -625,6 +674,16 @@ class AuditService:
             f"{settings.audit_retention_prefix}/"
             f"{datetime.now(UTC).strftime('%Y/%m/%d')}/"
             f"{safe_partition}-{first_offset}-{last_offset}.jsonl"
+        )
+
+    @staticmethod
+    def _json_default(value: object) -> str:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, UUID):
+            return str(value)
+        raise TypeError(
+            f"Object of type {value.__class__.__name__} is not JSON serializable"
         )
 
     @staticmethod

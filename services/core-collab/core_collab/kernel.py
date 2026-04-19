@@ -47,6 +47,7 @@ from .contracts import (
     CreateInteractionRequestsRequest,
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
+    CreateOrganizationRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
     ConfirmWorkspaceMemoryRequest,
@@ -59,6 +60,9 @@ from .contracts import (
     DeleteLlmProviderRequest,
     DeleteMemoryProviderRequest,
     DeleteParticipantRequest,
+    DeleteRoleDefinitionRequest,
+    DeleteSystemAgentRequest,
+    DeleteSystemToolRequest,
     DeleteWorkspaceToolRequest,
     DeleteWorkspaceRequest,
     ExecutionWorkspaceRef,
@@ -76,6 +80,8 @@ from .contracts import (
     MemorySearchHit,
     MemorySearchResponse,
     LlmProviderDefinition,
+    Organization,
+    OrganizationMembership,
     ParticipantSelector,
     ParticipantInput,
     ParticipantProfile,
@@ -103,12 +109,16 @@ from .contracts import (
     LinkAssetRequest,
     UpdateLlmProviderRequest,
     UpdateMemoryProviderRequest,
+    UpdateOrganizationRequest,
     UpsertRoleDefinitionRequest,
+    RemoveOrganizationMemberRequest,
     UpdateSystemToolRequest,
     build_default_interaction_contract,
     interaction_contract_is_empty,
+    AddOrganizationMemberRequest,
     UpdateAgentParticipantRequest,
     UpdateMemoryEntryRequest,
+    UpdateWorkspaceRequest,
     UpdateWorkspaceToolRequest,
     Workspace,
     WorkspaceAsset,
@@ -128,6 +138,8 @@ from .results import (
     MemoryCommandResult,
     MemoryProviderCommandResult,
     MessageCommandResult,
+    OrganizationCommandResult,
+    OrganizationMembershipCommandResult,
     ParticipantCommandResult,
     RoleDefinitionCommandResult,
     RunCommandResult,
@@ -151,6 +163,7 @@ _DEFAULT_WORKSPACE_ROLE_DEFINITIONS = {
 }
 
 _WORKSPACE_MANAGER_ROLES = {"admin", "supervisor"}
+_ORGANIZATION_ADMIN_ROLES = {"owner", "admin"}
 _MAX_RUN_STEP_ATTEMPTS = 3
 _MAX_TOOL_CALL_ATTEMPTS = 3
 _RETRY_BACKOFF_SECONDS = (30, 120, 600)
@@ -215,21 +228,213 @@ class CollaborationKernel:
         await self._repository.setup_schema()
         await self._backfill_system_agent_interaction_contracts()
 
+    async def create_organization(
+        self,
+        payload: CreateOrganizationRequest,
+    ) -> OrganizationCommandResult:
+        now = self._now()
+        created_by = self._actor_user_id(payload.actor) or payload.actor.participant_id
+        organization = Organization(
+            organization_id=uuid4(),
+            slug=payload.slug,
+            name=payload.name,
+            description=payload.description,
+            created_by=created_by,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        actor_user_id = self._actor_user_id(payload.actor)
+        membership = (
+            OrganizationMembership(
+                organization_id=organization.organization_id,
+                user_id=actor_user_id,
+                role="owner",
+                joined_at=now,
+                updated_at=now,
+                metadata={"created_by": str(created_by)},
+            )
+            if actor_user_id is not None
+            else None
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                if actor_user_id is not None:
+                    await self._repository.upsert_user(
+                        conn,
+                        UserRecord(
+                            user_id=actor_user_id,
+                            display_name=payload.actor.display_name,
+                            created_at=now,
+                            updated_at=now,
+                            metadata={},
+                        ),
+                    )
+                await self._repository.upsert_organization(conn, organization)
+                if membership is not None:
+                    await self._repository.upsert_organization_membership(conn, membership)
+        return OrganizationCommandResult(organization=organization)
+
+    async def list_organizations(
+        self,
+        *,
+        user_id: UUID | None = None,
+    ) -> list[Organization]:
+        if user_id is not None:
+            return await self._repository.list_organizations_for_user(user_id)
+        return await self._repository.list_organizations()
+
+    async def get_organization(self, organization_id: UUID) -> Organization | None:
+        return await self._repository.fetch_organization(organization_id)
+
+    async def update_organization(
+        self,
+        organization_id: UUID,
+        payload: UpdateOrganizationRequest,
+        *,
+        allow_platform_admin: bool = False,
+    ) -> OrganizationCommandResult:
+        organization = await self._repository.fetch_organization(organization_id)
+        if organization is None:
+            raise KeyError(f"Organization {organization_id} not found")
+        actor_user_id = self._actor_user_id(payload.actor)
+        if actor_user_id is not None and not allow_platform_admin:
+            await self._require_organization_admin(organization_id, actor_user_id)
+        updated = organization.model_copy(
+            update={
+                "slug": payload.slug or organization.slug,
+                "name": payload.name or organization.name,
+                "description": (
+                    payload.description
+                    if payload.description is not None
+                    else organization.description
+                ),
+                "updated_at": self._now(),
+                "metadata": (
+                    {**organization.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else organization.metadata
+                ),
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_organization(conn, updated)
+        return OrganizationCommandResult(organization=updated)
+
+    async def list_organization_memberships(
+        self,
+        organization_id: UUID,
+    ) -> list[OrganizationMembership]:
+        if await self._repository.fetch_organization(organization_id) is None:
+            raise KeyError(f"Organization {organization_id} not found")
+        return await self._repository.list_organization_memberships(organization_id)
+
+    async def add_organization_member(
+        self,
+        organization_id: UUID,
+        payload: AddOrganizationMemberRequest,
+        *,
+        allow_platform_admin: bool = False,
+    ) -> OrganizationMembershipCommandResult:
+        if await self._repository.fetch_organization(organization_id) is None:
+            raise KeyError(f"Organization {organization_id} not found")
+        actor_user_id = self._actor_user_id(payload.actor)
+        if actor_user_id is not None and not allow_platform_admin:
+            await self._require_organization_admin(organization_id, actor_user_id)
+        user = await self._repository.fetch_user(payload.user_id)
+        if user is None:
+            raise KeyError(f"User {payload.user_id} not found")
+        now = self._now()
+        membership = OrganizationMembership(
+            organization_id=organization_id,
+            user_id=payload.user_id,
+            role=payload.role,
+            joined_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_organization_membership(conn, membership)
+        return OrganizationMembershipCommandResult(membership=membership)
+
+    async def remove_organization_member(
+        self,
+        organization_id: UUID,
+        user_id: UUID,
+        payload: RemoveOrganizationMemberRequest,
+        *,
+        allow_platform_admin: bool = False,
+    ) -> dict[str, bool | str]:
+        if await self._repository.fetch_organization(organization_id) is None:
+            raise KeyError(f"Organization {organization_id} not found")
+        actor_user_id = self._actor_user_id(payload.actor)
+        if actor_user_id is not None and not allow_platform_admin:
+            await self._require_organization_admin(organization_id, actor_user_id)
+        membership = await self._repository.fetch_organization_membership(
+            organization_id,
+            user_id,
+        )
+        if membership is None:
+            raise KeyError(
+                f"User {user_id} is not a member of organization {organization_id}"
+            )
+        if membership.role == "owner":
+            memberships = await self._repository.list_organization_memberships(organization_id)
+            if not any(
+                item.user_id != user_id and item.role == "owner"
+                for item in memberships
+            ):
+                raise ValueError("Cannot remove the last organization owner")
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                deleted = await self._repository.delete_organization_membership(
+                    conn,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                )
+                if not deleted:
+                    raise KeyError(
+                        f"User {user_id} is not a member of organization {organization_id}"
+                    )
+                await self._repository.remove_user_participants_for_organization(
+                    conn,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                )
+        return {
+            "deleted": True,
+            "organization_id": str(organization_id),
+            "user_id": str(user_id),
+        }
+
     async def create_workspace(
-        self, payload: CreateWorkspaceRequest
+        self,
+        payload: CreateWorkspaceRequest,
+        *,
+        allow_platform_admin: bool = False,
     ) -> WorkspaceCommandResult:
         logger.debug(
             "Kernel create_workspace participant_id=%s name=%r",
             payload.actor.participant_id,
             payload.name,
         )
+        actor_user_id = self._actor_user_id(payload.actor)
+        organization = await self._resolve_workspace_organization(
+            requested_organization_id=payload.organization_id,
+            actor=payload.actor,
+        )
+        if actor_user_id is not None and not allow_platform_admin:
+            await self._require_organization_admin(organization.organization_id, actor_user_id)
         workspace_id = uuid4()
         now = self._now()
         workspace = Workspace(
             workspace_id=workspace_id,
+            organization_id=organization.organization_id,
             name=payload.name,
             description=payload.description,
-            owner_user_id=payload.actor.user_id,
+            owner_user_id=actor_user_id,
             created_at=now,
             updated_at=now,
             metadata=self._workspace_metadata_for_create(
@@ -296,10 +501,24 @@ class CollaborationKernel:
         )
         return WorkspaceCommandResult(workspace=workspace, detail=detail, events=events)
 
-    async def list_workspaces(self, *, user_id: UUID | None = None) -> list[Workspace]:
+    async def list_workspaces(
+        self,
+        *,
+        user_id: UUID | None = None,
+        organization_id: UUID | None = None,
+    ) -> list[Workspace]:
         if user_id is not None:
-            return await self._repository.list_workspaces_for_user(user_id)
-        return await self._repository.list_workspaces()
+            try:
+                return await self._repository.list_workspaces_for_user(
+                    user_id,
+                    organization_id=organization_id,
+                )
+            except TypeError:
+                return await self._repository.list_workspaces_for_user(user_id)
+        try:
+            return await self._repository.list_workspaces(organization_id=organization_id)
+        except TypeError:
+            return await self._repository.list_workspaces()
 
     async def delete_workspace(self, workspace_id: UUID, payload: DeleteWorkspaceRequest) -> dict[str, bool | str]:
         logger.debug(
@@ -443,8 +662,13 @@ class CollaborationKernel:
         }
 
     async def create_system_agent(
-        self, payload: CreateSystemAgentRequest
+        self,
+        payload: CreateSystemAgentRequest,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
     ) -> AgentDefinitionCommandResult:
+        self._validate_registry_scope(scope=scope, organization_id=organization_id)
         now = self._now()
         interaction_contract = (
             build_default_interaction_contract(
@@ -458,6 +682,8 @@ class CollaborationKernel:
         )
         agent = AgentDefinition(
             agent_id=uuid4(),
+            scope=scope,
+            organization_id=organization_id,
             display_name=payload.display_name,
             description=payload.description,
             role=payload.role,
@@ -488,12 +714,45 @@ class CollaborationKernel:
             raise KeyError(f"System agent {agent_id} not found")
         return {"deleted": True, "agent_id": str(agent_id)}
 
-    async def list_system_agents(self) -> list[AgentDefinition]:
-        return await self._repository.list_system_agents()
+    async def list_system_agents(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[AgentDefinition]:
+        self._validate_registry_scope(scope=scope, organization_id=organization_id)
+        try:
+            return await self._repository.list_system_agents(
+                scope=scope,
+                organization_id=organization_id,
+            )
+        except TypeError:
+            return await self._repository.list_system_agents()
+
+    async def list_workspace_catalog_agents(
+        self,
+        workspace_id: UUID,
+    ) -> list[AgentDefinition]:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        agents = await self._repository.list_system_agents(scope="global")
+        agents.extend(
+            await self._repository.list_system_agents(
+                scope="organization",
+                organization_id=workspace.organization_id,
+            )
+        )
+        return agents
 
     async def create_system_tool(
-        self, payload: CreateSystemToolRequest
+        self,
+        payload: CreateSystemToolRequest,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
     ) -> SystemToolCommandResult:
+        self._validate_registry_scope(scope=scope, organization_id=organization_id)
         now = self._now()
         execution = payload.execution.model_copy(
             update={"handler_ref": payload.execution.handler_ref or payload.name}
@@ -501,6 +760,8 @@ class CollaborationKernel:
         self._validate_tool_execution_binding(execution)
         tool = SystemToolDefinition(
             tool_id=uuid4(),
+            scope=scope,
+            organization_id=organization_id,
             name=payload.name,
             description=payload.description,
             parameter_contract=payload.parameter_contract,
@@ -530,11 +791,18 @@ class CollaborationKernel:
         return {"deleted": True, "tool_id": str(tool_id)}
 
     async def create_llm_provider(
-        self, payload: CreateLlmProviderRequest
+        self,
+        payload: CreateLlmProviderRequest,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
     ) -> LlmProviderCommandResult:
+        self._validate_registry_scope(scope=scope, organization_id=organization_id)
         now = self._now()
         provider = LlmProviderDefinition(
             provider_id=uuid4(),
+            scope=scope,
+            organization_id=organization_id,
             engine_id=payload.engine_id,
             display_name=payload.display_name,
             description=payload.description,
@@ -559,11 +827,18 @@ class CollaborationKernel:
         return LlmProviderCommandResult(provider=provider)
 
     async def create_memory_provider(
-        self, payload: CreateMemoryProviderRequest
+        self,
+        payload: CreateMemoryProviderRequest,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
     ) -> MemoryProviderCommandResult:
+        self._validate_registry_scope(scope=scope, organization_id=organization_id)
         now = self._now()
         provider = MemoryProviderDefinition(
             provider_id=uuid4(),
+            scope=scope,
+            organization_id=organization_id,
             provider_key=payload.provider_key,
             display_name=payload.display_name,
             description=payload.description,
@@ -582,14 +857,68 @@ class CollaborationKernel:
                 await self._repository.upsert_memory_provider(conn, provider)
         return MemoryProviderCommandResult(provider=provider)
 
-    async def list_system_tools(self) -> list[SystemToolDefinition]:
-        return await self._repository.list_system_tools()
+    async def list_system_tools(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[SystemToolDefinition]:
+        self._validate_registry_scope(scope=scope, organization_id=organization_id)
+        try:
+            return await self._repository.list_system_tools_by_scope(
+                scope=scope,
+                organization_id=organization_id,
+            )
+        except AttributeError:
+            return await self._repository.list_system_tools()
+        except TypeError:
+            return await self._repository.list_system_tools()
 
-    async def list_llm_providers(self) -> list[LlmProviderDefinition]:
-        return await self._repository.list_llm_providers()
+    async def list_workspace_catalog_tools(
+        self,
+        workspace_id: UUID,
+    ) -> list[SystemToolDefinition]:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        tools = await self._repository.list_system_tools_by_scope(scope="global")
+        tools.extend(
+            await self._repository.list_system_tools_by_scope(
+                scope="organization",
+                organization_id=workspace.organization_id,
+            )
+        )
+        return tools
 
-    async def list_memory_providers(self) -> list[MemoryProviderDefinition]:
-        return await self._repository.list_memory_providers()
+    async def list_llm_providers(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[LlmProviderDefinition]:
+        self._validate_registry_scope(scope=scope, organization_id=organization_id)
+        try:
+            return await self._repository.list_llm_providers(
+                scope=scope,
+                organization_id=organization_id,
+            )
+        except TypeError:
+            return await self._repository.list_llm_providers()
+
+    async def list_memory_providers(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[MemoryProviderDefinition]:
+        self._validate_registry_scope(scope=scope, organization_id=organization_id)
+        try:
+            return await self._repository.list_memory_providers(
+                scope=scope,
+                organization_id=organization_id,
+            )
+        except TypeError:
+            return await self._repository.list_memory_providers()
 
     async def get_llm_provider(self, provider_id: UUID) -> LlmProviderDefinition | None:
         return await self._repository.fetch_llm_provider(provider_id)
@@ -780,10 +1109,15 @@ class CollaborationKernel:
         self,
         *,
         scope: str,
+        organization_id: UUID | None = None,
         workspace_id: UUID | None,
         payload: CreateGitRepositoryRequest,
     ) -> GitRepositoryCommandResult:
-        self._validate_asset_scope(scope=scope, workspace_id=workspace_id)
+        organization = await self._resolve_scope_organization(
+            scope=scope,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+        )
         if workspace_id is not None:
             workspace = await self._repository.fetch_workspace(workspace_id)
             if workspace is None:
@@ -795,6 +1129,7 @@ class CollaborationKernel:
         now = self._now()
         repository = GitRepository(
             repo_id=uuid4(),
+            organization_id=organization.organization_id if organization is not None else None,
             workspace_id=workspace_id,
             scope=scope,
             name=payload.name,
@@ -816,14 +1151,23 @@ class CollaborationKernel:
         self,
         *,
         scope: str,
+        organization_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[GitRepository]:
-        self._validate_asset_scope(scope=scope, workspace_id=workspace_id)
+        await self._resolve_scope_organization(
+            scope=scope,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+        )
         if workspace_id is not None:
             workspace = await self._repository.fetch_workspace(workspace_id)
             if workspace is None:
                 raise KeyError(f"Workspace {workspace_id} not found")
-        return await self._repository.list_git_repositories(scope=scope, workspace_id=workspace_id)
+        return await self._repository.list_git_repositories(
+            scope=scope,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+        )
 
     async def get_git_repository(self, repo_id: UUID) -> GitRepository | None:
         return await self._repository.fetch_git_repository(repo_id)
@@ -832,6 +1176,7 @@ class CollaborationKernel:
         self,
         *,
         scope: str,
+        organization_id: UUID | None = None,
         workspace_id: UUID | None,
         payload: PublishAssetFromGitRequest,
         storage_backend: str,
@@ -841,7 +1186,11 @@ class CollaborationKernel:
         sha256: str,
         content_type: str | None,
     ) -> WorkspaceAssetCommandResult:
-        self._validate_asset_scope(scope=scope, workspace_id=workspace_id)
+        organization = await self._resolve_scope_organization(
+            scope=scope,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+        )
         if workspace_id is not None:
             workspace = await self._repository.fetch_workspace(workspace_id)
             if workspace is None:
@@ -857,6 +1206,12 @@ class CollaborationKernel:
             raise ValueError(
                 f"Repository {repository.repo_id} scope {repository.scope!r} does not match asset scope {scope!r}"
             )
+        if repository.organization_id != (
+            organization.organization_id if organization is not None else None
+        ):
+            raise ValueError(
+                f"Repository {repository.repo_id} organization binding does not match asset organization scope"
+            )
         if repository.workspace_id != workspace_id:
             raise ValueError(
                 f"Repository {repository.repo_id} workspace binding does not match asset workspace scope"
@@ -864,12 +1219,14 @@ class CollaborationKernel:
         now = self._now()
         asset = await self._repository.fetch_workspace_asset_by_logical_name(
             scope=scope,
+            organization_id=organization.organization_id if organization is not None else None,
             workspace_id=workspace_id,
             logical_name=payload.logical_name,
         )
         if asset is None:
             asset = WorkspaceAsset(
                 asset_id=uuid4(),
+                organization_id=organization.organization_id if organization is not None else None,
                 workspace_id=workspace_id,
                 scope=scope,
                 asset_type=payload.asset_type,
@@ -928,15 +1285,24 @@ class CollaborationKernel:
         self,
         *,
         scope: str | None = None,
+        organization_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[WorkspaceAsset]:
         if scope is not None:
-            self._validate_asset_scope(scope=scope, workspace_id=workspace_id)
+            await self._resolve_scope_organization(
+                scope=scope,
+                organization_id=organization_id,
+                workspace_id=workspace_id,
+            )
         if workspace_id is not None:
             workspace = await self._repository.fetch_workspace(workspace_id)
             if workspace is None:
                 raise KeyError(f"Workspace {workspace_id} not found")
-        return await self._repository.list_workspace_assets(scope=scope, workspace_id=workspace_id)
+        return await self._repository.list_workspace_assets(
+            scope=scope,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+        )
 
     async def list_workspace_asset_versions(
         self,
@@ -972,17 +1338,23 @@ class CollaborationKernel:
         await self._validate_asset_link_target(
             target_type=payload.target_type,
             target_id=payload.target_id,
+            organization_id=asset.organization_id,
             workspace_id=payload.workspace_id,
         )
         if payload.workspace_id is not None:
             workspace = await self._repository.fetch_workspace(payload.workspace_id)
             if workspace is None:
                 raise KeyError(f"Workspace {payload.workspace_id} not found")
+            if asset.organization_id is not None and workspace.organization_id != asset.organization_id:
+                raise ValueError(
+                    "Workspace asset links must stay within the asset organization"
+                )
         now = self._now()
         link = AssetLink(
             link_id=uuid4(),
             asset_id=asset_id,
             asset_version_id=payload.asset_version_id,
+            organization_id=asset.organization_id,
             workspace_id=payload.workspace_id,
             target_type=payload.target_type,
             target_id=payload.target_id,
@@ -997,6 +1369,7 @@ class CollaborationKernel:
             async with conn.transaction():
                 await self._repository.deactivate_asset_links(
                     conn,
+                    organization_id=asset.organization_id,
                     workspace_id=payload.workspace_id,
                     target_type=payload.target_type,
                     target_id=payload.target_id,
@@ -1022,13 +1395,23 @@ class CollaborationKernel:
         agent = await self._repository.fetch_system_agent(agent_id)
         if agent is None:
             raise KeyError(f"System agent {agent_id} not found")
+        workspace: Workspace | None = None
         if workspace_id is not None:
             workspace = await self._repository.fetch_workspace(workspace_id)
             if workspace is None:
                 raise KeyError(f"Workspace {workspace_id} not found")
+            if not self._resource_visible_to_workspace(
+                agent.scope,
+                agent.organization_id,
+                workspace,
+            ):
+                raise PermissionError(
+                    f"System agent {agent_id} is not visible in workspace {workspace_id}"
+                )
         return await self._repository.list_asset_links_for_target(
             target_type="system_agent",
             target_id=agent_id,
+            organization_id=workspace.organization_id if workspace is not None else None,
             workspace_id=workspace_id,
         )
 
@@ -1041,13 +1424,23 @@ class CollaborationKernel:
         tool = await self._repository.fetch_system_tool(tool_id)
         if tool is None:
             raise KeyError(f"System tool {tool_id} not found")
+        workspace: Workspace | None = None
         if workspace_id is not None:
             workspace = await self._repository.fetch_workspace(workspace_id)
             if workspace is None:
                 raise KeyError(f"Workspace {workspace_id} not found")
+            if not self._resource_visible_to_workspace(
+                tool.scope,
+                tool.organization_id,
+                workspace,
+            ):
+                raise PermissionError(
+                    f"System tool {tool_id} is not visible in workspace {workspace_id}"
+                )
         return await self._repository.list_asset_links_for_target(
             target_type="system_tool",
             target_id=tool_id,
+            organization_id=workspace.organization_id if workspace is not None else None,
             workspace_id=workspace_id,
         )
 
@@ -1096,8 +1489,10 @@ class CollaborationKernel:
     async def _resolve_search_memory_provider(
         self,
         preferred_provider_key: str | None,
+        *,
+        organization_id: UUID | None = None,
     ) -> MemoryProviderDefinition:
-        providers = await self._repository.list_enabled_memory_providers()
+        providers = await self._visible_enabled_memory_providers(organization_id)
         if preferred_provider_key:
             for provider in providers:
                 if provider.provider_key == preferred_provider_key:
@@ -1112,7 +1507,9 @@ class CollaborationKernel:
         raise ValueError("No enabled memory providers configured")
 
     async def _sync_memory_entry(self, entry: MemoryEntry) -> None:
-        providers = await self._repository.list_enabled_memory_providers()
+        workspace = await self._repository.fetch_workspace(entry.workspace_id)
+        organization_id = workspace.organization_id if workspace is not None else None
+        providers = await self._visible_enabled_memory_providers(organization_id)
         now = self._now()
         for definition in providers:
             provider = self._memory_provider_index.get(definition.provider)
@@ -1173,7 +1570,15 @@ class CollaborationKernel:
     async def _delete_memory_entry_from_providers(self, entry: MemoryEntry) -> None:
         records = await self._repository.list_memory_provider_records(entry.memory_entry_id)
         now = self._now()
+        workspace = await self._repository.fetch_workspace(entry.workspace_id)
+        organization_id = workspace.organization_id if workspace is not None else None
+        visible_provider_ids = {
+            provider.provider_id
+            for provider in await self._visible_enabled_memory_providers(organization_id)
+        }
         for record in records:
+            if record.provider_id not in visible_provider_ids:
+                continue
             definition = await self._repository.fetch_memory_provider(record.provider_id)
             if definition is None:
                 continue
@@ -1212,7 +1617,18 @@ class CollaborationKernel:
                     await self._repository.upsert_memory_provider_record(conn, updated_record)
 
     async def _backfill_system_agent_interaction_contracts(self) -> None:
-        agents = await self._repository.list_system_agents()
+        try:
+            agents = await self._repository.list_system_agents(scope="global")
+            organizations = await self._repository.list_organizations()
+            for organization in organizations:
+                agents.extend(
+                    await self._repository.list_system_agents(
+                        scope="organization",
+                        organization_id=organization.organization_id,
+                    )
+                )
+        except (AttributeError, TypeError):
+            agents = await self._repository.list_system_agents()
         missing = [
             agent
             for agent in agents
@@ -1368,6 +1784,14 @@ class CollaborationKernel:
         system_tool = await self._repository.fetch_system_tool(payload.tool_id)
         if system_tool is None:
             raise KeyError(f"System tool {payload.tool_id} not found")
+        if not self._resource_visible_to_workspace(
+            system_tool.scope,
+            system_tool.organization_id,
+            workspace,
+        ):
+            raise PermissionError(
+                f"System tool {payload.tool_id} is not visible in workspace {workspace_id}"
+            )
         now = self._now()
         actor = self._actor_from_input(payload.actor)
         tool = WorkspaceTool(
@@ -1586,6 +2010,14 @@ class CollaborationKernel:
         system_agent = await self._repository.fetch_system_agent(payload.agent_id)
         if system_agent is None:
             raise KeyError(f"System agent {payload.agent_id} not found")
+        if not self._resource_visible_to_workspace(
+            system_agent.scope,
+            system_agent.organization_id,
+            workspace,
+        ):
+            raise PermissionError(
+                f"System agent {payload.agent_id} is not visible in workspace {workspace_id}"
+            )
         workspace_tools = await self._repository.list_workspace_tools(workspace_id)
         now = self._now()
         actor = self._actor_from_input(payload.actor)
@@ -1873,8 +2305,14 @@ class CollaborationKernel:
             default_workspace_daily_token_cap=default_workspace_daily_token_cap,
         )
 
-    async def get_runtime_overview(self) -> dict[str, object]:
-        return await self._runtime_execution.get_runtime_overview()
+    async def get_runtime_overview(
+        self,
+        *,
+        organization_id: UUID | None = None,
+    ) -> dict[str, object]:
+        return await self._runtime_execution.get_runtime_overview(
+            organization_id=organization_id,
+        )
 
     async def claim_next_run_step(
         self,
@@ -3560,7 +3998,13 @@ class CollaborationKernel:
         thread = await self._repository.fetch_thread(thread_id)
         if thread is None:
             raise KeyError(f"Thread {thread_id} not found")
-        provider_definition = await self._resolve_search_memory_provider(payload.use_provider)
+        workspace = await self._repository.fetch_workspace(thread.workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {thread.workspace_id} not found")
+        provider_definition = await self._resolve_search_memory_provider(
+            payload.use_provider,
+            organization_id=workspace.organization_id,
+        )
         provider = self._memory_provider_index.get(provider_definition.provider)
         if provider is None:
             raise ValueError(f"Unsupported memory provider {provider_definition.provider!r}")
@@ -3766,6 +4210,7 @@ class CollaborationKernel:
     async def list_audit_events(
         self,
         *,
+        organization_id: UUID | None = None,
         workspace_id: UUID | None = None,
         thread_id: UUID | None = None,
         actor_user_id: UUID | None = None,
@@ -3781,6 +4226,7 @@ class CollaborationKernel:
         limit: int = 100,
     ) -> AuditEventPage:
         return await self._repository.list_audit_events(
+            organization_id=organization_id,
             workspace_id=workspace_id,
             thread_id=thread_id,
             actor_user_id=actor_user_id,
@@ -4978,6 +5424,8 @@ class CollaborationKernel:
         now: datetime,
         status: str = "active",
     ) -> ParticipantProfile:
+        if actor.participant_type == "user":
+            await self._require_workspace_user_membership(workspace_id, actor)
         existing = await self._repository.fetch_participant(workspace_id, actor.participant_id)
         return self._participant_profile(
             workspace_id=workspace_id,
@@ -5017,6 +5465,20 @@ class CollaborationKernel:
         display_name: str,
         auto_create: bool = True,
     ) -> ParticipantInput:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if (
+            workspace is not None
+            and workspace.organization_id is not None
+            and hasattr(self._repository, "fetch_organization_membership")
+        ):
+            membership = await self._repository.fetch_organization_membership(
+                workspace.organization_id,
+                user_id,
+            )
+            if membership is None:
+                raise KeyError(
+                    f"Authenticated user {user_id} is not a member of organization {workspace.organization_id}"
+                )
         participant = await self._repository.fetch_user_participant(workspace_id, user_id)
         if participant is None and not auto_create:
             raise KeyError(
@@ -5029,6 +5491,106 @@ class CollaborationKernel:
             user_id=user_id,
             display_name=display_name,
         )
+
+    @staticmethod
+    def _actor_user_id(actor: ParticipantInput) -> UUID | None:
+        if actor.user_id is not None:
+            return actor.user_id
+        if actor.participant_type == "user":
+            return actor.participant_id
+        return None
+
+    async def _require_workspace_user_membership(
+        self,
+        workspace_id: UUID,
+        actor: ParticipantInput,
+    ) -> None:
+        user_id = self._actor_user_id(actor)
+        if user_id is None:
+            return
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        if workspace.organization_id is None or not hasattr(
+            self._repository,
+            "fetch_organization_membership",
+        ):
+            return
+        membership = await self._repository.fetch_organization_membership(
+            workspace.organization_id,
+            user_id,
+        )
+        if membership is None:
+            raise PermissionError(
+                f"User {user_id} is not a member of organization {workspace.organization_id}"
+            )
+
+    async def _require_organization_membership(
+        self,
+        organization_id: UUID,
+        user_id: UUID,
+    ) -> OrganizationMembership:
+        if not hasattr(self._repository, "fetch_organization_membership"):
+            now = self._now()
+            return OrganizationMembership(
+                organization_id=organization_id,
+                user_id=user_id,
+                role="owner",
+                joined_at=now,
+                updated_at=now,
+                metadata={},
+            )
+        membership = await self._repository.fetch_organization_membership(
+            organization_id,
+            user_id,
+        )
+        if membership is None:
+            raise KeyError(
+                f"User {user_id} is not a member of organization {organization_id}"
+            )
+        return membership
+
+    async def _require_organization_admin(
+        self,
+        organization_id: UUID,
+        user_id: UUID,
+    ) -> OrganizationMembership:
+        membership = await self._require_organization_membership(organization_id, user_id)
+        if membership.role not in _ORGANIZATION_ADMIN_ROLES:
+            raise PermissionError("Organization admin role required")
+        return membership
+
+    async def _resolve_workspace_organization(
+        self,
+        *,
+        requested_organization_id: UUID | None,
+        actor: ParticipantInput,
+    ) -> Organization:
+        if requested_organization_id is not None:
+            organization = await self._repository.fetch_organization(requested_organization_id)
+            if organization is None:
+                raise KeyError(f"Organization {requested_organization_id} not found")
+            return organization
+        if not hasattr(self._repository, "list_organizations_for_user"):
+            return Organization(
+                organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+                slug="default",
+                name="Default Organization",
+                description="Implicit test organization",
+                created_by=self._actor_user_id(actor) or actor.participant_id,
+                created_at=self._now(),
+                updated_at=self._now(),
+                metadata={},
+            )
+        user_id = self._actor_user_id(actor)
+        organizations = (
+            await self._repository.list_organizations_for_user(user_id)
+            if user_id is not None
+            else await self._repository.list_organizations()
+        )
+        if len(organizations) == 1:
+            return organizations[0]
+        raise ValueError("organization_id is required when multiple organizations are available")
 
     async def _require_workspace_management_role(
         self,
@@ -5143,11 +5705,27 @@ class CollaborationKernel:
         return []
 
     @staticmethod
-    def _validate_asset_scope(*, scope: str, workspace_id: UUID | None) -> None:
-        if scope not in {"global", "workspace"}:
+    def _validate_registry_scope(*, scope: str, organization_id: UUID | None) -> None:
+        if scope not in {"global", "organization"}:
+            raise ValueError(f"Unsupported registry scope {scope!r}")
+        if scope == "global" and organization_id is not None:
+            raise ValueError("Global registry resources cannot include an organization_id")
+        if scope == "organization" and organization_id is None:
+            raise ValueError("Organization-scoped resources require an organization_id")
+
+    @staticmethod
+    def _validate_asset_scope(
+        *,
+        scope: str,
+        organization_id: UUID | None,
+        workspace_id: UUID | None,
+    ) -> None:
+        if scope not in {"global", "organization", "workspace"}:
             raise ValueError(f"Unsupported asset scope {scope!r}")
-        if scope == "global" and workspace_id is not None:
-            raise ValueError("Global scope resources cannot include a workspace_id")
+        if scope == "global" and (organization_id is not None or workspace_id is not None):
+            raise ValueError("Global scope resources cannot include organization_id or workspace_id")
+        if scope == "organization" and (organization_id is None or workspace_id is not None):
+            raise ValueError("Organization scope resources require organization_id and forbid workspace_id")
         if scope == "workspace" and workspace_id is None:
             raise ValueError("Workspace scope resources require a workspace_id")
 
@@ -5167,19 +5745,37 @@ class CollaborationKernel:
         *,
         target_type: str,
         target_id: UUID,
+        organization_id: UUID | None,
         workspace_id: UUID | None,
     ) -> None:
         if target_type == "system_agent":
-            if await self._repository.fetch_system_agent(target_id) is None:
+            agent = await self._repository.fetch_system_agent(target_id)
+            if agent is None:
                 raise KeyError(f"System agent {target_id} not found")
+            if (
+                organization_id is not None
+                and agent.scope == "organization"
+                and agent.organization_id != organization_id
+            ):
+                raise ValueError("Organization asset links must target resources in the same organization")
             return
         if target_type == "system_tool":
-            if await self._repository.fetch_system_tool(target_id) is None:
+            tool = await self._repository.fetch_system_tool(target_id)
+            if tool is None:
                 raise KeyError(f"System tool {target_id} not found")
+            if (
+                organization_id is not None
+                and tool.scope == "organization"
+                and tool.organization_id != organization_id
+            ):
+                raise ValueError("Organization asset links must target resources in the same organization")
             return
         if target_type == "workspace":
-            if await self._repository.fetch_workspace(target_id) is None:
+            workspace = await self._repository.fetch_workspace(target_id)
+            if workspace is None:
                 raise KeyError(f"Workspace {target_id} not found")
+            if organization_id is not None and workspace.organization_id != organization_id:
+                raise ValueError("Organization asset links must target workspaces in the same organization")
             return
         if target_type == "workspace_tool":
             if workspace_id is None:
@@ -5188,6 +5784,95 @@ class CollaborationKernel:
                 raise KeyError(f"Workspace tool {target_id} not found in workspace {workspace_id}")
             return
         raise ValueError(f"Unsupported asset link target type {target_type!r}")
+
+    async def _resolve_scope_organization(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None,
+        workspace_id: UUID | None,
+    ) -> Organization | None:
+        self._validate_asset_scope(
+            scope=scope,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+        )
+        if scope == "global":
+            return None
+        if workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+            if organization_id is not None and workspace.organization_id != organization_id:
+                raise ValueError(
+                    f"Workspace {workspace_id} does not belong to organization {organization_id}"
+                )
+            if not hasattr(self._repository, "fetch_organization"):
+                return Organization(
+                    organization_id=workspace.organization_id
+                    or UUID("11111111-1111-1111-1111-111111111111"),
+                    slug="default",
+                    name="Default Organization",
+                    description="Implicit test organization",
+                    created_by=workspace.owner_user_id or workspace.workspace_id,
+                    created_at=workspace.created_at,
+                    updated_at=workspace.updated_at,
+                    metadata={},
+                )
+            organization = await self._repository.fetch_organization(workspace.organization_id)
+            if organization is None:
+                raise KeyError(f"Organization {workspace.organization_id} not found")
+            return organization
+        assert organization_id is not None
+        if not hasattr(self._repository, "fetch_organization"):
+            return Organization(
+                organization_id=organization_id,
+                slug="default",
+                name="Default Organization",
+                description="Implicit test organization",
+                created_by=organization_id,
+                created_at=self._now(),
+                updated_at=self._now(),
+                metadata={},
+            )
+        organization = await self._repository.fetch_organization(organization_id)
+        if organization is None:
+            raise KeyError(f"Organization {organization_id} not found")
+        return organization
+
+    @staticmethod
+    def _resource_visible_to_workspace(
+        scope: str,
+        organization_id: UUID | None,
+        workspace: Workspace,
+    ) -> bool:
+        if scope == "global":
+            return True
+        if scope == "organization":
+            return organization_id == workspace.organization_id
+        return False
+
+    async def _visible_enabled_memory_providers(
+        self,
+        organization_id: UUID | None,
+    ) -> list[MemoryProviderDefinition]:
+        try:
+            providers = await self._repository.list_enabled_memory_providers(scope="global")
+        except TypeError:
+            providers = await self._repository.list_enabled_memory_providers()
+        if organization_id is None:
+            return providers
+        try:
+            overrides = await self._repository.list_enabled_memory_providers(
+                scope="organization",
+                organization_id=organization_id,
+            )
+        except TypeError:
+            overrides = []
+        by_key = {provider.provider_key: provider for provider in providers}
+        for provider in overrides:
+            by_key[provider.provider_key] = provider
+        return list(by_key.values())
 
     @staticmethod
     def _advertised_agent_capabilities(

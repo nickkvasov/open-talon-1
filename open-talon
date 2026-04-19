@@ -170,9 +170,29 @@ except Exception:
 PY
 }
 
+oidc_issuer_ready() {
+  local issuer_url="$1"
+  local discovery_url="${issuer_url%/}/.well-known/openid-configuration"
+  "${PYTHON_BIN}" - <<PY
+import json
+import sys
+import urllib.request
+
+try:
+    with urllib.request.urlopen("${discovery_url}", timeout=2) as response:
+        data = json.load(response)
+    required = {"authorization_endpoint", "token_endpoint", "issuer"}
+    raise SystemExit(0 if required.issubset(data) else 1)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
 start_cmd() {
   ensure_python
   load_local_env
+  local gateway_startup_wait_seconds="${OPEN_TALON_GATEWAY_STARTUP_WAIT_SECONDS:-60}"
+  local oidc_startup_wait_seconds="${OPEN_TALON_OIDC_STARTUP_WAIT_SECONDS:-60}"
   local enable_memgraph=0
   while (($# > 0)); do
     case "$1" in
@@ -270,7 +290,20 @@ PY
     echo "${GATEWAY_PID}" > "${GATEWAY_PID_FILE}"
   fi
 
-  for _ in {1..20}; do
+  for _ in $(seq 1 "${oidc_startup_wait_seconds}"); do
+    if oidc_issuer_ready "${OPEN_TALON_OIDC_ISSUER_URL}"; then
+      break
+    fi
+    sleep 1
+  done
+
+  if ! oidc_issuer_ready "${OPEN_TALON_OIDC_ISSUER_URL}"; then
+    echo "OIDC issuer failed to become ready: ${OPEN_TALON_OIDC_ISSUER_URL}" >&2
+    rm -f "${GATEWAY_PID_FILE}"
+    exit 1
+  fi
+
+  for _ in $(seq 1 "${gateway_startup_wait_seconds}"); do
     sleep 1
     if gateway_supports_current_api "${pythonpath}"; then
       start_python_module \

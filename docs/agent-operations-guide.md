@@ -36,6 +36,7 @@ For multiple simulated humans:
 This keeps:
 
 - auth state separate
+- selected organization separate
 - selected workspace/thread separate
 - role assumptions separate
 - request-answer attribution correct
@@ -108,9 +109,9 @@ Use `tui2` for human operators, manual debugging, or mixed human/agent demos whe
 ./open-talon user-client auth login --profile supervisor
 ```
 
-### 2. Create Or Select A Shared Workspace
+### 2. Create Or Select A Shared Organization And Workspace
 
-Use one admin/supervisor-capable profile to create the workspace, then point every other profile at the same workspace ID.
+Use one admin/org-admin-capable profile to select the target organization first, then create the workspace there and point every other profile at the same workspace ID.
 
 ### 3. Create A Shared Thread
 
@@ -173,6 +174,8 @@ Check:
 
 | Goal | Preferred API |
 | --- | --- |
+| list organizations visible to the caller | `/v1/organizations` |
+| inspect one organization | `/v1/organizations/{organization_id}` |
 | create shared collaboration space | `/v1/workspaces` |
 | inspect workspace state | `/v1/workspaces/{workspace_id}` |
 | inspect participants and advertised roles | `/v1/workspaces/{workspace_id}/participants` |
@@ -185,6 +188,7 @@ Check:
 | inspect workspace-wide communication trail | `/v1/workspaces/{workspace_id}/communication-log` |
 | inspect persisted communication trail on disk | `OPEN_TALON_COMMUNICATION_LOG_DIR/<workspace_id>.jsonl` |
 | inspect runtime queues/failures/tokens | `/v1/admin/runtime/overview` |
+| inspect org-scoped runtime queues/failures/tokens | `/v1/organizations/{organization_id}/runtime/overview` |
 | inspect compliance/investigation events | `/v1/audit/events` |
 
 ## Request Construction Guidance
@@ -247,25 +251,28 @@ If the flow behaves unexpectedly, inspect in this order:
 
 1. `GET /v1/me`
    - confirm which authenticated human you are
-2. `GET /v1/workspaces/{workspace_id}/participants`
+2. `GET /v1/organizations`
+   - confirm which organizations are visible to that human
+3. `GET /v1/workspaces/{workspace_id}/participants`
    - confirm advertised roles/capabilities and participant IDs
-3. `GET /v1/threads/{thread_id}/timeline`
+4. `GET /v1/threads/{thread_id}/timeline`
    - confirm the messages were created
-4. `GET /v1/requests/{request_id}`
+5. `GET /v1/requests/{request_id}`
    - confirm targets, answers, and aggregate status
-5. `GET /v1/workspaces/{workspace_id}/communication-log`
+6. `GET /v1/workspaces/{workspace_id}/communication-log`
    - confirm workspace-wide communication ordering
-6. `OPEN_TALON_COMMUNICATION_LOG_DIR/<workspace_id>.jsonl`
+7. `OPEN_TALON_COMMUNICATION_LOG_DIR/<workspace_id>.jsonl`
    - confirm finalized messages were persisted to disk
-7. `GET /v1/admin/runtime/overview`
+8. `GET /v1/admin/runtime/overview`
    - confirm runnable or failed work when an agent should have resumed
-8. `GET /v1/audit/events`
+9. `GET /v1/audit/events`
    - inspect authorization or mutation history when needed
 
 ## Common Mistakes
 
 - reusing one local profile for multiple humans
 - assuming `participant_id` is the human identity
+- forgetting to select the intended organization before creating or listing workspaces in `tui2` or `user-client`
 - testing role-based selection with explicit participant IDs
 - using `/v1/chat` for workflows that should use workspaces and threads
 - expecting the communication log to include every internal runtime transition
@@ -275,7 +282,7 @@ If the flow behaves unexpectedly, inspect in this order:
 
 A good first end-to-end validation is:
 
-1. create one workspace
+1. select one organization and create one workspace
 2. attach two agents
 3. create three human participants with advertised roles
 4. create one shared thread
@@ -288,6 +295,7 @@ A good first end-to-end validation is:
 That scenario exercises:
 
 - auth
+- organization membership
 - participant materialization
 - role-based selection
 - tracked requests

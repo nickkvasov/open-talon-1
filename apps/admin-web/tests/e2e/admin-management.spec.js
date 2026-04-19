@@ -14,9 +14,36 @@ test.beforeEach(async ({ page }) => {
 });
 
 test('workspaces can be created and deleted', async ({ page }) => {
+  const organizationName = uniqueName('playwright-org');
+  const organizationSlug = organizationName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
   const workspaceName = uniqueName('playwright-workspace');
 
   await openAdminPage(page, /^workspaces$/i, /workspace fleet/i);
+  const organizationSelect = page.locator('select').first();
+  await expect(organizationSelect).toBeVisible();
+  let options = await organizationSelect.locator('option').evaluateAll((nodes) =>
+    nodes.map((node) => node.value).filter(Boolean)
+  );
+  if (options.length === 0) {
+    await openAdminPage(page, /^organizations$/i, /^organizations$/i);
+    const createOrganizationForm = page.locator('form').filter({
+      has: page.getByText(/create organization/i),
+    });
+    await createOrganizationForm.locator('input').nth(0).fill(organizationSlug);
+    await createOrganizationForm.locator('input').nth(1).fill(organizationName);
+    await createOrganizationForm.locator('textarea').nth(0).fill('Organization created by Playwright.');
+    await createOrganizationForm.locator('button[type="submit"]').click();
+    await expect(page.getByText(organizationName, { exact: true })).toBeVisible();
+
+    await openAdminPage(page, /^workspaces$/i, /workspace fleet/i);
+    options = await organizationSelect.locator('option').evaluateAll((nodes) =>
+      nodes.map((node) => node.value).filter(Boolean)
+    );
+  }
+  const selectedValue = await organizationSelect.inputValue();
+  if (!selectedValue && options.length > 0) {
+    await organizationSelect.selectOption(options[0]);
+  }
 
   await page.getByRole('button', { name: /create workspace/i }).click();
   await expect(page.getByRole('heading', { name: /create workspace/i })).toBeVisible();

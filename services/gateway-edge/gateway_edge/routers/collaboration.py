@@ -32,6 +32,7 @@ from gateway_edge.models import (
     CreateInteractionRequestsRequest,
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
+    CreateOrganizationRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
     ConfirmWorkspaceMemoryRequest,
@@ -53,12 +54,15 @@ from gateway_edge.models import (
     MemoryProviderDefinition,
     MemoryProviderHealthReport,
     MemorySearchResponse,
+    RuntimeOverviewResponse,
     LlmEngineDescriptor,
     LlmProviderDefinition,
     LlmProviderHealthReport,
     GitRepository,
     InteractionRequestDetail,
     LinkAssetRequest,
+    Organization,
+    OrganizationMembership,
     ParticipantInput,
     ParticipantProfile,
     PublishAssetFromGitRequest,
@@ -78,6 +82,7 @@ from gateway_edge.models import (
     UpdateLlmProviderRequest,
     UpdateMemoryProviderRequest,
     UpdateMemoryEntryRequest,
+    UpdateOrganizationRequest,
     UpdateWorkspaceToolRequest,
     UpdateWorkspaceRequest,
     Workspace,
@@ -85,6 +90,8 @@ from gateway_edge.models import (
     WorkspaceAssetVersion,
     WorkspaceDetail,
     WorkspaceTool,
+    AddOrganizationMemberRequest,
+    RemoveOrganizationMemberRequest,
 )
 from gateway_edge.services import collaboration as collab_svc
 from gateway_edge.services.audit import audit_service
@@ -206,11 +213,16 @@ async def _resolve_workspace_actor(
     auth_context = _user_auth_context(request)
     if auth_context is None:
         return actor
-    return await collab_svc.collaboration_service.resolve_authenticated_user_actor(
-        workspace_id=workspace_id,
-        auth_context=auth_context,
-        auto_create=auto_create,
-    )
+    try:
+        return await collab_svc.collaboration_service.resolve_authenticated_user_actor(
+            workspace_id=workspace_id,
+            auth_context=auth_context,
+            auto_create=auto_create,
+        )
+    except KeyError:
+        if has_admin_access(request) and not auto_create:
+            return _resolve_global_actor(request, actor)
+        raise
 
 
 async def _resolve_thread_actor(
@@ -289,10 +301,67 @@ def _thread_not_found(thread_id: UUID) -> HTTPException:
     return HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
 
+def _organization_not_found(organization_id: UUID) -> HTTPException:
+    return HTTPException(status_code=404, detail=f"Organization {organization_id} not found")
+
+
+def _resolve_organization_actor(
+    request: Request,
+    actor: ParticipantInput,
+) -> ParticipantInput:
+    return _resolve_global_actor(request, actor)
+
+
+async def _organization_membership_for_user(
+    request: Request,
+    organization_id: UUID,
+) -> OrganizationMembership | None:
+    auth_context = _user_auth_context(request)
+    if auth_context is None or auth_context.user_id is None:
+        return None
+    try:
+        memberships = await collab_svc.collaboration_service.list_organization_memberships(
+            organization_id
+        )
+    except KeyError as exc:
+        raise _organization_not_found(organization_id) from exc
+    return next(
+        (item for item in memberships if item.user_id == auth_context.user_id),
+        None,
+    )
+
+
+async def _require_organization_membership(
+    request: Request,
+    organization_id: UUID,
+) -> OrganizationMembership | None:
+    if has_admin_access(request):
+        return None
+    membership = await _organization_membership_for_user(request, organization_id)
+    auth_context = _user_auth_context(request)
+    if auth_context is not None and membership is None:
+        raise _organization_not_found(organization_id)
+    return membership
+
+
+async def _require_organization_admin(
+    request: Request,
+    organization_id: UUID,
+) -> OrganizationMembership | None:
+    membership = await _require_organization_membership(request, organization_id)
+    if membership is None:
+        return None
+    if membership.role in {"owner", "admin"}:
+        return membership
+    raise HTTPException(status_code=403, detail="Organization admin role required")
+
+
 async def _require_workspace_membership(
     request: Request,
     workspace_id: UUID,
 ) -> ParticipantInput | None:
+    if has_admin_access(request):
+        return None
     auth_context = _user_auth_context(request)
     if auth_context is None:
         return None
@@ -310,6 +379,8 @@ async def _require_thread_membership(
     request: Request,
     thread_id: UUID,
 ) -> ParticipantInput | None:
+    if has_admin_access(request):
+        return None
     auth_context = _user_auth_context(request)
     if auth_context is None:
         return None
@@ -332,6 +403,8 @@ async def _require_asset_workspace_membership(
         raise HTTPException(status_code=404, detail=f"Workspace asset {asset_id} not found")
     if asset.workspace_id is not None:
         await _require_workspace_membership(request, asset.workspace_id)
+    elif asset.organization_id is not None:
+        await _require_organization_membership(request, asset.organization_id)
     return asset
 
 
@@ -363,8 +436,148 @@ async def _require_workspace_admin_or_supervisor(
     )
 
 
+@router.post(
+    "/organizations",
+    response_model=Organization,
+    summary="Create an organization",
+)
+async def create_organization(
+    request: Request,
+    payload: CreateOrganizationRequest,
+) -> Organization:
+    require_admin_access(request)
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        return await collab_svc.collaboration_service.create_organization(payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations",
+    response_model=list[Organization],
+    summary="List organizations",
+)
+async def list_organizations(request: Request) -> list[Organization]:
+    auth_context = _user_auth_context(request)
+    user_id = None if has_admin_access(request) else (auth_context.user_id if auth_context else None)
+    try:
+        return await collab_svc.collaboration_service.list_organizations(user_id=user_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}",
+    response_model=Organization,
+    summary="Get organization detail",
+)
+async def get_organization(request: Request, organization_id: UUID) -> Organization:
+    try:
+        await _require_organization_membership(request, organization_id)
+        return await collab_svc.collaboration_service.get_organization(organization_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch(
+    "/organizations/{organization_id}",
+    response_model=Organization,
+    summary="Update an organization",
+)
+async def update_organization(
+    request: Request,
+    organization_id: UUID,
+    payload: UpdateOrganizationRequest,
+) -> Organization:
+    await _require_organization_admin(request, organization_id)
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        return await collab_svc.collaboration_service.update_organization(
+            organization_id,
+            payload,
+            allow_platform_admin=has_admin_access(request),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/members",
+    response_model=list[OrganizationMembership],
+    summary="List organization memberships",
+)
+async def list_organization_memberships(
+    request: Request,
+    organization_id: UUID,
+) -> list[OrganizationMembership]:
+    try:
+        await _require_organization_membership(request, organization_id)
+        return await collab_svc.collaboration_service.list_organization_memberships(
+            organization_id
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/members",
+    response_model=OrganizationMembership,
+    summary="Add an organization member",
+)
+async def add_organization_member(
+    request: Request,
+    organization_id: UUID,
+    payload: AddOrganizationMemberRequest,
+) -> OrganizationMembership:
+    await _require_organization_admin(request, organization_id)
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        return await collab_svc.collaboration_service.add_organization_member(
+            organization_id,
+            payload,
+            allow_platform_admin=has_admin_access(request),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/organizations/{organization_id}/members/{user_id}",
+    response_model=dict,
+    summary="Remove an organization member",
+)
+async def remove_organization_member(
+    request: Request,
+    organization_id: UUID,
+    user_id: UUID,
+    payload: RemoveOrganizationMemberRequest = Body(...),
+) -> dict[str, bool | str]:
+    await _require_organization_admin(request, organization_id)
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        return await collab_svc.collaboration_service.remove_organization_member(
+            organization_id,
+            user_id,
+            payload,
+            allow_platform_admin=has_admin_access(request),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.post("/workspaces", response_model=WorkspaceDetail, summary="Create a workspace")
 async def create_workspace(request: Request, payload: CreateWorkspaceRequest) -> WorkspaceDetail:
+    if payload.organization_id is not None:
+        await _require_organization_admin(request, payload.organization_id)
     payload = payload.model_copy(
         update={"actor": _resolved_create_workspace_actor(request, payload.actor)}
     )
@@ -375,17 +588,95 @@ async def create_workspace(request: Request, payload: CreateWorkspaceRequest) ->
         sorted(payload.metadata.keys()),
     )
     try:
-        return await collab_svc.collaboration_service.create_workspace(payload)
+        return await collab_svc.collaboration_service.create_workspace(
+            payload,
+            allow_platform_admin=has_admin_access(request),
+        )
     except Exception as exc:  # pragma: no cover - exercised by tests via error type mapping
         raise _http_error(exc) from exc
 
 
 @router.get("/workspaces", response_model=list[Workspace], summary="List workspaces")
-async def list_workspaces(request: Request) -> list[Workspace]:
-    logger.debug("HTTP list_workspaces")
+async def list_workspaces(
+    request: Request,
+    organization_id: UUID | None = Query(default=None),
+) -> list[Workspace]:
+    logger.debug("HTTP list_workspaces organization_id=%s", organization_id)
     auth_context = _user_auth_context(request)
-    user_id = auth_context.user_id if auth_context is not None else None
-    return await collab_svc.collaboration_service.list_workspaces(user_id=user_id)
+    if organization_id is not None and auth_context is not None and not has_admin_access(request):
+        await _require_organization_membership(request, organization_id)
+    user_id = None if has_admin_access(request) else (auth_context.user_id if auth_context is not None else None)
+    return await collab_svc.collaboration_service.list_workspaces(
+        user_id=user_id,
+        organization_id=organization_id,
+    )
+
+
+@router.post(
+    "/organizations/{organization_id}/workspaces",
+    response_model=WorkspaceDetail,
+    summary="Create a workspace inside an organization",
+)
+async def create_organization_workspace(
+    request: Request,
+    organization_id: UUID,
+    payload: CreateWorkspaceRequest,
+) -> WorkspaceDetail:
+    await _require_organization_admin(request, organization_id)
+    payload = payload.model_copy(
+        update={
+            "organization_id": organization_id,
+            "actor": _resolved_create_workspace_actor(request, payload.actor),
+        }
+    )
+    try:
+        return await collab_svc.collaboration_service.create_workspace(
+            payload,
+            allow_platform_admin=has_admin_access(request),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/workspaces",
+    response_model=list[Workspace],
+    summary="List workspaces inside an organization",
+)
+async def list_organization_workspaces(
+    request: Request,
+    organization_id: UUID,
+) -> list[Workspace]:
+    await _require_organization_membership(request, organization_id)
+    auth_context = _user_auth_context(request)
+    user_id = None if has_admin_access(request) else (auth_context.user_id if auth_context else None)
+    try:
+        return await collab_svc.collaboration_service.list_workspaces(
+            user_id=user_id,
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/runtime/overview",
+    response_model=RuntimeOverviewResponse,
+    summary="View runtime overview for a single organization",
+)
+async def organization_runtime_overview(
+    request: Request,
+    organization_id: UUID,
+) -> RuntimeOverviewResponse:
+    await _require_organization_membership(request, organization_id)
+    try:
+        return RuntimeOverviewResponse.model_validate(
+            await collab_svc.collaboration_service.get_runtime_overview(
+                organization_id=organization_id
+            )
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
 
 
 @router.delete(
@@ -479,6 +770,42 @@ async def list_workspace_participants(
     try:
         await _require_workspace_membership(request, workspace_id)
         return await collab_svc.collaboration_service.list_workspace_participants(
+            workspace_id
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/workspaces/{workspace_id}/catalog/agents",
+    response_model=list[AgentDefinition],
+    summary="List agents visible to a workspace",
+)
+async def list_workspace_catalog_agents(
+    request: Request,
+    workspace_id: UUID,
+) -> list[AgentDefinition]:
+    try:
+        await _require_workspace_membership(request, workspace_id)
+        return await collab_svc.collaboration_service.list_workspace_catalog_agents(
+            workspace_id
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/workspaces/{workspace_id}/catalog/tools",
+    response_model=list[SystemToolDefinition],
+    summary="List tools visible to a workspace",
+)
+async def list_workspace_catalog_tools(
+    request: Request,
+    workspace_id: UUID,
+) -> list[SystemToolDefinition]:
+    try:
+        await _require_workspace_membership(request, workspace_id)
+        return await collab_svc.collaboration_service.list_workspace_catalog_tools(
             workspace_id
         )
     except Exception as exc:
@@ -582,6 +909,28 @@ async def create_system_agent(
         raise _http_error(exc) from exc
 
 
+@router.post(
+    "/organizations/{organization_id}/agents",
+    response_model=AgentDefinition,
+    summary="Create an organization-scoped agent definition",
+)
+async def create_organization_system_agent(
+    request: Request,
+    organization_id: UUID,
+    payload: CreateSystemAgentRequest,
+) -> AgentDefinition:
+    await _require_organization_admin(request, organization_id)
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.create_system_agent(
+            payload,
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get(
     "/llm-engines",
     response_model=list[LlmEngineDescriptor],
@@ -611,6 +960,28 @@ async def create_llm_provider(
     )
     try:
         return await collab_svc.collaboration_service.create_llm_provider(payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/llm-providers",
+    response_model=LlmProviderDefinition,
+    summary="Create an organization-scoped LLM provider definition",
+)
+async def create_organization_llm_provider(
+    request: Request,
+    organization_id: UUID,
+    payload: CreateLlmProviderRequest,
+) -> LlmProviderDefinition:
+    await _require_organization_admin(request, organization_id)
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.create_llm_provider(
+            payload,
+            scope="organization",
+            organization_id=organization_id,
+        )
     except Exception as exc:
         raise _http_error(exc) from exc
 
@@ -669,6 +1040,25 @@ async def list_llm_providers(request: Request) -> list[LlmProviderDefinition]:
     logger.debug("HTTP list_llm_providers")
     try:
         return await collab_svc.collaboration_service.list_llm_providers()
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/llm-providers",
+    response_model=list[LlmProviderDefinition],
+    summary="List organization-scoped LLM provider definitions",
+)
+async def list_organization_llm_providers(
+    request: Request,
+    organization_id: UUID,
+) -> list[LlmProviderDefinition]:
+    await _require_organization_membership(request, organization_id)
+    try:
+        return await collab_svc.collaboration_service.list_llm_providers(
+            scope="organization",
+            organization_id=organization_id,
+        )
     except Exception as exc:
         raise _http_error(exc) from exc
 
@@ -767,6 +1157,28 @@ async def create_memory_provider(
 
 
 @router.post(
+    "/organizations/{organization_id}/memory-providers",
+    response_model=MemoryProviderDefinition,
+    summary="Create an organization-scoped memory provider definition",
+)
+async def create_organization_memory_provider(
+    request: Request,
+    organization_id: UUID,
+    payload: CreateMemoryProviderRequest,
+) -> MemoryProviderDefinition:
+    await _require_organization_admin(request, organization_id)
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.create_memory_provider(
+            payload,
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
     "/memory-providers/validate",
     response_model=MemoryProviderHealthReport,
     summary="Validate a memory provider definition without persisting it",
@@ -815,6 +1227,25 @@ async def list_memory_providers(request: Request) -> list[MemoryProviderDefiniti
     logger.debug("HTTP list_memory_providers")
     try:
         return await collab_svc.collaboration_service.list_memory_providers()
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/memory-providers",
+    response_model=list[MemoryProviderDefinition],
+    summary="List organization-scoped memory provider definitions",
+)
+async def list_organization_memory_providers(
+    request: Request,
+    organization_id: UUID,
+) -> list[MemoryProviderDefinition]:
+    await _require_organization_membership(request, organization_id)
+    try:
+        return await collab_svc.collaboration_service.list_memory_providers(
+            scope="organization",
+            organization_id=organization_id,
+        )
     except Exception as exc:
         raise _http_error(exc) from exc
 
@@ -903,6 +1334,25 @@ async def list_system_agents(request: Request) -> list[AgentDefinition]:
         raise _http_error(exc) from exc
 
 
+@router.get(
+    "/organizations/{organization_id}/agents",
+    response_model=list[AgentDefinition],
+    summary="List organization-scoped agent definitions",
+)
+async def list_organization_system_agents(
+    request: Request,
+    organization_id: UUID,
+) -> list[AgentDefinition]:
+    await _require_organization_membership(request, organization_id)
+    try:
+        return await collab_svc.collaboration_service.list_system_agents(
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.post(
     "/tools",
     response_model=SystemToolDefinition,
@@ -925,6 +1375,28 @@ async def create_system_tool(
         raise _http_error(exc) from exc
 
 
+@router.post(
+    "/organizations/{organization_id}/tools",
+    response_model=SystemToolDefinition,
+    summary="Create an organization-scoped tool definition",
+)
+async def create_organization_system_tool(
+    request: Request,
+    organization_id: UUID,
+    payload: CreateSystemToolRequest,
+) -> SystemToolDefinition:
+    await _require_organization_admin(request, organization_id)
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.create_system_tool(
+            payload,
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get(
     "/tools",
     response_model=list[SystemToolDefinition],
@@ -935,6 +1407,25 @@ async def list_system_tools(request: Request) -> list[SystemToolDefinition]:
     logger.debug("HTTP list_system_tools")
     try:
         return await collab_svc.collaboration_service.list_system_tools()
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/tools",
+    response_model=list[SystemToolDefinition],
+    summary="List organization-scoped tool definitions",
+)
+async def list_organization_system_tools(
+    request: Request,
+    organization_id: UUID,
+) -> list[SystemToolDefinition]:
+    await _require_organization_membership(request, organization_id)
+    try:
+        return await collab_svc.collaboration_service.list_system_tools(
+            scope="organization",
+            organization_id=organization_id,
+        )
     except Exception as exc:
         raise _http_error(exc) from exc
 
@@ -1057,6 +1548,7 @@ async def create_global_git_repository(
     try:
         return await collab_svc.collaboration_service.create_git_repository(
             scope="global",
+            organization_id=None,
             workspace_id=None,
             payload=payload,
         )
@@ -1073,7 +1565,53 @@ async def list_global_git_repositories(request: Request) -> list[GitRepository]:
     require_admin_access(request)
     logger.debug("HTTP list_global_git_repositories")
     try:
-        return await collab_svc.collaboration_service.list_git_repositories(scope="global")
+        return await collab_svc.collaboration_service.list_git_repositories(
+            scope="global",
+            organization_id=None,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/git-repositories",
+    response_model=GitRepository,
+    summary="Register an organization Git repository",
+)
+async def create_organization_git_repository(
+    request: Request,
+    organization_id: UUID,
+    payload: CreateGitRepositoryRequest,
+) -> GitRepository:
+    await _require_organization_admin(request, organization_id)
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.create_git_repository(
+            scope="organization",
+            organization_id=organization_id,
+            workspace_id=None,
+            payload=payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/git-repositories",
+    response_model=list[GitRepository],
+    summary="List organization Git repositories",
+)
+async def list_organization_git_repositories(
+    request: Request,
+    organization_id: UUID,
+) -> list[GitRepository]:
+    await _require_organization_membership(request, organization_id)
+    try:
+        return await collab_svc.collaboration_service.list_git_repositories(
+            scope="organization",
+            organization_id=organization_id,
+            workspace_id=None,
+        )
     except Exception as exc:
         raise _http_error(exc) from exc
 
@@ -1099,8 +1637,51 @@ async def publish_global_asset_from_git(
     try:
         return await collab_svc.collaboration_service.publish_asset_from_git(
             scope="global",
+            organization_id=None,
             workspace_id=None,
             payload=payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/assets/publish-from-git",
+    response_model=WorkspaceAssetVersion,
+    summary="Publish an organization immutable asset version from Git",
+)
+async def publish_organization_asset_from_git(
+    request: Request,
+    organization_id: UUID,
+    payload: PublishAssetFromGitRequest,
+) -> WorkspaceAssetVersion:
+    await _require_organization_admin(request, organization_id)
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.publish_asset_from_git(
+            scope="organization",
+            organization_id=organization_id,
+            workspace_id=None,
+            payload=payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/assets",
+    response_model=list[WorkspaceAsset],
+    summary="List organization-scoped assets",
+)
+async def list_organization_assets(
+    request: Request,
+    organization_id: UUID,
+) -> list[WorkspaceAsset]:
+    await _require_organization_membership(request, organization_id)
+    try:
+        return await collab_svc.collaboration_service.list_workspace_assets(
+            scope="organization",
+            organization_id=organization_id,
         )
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -1113,15 +1694,24 @@ async def publish_global_asset_from_git(
 )
 async def list_assets(
     request: Request,
+    organization_id: UUID | None = Query(default=None),
     workspace_id: UUID | None = Query(default=None),
     scope: str | None = Query(default=None),
 ) -> list[WorkspaceAsset]:
-    logger.debug("HTTP list_assets workspace_id=%s scope=%s", workspace_id, scope)
+    logger.debug(
+        "HTTP list_assets organization_id=%s workspace_id=%s scope=%s",
+        organization_id,
+        workspace_id,
+        scope,
+    )
     try:
+        if organization_id is not None and workspace_id is None:
+            await _require_organization_membership(request, organization_id)
         if workspace_id is not None:
             await _require_workspace_membership(request, workspace_id)
         return await collab_svc.collaboration_service.list_workspace_assets(
             scope=scope,
+            organization_id=organization_id,
             workspace_id=workspace_id,
         )
     except Exception as exc:
@@ -2224,6 +2814,7 @@ async def delete_thread_memory(
 )
 async def list_audit_events(
     request: Request,
+    organization_id: UUID | None = Query(default=None),
     workspace_id: UUID | None = Query(default=None),
     thread_id: UUID | None = Query(default=None),
     actor_user_id: UUID | None = Query(default=None),
@@ -2239,13 +2830,60 @@ async def list_audit_events(
     limit: int = Query(default=100, ge=1, le=1000),
 ):
     try:
-        if workspace_id is None:
-            require_admin_access(request)
-        else:
+        if workspace_id is not None:
             await _require_workspace_audit_access(request, workspace_id)
+        elif organization_id is not None:
+            await _require_organization_admin(request, organization_id)
+        else:
+            require_admin_access(request)
         return await audit_service.list_audit_events(
             AuditExportRequest(
+                organization_id=organization_id,
                 workspace_id=workspace_id,
+                thread_id=thread_id,
+                actor_user_id=actor_user_id,
+                actor_system_agent_id=actor_system_agent_id,
+                action_prefix=action_prefix,
+                outcome=outcome,
+                target_type=target_type,
+                target_id=target_id,
+                correlation_id=correlation_id,
+                request_id=request_id,
+                occurred_after=occurred_after,
+                occurred_before=occurred_before,
+                limit=limit,
+            )
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/audit/events",
+    response_model=AuditEventPage,
+    summary="List organization audit events",
+)
+async def list_organization_audit_events(
+    request: Request,
+    organization_id: UUID,
+    thread_id: UUID | None = Query(default=None),
+    actor_user_id: UUID | None = Query(default=None),
+    actor_system_agent_id: UUID | None = Query(default=None),
+    action_prefix: str | None = Query(default=None),
+    outcome: str | None = Query(default=None),
+    target_type: str | None = Query(default=None),
+    target_id: UUID | None = Query(default=None),
+    correlation_id: UUID | None = Query(default=None),
+    request_id: UUID | None = Query(default=None),
+    occurred_after: datetime | None = Query(default=None),
+    occurred_before: datetime | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> AuditEventPage:
+    await _require_organization_admin(request, organization_id)
+    try:
+        return await audit_service.list_audit_events(
+            AuditExportRequest(
+                organization_id=organization_id,
                 thread_id=thread_id,
                 actor_user_id=actor_user_id,
                 actor_system_agent_id=actor_system_agent_id,
@@ -2274,10 +2912,12 @@ async def get_audit_event(request: Request, audit_event_id: UUID):
         event = await audit_service.get_audit_event(audit_event_id)
         if event is None:
             raise KeyError(f"Audit event {audit_event_id} not found")
-        if event.workspace_id is None:
-            require_admin_access(request)
-        else:
+        if event.workspace_id is not None:
             await _require_workspace_audit_access(request, event.workspace_id)
+        elif event.organization_id is not None:
+            await _require_organization_admin(request, event.organization_id)
+        else:
+            require_admin_access(request)
         return event
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -2295,6 +2935,11 @@ async def verify_audit_chain(request: Request, chain_partition: str):
                 request,
                 UUID(chain_partition.split(":", 1)[1]),
             )
+        elif chain_partition.startswith("organization:"):
+            await _require_organization_admin(
+                request,
+                UUID(chain_partition.split(":", 1)[1]),
+            )
         else:
             require_admin_access(request)
         return await audit_service.verify_audit_chain(chain_partition)
@@ -2309,11 +2954,32 @@ async def verify_audit_chain(request: Request, chain_partition: str):
 )
 async def export_audit_events(request: Request, payload: AuditExportRequest = Body(...)):
     try:
-        if payload.workspace_id is None:
-            require_admin_access(request)
-        else:
+        if payload.workspace_id is not None:
             await _require_workspace_audit_access(request, payload.workspace_id)
+        elif payload.organization_id is not None:
+            await _require_organization_admin(request, payload.organization_id)
+        else:
+            require_admin_access(request)
         return await audit_service.export_audit_events(payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/audit/events/export",
+    response_model=AuditExportResult,
+    summary="Export organization audit events to object storage",
+)
+async def export_organization_audit_events(
+    request: Request,
+    organization_id: UUID,
+    payload: AuditExportRequest = Body(...),
+) -> AuditExportResult:
+    await _require_organization_admin(request, organization_id)
+    try:
+        return await audit_service.export_audit_events(
+            payload.model_copy(update={"organization_id": organization_id, "workspace_id": None})
+        )
     except Exception as exc:
         raise _http_error(exc) from exc
 

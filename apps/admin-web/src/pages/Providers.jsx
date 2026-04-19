@@ -20,9 +20,12 @@ export default function Providers() {
   const api = useApi();
   const [llmProviders, setLlmProviders] = useState([]);
   const [memoryProviders, setMemoryProviders] = useState([]);
+  const [organizations, setOrganizations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('llm');
+  const [scopeMode, setScopeMode] = useState('global');
+  const [selectedOrganizationId, setSelectedOrganizationId] = useState('');
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState('create');
@@ -62,12 +65,42 @@ export default function Providers() {
     onConfirm: () => {} 
   });
 
+  const selectedOrganization = organizations.find(
+    (organization) => organization.organization_id === selectedOrganizationId
+  ) || null;
+
+  const fetchOrganizations = async () => {
+    try {
+      const res = await api.get('/v1/organizations');
+      setOrganizations(res.data);
+      if (!selectedOrganizationId && res.data.length === 1) {
+        setSelectedOrganizationId(res.data[0].organization_id);
+      }
+    } catch (err) {
+      setError(err.message || 'Failed to fetch organizations');
+    }
+  };
+
   const fetchData = async () => {
     try {
       setLoading(true);
+      if (scopeMode === 'organization' && !selectedOrganizationId) {
+        setLlmProviders([]);
+        setMemoryProviders([]);
+        setError(null);
+        return;
+      }
+      const llmEndpoint =
+        scopeMode === 'organization'
+          ? `/v1/organizations/${selectedOrganizationId}/llm-providers`
+          : '/v1/llm-providers';
+      const memoryEndpoint =
+        scopeMode === 'organization'
+          ? `/v1/organizations/${selectedOrganizationId}/memory-providers`
+          : '/v1/memory-providers';
       const [llmRes, memRes] = await Promise.all([
-        api.get('/v1/llm-providers'),
-        api.get('/v1/memory-providers')
+        api.get(llmEndpoint),
+        api.get(memoryEndpoint),
       ]);
 
       setLlmProviders(llmRes.data);
@@ -81,8 +114,18 @@ export default function Providers() {
   };
 
   useEffect(() => {
-    void fetchData();
+    void fetchOrganizations();
   }, [api]);
+
+  useEffect(() => {
+    if (scopeMode === 'organization' && !selectedOrganizationId && organizations.length === 1) {
+      setSelectedOrganizationId(organizations[0].organization_id);
+    }
+  }, [organizations, scopeMode, selectedOrganizationId]);
+
+  useEffect(() => {
+    void fetchData();
+  }, [api, scopeMode, selectedOrganizationId]);
 
   const resetForms = () => {
     setLlmFormData({
@@ -115,6 +158,10 @@ export default function Providers() {
   };
 
   const handleOpenCreateModal = () => {
+    if (scopeMode === 'organization' && !selectedOrganizationId) {
+      alert('Select an organization before creating an org-scoped provider.');
+      return;
+    }
     resetForms();
     setIsModalOpen(true);
   };
@@ -204,7 +251,11 @@ export default function Providers() {
           secret_config: JSON.parse(llmFormData.secret_config || '{}'),
           metadata: JSON.parse(llmFormData.metadata || '{}')
         };
-        endpoint = modalMode === 'edit' ? `llm-providers/${editingProvider.provider_id}` : 'llm-providers';
+        endpoint = modalMode === 'edit'
+          ? `llm-providers/${editingProvider.provider_id}`
+          : scopeMode === 'organization'
+            ? `organizations/${selectedOrganizationId}/llm-providers`
+            : 'llm-providers';
         method = modalMode === 'edit' ? 'PATCH' : 'POST';
       } else {
         payload = {
@@ -218,7 +269,11 @@ export default function Providers() {
           secret_config: JSON.parse(memoryFormData.secret_config || '{}'),
           metadata: JSON.parse(memoryFormData.metadata || '{}')
         };
-        endpoint = modalMode === 'edit' ? `memory-providers/${editingProvider.provider_id}` : 'memory-providers';
+        endpoint = modalMode === 'edit'
+          ? `memory-providers/${editingProvider.provider_id}`
+          : scopeMode === 'organization'
+            ? `organizations/${selectedOrganizationId}/memory-providers`
+            : 'memory-providers';
         method = modalMode === 'edit' ? 'PATCH' : 'POST';
       }
 
@@ -256,15 +311,47 @@ export default function Providers() {
             <Server className="w-6 h-6 mr-3 text-blue-500" />
             Infrastructure Providers
           </h1>
-          <p className="text-slate-500 mt-1">Manage system-level LLM and Memory backend integrations</p>
+          <p className="text-slate-500 mt-1">
+            Manage {scopeMode === 'organization' ? 'organization-scoped' : 'platform-global'} LLM and Memory backend integrations
+          </p>
         </div>
-        <button 
-          onClick={handleOpenCreateModal}
-          className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center transition-all shadow-lg shadow-blue-500/20 font-medium"
-        >
-          <Plus className="w-5 h-5 mr-2" />
-          Add Provider
-        </button>
+        <div className="flex items-center gap-3">
+          <div className="flex space-x-1 bg-slate-100 dark:bg-slate-800/50 p-1 rounded-xl border border-slate-200 dark:border-slate-700">
+            <button
+              onClick={() => setScopeMode('global')}
+              className={`px-3 py-2 rounded-lg text-sm font-medium transition-all ${scopeMode === 'global' ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}
+            >
+              Platform Global
+            </button>
+            <button
+              onClick={() => setScopeMode('organization')}
+              className={`px-3 py-2 rounded-lg text-sm font-medium transition-all ${scopeMode === 'organization' ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}
+            >
+              Organization
+            </button>
+          </div>
+          {scopeMode === 'organization' && (
+            <select
+              value={selectedOrganizationId}
+              onChange={(e) => setSelectedOrganizationId(e.target.value)}
+              className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm"
+            >
+              <option value="">Select organization</option>
+              {organizations.map((organization) => (
+                <option key={organization.organization_id} value={organization.organization_id}>
+                  {organization.name}
+                </option>
+              ))}
+            </select>
+          )}
+          <button 
+            onClick={handleOpenCreateModal}
+            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center transition-all shadow-lg shadow-blue-500/20 font-medium"
+          >
+            <Plus className="w-5 h-5 mr-2" />
+            Add Provider
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -301,7 +388,17 @@ export default function Providers() {
                 </div>
                 <div>
                   <h3 className="font-bold text-slate-900 dark:text-white">{p.display_name}</h3>
-                  <code className="text-xs text-slate-400">{activeTab === 'llm' ? p.engine_id : p.provider_key}</code>
+                  <div className="flex items-center gap-2">
+                    <code className="text-xs text-slate-400">{activeTab === 'llm' ? p.engine_id : p.provider_key}</code>
+                    <span className="text-[10px] uppercase tracking-wide bg-slate-100 dark:bg-slate-700 text-slate-500 px-2 py-0.5 rounded-full">
+                      {p.scope || 'global'}
+                    </span>
+                    {p.organization_id && selectedOrganization && (
+                      <span className="text-[10px] uppercase tracking-wide bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300 px-2 py-0.5 rounded-full">
+                        {selectedOrganization.name}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
               <div className="flex space-x-2">

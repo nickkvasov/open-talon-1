@@ -145,6 +145,9 @@ class ScrollbackTUI2:
         "/llm-provider enable",
         "/llm-provider disable",
         "/llm-provider delete",
+        "/organization list",
+        "/organization show",
+        "/organization use",
         "/workspace list",
         "/workspace show",
         "/workspace create",
@@ -366,6 +369,11 @@ class ScrollbackTUI2:
 
         display_name = self.state.display_name if self._is_authenticated else self.profile
         auth = self.state.display_name if self._is_authenticated else "signed out"
+        organization = (
+            self.state.organization_id[:8]
+            if self._is_authenticated and self.state.organization_id
+            else "--"
+        )
         workspace = self.state.workspace_id[:8] if self._is_authenticated and self.state.workspace_id else "--"
         thread = self.state.thread_id[:8] if self._is_authenticated and self.state.thread_id else "--"
         participant = (
@@ -382,11 +390,15 @@ class ScrollbackTUI2:
             (f"Profile: {self.profile}", "Up/Down recalls command history"),
             (f"Auth: {auth}", "Tab fills the first matching slash command"),
             (f"Conn: {self._connection_status} | Links: {len(self._detected_links)}", "/help shows the command list"),
+            (f"Organization: {organization}", "/organization use picks the active org"),
             (f"Workspace: {workspace}", "/workspace list and /thread list are handy starts"),
             (f"Thread: {thread}", "Recent activity"),
             (f"Participant: {participant}", recent_one),
-            (f"Gateway: {gateway_label}", recent_two),
         ]
+        if recent_two:
+            rows.append((f"Gateway: {gateway_label}", recent_two))
+        else:
+            rows.append((f"Gateway: {gateway_label}", ""))
 
         lines = [f"┌─ {'Open Talon TUI2':<{body_width - 2}} ─┐"]
         for left, right in rows:
@@ -746,6 +758,15 @@ class ScrollbackTUI2:
             self.state.participant_id = current.get("participant_id")
             self.state.display_name = current.get("display_name", self.state.display_name)
 
+    def _clear_workspace_context(self, *, persist: bool = True) -> None:
+        self.state.participant_id = None
+        self.state.workspace_id = None
+        self.state.thread_id = None
+        self.state.last_sequence = 0
+        self._seen_message_ids.clear()
+        if persist:
+            save_state(self.profile, self.state)
+
     @staticmethod
     def _extract_workspace_id(body: dict) -> str:
         workspace = body.get("workspace")
@@ -770,6 +791,56 @@ class ScrollbackTUI2:
             return thread_id
         raise KeyError("thread_id")
 
+    async def _list_organizations(self) -> list[dict]:
+        assert self._http_client is not None
+        response = await self._http_client.get(f"{self.gateway}/v1/organizations")
+        response.raise_for_status()
+        return response.json()
+
+    async def _organization_detail(self, organization_id: str) -> dict:
+        assert self._http_client is not None
+        response = await self._http_client.get(f"{self.gateway}/v1/organizations/{organization_id}")
+        response.raise_for_status()
+        return response.json()
+
+    def _resolve_organization_target(self, organizations: list[dict], target: str) -> dict | None:
+        normalized = target.strip()
+        if not normalized or normalized == "current":
+            for organization in organizations:
+                if organization["organization_id"] == self.state.organization_id:
+                    return organization
+            return None
+        for organization in organizations:
+            organization_id = organization["organization_id"]
+            if organization_id == normalized or organization_id.startswith(normalized):
+                return organization
+        lowered = normalized.lower()
+        for organization in organizations:
+            slug = organization.get("slug", "")
+            name = organization.get("name", "")
+            if isinstance(slug, str) and slug.lower() == lowered:
+                return organization
+            if isinstance(name, str) and name.lower() == lowered:
+                return organization
+        return None
+
+    async def _refresh_selected_organization(self) -> list[dict]:
+        organizations = await self._list_organizations()
+        changed = False
+        if self.state.organization_id and self._resolve_organization_target(
+            organizations,
+            self.state.organization_id,
+        ) is None:
+            self.state.organization_id = None
+            self._clear_workspace_context(persist=False)
+            changed = True
+        if self.state.organization_id is None and len(organizations) == 1:
+            self.state.organization_id = organizations[0]["organization_id"]
+            changed = True
+        if changed:
+            save_state(self.profile, self.state)
+        return organizations
+
     async def _ensure_context(self) -> None:
         assert self._http_client is not None
 
@@ -777,14 +848,26 @@ class ScrollbackTUI2:
         if workspace_id:
             response = await self._http_client.get(f"{self.gateway}/v1/workspaces/{workspace_id}")
             if response.status_code != 200:
-                self.state.workspace_id = None
+                self._clear_workspace_context(persist=False)
             else:
-                self._set_current_participant(response.json().get("participants", []))
+                body = response.json()
+                workspace = body.get("workspace", {})
+                if isinstance(workspace, dict) and workspace.get("organization_id"):
+                    self.state.organization_id = workspace["organization_id"]
+                self._set_current_participant(body.get("participants", []))
+
+        if self.state.organization_id is None:
+            await self._refresh_selected_organization()
+
+        if self.state.organization_id is None:
+            save_state(self.profile, self.state)
+            return
 
         if self.state.workspace_id is None:
             response = await self._http_client.post(
                 f"{self.gateway}/v1/workspaces",
                 json={
+                    "organization_id": self.state.organization_id,
                     "name": self.workspace_name,
                     "description": "Workspace created by Open Talon TUI2",
                     "actor": self.actor_payload,
@@ -792,6 +875,9 @@ class ScrollbackTUI2:
             )
             response.raise_for_status()
             body = response.json()
+            workspace = body.get("workspace", {})
+            if isinstance(workspace, dict) and workspace.get("organization_id"):
+                self.state.organization_id = workspace["organization_id"]
             self.state.workspace_id = self._extract_workspace_id(body)
             self._set_current_participant(body.get("participants", []))
             save_state(self.profile, self.state)
@@ -803,7 +889,7 @@ class ScrollbackTUI2:
                 self.state.thread_id = None
                 self.state.last_sequence = 0
 
-        if self.state.thread_id is None:
+        if self.state.thread_id is None and self.state.workspace_id is not None:
             await self._create_thread(self.default_thread_title)
 
         save_state(self.profile, self.state)
@@ -825,9 +911,10 @@ class ScrollbackTUI2:
         self._seen_message_ids.clear()
         save_state(self.profile, self.state)
 
-    async def _list_workspaces(self) -> list[dict]:
+    async def _list_workspaces(self, organization_id: str | None = None) -> list[dict]:
         assert self._http_client is not None
-        response = await self._http_client.get(f"{self.gateway}/v1/workspaces")
+        params = {"organization_id": organization_id} if organization_id else None
+        response = await self._http_client.get(f"{self.gateway}/v1/workspaces", params=params)
         response.raise_for_status()
         return response.json()
 
@@ -1194,14 +1281,30 @@ class ScrollbackTUI2:
             return
         try:
             await self._ensure_context()
-            await self._load_timeline()
         except Exception as exc:
             self._handle_runtime_error(exc, context="unable to load workspace context")
+            return
+        if self.state.organization_id is None:
+            self._set_connection_status("ready")
+            self._write_system(
+                f"profile {self.profile} ready as {self.state.display_name}; select an organization with /organization use"
+            )
+            return
+        if self.state.workspace_id is None:
+            self._set_connection_status("ready")
+            self._write_system(
+                f"profile {self.profile} ready in organization {self.state.organization_id[:8]}; use /workspace create <name> or /workspace list"
+            )
+            return
+        try:
+            await self._load_timeline()
+        except Exception as exc:
+            self._handle_runtime_error(exc, context="unable to load workspace timeline")
             return
         self._start_ws()
         self._set_connection_status("ready")
         self._write_system(
-            f"profile {self.profile} ready as {self.state.display_name} in workspace {self.state.workspace_id[:8]} thread {self.state.thread_id[:8]}"
+            f"profile {self.profile} ready as {self.state.display_name} in organization {self.state.organization_id[:8]} workspace {self.state.workspace_id[:8]} thread {self.state.thread_id[:8]}"
         )
 
     async def _login(self) -> None:
@@ -1313,6 +1416,61 @@ class ScrollbackTUI2:
             return
         self._write_system(f"unknown account action: {action}")
 
+    async def _handle_organization_command(self, command: str) -> None:
+        if not self._is_authenticated:
+            self._write_system("sign in first with /auth login")
+            return
+        parts = command.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            self._write_system(
+                "organization commands: /organization list | /organization show [id|slug|name] | /organization use <id|slug|name>"
+            )
+            return
+        action = parts[1].lower()
+        organizations = await self._refresh_selected_organization()
+        if action == "list":
+            for organization in organizations:
+                marker = "*" if organization["organization_id"] == self.state.organization_id else "-"
+                self._write_system(
+                    f"{marker} {organization['name']} ({organization['slug']}) [{organization['organization_id'][:8]}]"
+                )
+            return
+        if action == "show":
+            target = parts[2].strip() if len(parts) > 2 else "current"
+            organization = self._resolve_organization_target(organizations, target)
+            if organization is None:
+                self._write_system(
+                    "no organization selected"
+                    if target == "current"
+                    else f"organization not found: {target}"
+                )
+                return
+            detail = await self._organization_detail(organization["organization_id"])
+            self._write_system(f"name: {detail['name']}")
+            self._write_system(f"slug: {detail['slug']}")
+            self._write_system(f"id: {detail['organization_id']}")
+            self._write_system(f"description: {detail.get('description') or 'No description'}")
+            return
+        if action == "use":
+            target = parts[2].strip() if len(parts) > 2 else ""
+            if not target:
+                self._write_system("usage: /organization use <id|slug|name>")
+                return
+            organization = self._resolve_organization_target(organizations, target)
+            if organization is None:
+                self._write_system(f"organization not found: {target}")
+                return
+            previous_organization_id = self.state.organization_id
+            self.state.organization_id = organization["organization_id"]
+            if previous_organization_id != self.state.organization_id:
+                await self._close_ws()
+                self._clear_workspace_context(persist=False)
+            save_state(self.profile, self.state)
+            self._set_connection_status("ready")
+            self._write_system(f"selected organization: {organization['name']}")
+            return
+        self._write_system(f"unknown organization action: {action}")
+
     async def _handle_workspace_command(self, command: str) -> None:
         if not self._is_authenticated:
             self._write_system("sign in first with /auth login")
@@ -1320,33 +1478,55 @@ class ScrollbackTUI2:
         parts = command.strip().split(maxsplit=2)
         if len(parts) < 2:
             self._write_system(
-                "workspace commands: /workspace list | /workspace show | /workspace create <name> | /workspace use <id|name>"
+                "workspace commands: /workspace list [all] | /workspace show | /workspace create <name> | /workspace use <id|name>"
             )
             return
         action = parts[1].lower()
         target = parts[2].strip() if len(parts) > 2 else ""
-        workspaces = await self._list_workspaces()
         if action == "list":
+            show_all = target.lower() == "all" if target else False
+            if target and not show_all:
+                self._write_system("usage: /workspace list [all]")
+                return
+            if not show_all and not self.state.organization_id:
+                await self._refresh_selected_organization()
+            if not show_all and not self.state.organization_id:
+                self._write_system(
+                    "select an organization first with /organization use or run /workspace list all"
+                )
+                return
+            workspaces = await self._list_workspaces(
+                None if show_all else self.state.organization_id
+            )
             for workspace in workspaces:
                 marker = "*" if workspace["workspace_id"] == self.state.workspace_id else "-"
                 self._write_system(f"{marker} {workspace['name']} ({workspace['workspace_id'][:8]})")
             return
         if action == "show":
+            workspaces = await self._list_workspaces(self.state.organization_id)
             current = self._resolve_workspace_target(workspaces, "current")
             if current is None:
                 self._write_system("current workspace not found")
                 return
             self._write_system(f"name: {current['name']}")
             self._write_system(f"id: {current['workspace_id']}")
+            if current.get("organization_id"):
+                self._write_system(f"organization: {current['organization_id']}")
             return
         if action == "create":
             if not target:
                 self._write_system("usage: /workspace create <name>")
                 return
+            if not self.state.organization_id:
+                await self._refresh_selected_organization()
+            if not self.state.organization_id:
+                self._write_system("select an organization first with /organization use")
+                return
             assert self._http_client is not None
             response = await self._http_client.post(
                 f"{self.gateway}/v1/workspaces",
                 json={
+                    "organization_id": self.state.organization_id,
                     "name": target,
                     "description": "Workspace created by Open Talon TUI2",
                     "actor": self.actor_payload,
@@ -1354,6 +1534,9 @@ class ScrollbackTUI2:
             )
             response.raise_for_status()
             body = response.json()
+            workspace = body.get("workspace", {})
+            if isinstance(workspace, dict) and workspace.get("organization_id"):
+                self.state.organization_id = workspace["organization_id"]
             self.state.workspace_id = body["workspace"]["workspace_id"]
             self.state.thread_id = None
             self.state.last_sequence = 0
@@ -1365,6 +1548,7 @@ class ScrollbackTUI2:
             self._write_system(f"switched workspace: {target}")
             return
         if action == "use":
+            workspaces = await self._list_workspaces(self.state.organization_id)
             workspace = self._resolve_workspace_target(workspaces, target)
             if workspace is None:
                 self._write_system(f"workspace not found: {target or 'current'}")
@@ -1479,7 +1663,7 @@ class ScrollbackTUI2:
     async def _handle_command(self, text: str) -> None:
         if text == "/help":
             self._write_system(
-                "commands: /auth login | /auth logout | /account whoami | /account list | /account switch <profile> | /llm-provider list | /llm-provider show <id|engine_id|name> | /llm-provider create key=value ... | /llm-provider update <target> field=value ... | /workspace list | /workspace create <name> | /workspace use <id|name> | /thread list | /thread create <title> | /thread use <id|title> | /links | /open <n|last|url> | /copy | /quit"
+                "commands: /auth login | /auth logout | /account whoami | /account list | /account switch <profile> | /llm-provider list | /llm-provider show <id|engine_id|name> | /llm-provider create key=value ... | /llm-provider update <target> field=value ... | /organization list | /organization show [id|slug|name] | /organization use <id|slug|name> | /workspace list [all] | /workspace create <name> | /workspace use <id|name> | /thread list | /thread create <title> | /thread use <id|title> | /links | /open <n|last|url> | /copy | /quit"
             )
             return
         if text == "/quit":
@@ -1510,6 +1694,9 @@ class ScrollbackTUI2:
             return
         if text == "/llm-provider" or text.startswith("/llm-provider "):
             await self._handle_llm_provider_command(text)
+            return
+        if text == "/organization" or text.startswith("/organization "):
+            await self._handle_organization_command(text)
             return
         if text == "/workspace" or text.startswith("/workspace "):
             await self._handle_workspace_command(text)
