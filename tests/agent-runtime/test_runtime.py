@@ -41,6 +41,10 @@ from agent_runtime.runtime import (
     _debug_prompt_payload,
     render_prompt,
 )
+from agent_runtime.observability import (
+    OtlpHttpObservabilityProvider,
+    build_observability_provider_from_env,
+)
 from agent_runtime.secrets import (
     OpenBaoSecretProvider,
     SecretReference,
@@ -1008,6 +1012,9 @@ async def test_agent_runtime_emits_task_span_to_observer():
 
     assert observer.records[0]["kind"] == "span"
     assert observer.records[0]["name"] == "agent-task-run"
+    assert observer.records[0]["metadata"]["correlation_id"] == str(kernel.context.run.correlation_id)
+    assert observer.records[0]["metadata"]["run_id"] == str(kernel.context.run.run_id)
+    assert observer.records[0]["metadata"]["task_id"] == str(kernel.task.task_id)
     updates = observer.records[0]["updates"]
     assert any(update.get("metadata", {}).get("stop_reason") == "completed" for update in updates)
     assert observer.flush_count >= 1
@@ -1385,6 +1392,73 @@ def test_langfuse_runtime_observer_from_env_uses_sdk_client(monkeypatch):
 
     assert observer._client is fake_client
     assert os.environ["LANGFUSE_BASE_URL"] == "http://localhost:3000"
+
+
+def test_build_observability_provider_from_env_supports_otlp(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_OBSERVABILITY_PROVIDER", "otlp")
+    monkeypatch.setenv("AGENT_RUNTIME_OTLP_HTTP_ENDPOINT", "http://127.0.0.1:4318/v1/traces")
+
+    provider = build_observability_provider_from_env()
+
+    assert isinstance(provider, OtlpHttpObservabilityProvider)
+
+
+def test_build_observability_provider_from_env_supports_none(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_OBSERVABILITY_PROVIDER", "none")
+
+    provider = build_observability_provider_from_env()
+
+    assert provider.provider_name == "none"
+
+
+def test_otlp_observability_redacts_sensitive_payloads(monkeypatch):
+    requests: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json=None):
+            requests.append({"url": url, "json": json})
+            return FakeResponse()
+
+    monkeypatch.setattr("agent_runtime.observability.httpx.Client", FakeClient)
+
+    provider = OtlpHttpObservabilityProvider(
+        endpoint="http://127.0.0.1:4318/v1/traces",
+        service_name="agent-runtime",
+    )
+    with provider.start_generation(
+        name="remote-openai-responses",
+        model="gpt-5.4-mini",
+        input={
+            "prompt": "top secret prompt",
+            "headers": {
+                "authorization": "Bearer sk-test-secret",
+                "x-api-key": "sk-test-secret",
+            },
+        },
+        metadata={"provider": "openai"},
+    ) as observation:
+        observation.update(output={"message": "ok", "token": "secret-token"})
+
+    provider.flush()
+
+    body = json.dumps(requests[0]["json"], sort_keys=True)
+    assert "top secret prompt" not in body
+    assert "Bearer sk-test-secret" not in body
+    assert "secret-token" not in body
+    assert "[REDACTED]" in body
 
 
 @pytest.mark.asyncio

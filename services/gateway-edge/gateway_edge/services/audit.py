@@ -9,9 +9,6 @@ from pathlib import Path
 import sys
 from uuid import UUID, uuid4
 
-import httpx
-from aiokafka import AIOKafkaConsumer
-
 _ROOT_DIR = Path(__file__).resolve().parents[4]
 _CORE_COLLAB_DIR = _ROOT_DIR / "services" / "core-collab"
 if _CORE_COLLAB_DIR.is_dir():
@@ -19,10 +16,7 @@ if _CORE_COLLAB_DIR.is_dir():
     if collab_path not in sys.path:
         sys.path.insert(0, collab_path)
 
-from core_collab import CollaborationKernel, CollaborationRepository
-
 from gateway_edge.config import settings
-from gateway_edge.db.postgres import get_pool
 from gateway_edge.models import (
     AuditChainVerificationResult,
     AuditEvent,
@@ -32,8 +26,13 @@ from gateway_edge.models import (
     AuditExportResult,
     AuthContext,
 )
-from gateway_edge.services.events import event_service
-from gateway_edge.services.object_storage import MinioObjectStorage
+from gateway_edge.services.audit_providers import (
+    AuditArchiveProvider,
+    AuditLedger,
+    AuditProjectionProvider,
+    AuditRelayProvider,
+    build_audit_provider_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,17 +42,18 @@ _SECRET_PATTERN = re.compile(
 
 
 class AuditService:
-    def __init__(self) -> None:
-        self._repository: CollaborationRepository | None = None
-        self._kernel: CollaborationKernel | None = None
-        self._storage = MinioObjectStorage(
-            endpoint=settings.asset_storage_endpoint,
-            bucket=settings.asset_storage_bucket,
-            access_key=settings.asset_storage_access_key,
-            secret_key=settings.asset_storage_secret_key,
-            region=settings.asset_storage_region,
-            force_path_style=settings.asset_storage_force_path_style,
-        )
+    def __init__(
+        self,
+        *,
+        ledger: AuditLedger | None = None,
+        relay_provider: AuditRelayProvider | None = None,
+        projection_provider: AuditProjectionProvider | None = None,
+        archive_provider: AuditArchiveProvider | None = None,
+    ) -> None:
+        self._ledger = ledger
+        self._relay_provider = relay_provider
+        self._projection_provider = projection_provider
+        self._archive_provider = archive_provider
         self._relay_task: asyncio.Task[None] | None = None
         self._projector_task: asyncio.Task[None] | None = None
         self._replay_task: asyncio.Task[None] | None = None
@@ -62,10 +62,18 @@ class AuditService:
         self._checkpoint_exported_for: str | None = None
 
     async def start(self) -> None:
-        pool = await get_pool()
-        self._repository = CollaborationRepository(pool)
-        self._kernel = CollaborationKernel(self._repository)
-        await self._kernel.setup_schema()
+        if (
+            self._ledger is None
+            or self._relay_provider is None
+            or self._projection_provider is None
+            or self._archive_provider is None
+        ):
+            providers = await build_audit_provider_registry(gateway_settings=settings)
+            self._ledger = self._ledger or providers.ledger
+            self._relay_provider = self._relay_provider or providers.relay
+            self._projection_provider = self._projection_provider or providers.projection
+            self._archive_provider = self._archive_provider or providers.archive
+        await self._require_ledger().setup()
         self._relay_task = asyncio.create_task(self._relay_loop())
         self._projector_task = asyncio.create_task(self._projector_loop())
         self._replay_task = asyncio.create_task(self._replay_loop())
@@ -102,8 +110,6 @@ class AuditService:
         self._replay_task = None
         self._checkpoint_task = None
         self._retention_task = None
-        self._kernel = None
-        self._repository = None
         logger.info("Audit service stopped")
 
     async def record_http_audit(
@@ -114,8 +120,7 @@ class AuditService:
         started_at: datetime,
         error: Exception | None = None,
     ) -> None:
-        kernel = self._kernel
-        if kernel is None:
+        if self._ledger is None:
             return
         status_code = 500 if error is not None else getattr(response, "status_code", 200)
         auth_context = getattr(request.state, "auth_context", None)
@@ -178,8 +183,7 @@ class AuditService:
         organization_id = None
         if workspace_id is not None:
             try:
-                workspace = await self._require_kernel().get_workspace_detail(workspace_id)
-                organization_id = workspace.workspace.organization_id
+                organization_id = await self._require_ledger().resolve_workspace_organization(workspace_id)
             except Exception:
                 organization_id = None
         draft = AuditEventDraft(
@@ -209,31 +213,16 @@ class AuditService:
         await self._record_audit_draft(draft)
 
     async def list_audit_events(self, payload: AuditExportRequest) -> AuditEventPage:
-        return await self._require_kernel().list_audit_events(
-            organization_id=payload.organization_id,
-            workspace_id=payload.workspace_id,
-            thread_id=payload.thread_id,
-            actor_user_id=payload.actor_user_id,
-            actor_system_agent_id=payload.actor_system_agent_id,
-            action_prefix=payload.action_prefix,
-            outcome=payload.outcome,
-            target_type=payload.target_type,
-            target_id=payload.target_id,
-            correlation_id=payload.correlation_id,
-            request_id=payload.request_id,
-            occurred_after=payload.occurred_after,
-            occurred_before=payload.occurred_before,
-            limit=payload.limit,
-        )
+        return await self._require_ledger().list_events(payload)
 
     async def get_audit_event(self, audit_event_id: UUID) -> AuditEvent | None:
-        return await self._require_kernel().get_audit_event(audit_event_id)
+        return await self._require_ledger().get_event(audit_event_id)
 
     async def verify_audit_chain(
         self,
         chain_partition: str,
     ) -> AuditChainVerificationResult:
-        return await self._require_kernel().verify_audit_chain(chain_partition)
+        return await self._require_ledger().verify_chain(chain_partition)
 
     async def export_audit_events(self, payload: AuditExportRequest) -> AuditExportResult:
         page = await self.list_audit_events(payload)
@@ -247,7 +236,8 @@ class AuditService:
             f"{datetime.now(UTC).strftime('%Y/%m/%d')}/"
             f"{uuid4()}.jsonl"
         )
-        stored = await self._storage.put_object(
+        archive_provider = self._require_archive_provider()
+        stored = await archive_provider.put_object(
             object_key=object_key,
             payload=body,
             content_type="application/x-ndjson",
@@ -258,18 +248,18 @@ class AuditService:
             event_count=len(page.events),
             size_bytes=stored.size_bytes,
             sha256=stored.sha256,
-            presigned_url=self._storage.presign_get(
+            presigned_url=archive_provider.presign_get(
                 object_key=stored.object_key,
                 expires_seconds=settings.asset_storage_presign_expiry_seconds,
             ),
         )
 
     async def _record_audit_draft(self, draft: AuditEventDraft) -> None:
-        kernel = self._kernel
-        if kernel is None:
+        ledger = self._ledger
+        if ledger is None:
             return
         try:
-            await kernel.record_audit_event(draft)
+            await ledger.record_event(draft)
         except Exception:
             logger.exception("Failed to write audit event action_name=%s", draft.action_name)
 
@@ -282,16 +272,8 @@ class AuditService:
         thread_id = path_params.get("thread_id")
         if isinstance(thread_id, UUID):
             try:
-                thread = await self._require_kernel().get_thread_detail(thread_id)
-                workspace = await self._require_kernel().get_workspace_detail(
-                    thread.thread.workspace_id
-                )
-                return (
-                    workspace.workspace.organization_id,
-                    thread.thread.workspace_id,
-                    thread_id,
-                    "thread",
-                )
+                organization_id, workspace_id = await self._require_ledger().resolve_thread_scope(thread_id)
+                return (organization_id, workspace_id, thread_id, "thread")
             except Exception:
                 return (
                     organization_id if isinstance(organization_id, UUID) else None,
@@ -301,8 +283,8 @@ class AuditService:
                 )
         if isinstance(workspace_id, UUID):
             try:
-                workspace = await self._require_kernel().get_workspace_detail(workspace_id)
-                return workspace.workspace.organization_id, workspace_id, None, "workspace"
+                organization_id = await self._require_ledger().resolve_workspace_organization(workspace_id)
+                return organization_id, workspace_id, None, "workspace"
             except Exception:
                 return (
                     organization_id if isinstance(organization_id, UUID) else None,
@@ -325,21 +307,14 @@ class AuditService:
             logger.exception("Audit relay loop failed")
 
     async def _projector_loop(self) -> None:
-        if not settings.audit_clickhouse_enabled:
+        projection_provider = self._require_projection_provider()
+        relay_provider = self._require_relay_provider()
+        if not projection_provider.enabled() or not relay_provider.supports_subscription():
             return
-        consumer = AIOKafkaConsumer(
-            settings.kafka_audit_events_topic,
-            bootstrap_servers=settings.kafka_bootstrap_servers,
-            group_id=f"{settings.kafka_consumer_group}-audit-projector",
-            auto_offset_reset="latest",
-            enable_auto_commit=True,
-            value_deserializer=lambda value: json.loads(value.decode()),
-        )
         try:
-            await consumer.start()
             while True:
                 try:
-                    await self._ensure_clickhouse_schema()
+                    await projection_provider.ensure_ready()
                     break
                 except asyncio.CancelledError:  # pragma: no cover - shutdown path
                     raise
@@ -348,40 +323,34 @@ class AuditService:
                     await asyncio.sleep(
                         settings.audit_clickhouse_replay_interval_seconds
                     )
-            async for message in consumer:
+            async for event in relay_provider.subscribe():
                 try:
-                    event = AuditEvent.model_validate(message.value)
-                    await self._insert_clickhouse_events([event])
-                    pool = await get_pool()
-                    async with pool.acquire() as conn:
-                        async with conn.transaction():
-                            await self._require_repository().advance_audit_export_checkpoint(
-                                conn,
-                                consumer_name=settings.audit_clickhouse_projector_consumer_name,
-                                last_ledger_offset=event.ledger_offset,
-                                metadata={"source": "kafka"},
-                            )
+                    await projection_provider.project_events([event])
+                    if projection_provider.consumer_name is not None:
+                        await self._require_ledger().advance_export_checkpoint(
+                            consumer_name=projection_provider.consumer_name,
+                            last_ledger_offset=event.ledger_offset,
+                            metadata={"source": "kafka"},
+                        )
                 except asyncio.CancelledError:  # pragma: no cover - shutdown path
                     raise
                 except Exception:
                     logger.exception(
                         "Audit projector event failed ledger_offset=%s",
-                        message.value.get("ledger_offset"),
+                        event.ledger_offset,
                     )
         except asyncio.CancelledError:  # pragma: no cover - shutdown path
             raise
         except Exception:
             logger.exception("Audit projector loop failed")
-        finally:
-            await consumer.stop()
 
     async def _replay_loop(self) -> None:
-        if not settings.audit_clickhouse_enabled:
+        if not self._require_projection_provider().enabled():
             return
         try:
             while True:
                 try:
-                    await self._ensure_clickhouse_schema()
+                    await self._require_projection_provider().ensure_ready()
                     await self._replay_projection_once()
                 except asyncio.CancelledError:  # pragma: no cover - shutdown path
                     raise
@@ -416,53 +385,50 @@ class AuditService:
             logger.exception("Audit retention loop failed")
 
     async def _relay_batch_once(self) -> None:
-        repository = self._require_repository()
-        batch = await repository.list_audit_events_pending_export(
-            consumer_name=settings.audit_relay_consumer_name,
+        relay_provider = self._require_relay_provider()
+        if relay_provider.consumer_name is None:
+            return
+        batch = await self._require_ledger().list_pending_export_events(
+            consumer_name=relay_provider.consumer_name,
             limit=settings.audit_relay_batch_size,
         )
         if not batch:
             return
-        for event in batch:
-            await event_service.publish_audit_event(event)
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                await repository.advance_audit_export_checkpoint(
-                    conn,
-                    consumer_name=settings.audit_relay_consumer_name,
-                    last_ledger_offset=batch[-1].ledger_offset,
-                    metadata={"event_count": len(batch)},
-                )
+        await relay_provider.publish_events(batch)
+        await self._require_ledger().advance_export_checkpoint(
+            consumer_name=relay_provider.consumer_name,
+            last_ledger_offset=batch[-1].ledger_offset,
+            metadata={"event_count": len(batch)},
+        )
 
     async def _replay_projection_once(self) -> None:
-        repository = self._require_repository()
-        batch = await repository.list_audit_events_pending_export(
-            consumer_name=settings.audit_clickhouse_projector_consumer_name,
+        projection_provider = self._require_projection_provider()
+        if projection_provider.consumer_name is None:
+            return
+        batch = await self._require_ledger().list_pending_export_events(
+            consumer_name=projection_provider.consumer_name,
             limit=settings.audit_clickhouse_replay_batch_size,
         )
         if not batch:
             return
-        await self._insert_clickhouse_events(batch)
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                await repository.advance_audit_export_checkpoint(
-                    conn,
-                    consumer_name=settings.audit_clickhouse_projector_consumer_name,
-                    last_ledger_offset=batch[-1].ledger_offset,
-                    metadata={"source": "replay", "event_count": len(batch)},
-                )
+        await projection_provider.project_events(batch)
+        await self._require_ledger().advance_export_checkpoint(
+            consumer_name=projection_provider.consumer_name,
+            last_ledger_offset=batch[-1].ledger_offset,
+            metadata={"source": "replay", "event_count": len(batch)},
+        )
 
     async def _retention_once(self) -> None:
-        repository = self._require_repository()
+        archive_provider = self._require_archive_provider()
+        if not archive_provider.enabled():
+            return
         cutoff = datetime.now(UTC) - timedelta(days=max(settings.audit_hot_retention_days, 1))
-        candidates = await repository.list_audit_retention_candidates(
+        candidates = await self._require_ledger().list_retention_candidates(
             cutoff_recorded_at=cutoff,
         )
         for candidate in candidates:
             chain_partition = str(candidate["chain_partition"])
-            batch = await repository.list_audit_events_for_retention(
+            batch = await self._require_ledger().list_events_for_retention(
                 chain_partition=chain_partition,
                 cutoff_recorded_at=cutoff,
                 limit=settings.audit_retention_batch_size,
@@ -481,40 +447,37 @@ class AuditService:
                 )
                 + "\n"
             ).encode("utf-8")
-            stored = await self._storage.put_object(
+            stored = await archive_provider.put_object(
                 object_key=object_key,
                 payload=payload,
                 content_type="application/x-ndjson",
             )
             last_event = batch[-1]
-            pool = await get_pool()
-            async with pool.acquire() as conn:
-                async with conn.transaction():
-                    await repository.record_audit_retention_snapshot(
-                        conn,
-                        chain_partition=chain_partition,
-                        cutoff_recorded_at=cutoff,
-                        last_pruned_sequence=last_event.chain_sequence,
-                        last_pruned_event_hash=last_event.event_hash,
-                        object_key=stored.object_key,
-                        metadata={
-                            "event_count": len(batch),
-                            "first_sequence": batch[0].chain_sequence,
-                            "last_sequence": last_event.chain_sequence,
-                            "first_ledger_offset": batch[0].ledger_offset,
-                            "last_ledger_offset": last_event.ledger_offset,
-                            "sha256": stored.sha256,
-                        },
-                    )
-                    await repository.prune_audit_events(
-                        conn,
-                        chain_partition=chain_partition,
-                        max_ledger_offset=last_event.ledger_offset,
-                    )
+            await self._require_ledger().record_retention_snapshot(
+                chain_partition=chain_partition,
+                cutoff_recorded_at=cutoff,
+                last_pruned_sequence=last_event.chain_sequence,
+                last_pruned_event_hash=last_event.event_hash,
+                object_key=stored.object_key,
+                metadata={
+                    "event_count": len(batch),
+                    "first_sequence": batch[0].chain_sequence,
+                    "last_sequence": last_event.chain_sequence,
+                    "first_ledger_offset": batch[0].ledger_offset,
+                    "last_ledger_offset": last_event.ledger_offset,
+                    "sha256": stored.sha256,
+                },
+            )
+            await self._require_ledger().prune_events(
+                chain_partition=chain_partition,
+                max_ledger_offset=last_event.ledger_offset,
+            )
 
     async def _export_chain_checkpoint(self, day_key: str) -> bool:
-        repository = self._require_repository()
-        heads = await repository.list_audit_chain_heads()
+        archive_provider = self._require_archive_provider()
+        if not archive_provider.enabled():
+            return False
+        heads = await self._require_ledger().list_chain_heads()
         payload = json.dumps(
             {
                 "exported_at": datetime.now(UTC).isoformat(),
@@ -525,7 +488,7 @@ class AuditService:
         ).encode("utf-8")
         object_key = f"{settings.audit_checkpoint_bucket_prefix}/{day_key}.json"
         try:
-            await self._storage.put_object(
+            await archive_provider.put_object(
                 object_key=object_key,
                 payload=payload,
                 content_type="application/json",
@@ -534,119 +497,6 @@ class AuditService:
         except Exception:
             logger.exception("Failed to export audit chain checkpoint")
             return False
-
-    async def _ensure_clickhouse_schema(self) -> None:
-        ttl_days = max(settings.audit_clickhouse_retention_days, 1)
-        statement = f"""
-        CREATE TABLE IF NOT EXISTS {settings.audit_clickhouse_db}.audit_events (
-            audit_event_id UUID,
-            ledger_offset UInt64,
-            occurred_at DateTime64(3, 'UTC'),
-            recorded_at DateTime64(3, 'UTC'),
-            scope_type String,
-            organization_id Nullable(UUID),
-            workspace_id Nullable(UUID),
-            thread_id Nullable(UUID),
-            actor_type String,
-            actor_id Nullable(UUID),
-            user_id Nullable(UUID),
-            system_agent_id Nullable(UUID),
-            source_service String,
-            source_component String,
-            action_category String,
-            action_name String,
-            target_type Nullable(String),
-            target_id Nullable(UUID),
-            outcome String,
-            correlation_id Nullable(UUID),
-            causation_id Nullable(UUID),
-            request_id Nullable(UUID),
-            trace_id Nullable(String),
-            error_code Nullable(String),
-            error_class Nullable(String),
-            error_message_redacted Nullable(String),
-            payload_mode String,
-            payload_hash Nullable(String),
-            payload_ref Nullable(String),
-            payload_size_bytes Nullable(Int64),
-            metadata String,
-            chain_partition String,
-            chain_sequence UInt64,
-            prev_hash String,
-            event_hash String
-        )
-        ENGINE = ReplacingMergeTree(recorded_at)
-        PARTITION BY toYYYYMM(recorded_at)
-        ORDER BY (recorded_at, chain_partition, chain_sequence, audit_event_id)
-        TTL toDateTime(recorded_at) + toIntervalDay({ttl_days})
-        """
-        await self._clickhouse_query(statement)
-
-    async def _insert_clickhouse_events(self, events: list[AuditEvent]) -> None:
-        if not events:
-            return
-        existing_ids = await self._existing_clickhouse_ids(events)
-        rows = []
-        for event in events:
-            if str(event.audit_event_id) in existing_ids:
-                continue
-            row = self._clickhouse_event_row(event)
-            row["metadata"] = json.dumps(row["metadata"], sort_keys=True)
-            rows.append(row)
-        if not rows:
-            return
-        payload = "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n"
-        statement = (
-            f"INSERT INTO {settings.audit_clickhouse_db}.audit_events FORMAT JSONEachRow"
-        )
-        await self._clickhouse_query(statement, body=payload)
-
-    async def _existing_clickhouse_ids(self, events: list[AuditEvent]) -> set[str]:
-        if not events:
-            return set()
-        quoted_ids = ",".join(f"'{event.audit_event_id}'" for event in events)
-        query = (
-            f"SELECT audit_event_id FROM {settings.audit_clickhouse_db}.audit_events "
-            f"WHERE audit_event_id IN ({quoted_ids}) FORMAT JSONEachRow"
-        )
-        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
-            response = await client.post(
-                settings.audit_clickhouse_url,
-                params={"database": settings.audit_clickhouse_db, "query": query},
-                auth=(settings.audit_clickhouse_user, settings.audit_clickhouse_password),
-            )
-            response.raise_for_status()
-        lines = [line for line in response.text.splitlines() if line.strip()]
-        ids = set()
-        for line in lines:
-            try:
-                ids.add(str(json.loads(line)["audit_event_id"]))
-            except Exception:
-                logger.debug("Failed to parse ClickHouse existence check row")
-        return ids
-
-    async def _clickhouse_query(self, query: str, *, body: str | None = None) -> None:
-        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
-            response = await client.post(
-                settings.audit_clickhouse_url,
-                params={"database": settings.audit_clickhouse_db, "query": query},
-                auth=(settings.audit_clickhouse_user, settings.audit_clickhouse_password),
-                content=body.encode("utf-8") if body is not None else None,
-            )
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                detail = response.text.strip()
-                if detail:
-                    message = (
-                        f"{exc}. ClickHouse response body: {detail[:1000]}"
-                    )
-                    raise httpx.HTTPStatusError(
-                        message,
-                        request=exc.request,
-                        response=exc.response,
-                    ) from exc
-                raise
 
     @staticmethod
     def _http_action_details(
@@ -729,27 +579,25 @@ class AuditService:
             return None
         return _SECRET_PATTERN.sub("[REDACTED]", message)[:512]
 
-    @classmethod
-    def _clickhouse_event_row(cls, event: AuditEvent) -> dict[str, object]:
-        row = event.model_dump(mode="json")
-        row["occurred_at"] = cls._clickhouse_datetime(event.occurred_at)
-        row["recorded_at"] = cls._clickhouse_datetime(event.recorded_at)
-        return row
-
-    @staticmethod
-    def _clickhouse_datetime(value: datetime) -> str:
-        normalized = value.astimezone(UTC)
-        return normalized.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-
-    def _require_repository(self) -> CollaborationRepository:
-        if self._repository is None:
+    def _require_ledger(self) -> AuditLedger:
+        if self._ledger is None:
             raise RuntimeError("Audit service is not started")
-        return self._repository
+        return self._ledger
 
-    def _require_kernel(self) -> CollaborationKernel:
-        if self._kernel is None:
+    def _require_relay_provider(self) -> AuditRelayProvider:
+        if self._relay_provider is None:
             raise RuntimeError("Audit service is not started")
-        return self._kernel
+        return self._relay_provider
+
+    def _require_projection_provider(self) -> AuditProjectionProvider:
+        if self._projection_provider is None:
+            raise RuntimeError("Audit service is not started")
+        return self._projection_provider
+
+    def _require_archive_provider(self) -> AuditArchiveProvider:
+        if self._archive_provider is None:
+            raise RuntimeError("Audit service is not started")
+        return self._archive_provider
 
 
 audit_service = AuditService()

@@ -144,6 +144,7 @@ from .models import (
     WorkspaceDetail,
     WorkspaceTool,
 )
+from .telemetry import PayloadRedactionPolicy, TelemetryContext, redact_payload
 
 __all__ = [
     "ActorRef",
@@ -249,6 +250,7 @@ __all__ = [
     "RunStep",
     "ServiceStatus",
     "SystemToolDefinition",
+    "TelemetryContext",
     "StopReason",
     "ToolCall",
     "ToolCallResult",
@@ -279,11 +281,13 @@ __all__ = [
     "WorkspaceAssetVersion",
     "WorkspaceDetail",
     "WorkspaceTool",
+    "PayloadRedactionPolicy",
     "LlmEngineDescriptor",
     "LlmEngineRegistry",
     "LlmEngineSelection",
     "LlmEngineSelectionPreferences",
     "load_repo_local_env",
     "interaction_contract_is_empty",
+    "redact_payload",
     "runtime_preferences_from_definition",
 ]

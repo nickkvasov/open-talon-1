@@ -30,6 +30,7 @@ from open_talon_contracts.models import (  # noqa: E402
     AuditEventDraft,
     EventEnvelope,
 )
+from open_talon_contracts.telemetry import TelemetryContext  # noqa: E402
 from open_talon_contracts.llm_engines import (  # noqa: E402
     LlmEngineRegistry,
     llm_engine_descriptor_from_provider_definition,
@@ -38,6 +39,12 @@ from open_talon_contracts.llm_engines import (  # noqa: E402
 from .llm_engines import (  # noqa: E402
     build_default_llm_engine_registry,
     resolve_llm_engine_for_context,
+)
+from .observability import (  # noqa: E402
+    LangfuseRuntimeObserver,
+    RuntimeObservation,
+    RuntimeObservability,
+    build_observability_provider_from_env,
 )
 from .secrets import (  # noqa: E402
     SecretReference,
@@ -86,119 +93,6 @@ async def _record_runtime_audit(
         )
     except Exception:
         logger.exception("Failed to record runtime audit event action_name=%s", action_name)
-
-
-class RuntimeObservation(Protocol):
-    def update(self, **kwargs: Any) -> None: ...
-
-
-class RuntimeObservability(Protocol):
-    def start_span(
-        self,
-        *,
-        name: str,
-        input: Any | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> Any: ...
-
-    def start_generation(
-        self,
-        *,
-        name: str,
-        model: str | None = None,
-        input: Any | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> Any: ...
-
-    def flush(self) -> None: ...
-
-
-class _NoopObservation:
-    def __enter__(self) -> "_NoopObservation":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        return False
-
-    def update(self, **kwargs: Any) -> None:
-        return None
-
-
-class LangfuseRuntimeObserver:
-    def __init__(self, client: Any | None = None) -> None:
-        self._client = client
-
-    @classmethod
-    def from_env(cls) -> "LangfuseRuntimeObserver":
-        public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
-        secret_key = os.getenv("LANGFUSE_SECRET_KEY")
-        if not public_key or not secret_key:
-            return cls()
-
-        base_url = (
-            os.getenv("LANGFUSE_BASE_URL")
-            or os.getenv("LANGFUSE_HOST")
-            or os.getenv("LANGFUSE_PUBLIC_URL")
-        )
-        if base_url and "LANGFUSE_BASE_URL" not in os.environ:
-            os.environ["LANGFUSE_BASE_URL"] = base_url
-
-        try:
-            from langfuse import get_client
-        except ImportError:
-            logger.warning(
-                "Langfuse credentials are configured but the Python SDK is not installed. "
-                "Install the 'langfuse' package to enable runtime tracing."
-            )
-            return cls()
-
-        try:
-            return cls(get_client())
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("Failed to initialize Langfuse client: %s", exc)
-            return cls()
-
-    def start_span(
-        self,
-        *,
-        name: str,
-        input: Any | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> Any:
-        if self._client is None:
-            return _NoopObservation()
-        return self._client.start_as_current_observation(
-            name=name,
-            as_type="span",
-            input=input,
-            metadata=metadata,
-        )
-
-    def start_generation(
-        self,
-        *,
-        name: str,
-        model: str | None = None,
-        input: Any | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> Any:
-        if self._client is None:
-            return _NoopObservation()
-        return self._client.start_as_current_observation(
-            name=name,
-            as_type="generation",
-            model=model,
-            input=input,
-            metadata=metadata,
-        )
-
-    def flush(self) -> None:
-        if self._client is None:
-            return
-        try:
-            self._client.flush()
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("Langfuse flush failed: %s", exc)
 
 
 class RuntimeKernel(Protocol):
@@ -251,7 +145,7 @@ class LocalOllamaExecutor:
         observability: RuntimeObservability | None = None,
     ) -> None:
         self._timeout_seconds = timeout_seconds
-        self._observability = observability or LangfuseRuntimeObserver()
+        self._observability = observability or build_observability_provider_from_env()
 
     async def execute(self, context: AgentExecutionContext) -> AgentRunResult:
         endpoint = context.system_agent.endpoint
@@ -333,7 +227,7 @@ class HttpEndpointExecutor:
     ) -> None:
         self._timeout_seconds = timeout_seconds
         self._endpoint_scope = endpoint_scope
-        self._observability = observability or LangfuseRuntimeObserver()
+        self._observability = observability or build_observability_provider_from_env()
         self._secret_resolver = secret_resolver or build_default_secret_resolver()
 
     async def execute(self, context: AgentExecutionContext) -> AgentRunResult:
@@ -524,7 +418,7 @@ class RuntimeExecutionManager:
         engine_registry: LlmEngineRegistry | None = None,
         secret_resolver: SecretResolver | None = None,
     ) -> None:
-        self._observability = observability or LangfuseRuntimeObserver.from_env()
+        self._observability = observability or build_observability_provider_from_env()
         self._engine_registry = engine_registry or build_default_llm_engine_registry()
         self._secret_resolver = secret_resolver or build_default_secret_resolver()
         self._executors = executors or build_default_agent_executors(
@@ -1062,20 +956,46 @@ def _langfuse_metadata(
     task_id: UUID | None = None,
     run_id: UUID | None = None,
 ) -> dict[str, Any]:
-    return {
-        "workspace_id": str(context.workspace.workspace_id),
-        "thread_id": str(context.thread.thread_id),
-        "system_agent_id": str(context.system_agent.agent_id),
-        "participant_id": str(context.participant.participant_id),
-        "trigger_message_id": (
-            str(context.trigger_message.message_id) if context.trigger_message else None
+    telemetry_context = TelemetryContext(
+        source_service="agent-runtime",
+        source_component="runtime",
+        correlation_id=context.run.correlation_id,
+        causation_id=context.run.causation_id,
+        workspace_id=context.workspace.workspace_id,
+        thread_id=context.thread.thread_id,
+        participant_id=context.participant.participant_id,
+        system_agent_id=context.system_agent.agent_id,
+        task_id=task_id,
+        run_id=run_id,
+        metadata={
+            "trigger_message_id": (
+                str(context.trigger_message.message_id) if context.trigger_message else None
+            ),
+            "endpoint_kind": context.system_agent.endpoint.kind,
+            "endpoint_url": endpoint_url,
+            "provider": provider,
+        },
+    )
+    metadata = {
+        "workspace_id": str(telemetry_context.workspace_id),
+        "thread_id": str(telemetry_context.thread_id),
+        "system_agent_id": str(telemetry_context.system_agent_id),
+        "participant_id": str(telemetry_context.participant_id),
+        "correlation_id": (
+            str(telemetry_context.correlation_id)
+            if telemetry_context.correlation_id is not None
+            else None
         ),
-        "endpoint_kind": context.system_agent.endpoint.kind,
-        "endpoint_url": endpoint_url,
-        "provider": provider,
-        "task_id": str(task_id) if task_id else None,
-        "run_id": str(run_id) if run_id else None,
+        "causation_id": (
+            str(telemetry_context.causation_id)
+            if telemetry_context.causation_id is not None
+            else None
+        ),
+        "task_id": str(telemetry_context.task_id) if telemetry_context.task_id else None,
+        "run_id": str(telemetry_context.run_id) if telemetry_context.run_id else None,
     }
+    metadata.update(telemetry_context.metadata)
+    return metadata
 
 
 def _usage_metadata(

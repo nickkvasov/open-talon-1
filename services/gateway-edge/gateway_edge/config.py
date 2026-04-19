@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     audit_relay_consumer_name: str = "gateway-audit-relay"
     audit_relay_batch_size: int = 100
     audit_relay_interval_seconds: float = 1.0
+    audit_relay_provider: Literal["kafka", "none"] = "kafka"
+    audit_projection_provider: Literal["clickhouse", "none"] = "clickhouse"
+    audit_archive_provider: Literal["minio", "none"] = "minio"
     audit_clickhouse_enabled: bool = True
     audit_clickhouse_projector_consumer_name: str = "gateway-audit-projector"
     audit_clickhouse_replay_batch_size: int = 250

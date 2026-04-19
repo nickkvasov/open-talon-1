@@ -56,6 +56,11 @@ Primary local flow:
 - Audit integrity depends on `chain_partition`, `chain_sequence`, `prev_hash`, and `event_hash`; preserve chain semantics when changing audit writes.
 - Organization audit chains use `organization:<id>` partitions; workspace chains stay `workspace:<id>` and platform/global chains stay `global`.
 - Audit v1 is metadata-only. Do not store raw bearer tokens, prompt bodies, tool arguments, or message bodies inline in audit metadata.
+- Keep Postgres as the canonical audit ledger unless the task explicitly redesigns audit authority.
+- Keep non-canonical audit surfaces behind provider boundaries. Do not hard-wire Kafka, ClickHouse, MinIO, Langfuse, HyperDX, or other backend details back into service orchestration.
+- Local audit provider defaults are Kafka for relay, ClickHouse for projection, and MinIO for archive/export/checkpoint storage.
+- Runtime observability is provider-backed. Langfuse and OTLP-compatible sinks such as HyperDX are integrations, not architectural constants.
+- Use `packages/contracts/open_talon_contracts/telemetry.py` for shared telemetry context and redaction behavior instead of inventing per-service variants.
 - LLM providers are persistent records in `llm_providers`; do not reintroduce env-defined engine registries.
 - Memory providers are persistent records in `memory_providers`; do not hardcode provider definitions in application logic after bootstrapping.
 - `system_agents`, `system_tools`, `llm_providers`, and `memory_providers` support `global` and `organization` scope; `git_repositories`, `workspace_assets`, and `asset_links` support `global`, `organization`, and `workspace` scope.
@@ -200,6 +205,8 @@ If a change touches audit logging, audit APIs, event relays, or runtime failure 
 - inspect `packages/contracts`, `services/core-collab`, `services/gateway-edge`, and `services/agent-runtime` together
 - verify Postgres remains the canonical audit store even if Kafka or ClickHouse is unavailable
 - keep relay/projector failures non-blocking for canonical audit writes
+- verify provider selection and no-op provider behavior where relevant
+- keep shared telemetry/redaction behavior aligned between gateway audit and runtime observability
 - run at least one gateway audit test and one repository chain-verification test
 - verify `organization:<id>` and `workspace:<id>` chains both still verify when tenant-aware audit behavior changes
 - keep MinIO export/checkpoint behavior aligned with docs and env defaults
@@ -228,6 +235,7 @@ If a change touches execution lease recovery, budget enforcement, or runtime ove
 - Preserve `next_retry_at`-based scheduling and bounded retry semantics when changing lease reconciliation or claim logic.
 - Preserve normalized `run.output["usage"]` payloads when changing model runtime or provider integrations.
 - When changing provider or secret behavior, keep `gateway-edge`, `core-collab`, `agent-runtime`, and docs aligned on persistent provider definitions and OpenBao-backed secret resolution.
+- When adding or changing audit or observability integrations, implement or update the provider/registry layer instead of branching directly on vendor behavior in service logic.
 - When adding a new memory provider, implement the shared `MemoryProvider` protocol in `services/workspace-memory/workspace_memory/providers.py` and register it in `build_provider_index(...)` instead of bypassing the abstraction.
 - When working on memory search behavior, preserve the rule that graph relations are additive context only and not the canonical memory store.
 
@@ -284,10 +292,13 @@ If a change touches execution lease recovery, budget enforcement, or runtime ove
 - `services/gateway-edge/gateway_edge/auth/`
 - `services/gateway-edge/gateway_edge/services/events.py`
 - `services/gateway-edge/gateway_edge/services/audit.py`
+- `services/gateway-edge/gateway_edge/services/audit_providers.py`
 - `services/gateway-edge/gateway_edge/audit_middleware.py`
 - `services/gateway-edge/gateway_edge/db/postgres.py`
 - `services/gateway-edge/gateway_edge/routers/admin.py`
+- `services/agent-runtime/agent_runtime/observability.py`
 - `packages/contracts/open_talon_contracts/llm_engines.py`
+- `packages/contracts/open_talon_contracts/telemetry.py`
 - `apps/tui/open_talon_tui/main.py`
 - `apps/tui/open_talon_tui/tui2.py`
 
