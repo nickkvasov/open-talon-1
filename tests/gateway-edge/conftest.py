@@ -118,6 +118,7 @@ class MockCollaborationService:
             name=payload.name,
             description=payload.description,
             owner_user_id=payload.actor.user_id,
+            harness=payload.harness,
             created_at=now,
             updated_at=now,
             metadata={
@@ -338,6 +339,11 @@ class MockCollaborationService:
                     if payload.description is not None
                     else workspace.description
                 ),
+                "harness": (
+                    payload.harness
+                    if "harness" in payload.model_fields_set
+                    else workspace.harness
+                ),
                 "updated_at": datetime.now(timezone.utc),
                 "metadata": (
                     {**workspace.metadata, **payload.metadata}
@@ -411,6 +417,7 @@ class MockCollaborationService:
             capabilities=payload.capabilities,
             endpoint=payload.endpoint,
             system_prompt=payload.system_prompt,
+            harness=payload.harness,
             interaction_contract=interaction_contract,
             definition=payload.definition,
             created_by=payload.actor.participant_id,
@@ -565,6 +572,11 @@ class MockCollaborationService:
                 "capabilities": payload.capabilities or agent.capabilities,
                 "endpoint": payload.endpoint or agent.endpoint,
                 "system_prompt": payload.system_prompt or agent.system_prompt,
+                "harness": (
+                    payload.harness
+                    if "harness" in payload.model_fields_set
+                    else agent.harness
+                ),
                 "interaction_contract": (
                     payload.interaction_contract
                     if payload.interaction_contract is not None
@@ -1114,6 +1126,7 @@ class MockCollaborationService:
             agent_config=AgentConfiguration(
                 endpoint=system_agent.endpoint,
                 system_prompt=system_agent.system_prompt,
+                harness=system_agent.harness,
                 definition=system_agent.definition,
             ),
             created_at=now,
@@ -1123,6 +1136,11 @@ class MockCollaborationService:
                 "agent_config": {
                     "endpoint": system_agent.endpoint.model_dump(mode="json"),
                     "system_prompt": system_agent.system_prompt,
+                    "harness": (
+                        system_agent.harness.model_dump(mode="json")
+                        if system_agent.harness is not None
+                        else None
+                    ),
                     "definition": system_agent.definition,
                 },
             },

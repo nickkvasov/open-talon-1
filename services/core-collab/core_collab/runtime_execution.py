@@ -293,6 +293,12 @@ class RuntimeExecutionService:
             workspace_memory,
             viewer=participant,
         )
+        if not self._memory_scope_enabled(system_agent, "run"):
+            visible_run_memory = []
+        if not self._memory_scope_enabled(system_agent, "thread"):
+            visible_thread_memory = []
+        if not self._memory_scope_enabled(system_agent, "workspace"):
+            visible_workspace_memory = []
         tool_results = await self._repository.list_completed_tool_calls_for_run(run.run_id)
         interaction_requests = []
         request_id = task.metadata.get("request_id")
@@ -302,11 +308,13 @@ class RuntimeExecutionService:
                 interaction_requests.append(detail)
         return AgentExecutionContext(
             workspace=workspace,
+            workspace_harness=workspace.harness,
             thread=thread,
             task=task,
             run=run,
             routing=routing,
             system_agent=system_agent,
+            agent_harness=system_agent.harness,
             participant=self._advertise_workspace_tools(participant, workspace_tools),
             participants=participants,
             role_definitions=self._role_definitions_from_workspace(workspace),
@@ -321,6 +329,20 @@ class RuntimeExecutionService:
             thread_reply_contract=system_agent.interaction_contract,
             tool_results=tool_results,
         )
+
+    @staticmethod
+    def _memory_scope_enabled(system_agent, scope: str) -> bool:
+        harness = system_agent.harness
+        if harness is None:
+            return True
+        policy = harness.memory_policy
+        if scope == "run":
+            return policy.use_run_memory
+        if scope == "thread":
+            return policy.use_thread_memory
+        if scope == "workspace":
+            return policy.use_workspace_memory
+        return True
 
     async def build_agent_execution_context_for_run_step(
         self,

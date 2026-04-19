@@ -208,13 +208,14 @@ services:
     container_name: minio-init
     depends_on:
       - minio
+    entrypoint:
+      - /bin/sh
+      - -c
     environment:
       MC_HOST_local: http://${LANGFUSE_MINIO_ROOT_USER:-minio}:${LANGFUSE_MINIO_ROOT_PASSWORD:-miniosecret}@minio:9000
       LANGFUSE_S3_BUCKET: ${LANGFUSE_S3_BUCKET:-langfuse}
       OPEN_TALON_ASSET_BUCKET: ${ASSET_STORAGE_BUCKET:-open-talon-assets}
     command:
-      - /bin/sh
-      - -c
       - |
         mc mb --ignore-existing "local/${LANGFUSE_S3_BUCKET:-langfuse}"
         mc mb --ignore-existing "local/${OPEN_TALON_ASSET_BUCKET:-open-talon-assets}"

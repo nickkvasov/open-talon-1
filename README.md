@@ -35,7 +35,7 @@ The typical flow is:
 3. `core-collab` persists durable execution state in Postgres, including `tasks`, `runs`, `run_steps`, and `tool_calls`.
 4. Stateless `agent-runtime` workers claim runnable work, execute model turns or tool calls, and publish events back into Kafka.
 5. The gateway streams results back to clients over HTTP, SSE, or WebSocket.
-6. Langfuse captures observability data for prompts, traces, and evaluations.
+6. Runtime observability is exported through a provider layer so Langfuse, OTLP-compatible sinks such as HyperDX, or no-op mode can be selected without changing executor code.
 
 ## Identity And Auth
 
@@ -101,7 +101,7 @@ The current thread-native request flow is:
 5. When the request is complete, `core-collab` creates a follow-up task targeted only to the original requesting agent.
 6. `agent-runtime` resumes that agent with the original request, targets, and accumulated answers in execution context.
 
-For workspace-level debugging, Open Talon now also exposes a communication log view backed by canonical `timeline_messages`. It aggregates thread messages, rendered interaction requests, and interaction answers across the workspace, and is intended for workspace `admin` or `supervisor` troubleshooting flows. Finalized communications are also appended to workspace JSONL files under `OPEN_TALON_COMMUNICATION_LOG_DIR` (default: `infrastructure/data/communication-logs/<workspace_id>.jsonl`) so end-to-end collaboration traces survive outside the database.
+For workspace-level debugging, Open Talon now also exposes a communication log view backed by canonical `timeline_messages`. It aggregates thread messages, rendered interaction requests, and interaction answers across the workspace, and is intended for workspace `admin` or `supervisor` troubleshooting flows. Finalized communications are also appended to workspace JSONL files under `OPEN_TALON_COMMUNICATION_LOG_DIR` (default: `infrastructure/data/communication-logs/<workspace_id>.jsonl`) so end-to-end collaboration traces survive outside the database. These JSONL files now rotate automatically with `OPEN_TALON_COMMUNICATION_LOG_MAX_BYTES` and `OPEN_TALON_COMMUNICATION_LOG_BACKUP_COUNT`, and local `./open-talon start` service logs under `.run/` rotate with `OPEN_TALON_SERVICE_LOG_MAX_BYTES` and `OPEN_TALON_SERVICE_LOG_BACKUP_COUNT`.
 
 Common collaboration endpoints:
 
@@ -183,9 +183,10 @@ Open Talon now has a dedicated audit subsystem that is separate from the collabo
 
 - `collab_event_log` remains the collaboration/event fanout stream
 - `audit_event_ledger` is the canonical append-only audit ledger
-- Kafka topic `talon.audit.events` relays committed audit rows
-- ClickHouse stores the searchable audit projection in `default.audit_events`
-- MinIO stores audit exports and daily chain checkpoints
+- non-canonical audit surfaces are abstracted behind provider interfaces
+- local defaults use Kafka topic `talon.audit.events` as the relay provider
+- local defaults use ClickHouse for the audit projection provider in `default.audit_events`
+- local defaults use MinIO for the archive provider that stores exports and daily chain checkpoints
 
 V1 audit behavior:
 
@@ -218,14 +219,28 @@ Audit access model:
 - workspace `admin` and `supervisor` can access audit within their workspace scope
 - regular `user` cannot read audit data
 
-The current local implementation writes directly into ClickHouse for the audit warehouse path, and the authoritative audit interface remains the Open Talon API backed by Postgres.
+Provider defaults are selected through env-backed settings:
+
+- `AUDIT_RELAY_PROVIDER=kafka`
+- `AUDIT_PROJECTION_PROVIDER=clickhouse`
+- `AUDIT_ARCHIVE_PROVIDER=minio`
+- each of those can also be set to `none` for a local no-op surface while Postgres remains canonical
+
+The authoritative audit interface remains the Open Talon API backed by Postgres. Projection, relay, export, and checkpoint backends are replaceable and must stay non-blocking for canonical writes.
+
 An optional local HyperDX all-in-one profile is now available in Docker Compose for UI and OTLP intake experiments:
 
 ```bash
 docker compose -f infrastructure/docker-compose.yaml --profile hyperdx up -d hyperdx
 ```
 
-That profile is operational/investigative only. The canonical audit source remains Postgres plus the Open Talon audit APIs.
+That profile is operational/investigative only. The canonical audit source remains Postgres plus the Open Talon audit APIs. To route runtime observability there, configure:
+
+- `AGENT_RUNTIME_OBSERVABILITY_PROVIDER=otlp`
+- `AGENT_RUNTIME_OTLP_HTTP_ENDPOINT=http://127.0.0.1:4318/v1/traces`
+- optional `AGENT_RUNTIME_OBSERVABILITY_RICH_PAYLOADS=true|false`
+
+The runtime observability path is separate from the canonical audit ledger. Rich payload capture belongs on the observability side and is centrally redacted before export.
 
 ## Tools Model
 
@@ -425,7 +440,8 @@ That provider can then be exposed by registering it in `build_provider_index(...
 - **OpenBao**: Open-source fork of Hashicorp Vault running in local development for secrets-oriented workflows, backed by a persistent local file store under `infrastructure/data/openbao`.
 - **Keycloak**: Local identity provider for registration, login, OIDC token issuance, and device/browser flows.
 - **Valkey**: Drop-in compatible Redis equivalent caching infrastructure configured to handle immediate TTL caching.
-- **Langfuse**: Self-hosted LLM observability stack for traces, prompts, and evaluations, deployed with Langfuse Web/Worker plus ClickHouse and MinIO.
+- **Langfuse**: Self-hosted LLM observability stack that can be used as one runtime observability backend for traces, prompts, and evaluations.
+- **HyperDX**: Optional OTLP-compatible observability sink/UI for local investigations and runtime telemetry experiments.
 - **Ollama AI**: Serves dynamic generative model orchestration natively mapped across standard REST.
     - Operates natively against Google's modern **Gemma 4** models, with the default test setup pulling the lightweight `gemma4:latest` model.
 
@@ -451,8 +467,8 @@ Local services:
 - `postgres`: application database with `pgvector` enabled
 - `pgadmin`: pgAdmin 4 web UI for inspecting and querying the local Postgres instance
 - `kafka`: event bus for chat, collaboration, and agent-runtime traffic
-- `clickhouse`: Langfuse analytics store and audit query projection
-- `minio`: object storage for Langfuse, published assets, audit exports, and chain checkpoints
+- `clickhouse`: Langfuse analytics store and the default local audit projection provider
+- `minio`: object storage for Langfuse, published assets, and the default local audit archive provider
 - `openbao`: local secret store and token-validation backend
 - `keycloak`: local identity provider for user registration, browser login, and device login
 - `valkey`: session store, API-key cache, and short-lived gateway state
@@ -841,6 +857,14 @@ The local compose stack now includes a self-hosted Langfuse deployment:
 
 This setup reuses the repository Postgres server and Valkey container, but Langfuse now uses its own Postgres database (`LANGFUSE_POSTGRES_DB`) so Prisma migrations do not collide with the application schema. Defaults live in `infrastructure/.env.example`.
 
+Langfuse is no longer the only observability shape in the codebase. `agent-runtime` now exports through a provider layer:
+
+- `AGENT_RUNTIME_OBSERVABILITY_PROVIDER=langfuse` to use Langfuse
+- `AGENT_RUNTIME_OBSERVABILITY_PROVIDER=otlp` to use OTLP-compatible sinks such as HyperDX
+- `AGENT_RUNTIME_OBSERVABILITY_PROVIDER=none` to disable runtime observability export
+
+Audit relay/projection/archive surfaces are also provider-backed, with local defaults selected by `AUDIT_RELAY_PROVIDER`, `AUDIT_PROJECTION_PROVIDER`, and `AUDIT_ARCHIVE_PROVIDER`.
+
 Infra defaults are defined in `infrastructure/.env.example`, including:
 
 - core ports for Postgres, Kafka, OpenBao, Valkey, Ollama, Forgejo, and Langfuse
@@ -848,6 +872,7 @@ Infra defaults are defined in `infrastructure/.env.example`, including:
 - ClickHouse, MinIO, Forgejo, and Valkey credentials used by the local stack
 - the required Ollama model list for local startup
 - worker scaling and lease settings such as `AGENT_STEP_WORKER_CONCURRENCY`, `TOOL_WORKER_CONCURRENCY`, `LEASE_TTL_SECONDS`, and `RECONCILE_INTERVAL_SECONDS`
+- audit and observability provider selection defaults
 
 ## Pytest Orchestration
 

@@ -38,7 +38,12 @@ from agent_runtime.runtime import (
     HttpEndpointExecutor,
     LangfuseRuntimeObserver,
     LocalOllamaExecutor,
+    _debug_prompt_payload,
     render_prompt,
+)
+from agent_runtime.observability import (
+    OtlpHttpObservabilityProvider,
+    build_observability_provider_from_env,
 )
 from agent_runtime.secrets import (
     OpenBaoSecretProvider,
@@ -50,10 +55,13 @@ from open_talon_contracts.models import (
     AgentDefinition,
     AgentEndpoint,
     AgentExecutionContext,
+    AgentHarness,
     AgentInteractionContract,
     AgentRunResult,
     AgentResponseContract,
     AgentTaskRouting,
+    AgentToolUsePolicy,
+    HarnessExecutionRule,
     InteractionAnswer,
     InteractionQuestion,
     InteractionRequest,
@@ -70,6 +78,10 @@ from open_talon_contracts.models import (
     Thread,
     TimelineMessage,
     Workspace,
+    WorkspaceHarness,
+    WorkspaceMethodic,
+    WorkspaceMethodicStep,
+    WorkspaceMethodology,
     WorkspaceTool,
 )
 from open_talon_contracts.llm_engines import (
@@ -879,6 +891,155 @@ def test_render_prompt_includes_participants_memory_and_thread_context():
     assert "required sections: Summary, Checks performed, Findings, Residual risk, Next action" in prompt
 
 
+def test_render_prompt_includes_workspace_and_agent_harness_sections():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    workspace_harness = WorkspaceHarness(
+        summary="Workspace harness summary",
+        methodology=WorkspaceMethodology(
+            ontology="Evidence comes from visible artifacts.",
+            principles=["Prefer direct verification."],
+        ),
+        methodics=[
+            WorkspaceMethodic(
+                name="Validate release",
+                goal="Check rollout incrementally.",
+                steps=[
+                    WorkspaceMethodicStep(
+                        instruction="Inspect the current workspace tools before acting.",
+                        recommended_tool_patterns=["repo_search"],
+                        verification=["Confirm the tool catalog is current."],
+                    )
+                ],
+            )
+        ],
+        execution_rules=[
+            HarnessExecutionRule(
+                name="evidence-first",
+                instruction="Prefer direct evidence over assumptions.",
+                priority="critical",
+                scope="validation",
+            )
+        ],
+    )
+    agent_harness = AgentHarness(
+        summary="Agent harness summary",
+        operating_principles=["Stay incremental."],
+        tool_use_policy=AgentToolUsePolicy(
+            selection_principles=["Choose the narrowest tool that answers the question."],
+            fallback_when_no_tool_fits="Call out the gap and ask for clarification.",
+        ),
+    )
+    kernel.context = kernel.context.model_copy(
+        update={
+            "workspace_harness": workspace_harness,
+            "agent_harness": agent_harness,
+        }
+    )
+
+    prompt = render_prompt(kernel.context)
+
+    assert "Workspace harness:" in prompt
+    assert "Workspace harness summary" in prompt
+    assert "ontology: Evidence comes from visible artifacts." in prompt
+    assert "[critical/validation] evidence-first: Prefer direct evidence over assumptions." in prompt
+    assert "Agent harness:" in prompt
+    assert "Agent harness summary" in prompt
+    assert "select tools from the current workspace tool catalog dynamically" in prompt
+    assert "fallback when no tool fits: Call out the gap and ask for clarification." in prompt
+    assert "repo_search | enabled: yes | Searches the current workspace source tree." in prompt
+
+
+def test_render_prompt_keeps_full_workspace_tool_catalog_with_tool_use_guidance():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    now = _now()
+    kernel.context = kernel.context.model_copy(
+        update={
+            "workspace_tools": [
+                *kernel.context.workspace_tools,
+                WorkspaceTool(
+                    tool_id=uuid4(),
+                    name="db_query",
+                    description="Queries the attached database schema.",
+                    parameter_contract={
+                        "parameters": [
+                            {
+                                "name": "sql",
+                                "type": "string",
+                                "description": "Read-only SQL to execute.",
+                                "required": True,
+                            }
+                        ],
+                        "additional_properties": False,
+                    },
+                    attached_by=uuid4(),
+                    attached_at=now,
+                    updated_at=now,
+                ),
+            ],
+            "agent_harness": AgentHarness(
+                summary="Use the available tools carefully.",
+                tool_use_policy=AgentToolUsePolicy(
+                    selection_principles=[
+                        "Prefer the narrowest tool that provides direct evidence."
+                    ],
+                    fallback_when_no_tool_fits="Explain the gap and ask for clarification.",
+                ),
+            ),
+        }
+    )
+
+    prompt = render_prompt(kernel.context)
+
+    assert "select tools from the current workspace tool catalog dynamically" in prompt
+    assert "repo_search | enabled: yes | Searches the current workspace source tree." in prompt
+    assert "db_query | enabled: yes | Queries the attached database schema." in prompt
+
+
+def test_render_prompt_sorts_workspace_harness_execution_rules_by_priority():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    kernel.context = kernel.context.model_copy(
+        update={
+            "workspace_harness": WorkspaceHarness(
+                summary="Rules should render from highest to lowest priority.",
+                execution_rules=[
+                    HarnessExecutionRule(
+                        name="document-outcome",
+                        instruction="Summarize the completion state clearly.",
+                        priority="normal",
+                        scope="completion",
+                    ),
+                    HarnessExecutionRule(
+                        name="plan-first",
+                        instruction="Inspect visible context before changing anything.",
+                        priority="high",
+                        scope="planning",
+                    ),
+                    HarnessExecutionRule(
+                        name="verify-first",
+                        instruction="Prefer direct evidence over assumption.",
+                        priority="critical",
+                        scope="validation",
+                    ),
+                ],
+            )
+        }
+    )
+
+    prompt = render_prompt(kernel.context)
+
+    critical_index = prompt.index(
+        "[critical/validation] verify-first: Prefer direct evidence over assumption."
+    )
+    high_index = prompt.index(
+        "[high/planning] plan-first: Inspect visible context before changing anything."
+    )
+    normal_index = prompt.index(
+        "[normal/completion] document-outcome: Summarize the completion state clearly."
+    )
+
+    assert critical_index < high_index < normal_index
+
+
 def test_render_prompt_includes_interaction_request_summary():
     kernel = _build_fixture_context(endpoint_kind="system")
     now = _now()
@@ -1007,6 +1168,9 @@ async def test_agent_runtime_emits_task_span_to_observer():
 
     assert observer.records[0]["kind"] == "span"
     assert observer.records[0]["name"] == "agent-task-run"
+    assert observer.records[0]["metadata"]["correlation_id"] == str(kernel.context.run.correlation_id)
+    assert observer.records[0]["metadata"]["run_id"] == str(kernel.context.run.run_id)
+    assert observer.records[0]["metadata"]["task_id"] == str(kernel.task.task_id)
     updates = observer.records[0]["updates"]
     assert any(update.get("metadata", {}).get("stop_reason") == "completed" for update in updates)
     assert observer.flush_count >= 1
@@ -1386,6 +1550,73 @@ def test_langfuse_runtime_observer_from_env_uses_sdk_client(monkeypatch):
     assert os.environ["LANGFUSE_BASE_URL"] == "http://localhost:3000"
 
 
+def test_build_observability_provider_from_env_supports_otlp(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_OBSERVABILITY_PROVIDER", "otlp")
+    monkeypatch.setenv("AGENT_RUNTIME_OTLP_HTTP_ENDPOINT", "http://127.0.0.1:4318/v1/traces")
+
+    provider = build_observability_provider_from_env()
+
+    assert isinstance(provider, OtlpHttpObservabilityProvider)
+
+
+def test_build_observability_provider_from_env_supports_none(monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_OBSERVABILITY_PROVIDER", "none")
+
+    provider = build_observability_provider_from_env()
+
+    assert provider.provider_name == "none"
+
+
+def test_otlp_observability_redacts_sensitive_payloads(monkeypatch):
+    requests: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json=None):
+            requests.append({"url": url, "json": json})
+            return FakeResponse()
+
+    monkeypatch.setattr("agent_runtime.observability.httpx.Client", FakeClient)
+
+    provider = OtlpHttpObservabilityProvider(
+        endpoint="http://127.0.0.1:4318/v1/traces",
+        service_name="agent-runtime",
+    )
+    with provider.start_generation(
+        name="remote-openai-responses",
+        model="gpt-5.4-mini",
+        input={
+            "prompt": "top secret prompt",
+            "headers": {
+                "authorization": "Bearer sk-test-secret",
+                "x-api-key": "sk-test-secret",
+            },
+        },
+        metadata={"provider": "openai"},
+    ) as observation:
+        observation.update(output={"message": "ok", "token": "secret-token"})
+
+    provider.flush()
+
+    body = json.dumps(requests[0]["json"], sort_keys=True)
+    assert "top secret prompt" not in body
+    assert "Bearer sk-test-secret" not in body
+    assert "secret-token" not in body
+    assert "[REDACTED]" in body
+
+
 @pytest.mark.asyncio
 async def test_local_ollama_executor_debug_dump_writes_request_payload(monkeypatch, tmp_path):
     kernel = _build_fixture_context(endpoint_kind="local")
@@ -1424,3 +1655,26 @@ async def test_local_ollama_executor_debug_dump_writes_request_payload(monkeypat
     assert record["source"] == "local-ollama"
     assert record["message_count"] == 2
     assert record["request"]["prompt"] == render_prompt(kernel.context)
+
+
+def test_debug_prompt_payload_rotates_dump_file(monkeypatch, tmp_path):
+    context = _build_fixture_context(endpoint_kind="local").context
+    debug_file = tmp_path / "agent-runtime-prompts.jsonl"
+
+    monkeypatch.setenv("AGENT_RUNTIME_DEBUG_PROMPTS", "1")
+    monkeypatch.setenv("AGENT_RUNTIME_DEBUG_PROMPTS_FILE", str(debug_file))
+    monkeypatch.setenv("AGENT_RUNTIME_DEBUG_PROMPTS_MAX_BYTES", "250")
+    monkeypatch.setenv("AGENT_RUNTIME_DEBUG_PROMPTS_BACKUP_COUNT", "2")
+
+    for index in range(5):
+        _debug_prompt_payload(
+            "local-ollama",
+            context,
+            {"prompt": f"payload-{index}-" + ("x" * 120)},
+        )
+
+    assert debug_file.exists()
+    assert (tmp_path / "agent-runtime-prompts.jsonl.1").exists()
+
+    latest_record = json.loads(debug_file.read_text(encoding="utf-8").strip())
+    assert latest_record["request"]["prompt"].startswith("payload-4-")

@@ -54,9 +54,10 @@ This starts:
 For audit specifically, the local stack now also provides:
 
 - Postgres as the canonical append-only audit ledger store
-- Kafka topic `talon.audit.events`
-- ClickHouse as the audit query projection store
-- MinIO for audit exports and daily chain checkpoints
+- provider-backed non-canonical audit surfaces with local defaults:
+  - relay provider: Kafka topic `talon.audit.events`
+  - projection provider: ClickHouse
+  - archive provider: MinIO for exports and daily chain checkpoints
 
 If you want a local HyperDX UI plus OTLP intake endpoints, start the optional profile:
 
@@ -69,6 +70,23 @@ That exposes:
 - HyperDX UI on [http://127.0.0.1:8080](http://127.0.0.1:8080)
 - OTLP gRPC on `127.0.0.1:4317`
 - OTLP HTTP on `127.0.0.1:4318`
+
+If you want `agent-runtime` to export observability there, set these env vars before `./open-talon start`:
+
+```bash
+export AGENT_RUNTIME_OBSERVABILITY_PROVIDER=otlp
+export AGENT_RUNTIME_OTLP_HTTP_ENDPOINT=http://127.0.0.1:4318/v1/traces
+```
+
+Optional provider-selection env vars for audit surfaces:
+
+```bash
+export AUDIT_RELAY_PROVIDER=kafka
+export AUDIT_PROJECTION_PROVIDER=clickhouse
+export AUDIT_ARCHIVE_PROVIDER=minio
+```
+
+Each audit provider can also be set to `none` for a local no-op derived surface while Postgres remains canonical.
 
 `keycloak-init` is a local-only helper that normalizes Keycloak for development after the main container boots. It makes sure both the `master` and `open-talon` realms allow local HTTP access.
 
@@ -256,7 +274,7 @@ Current thread-native request flow:
 5. When complete, `core-collab` creates a follow-up task only for the original requesting agent.
 6. `agent-runtime` resumes that agent with the request and accumulated answers in context.
 
-For workspace debugging, there is also a workspace communication-log view backed by canonical `timeline_messages`. It aggregates regular thread messages, rendered interaction requests, and interaction answers across the workspace. Finalized communication entries are also appended to workspace JSONL files under `OPEN_TALON_COMMUNICATION_LOG_DIR` so the collaboration trace can be inspected from disk. The HTTP route is intended for workspace `admin` or `supervisor` users when using OIDC.
+For workspace debugging, there is also a workspace communication-log view backed by canonical `timeline_messages`. It aggregates regular thread messages, rendered interaction requests, and interaction answers across the workspace. Finalized communication entries are also appended to workspace JSONL files under `OPEN_TALON_COMMUNICATION_LOG_DIR` so the collaboration trace can be inspected from disk. Those JSONL files rotate automatically using `OPEN_TALON_COMMUNICATION_LOG_MAX_BYTES` and `OPEN_TALON_COMMUNICATION_LOG_BACKUP_COUNT`. Local `./open-talon start` service logs under `.run/` also rotate automatically using `OPEN_TALON_SERVICE_LOG_MAX_BYTES` and `OPEN_TALON_SERVICE_LOG_BACKUP_COUNT`. The HTTP route is intended for workspace `admin` or `supervisor` users when using OIDC.
 
 Relevant collaboration APIs:
 
@@ -528,10 +546,10 @@ Current model:
 - workspace-scoped chains use `workspace:{workspace_id}`
 - organization-scoped chains use `organization:{organization_id}`
 - global/system audit uses the `global` partition
-- ClickHouse stores the searchable projection in `default.audit_events`
-- MinIO stores exports in `audit/exports/` and chain checkpoints in `audit/checkpoints/`
-- background replay repopulates ClickHouse from the Postgres ledger if the projector falls behind
-- background retention exports old ledger rows to MinIO and prunes the Postgres hot window after snapshotting chain state
+- relay, projection, and archive surfaces are provider-backed and replaceable
+- local defaults are Kafka for relay, ClickHouse for projection, and MinIO for archive/export/checkpoint storage
+- background replay repopulates the configured projection provider from the Postgres ledger if the projector falls behind
+- background retention exports old ledger rows through the configured archive provider and prunes the Postgres hot window after snapshotting chain state
 
 Current audit APIs:
 
@@ -570,8 +588,9 @@ pytest tests/core-collab/test_repository_integration.py -q
 
 Note:
 
-- the current local code writes directly to ClickHouse for the warehouse path
-- HyperDX is available through the optional `hyperdx` compose profile, but the Open Talon API remains the authoritative audit interface
+- the canonical audit API remains Postgres-backed even when relay, projection, or archive providers are disabled or failing
+- HyperDX is available through the optional `hyperdx` compose profile, but it is an observability sink, not the authoritative audit interface
+- `agent-runtime` observability export is provider-backed and selected with `AGENT_RUNTIME_OBSERVABILITY_PROVIDER`
 
 ## 12. Layered Memory Quick Notes
 

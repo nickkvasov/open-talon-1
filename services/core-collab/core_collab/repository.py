@@ -9,12 +9,14 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import asyncpg
+from open_talon_contracts.log_management import RotationPolicy, append_bytes_with_rotation
 
 from .contracts import (
     ActorRef,
     AgentConfiguration,
     AgentDefinition,
     AgentEndpoint,
+    AgentHarness,
     AgentInteractionContract,
     Artifact,
     AuditChainVerificationResult,
@@ -53,6 +55,7 @@ from .contracts import (
     Workspace,
     WorkspaceAsset,
     WorkspaceAssetVersion,
+    WorkspaceHarness,
     WorkspaceTool,
 )
 from .migrations import apply_pending_migrations
@@ -106,6 +109,12 @@ class CollaborationRepository:
             Path(communication_log_dir).expanduser()
             if communication_log_dir is not None
             else None
+        )
+        self._communication_log_policy = RotationPolicy.from_env(
+            max_bytes_var="OPEN_TALON_COMMUNICATION_LOG_MAX_BYTES",
+            backup_count_var="OPEN_TALON_COMMUNICATION_LOG_BACKUP_COUNT",
+            default_max_bytes=20 * 1024 * 1024,
+            default_backup_count=10,
         )
 
     async def setup_schema(self) -> None:
@@ -641,14 +650,15 @@ class CollaborationRepository:
         await conn.execute(
             """
             INSERT INTO workspaces (
-                workspace_id, organization_id, name, description, owner_user_id, created_at, updated_at, metadata
+                workspace_id, organization_id, name, description, owner_user_id, harness, created_at, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (workspace_id) DO UPDATE
                 SET organization_id = EXCLUDED.organization_id,
                     name = EXCLUDED.name,
                     description = EXCLUDED.description,
                     owner_user_id = EXCLUDED.owner_user_id,
+                    harness = EXCLUDED.harness,
                     updated_at = EXCLUDED.updated_at,
                     metadata = EXCLUDED.metadata
             """,
@@ -657,6 +667,11 @@ class CollaborationRepository:
             workspace.name,
             workspace.description,
             workspace.owner_user_id,
+            (
+                self._json_dumps(workspace.harness.model_dump(mode="json"))
+                if workspace.harness is not None
+                else None
+            ),
             workspace.created_at,
             workspace.updated_at,
             self._json_dumps(workspace.metadata),
@@ -904,9 +919,9 @@ class CollaborationRepository:
             """
             INSERT INTO system_agents (
                 agent_id, scope, organization_id, display_name, description, role, capabilities, endpoint,
-                system_prompt, interaction_contract, definition, created_by, created_at, updated_at, metadata
+                system_prompt, harness, interaction_contract, definition, created_by, created_at, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             ON CONFLICT (agent_id) DO UPDATE
                 SET scope = EXCLUDED.scope,
                     organization_id = EXCLUDED.organization_id,
@@ -916,6 +931,7 @@ class CollaborationRepository:
                     capabilities = EXCLUDED.capabilities,
                     endpoint = EXCLUDED.endpoint,
                     system_prompt = EXCLUDED.system_prompt,
+                    harness = EXCLUDED.harness,
                     interaction_contract = EXCLUDED.interaction_contract,
                     definition = EXCLUDED.definition,
                     updated_at = EXCLUDED.updated_at,
@@ -930,6 +946,11 @@ class CollaborationRepository:
             self._json_dumps(agent.capabilities),
             self._json_dumps(agent.endpoint.model_dump(mode="json")),
             agent.system_prompt,
+            (
+                self._json_dumps(agent.harness.model_dump(mode="json"))
+                if agent.harness is not None
+                else None
+            ),
             self._json_dumps(agent.interaction_contract.model_dump(mode="json")),
             self._json_dumps(agent.definition),
             agent.created_by,
@@ -1972,7 +1993,7 @@ class CollaborationRepository:
     async def fetch_workspace(self, workspace_id: UUID) -> Workspace | None:
         row = await self._pool.fetchrow(
             """
-            SELECT workspace_id, organization_id, name, description, owner_user_id, created_at, updated_at, metadata
+            SELECT workspace_id, organization_id, name, description, owner_user_id, harness, created_at, updated_at, metadata
             FROM workspaces
             WHERE workspace_id = $1
             """,
@@ -1983,7 +2004,7 @@ class CollaborationRepository:
     async def list_workspaces(self, *, organization_id: UUID | None = None) -> list[Workspace]:
         rows = await self._pool.fetch(
             """
-            SELECT workspace_id, organization_id, name, description, owner_user_id, created_at, updated_at, metadata
+            SELECT workspace_id, organization_id, name, description, owner_user_id, harness, created_at, updated_at, metadata
             FROM workspaces
             WHERE ($1::uuid IS NULL OR organization_id = $1)
             ORDER BY created_at ASC
@@ -2001,7 +2022,7 @@ class CollaborationRepository:
         rows = await self._pool.fetch(
             """
             SELECT w.workspace_id, w.organization_id, w.name, w.description, w.owner_user_id,
-                   w.created_at, w.updated_at, w.metadata
+                   w.harness, w.created_at, w.updated_at, w.metadata
             FROM workspaces AS w
             JOIN organization_memberships AS membership
               ON membership.organization_id = w.organization_id
@@ -2030,7 +2051,7 @@ class CollaborationRepository:
         rows = await self._pool.fetch(
             """
             SELECT agent_id, scope, organization_id, display_name, description, role, capabilities, endpoint,
-                   system_prompt, interaction_contract, definition, created_by, created_at, updated_at, metadata
+                   system_prompt, harness, interaction_contract, definition, created_by, created_at, updated_at, metadata
             FROM system_agents
             WHERE scope = $1
               AND (
@@ -2051,7 +2072,7 @@ class CollaborationRepository:
         rows = await self._pool.fetch(
             """
             SELECT agent_id, scope, organization_id, display_name, description, role, capabilities, endpoint,
-                   system_prompt, interaction_contract, definition, created_by, created_at, updated_at, metadata
+                   system_prompt, harness, interaction_contract, definition, created_by, created_at, updated_at, metadata
             FROM system_agents
             WHERE endpoint->>'engine_id' = $1
                OR definition->'runtime'->>'engine_id' = $1
@@ -2127,7 +2148,7 @@ class CollaborationRepository:
         row = await self._pool.fetchrow(
             """
             SELECT agent_id, scope, organization_id, display_name, description, role, capabilities, endpoint,
-                   system_prompt, interaction_contract, definition, created_by, created_at, updated_at, metadata
+                   system_prompt, harness, interaction_contract, definition, created_by, created_at, updated_at, metadata
             FROM system_agents
             WHERE agent_id = $1
             """,
@@ -2473,6 +2494,7 @@ class CollaborationRepository:
                    sa.capabilities AS agent_capabilities,
                    sa.endpoint AS agent_endpoint,
                    sa.system_prompt AS agent_system_prompt,
+                   sa.harness AS agent_harness,
                    sa.definition AS agent_definition
             FROM participants p
             LEFT JOIN users u ON p.user_id = u.user_id
@@ -2505,6 +2527,7 @@ class CollaborationRepository:
                    sa.capabilities AS agent_capabilities,
                    sa.endpoint AS agent_endpoint,
                    sa.system_prompt AS agent_system_prompt,
+                   sa.harness AS agent_harness,
                    sa.definition AS agent_definition
             FROM participants p
             LEFT JOIN users u ON p.user_id = u.user_id
@@ -2533,6 +2556,7 @@ class CollaborationRepository:
                    sa.capabilities AS agent_capabilities,
                    sa.endpoint AS agent_endpoint,
                    sa.system_prompt AS agent_system_prompt,
+                   sa.harness AS agent_harness,
                    sa.definition AS agent_definition
             FROM participants p
             LEFT JOIN users u ON p.user_id = u.user_id
@@ -2559,6 +2583,7 @@ class CollaborationRepository:
                    sa.capabilities AS agent_capabilities,
                    sa.endpoint AS agent_endpoint,
                    sa.system_prompt AS agent_system_prompt,
+                   sa.harness AS agent_harness,
                    sa.definition AS agent_definition
             FROM participants p
             LEFT JOIN users u ON p.user_id = u.user_id
@@ -3914,6 +3939,13 @@ class CollaborationRepository:
             name=row["name"],
             description=row["description"],
             owner_user_id=row["owner_user_id"],
+            harness=(
+                WorkspaceHarness.model_validate(
+                    CollaborationRepository._json_value(row["harness"], default={})
+                )
+                if row["harness"] is not None
+                else None
+            ),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),
@@ -4007,6 +4039,15 @@ class CollaborationRepository:
                         CollaborationRepository._json_value(row["agent_endpoint"], default={})
                     ),
                     system_prompt=row["agent_system_prompt"],
+                    harness=(
+                        AgentHarness.model_validate(
+                            CollaborationRepository._json_value(
+                                row["agent_harness"], default={}
+                            )
+                        )
+                        if row["agent_harness"] is not None
+                        else None
+                    ),
                     definition=CollaborationRepository._json_value(
                         row["agent_definition"], default={}
                     ),
@@ -4046,6 +4087,13 @@ class CollaborationRepository:
                 CollaborationRepository._json_value(row["endpoint"], default={})
             ),
             system_prompt=row["system_prompt"],
+            harness=(
+                AgentHarness.model_validate(
+                    CollaborationRepository._json_value(row["harness"], default={})
+                )
+                if row["harness"] is not None
+                else None
+            ),
             interaction_contract=AgentInteractionContract.model_validate(
                 CollaborationRepository._json_value(
                     row["interaction_contract"],
@@ -4524,10 +4572,11 @@ class CollaborationRepository:
             )
             grouped_payloads.setdefault(file_path, []).append(payload)
         for file_path, payloads in grouped_payloads.items():
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            with file_path.open("ab") as handle:
-                for payload in payloads:
-                    handle.write(payload)
+            append_bytes_with_rotation(
+                file_path,
+                payloads,
+                policy=self._communication_log_policy,
+            )
 
     @staticmethod
     def _event_from_row(row: asyncpg.Record) -> EventEnvelope:

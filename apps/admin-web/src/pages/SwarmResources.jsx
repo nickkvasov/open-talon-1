@@ -37,7 +37,36 @@ export default function SwarmResources() {
   const [agentData, setAgentData] = useState({
     display_name: '', description: '', role: 'assistant', capabilities: 'execute_code',
     endpoint_kind: 'local', endpoint_model: '', endpoint_provider: '',
-    system_prompt: 'You are a helpful assistant.', instructions: '', completion_criteria: ''
+    system_prompt: 'You are a helpful assistant.', instructions: '', completion_criteria: '',
+    harness_summary: '',
+    operating_principles: '[]',
+    planning_guidance: '[]',
+    planning_plan_before_act: true,
+    planning_incremental_execution: true,
+    planning_one_goal_at_a_time: true,
+    planning_explicit_uncertainty: true,
+    tool_selection_principles: '[]',
+    tool_read_before_write: true,
+    tool_inspect_schema_before_use: true,
+    tool_prefer_existing_workspace_tools: true,
+    tool_cite_tool_results_in_reasoning: true,
+    tool_verify_side_effects_after_mutation: true,
+    tool_fallback_when_no_tool_fits: '',
+    memory_use_run_memory: true,
+    memory_use_thread_memory: true,
+    memory_use_workspace_memory: true,
+    collaboration_ask_user_when: '[]',
+    collaboration_escalate_when: '[]',
+    collaboration_delegation_guidance: '[]',
+    collaboration_handoff_guidance: '[]',
+    validation_required_checks: '[]',
+    validation_require_evidence_for_claims: true,
+    validation_require_tool_results_for_completion: false,
+    validation_require_tests_before_done: false,
+    stop_completion_conditions: '[]',
+    stop_stop_conditions: '[]',
+    stop_max_turns: '',
+    skill_refs: '[]'
   });
 
   const [toolData, setToolData] = useState({
@@ -113,7 +142,36 @@ export default function SwarmResources() {
     setAgentData({
       display_name: '', description: '', role: 'assistant', capabilities: 'execute_code',
       endpoint_kind: 'local', endpoint_model: '', endpoint_provider: '',
-      system_prompt: 'You are a helpful assistant.', instructions: '', completion_criteria: ''
+      system_prompt: 'You are a helpful assistant.', instructions: '', completion_criteria: '',
+      harness_summary: '',
+      operating_principles: '[]',
+      planning_guidance: '[]',
+      planning_plan_before_act: true,
+      planning_incremental_execution: true,
+      planning_one_goal_at_a_time: true,
+      planning_explicit_uncertainty: true,
+      tool_selection_principles: '[]',
+      tool_read_before_write: true,
+      tool_inspect_schema_before_use: true,
+      tool_prefer_existing_workspace_tools: true,
+      tool_cite_tool_results_in_reasoning: true,
+      tool_verify_side_effects_after_mutation: true,
+      tool_fallback_when_no_tool_fits: '',
+      memory_use_run_memory: true,
+      memory_use_thread_memory: true,
+      memory_use_workspace_memory: true,
+      collaboration_ask_user_when: '[]',
+      collaboration_escalate_when: '[]',
+      collaboration_delegation_guidance: '[]',
+      collaboration_handoff_guidance: '[]',
+      validation_required_checks: '[]',
+      validation_require_evidence_for_claims: true,
+      validation_require_tool_results_for_completion: false,
+      validation_require_tests_before_done: false,
+      stop_completion_conditions: '[]',
+      stop_stop_conditions: '[]',
+      stop_max_turns: '',
+      skill_refs: '[]'
     });
     setEditingAgent(null);
     setAgentModalMode('create');
@@ -129,6 +187,13 @@ export default function SwarmResources() {
   };
 
   const handleOpenAgentEdit = (agent) => {
+    const harness = agent.harness || {};
+    const planning = harness.planning || {};
+    const toolUsePolicy = harness.tool_use_policy || {};
+    const memoryPolicy = harness.memory_policy || {};
+    const collaborationPolicy = harness.collaboration_policy || {};
+    const validationPolicy = harness.validation_policy || {};
+    const stopPolicy = harness.stop_policy || {};
     setEditingAgent(agent);
     setAgentModalMode('edit');
     setAgentData({
@@ -141,9 +206,146 @@ export default function SwarmResources() {
       endpoint_provider: agent.endpoint.provider || '',
       system_prompt: agent.system_prompt,
       instructions: agent.interaction_contract?.instructions?.join(', ') || '',
-      completion_criteria: agent.interaction_contract?.completion_criteria?.join(', ') || ''
+      completion_criteria: agent.interaction_contract?.completion_criteria?.join(', ') || '',
+      harness_summary: harness.summary || '',
+      operating_principles: JSON.stringify(harness.operating_principles || [], null, 2),
+      planning_guidance: JSON.stringify(planning.guidance || [], null, 2),
+      planning_plan_before_act: planning.plan_before_act ?? true,
+      planning_incremental_execution: planning.incremental_execution ?? true,
+      planning_one_goal_at_a_time: planning.one_goal_at_a_time ?? true,
+      planning_explicit_uncertainty: planning.explicit_uncertainty ?? true,
+      tool_selection_principles: JSON.stringify(toolUsePolicy.selection_principles || [], null, 2),
+      tool_read_before_write: toolUsePolicy.read_before_write ?? true,
+      tool_inspect_schema_before_use: toolUsePolicy.inspect_schema_before_use ?? true,
+      tool_prefer_existing_workspace_tools: toolUsePolicy.prefer_existing_workspace_tools ?? true,
+      tool_cite_tool_results_in_reasoning: toolUsePolicy.cite_tool_results_in_reasoning ?? true,
+      tool_verify_side_effects_after_mutation: toolUsePolicy.verify_side_effects_after_mutation ?? true,
+      tool_fallback_when_no_tool_fits: toolUsePolicy.fallback_when_no_tool_fits || '',
+      memory_use_run_memory: memoryPolicy.use_run_memory ?? true,
+      memory_use_thread_memory: memoryPolicy.use_thread_memory ?? true,
+      memory_use_workspace_memory: memoryPolicy.use_workspace_memory ?? true,
+      collaboration_ask_user_when: JSON.stringify(collaborationPolicy.ask_user_when || [], null, 2),
+      collaboration_escalate_when: JSON.stringify(collaborationPolicy.escalate_when || [], null, 2),
+      collaboration_delegation_guidance: JSON.stringify(collaborationPolicy.delegation_guidance || [], null, 2),
+      collaboration_handoff_guidance: JSON.stringify(collaborationPolicy.handoff_guidance || [], null, 2),
+      validation_required_checks: JSON.stringify(validationPolicy.required_checks || [], null, 2),
+      validation_require_evidence_for_claims: validationPolicy.require_evidence_for_claims ?? true,
+      validation_require_tool_results_for_completion: validationPolicy.require_tool_results_for_completion ?? false,
+      validation_require_tests_before_done: validationPolicy.require_tests_before_done ?? false,
+      stop_completion_conditions: JSON.stringify(stopPolicy.completion_conditions || [], null, 2),
+      stop_stop_conditions: JSON.stringify(stopPolicy.stop_conditions || [], null, 2),
+      stop_max_turns: stopPolicy.max_turns != null ? String(stopPolicy.max_turns) : '',
+      skill_refs: JSON.stringify(harness.skill_refs || [], null, 2),
     });
     setIsAgentModalOpen(true);
+  };
+
+  const parseJsonField = (raw, fallback, label) => {
+    if (!raw.trim()) {
+      return fallback;
+    }
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new Error(`${label} must be valid JSON`);
+    }
+  };
+
+  const buildAgentHarness = () => {
+    const operatingPrinciples = parseJsonField(agentData.operating_principles, [], 'Operating principles');
+    const planningGuidance = parseJsonField(agentData.planning_guidance, [], 'Planning guidance');
+    const toolSelectionPrinciples = parseJsonField(agentData.tool_selection_principles, [], 'Tool selection principles');
+    const askUserWhen = parseJsonField(agentData.collaboration_ask_user_when, [], 'Ask-user guidance');
+    const escalateWhen = parseJsonField(agentData.collaboration_escalate_when, [], 'Escalation guidance');
+    const delegationGuidance = parseJsonField(agentData.collaboration_delegation_guidance, [], 'Delegation guidance');
+    const handoffGuidance = parseJsonField(agentData.collaboration_handoff_guidance, [], 'Handoff guidance');
+    const requiredChecks = parseJsonField(agentData.validation_required_checks, [], 'Validation checks');
+    const completionConditions = parseJsonField(agentData.stop_completion_conditions, [], 'Completion conditions');
+    const stopConditions = parseJsonField(agentData.stop_stop_conditions, [], 'Stop conditions');
+    const skillRefs = parseJsonField(agentData.skill_refs, [], 'Skill refs');
+    const planningDefaults = agentData.planning_plan_before_act
+      && agentData.planning_incremental_execution
+      && agentData.planning_one_goal_at_a_time
+      && agentData.planning_explicit_uncertainty;
+    const toolDefaults = agentData.tool_read_before_write
+      && agentData.tool_inspect_schema_before_use
+      && agentData.tool_prefer_existing_workspace_tools
+      && agentData.tool_cite_tool_results_in_reasoning
+      && agentData.tool_verify_side_effects_after_mutation;
+    const memoryDefaults = agentData.memory_use_run_memory
+      && agentData.memory_use_thread_memory
+      && agentData.memory_use_workspace_memory;
+    const validationDefaults = agentData.validation_require_evidence_for_claims
+      && !agentData.validation_require_tool_results_for_completion
+      && !agentData.validation_require_tests_before_done;
+    const hasHarness = Boolean(
+      agentData.harness_summary.trim()
+      || operatingPrinciples.length
+      || planningGuidance.length
+      || !planningDefaults
+      || toolSelectionPrinciples.length
+      || !toolDefaults
+      || agentData.tool_fallback_when_no_tool_fits.trim()
+      || !memoryDefaults
+      || askUserWhen.length
+      || escalateWhen.length
+      || delegationGuidance.length
+      || handoffGuidance.length
+      || requiredChecks.length
+      || !validationDefaults
+      || completionConditions.length
+      || stopConditions.length
+      || agentData.stop_max_turns.trim()
+      || skillRefs.length
+    );
+    if (!hasHarness) {
+      return null;
+    }
+    return {
+      version: 1,
+      summary: agentData.harness_summary.trim() || null,
+      operating_principles: operatingPrinciples,
+      planning: {
+        plan_before_act: agentData.planning_plan_before_act,
+        incremental_execution: agentData.planning_incremental_execution,
+        one_goal_at_a_time: agentData.planning_one_goal_at_a_time,
+        explicit_uncertainty: agentData.planning_explicit_uncertainty,
+        guidance: planningGuidance,
+      },
+      tool_use_policy: {
+        selection_principles: toolSelectionPrinciples,
+        read_before_write: agentData.tool_read_before_write,
+        inspect_schema_before_use: agentData.tool_inspect_schema_before_use,
+        prefer_existing_workspace_tools: agentData.tool_prefer_existing_workspace_tools,
+        cite_tool_results_in_reasoning: agentData.tool_cite_tool_results_in_reasoning,
+        verify_side_effects_after_mutation: agentData.tool_verify_side_effects_after_mutation,
+        fallback_when_no_tool_fits: agentData.tool_fallback_when_no_tool_fits.trim() || null,
+      },
+      memory_policy: {
+        use_run_memory: agentData.memory_use_run_memory,
+        use_thread_memory: agentData.memory_use_thread_memory,
+        use_workspace_memory: agentData.memory_use_workspace_memory,
+      },
+      collaboration_policy: {
+        ask_user_when: askUserWhen,
+        escalate_when: escalateWhen,
+        delegation_guidance: delegationGuidance,
+        handoff_guidance: handoffGuidance,
+      },
+      validation_policy: {
+        required_checks: requiredChecks,
+        require_evidence_for_claims: agentData.validation_require_evidence_for_claims,
+        require_tool_results_for_completion: agentData.validation_require_tool_results_for_completion,
+        require_tests_before_done: agentData.validation_require_tests_before_done,
+      },
+      stop_policy: {
+        completion_conditions: completionConditions,
+        stop_conditions: stopConditions,
+        max_turns: agentData.stop_max_turns.trim() ? Number(agentData.stop_max_turns) : null,
+      },
+      skill_refs: skillRefs,
+      metadata: {},
+    };
   };
 
   const handleOpenToolEdit = (tool) => {
@@ -210,6 +412,7 @@ export default function SwarmResources() {
         capabilities: agentData.capabilities.split(',').map(s => s.trim()).filter(Boolean),
         endpoint: { kind: agentData.endpoint_kind, model: agentData.endpoint_model || null, provider: agentData.endpoint_provider || null },
         system_prompt: agentData.system_prompt,
+        harness: buildAgentHarness(),
         interaction_contract: {
           instructions: agentData.instructions.split(',').map(s => s.trim()).filter(Boolean),
           completion_criteria: agentData.completion_criteria.split(',').map(s => s.trim()).filter(Boolean),
@@ -544,6 +747,123 @@ export default function SwarmResources() {
                     <div>
                       <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Success Criteria</label>
                       <input type="text" value={agentData.completion_criteria} onChange={e => setAgentData({...agentData, completion_criteria: e.target.value})} className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-emerald-500 outline-none transition-all text-sm" placeholder="How to know the task is done..." />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest border-b border-slate-100 dark:border-slate-700 pb-2">
+                  Agent Harness
+                </h4>
+                <div className="p-6 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-100 dark:border-slate-700 space-y-6">
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Harness Summary</label>
+                    <textarea
+                      value={agentData.harness_summary}
+                      onChange={e => setAgentData({...agentData, harness_summary: e.target.value})}
+                      rows={2}
+                      className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm resize-none"
+                      placeholder="Operational scaffold for this agent..."
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Operating Principles (JSON array)</label>
+                    <textarea
+                      value={agentData.operating_principles}
+                      onChange={e => setAgentData({...agentData, operating_principles: e.target.value})}
+                      rows={4}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                    />
+                  </div>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div className="space-y-3">
+                      <h5 className="text-sm font-bold text-slate-900 dark:text-white">Planning Policy</h5>
+                      <div className="grid grid-cols-2 gap-2 text-sm text-slate-600 dark:text-slate-300">
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.planning_plan_before_act} onChange={e => setAgentData({...agentData, planning_plan_before_act: e.target.checked})} />Plan before act</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.planning_incremental_execution} onChange={e => setAgentData({...agentData, planning_incremental_execution: e.target.checked})} />Incremental execution</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.planning_one_goal_at_a_time} onChange={e => setAgentData({...agentData, planning_one_goal_at_a_time: e.target.checked})} />One goal at a time</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.planning_explicit_uncertainty} onChange={e => setAgentData({...agentData, planning_explicit_uncertainty: e.target.checked})} />Explicit uncertainty</label>
+                      </div>
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Planning Guidance (JSON array)</label>
+                      <textarea
+                        value={agentData.planning_guidance}
+                        onChange={e => setAgentData({...agentData, planning_guidance: e.target.value})}
+                        rows={5}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                      />
+                    </div>
+                    <div className="space-y-3">
+                      <h5 className="text-sm font-bold text-slate-900 dark:text-white">Tool-Use Policy</h5>
+                      <div className="grid grid-cols-1 gap-2 text-sm text-slate-600 dark:text-slate-300">
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.tool_read_before_write} onChange={e => setAgentData({...agentData, tool_read_before_write: e.target.checked})} />Read before write</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.tool_inspect_schema_before_use} onChange={e => setAgentData({...agentData, tool_inspect_schema_before_use: e.target.checked})} />Inspect schema before use</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.tool_prefer_existing_workspace_tools} onChange={e => setAgentData({...agentData, tool_prefer_existing_workspace_tools: e.target.checked})} />Prefer existing workspace tools</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.tool_cite_tool_results_in_reasoning} onChange={e => setAgentData({...agentData, tool_cite_tool_results_in_reasoning: e.target.checked})} />Cite tool results in reasoning</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.tool_verify_side_effects_after_mutation} onChange={e => setAgentData({...agentData, tool_verify_side_effects_after_mutation: e.target.checked})} />Verify side effects after mutation</label>
+                      </div>
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Selection Principles (JSON array)</label>
+                      <textarea
+                        value={agentData.tool_selection_principles}
+                        onChange={e => setAgentData({...agentData, tool_selection_principles: e.target.value})}
+                        rows={4}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                      />
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Fallback When No Tool Fits</label>
+                      <textarea
+                        value={agentData.tool_fallback_when_no_tool_fits}
+                        onChange={e => setAgentData({...agentData, tool_fallback_when_no_tool_fits: e.target.value})}
+                        rows={2}
+                        className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm resize-none"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div className="space-y-3">
+                      <h5 className="text-sm font-bold text-slate-900 dark:text-white">Memory Policy</h5>
+                      <div className="grid grid-cols-1 gap-2 text-sm text-slate-600 dark:text-slate-300">
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.memory_use_run_memory} onChange={e => setAgentData({...agentData, memory_use_run_memory: e.target.checked})} />Use run memory</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.memory_use_thread_memory} onChange={e => setAgentData({...agentData, memory_use_thread_memory: e.target.checked})} />Use thread memory</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.memory_use_workspace_memory} onChange={e => setAgentData({...agentData, memory_use_workspace_memory: e.target.checked})} />Use workspace memory</label>
+                      </div>
+                      <h5 className="pt-2 text-sm font-bold text-slate-900 dark:text-white">Validation Policy</h5>
+                      <div className="grid grid-cols-1 gap-2 text-sm text-slate-600 dark:text-slate-300">
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.validation_require_evidence_for_claims} onChange={e => setAgentData({...agentData, validation_require_evidence_for_claims: e.target.checked})} />Require evidence for claims</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.validation_require_tool_results_for_completion} onChange={e => setAgentData({...agentData, validation_require_tool_results_for_completion: e.target.checked})} />Require tool results for completion</label>
+                        <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.validation_require_tests_before_done} onChange={e => setAgentData({...agentData, validation_require_tests_before_done: e.target.checked})} />Require tests before done</label>
+                      </div>
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Required Checks (JSON array)</label>
+                      <textarea
+                        value={agentData.validation_required_checks}
+                        onChange={e => setAgentData({...agentData, validation_required_checks: e.target.value})}
+                        rows={4}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                      />
+                    </div>
+                    <div className="space-y-3">
+                      <h5 className="text-sm font-bold text-slate-900 dark:text-white">Collaboration and Stop Policies</h5>
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Ask User When (JSON array)</label>
+                      <textarea value={agentData.collaboration_ask_user_when} onChange={e => setAgentData({...agentData, collaboration_ask_user_when: e.target.value})} rows={3} className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none" />
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Escalate When (JSON array)</label>
+                      <textarea value={agentData.collaboration_escalate_when} onChange={e => setAgentData({...agentData, collaboration_escalate_when: e.target.value})} rows={3} className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none" />
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Delegation Guidance (JSON array)</label>
+                      <textarea value={agentData.collaboration_delegation_guidance} onChange={e => setAgentData({...agentData, collaboration_delegation_guidance: e.target.value})} rows={3} className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none" />
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Handoff Guidance (JSON array)</label>
+                      <textarea value={agentData.collaboration_handoff_guidance} onChange={e => setAgentData({...agentData, collaboration_handoff_guidance: e.target.value})} rows={3} className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none" />
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Completion Conditions (JSON array)</label>
+                      <textarea value={agentData.stop_completion_conditions} onChange={e => setAgentData({...agentData, stop_completion_conditions: e.target.value})} rows={3} className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none" />
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Stop Conditions (JSON array)</label>
+                      <textarea value={agentData.stop_stop_conditions} onChange={e => setAgentData({...agentData, stop_stop_conditions: e.target.value})} rows={3} className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none" />
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Max Turns</label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={agentData.stop_max_turns}
+                        onChange={e => setAgentData({...agentData, stop_max_turns: e.target.value})}
+                        className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm"
+                      />
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Skill Refs (JSON array)</label>
+                      <textarea value={agentData.skill_refs} onChange={e => setAgentData({...agentData, skill_refs: e.target.value})} rows={3} className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none" />
                     </div>
                   </div>
                 </div>

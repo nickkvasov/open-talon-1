@@ -186,7 +186,7 @@ Check:
 | answer tracked question workflow | `/v1/requests/{request_id}/answers` |
 | inspect request aggregation state | `/v1/requests/{request_id}` |
 | inspect workspace-wide communication trail | `/v1/workspaces/{workspace_id}/communication-log` |
-| inspect persisted communication trail on disk | `OPEN_TALON_COMMUNICATION_LOG_DIR/<workspace_id>.jsonl` |
+| inspect persisted communication trail on disk | `OPEN_TALON_COMMUNICATION_LOG_DIR/<workspace_id>.jsonl` plus rotated siblings such as `.jsonl.1` |
 | inspect runtime queues/failures/tokens | `/v1/admin/runtime/overview` |
 | inspect org-scoped runtime queues/failures/tokens | `/v1/organizations/{organization_id}/runtime/overview` |
 | inspect compliance/investigation events | `/v1/audit/events` |

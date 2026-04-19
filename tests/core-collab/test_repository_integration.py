@@ -25,12 +25,16 @@ from open_talon_contracts.agent_contracts import build_default_interaction_contr
 from open_talon_contracts.models import (
     AgentDefinition,
     AgentEndpoint,
+    AgentHarness,
+    AgentToolUsePolicy,
     AssetLink,
     AuditEventDraft,
     GitRepository,
     LlmProviderDefinition,
     ResolvedAssetBinding,
     Workspace,
+    WorkspaceHarness,
+    WorkspaceMethodology,
     WorkspaceAsset,
     WorkspaceAssetVersion,
 )
@@ -214,6 +218,93 @@ async def test_repository_runtime_queue_stats_query_executes_with_org_filter():
         assert global_tokens == 0
         assert workspace_totals == []
     finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_repository_workspace_and_agent_harness_round_trip():
+    try:
+        pool = await asyncpg.create_pool(dsn=_postgres_dsn(), min_size=1, max_size=2)
+    except Exception as exc:  # pragma: no cover - integration environment dependent
+        pytest.skip(f"Postgres not available for repository integration test: {exc}")
+
+    repository = CollaborationRepository(pool)
+    await apply_pending_migrations(pool)
+
+    now = datetime.now(timezone.utc)
+    workspace_id = uuid4()
+    agent_id = uuid4()
+    owner_id = uuid4()
+
+    workspace = Workspace(
+        workspace_id=workspace_id,
+        name="Harness Workspace",
+        description="Workspace harness integration test.",
+        harness=WorkspaceHarness(
+            summary="Prefer explicit validation artifacts.",
+            methodology=WorkspaceMethodology(
+                ontology="Artifacts and tests are first-class evidence.",
+            ),
+        ),
+        created_at=now,
+        updated_at=now,
+    )
+    agent = AgentDefinition(
+        agent_id=agent_id,
+        display_name="Harness Agent",
+        description="Agent harness integration test.",
+        role="research agent",
+        capabilities=["research"],
+        endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+        system_prompt="Research carefully.",
+        harness=AgentHarness(
+            summary="Choose tools dynamically from the workspace catalog.",
+            tool_use_policy=AgentToolUsePolicy(
+                selection_principles=["Prefer the narrowest tool that provides evidence."],
+            ),
+        ),
+        interaction_contract=build_default_interaction_contract(
+            display_name="Harness Agent",
+            role="research agent",
+            description="Agent harness integration test.",
+            capabilities=["research"],
+        ),
+        created_by=owner_id,
+        created_at=now,
+        updated_at=now,
+    )
+
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await repository.upsert_workspace(conn, workspace)
+                await repository.upsert_system_agent(conn, agent)
+
+        fetched_workspace = await repository.fetch_workspace(workspace_id)
+        fetched_agent = await repository.fetch_system_agent(agent_id)
+        listed_workspaces = await repository.list_workspaces()
+        listed_agents = await repository.list_system_agents()
+
+        assert fetched_workspace is not None
+        assert fetched_workspace.harness is not None
+        assert fetched_workspace.harness.summary == "Prefer explicit validation artifacts."
+        assert fetched_workspace.harness.methodology.ontology.startswith("Artifacts and tests")
+        listed_workspace = next(item for item in listed_workspaces if item.workspace_id == workspace_id)
+        assert listed_workspace.harness is not None
+        assert listed_workspace.harness.summary == "Prefer explicit validation artifacts."
+        assert fetched_agent is not None
+        assert fetched_agent.harness is not None
+        assert fetched_agent.harness.summary.startswith("Choose tools dynamically")
+        assert fetched_agent.harness.tool_use_policy.selection_principles == [
+            "Prefer the narrowest tool that provides evidence."
+        ]
+        listed_agent = next(item for item in listed_agents if item.agent_id == agent_id)
+        assert listed_agent.harness is not None
+        assert listed_agent.harness.summary.startswith("Choose tools dynamically")
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM system_agents WHERE agent_id = $1", agent_id)
+            await conn.execute("DELETE FROM workspaces WHERE workspace_id = $1", workspace_id)
         await pool.close()
 
 
