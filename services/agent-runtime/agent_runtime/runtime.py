@@ -706,12 +706,21 @@ def render_prompt(context: AgentExecutionContext) -> str:
         )
 
     trigger_text = context.trigger_message.content if context.trigger_message else ""
+    workspace_harness_lines = _workspace_harness_lines(context)
+    agent_harness_lines = _agent_harness_lines(context)
     sections = [
         f"Workspace: {context.workspace.name}",
         f"Thread: {context.thread.title}",
         f"Agent role: {context.system_agent.role}",
         f"Agent description: {context.system_agent.description}",
         f"Sequence ceiling: {context.sequence_ceiling}",
+    ]
+    if workspace_harness_lines:
+        sections.extend(["", "Workspace harness:", *workspace_harness_lines])
+    if agent_harness_lines:
+        sections.extend(["", "Agent harness:", *agent_harness_lines])
+    sections.extend(
+        [
         "",
         "Workspace participants:",
         "\n".join(participant_lines) or "- none",
@@ -720,6 +729,8 @@ def render_prompt(context: AgentExecutionContext) -> str:
         "\n".join(role_lines) or "- none",
         "",
         "Workspace tools:",
+        "Choose tools dynamically from the current workspace tool catalog below.",
+        "Do not assume unavailable tools exist, and do not invent tool capabilities.",
         "\n".join(tool_lines) or "- none",
         "",
         "Completed tool results:",
@@ -747,7 +758,8 @@ def render_prompt(context: AgentExecutionContext) -> str:
         "Respond as the attached agent participant for this workspace.",
         "Use only the visible context above.",
         "Return a concise, thread-ready response that matches the agent role.",
-    ]
+        ]
+    )
     if contract.instructions:
         sections.extend(["", "Agent instructions:", *[f"- {item}" for item in contract.instructions]])
     response_contract = contract.response_contract
@@ -769,6 +781,183 @@ def render_prompt(context: AgentExecutionContext) -> str:
             ["", "Completion criteria:", *[f"- {item}" for item in contract.completion_criteria]]
         )
     return "\n".join(sections)
+
+
+def _workspace_harness_lines(context: AgentExecutionContext) -> list[str]:
+    harness = context.workspace_harness
+    if harness is None:
+        return []
+    lines = [f"- version: {harness.version}"]
+    if harness.summary:
+        lines.append(f"- summary: {harness.summary}")
+
+    methodology = harness.methodology
+    if methodology is not None:
+        lines.append("- methodology:")
+        if methodology.ontology:
+            lines.append(f"  - ontology: {methodology.ontology}")
+        if methodology.axiology:
+            lines.append(f"  - axiology: {methodology.axiology}")
+        if methodology.epistemology:
+            lines.append(f"  - epistemology: {methodology.epistemology}")
+        if methodology.principles:
+            lines.append("  - principles:")
+            lines.extend([f"    - {item}" for item in methodology.principles])
+
+    if harness.methodics:
+        lines.append("- methodics:")
+        for index, methodic in enumerate(harness.methodics, start=1):
+            lines.append(f"  - {index}. {methodic.name}: {methodic.goal}")
+            if methodic.applicability:
+                lines.append(f"    - applicability: {methodic.applicability}")
+            if methodic.steps:
+                lines.append("    - steps:")
+                for step_index, step in enumerate(methodic.steps, start=1):
+                    lines.append(f"      - {step_index}. {step.instruction}")
+                    if step.recommended_tool_patterns:
+                        lines.append(
+                            "        - recommended tool patterns: "
+                            + ", ".join(step.recommended_tool_patterns)
+                        )
+                    if step.expected_artifacts:
+                        lines.append(
+                            "        - expected artifacts: "
+                            + ", ".join(step.expected_artifacts)
+                        )
+                    if step.verification:
+                        lines.append(
+                            "        - verification: " + ", ".join(step.verification)
+                        )
+            if methodic.success_criteria:
+                lines.append(
+                    "    - success criteria: " + ", ".join(methodic.success_criteria)
+                )
+
+    if harness.execution_rules:
+        lines.append("- execution rules:")
+        for rule in sorted(
+            harness.execution_rules,
+            key=lambda item: _HARNESS_RULE_PRIORITY_ORDER.get(item.priority, 99),
+        ):
+            lines.append(
+                f"  - [{rule.priority}/{rule.scope}] {rule.name}: {rule.instruction}"
+            )
+    return lines
+
+
+def _agent_harness_lines(context: AgentExecutionContext) -> list[str]:
+    harness = context.agent_harness
+    if harness is None:
+        return []
+    lines = [f"- version: {harness.version}"]
+    if harness.summary:
+        lines.append(f"- summary: {harness.summary}")
+    if harness.operating_principles:
+        lines.append("- operating principles:")
+        lines.extend([f"  - {item}" for item in harness.operating_principles])
+
+    planning = harness.planning
+    lines.extend(
+        [
+            "- planning policy:",
+            f"  - plan before act: {'yes' if planning.plan_before_act else 'no'}",
+            f"  - incremental execution: {'yes' if planning.incremental_execution else 'no'}",
+            f"  - one goal at a time: {'yes' if planning.one_goal_at_a_time else 'no'}",
+            f"  - explicit uncertainty: {'yes' if planning.explicit_uncertainty else 'no'}",
+        ]
+    )
+    if planning.guidance:
+        lines.append("  - guidance:")
+        lines.extend([f"    - {item}" for item in planning.guidance])
+
+    tool_use_policy = harness.tool_use_policy
+    lines.extend(
+        [
+            "- tool-use policy:",
+            "  - select tools from the current workspace tool catalog dynamically",
+            f"  - read before write: {'yes' if tool_use_policy.read_before_write else 'no'}",
+            "  - inspect schema before use: "
+            + ("yes" if tool_use_policy.inspect_schema_before_use else "no"),
+            "  - prefer existing workspace tools: "
+            + ("yes" if tool_use_policy.prefer_existing_workspace_tools else "no"),
+            "  - cite tool results in reasoning: "
+            + ("yes" if tool_use_policy.cite_tool_results_in_reasoning else "no"),
+            "  - verify side effects after mutation: "
+            + ("yes" if tool_use_policy.verify_side_effects_after_mutation else "no"),
+        ]
+    )
+    if tool_use_policy.selection_principles:
+        lines.append("  - selection principles:")
+        lines.extend([f"    - {item}" for item in tool_use_policy.selection_principles])
+    if tool_use_policy.fallback_when_no_tool_fits:
+        lines.append(
+            f"  - fallback when no tool fits: {tool_use_policy.fallback_when_no_tool_fits}"
+        )
+
+    memory_policy = harness.memory_policy
+    lines.extend(
+        [
+            "- memory policy:",
+            f"  - use run memory: {'yes' if memory_policy.use_run_memory else 'no'}",
+            f"  - use thread memory: {'yes' if memory_policy.use_thread_memory else 'no'}",
+            "  - use workspace memory: "
+            + ("yes" if memory_policy.use_workspace_memory else "no"),
+        ]
+    )
+
+    collaboration_policy = harness.collaboration_policy
+    lines.append("- collaboration policy:")
+    if collaboration_policy.ask_user_when:
+        lines.append("  - ask user when:")
+        lines.extend([f"    - {item}" for item in collaboration_policy.ask_user_when])
+    if collaboration_policy.escalate_when:
+        lines.append("  - escalate when:")
+        lines.extend([f"    - {item}" for item in collaboration_policy.escalate_when])
+    if collaboration_policy.delegation_guidance:
+        lines.append("  - delegation guidance:")
+        lines.extend([f"    - {item}" for item in collaboration_policy.delegation_guidance])
+    if collaboration_policy.handoff_guidance:
+        lines.append("  - handoff guidance:")
+        lines.extend([f"    - {item}" for item in collaboration_policy.handoff_guidance])
+
+    validation_policy = harness.validation_policy
+    lines.extend(
+        [
+            "- validation policy:",
+            "  - require evidence for claims: "
+            + ("yes" if validation_policy.require_evidence_for_claims else "no"),
+            "  - require tool results for completion: "
+            + ("yes" if validation_policy.require_tool_results_for_completion else "no"),
+            "  - require tests before done: "
+            + ("yes" if validation_policy.require_tests_before_done else "no"),
+        ]
+    )
+    if validation_policy.required_checks:
+        lines.append("  - required checks:")
+        lines.extend([f"    - {item}" for item in validation_policy.required_checks])
+
+    stop_policy = harness.stop_policy
+    lines.append("- stop policy:")
+    if stop_policy.completion_conditions:
+        lines.append("  - completion conditions:")
+        lines.extend([f"    - {item}" for item in stop_policy.completion_conditions])
+    if stop_policy.stop_conditions:
+        lines.append("  - stop conditions:")
+        lines.extend([f"    - {item}" for item in stop_policy.stop_conditions])
+    if stop_policy.max_turns is not None:
+        lines.append(f"  - max turns: {stop_policy.max_turns}")
+
+    if harness.skill_refs:
+        lines.append("- skill refs:")
+        lines.extend([f"  - {item}" for item in harness.skill_refs])
+    return lines
+
+
+_HARNESS_RULE_PRIORITY_ORDER = {
+    "critical": 0,
+    "high": 1,
+    "normal": 2,
+}
 
 
 def _message_author_name(context: AgentExecutionContext, actor_id: UUID) -> str:

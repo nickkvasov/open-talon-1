@@ -35,7 +35,10 @@ from open_talon_contracts.models import (  # noqa: E402
     ActorRef,
     AgentDefinition,
     AgentEndpoint,
+    AgentHarness,
+    AgentMemoryPolicy,
     AgentRunResult,
+    AgentToolUsePolicy,
     AssumeParticipantRoleRequest,
     ArtifactRef,
     CreateAgentParticipantRequest,
@@ -73,16 +76,23 @@ from open_talon_contracts.models import (  # noqa: E402
     SystemToolDefinition,
     ToolExecutionBinding,
     CreateSystemAgentRequest,
+    HarnessExecutionRule,
     ParticipantInput,
     Task,
     Thread,
     TimelineMessage,
+    UpdateSystemAgentRequest,
     UpdateInteractionRequestRequest,
     UpdateLlmProviderRequest,
+    UpdateWorkspaceRequest,
     UpsertRoleDefinitionRequest,
     Workspace,
     WorkspaceCommunicationLogEntry,
     WorkspaceCommunicationLogPage,
+    WorkspaceHarness,
+    WorkspaceMethodic,
+    WorkspaceMethodicStep,
+    WorkspaceMethodology,
     WorkspaceTool,
 )
 from core_collab.kernel import CollaborationKernel  # noqa: E402
@@ -1184,6 +1194,191 @@ async def test_kernel_create_system_agent_fills_missing_interaction_contract():
 
 
 @pytest.mark.asyncio
+async def test_kernel_create_and_update_system_agent_round_trips_harness():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    initial_harness = AgentHarness(
+        summary="Plan carefully and choose tools dynamically.",
+        operating_principles=["Stay incremental."],
+        tool_use_policy=AgentToolUsePolicy(
+            selection_principles=["Prefer the narrowest tool that provides ground truth."],
+            fallback_when_no_tool_fits="Explain the gap and ask for help.",
+        ),
+    )
+
+    created = await kernel.create_system_agent(
+        CreateSystemAgentRequest(
+            actor=_actor(),
+            display_name="Harnessed Agent",
+            description="Agent with explicit harness state.",
+            role="research agent",
+            capabilities=["research"],
+            endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+            system_prompt="Research carefully.",
+            harness=initial_harness,
+        )
+    )
+
+    updated_harness = AgentHarness(
+        summary="Validate before declaring completion.",
+        operating_principles=["Show evidence for claims."],
+        tool_use_policy=AgentToolUsePolicy(
+            selection_principles=["Use workspace tools opportunistically."],
+            read_before_write=False,
+        ),
+    )
+    updated = await kernel.update_system_agent(
+        created.agent.agent_id,
+        UpdateSystemAgentRequest(
+            actor=_actor(),
+            description="Updated agent harness.",
+            harness=updated_harness,
+        ),
+    )
+    assert created.agent.harness == initial_harness
+    assert updated.agent.harness == updated_harness
+    assert repository.upserted_agents[-1].harness == updated_harness
+
+
+@pytest.mark.asyncio
+async def test_kernel_update_system_agent_preserves_existing_harness_when_omitted():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    initial_harness = AgentHarness(
+        summary="Preserve harness when not explicitly changed.",
+        tool_use_policy=AgentToolUsePolicy(
+            selection_principles=["Prefer direct evidence from workspace tools."],
+        ),
+    )
+
+    created = await kernel.create_system_agent(
+        CreateSystemAgentRequest(
+            actor=_actor(),
+            display_name="Stable Harness Agent",
+            description="Agent with stable harness state.",
+            role="research agent",
+            capabilities=["research"],
+            endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+            system_prompt="Research carefully.",
+            harness=initial_harness,
+        )
+    )
+
+    updated = await kernel.update_system_agent(
+        created.agent.agent_id,
+        UpdateSystemAgentRequest(
+            actor=_actor(),
+            description="Updated description only.",
+        ),
+    )
+
+    assert updated.agent.description == "Updated description only."
+    assert updated.agent.harness == initial_harness
+    assert repository.upserted_agents[-1].harness == initial_harness
+
+
+@pytest.mark.asyncio
+async def test_kernel_update_system_agent_clears_harness_when_explicit_null():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+
+    created = await kernel.create_system_agent(
+        CreateSystemAgentRequest(
+            actor=_actor(),
+            display_name="Clearable Harness Agent",
+            description="Agent with removable harness state.",
+            role="research agent",
+            capabilities=["research"],
+            endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+            system_prompt="Research carefully.",
+            harness=AgentHarness(
+                summary="This harness should be removed.",
+                tool_use_policy=AgentToolUsePolicy(
+                    selection_principles=["Start from visible workspace tools."],
+                ),
+            ),
+        )
+    )
+
+    updated = await kernel.update_system_agent(
+        created.agent.agent_id,
+        UpdateSystemAgentRequest(
+            actor=_actor(),
+            harness=None,
+        ),
+    )
+
+    assert updated.agent.harness is None
+    assert repository.upserted_agents[-1].harness is None
+
+
+@pytest.mark.asyncio
+async def test_kernel_update_workspace_preserves_existing_harness_when_omitted():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    actor = _actor()
+    initial_harness = WorkspaceHarness(
+        summary="Preserve workspace harness unless explicitly replaced.",
+        methodology=WorkspaceMethodology(
+            ontology="Artifacts are first-class evidence.",
+        ),
+    )
+
+    created = await kernel.create_workspace(
+        CreateWorkspaceRequest(
+            name="Stable Harness Workspace",
+            description="Workspace with stable harness state.",
+            actor=actor,
+            harness=initial_harness,
+        )
+    )
+
+    updated = await kernel.update_workspace(
+        created.workspace.workspace_id,
+        UpdateWorkspaceRequest(
+            actor=actor,
+            description="Updated description only.",
+        ),
+    )
+
+    assert updated.workspace.description == "Updated description only."
+    assert updated.workspace.harness == initial_harness
+    assert repository._workspaces[created.workspace.workspace_id].harness == initial_harness
+
+
+@pytest.mark.asyncio
+async def test_kernel_update_workspace_clears_harness_when_explicit_null():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    actor = _actor()
+
+    created = await kernel.create_workspace(
+        CreateWorkspaceRequest(
+            name="Clearable Harness Workspace",
+            description="Workspace with removable harness state.",
+            actor=actor,
+            harness=WorkspaceHarness(
+                summary="This harness should be removed.",
+                methodology=WorkspaceMethodology(
+                    ontology="Evidence begins with visible artifacts.",
+                ),
+            ),
+        )
+    )
+
+    updated = await kernel.update_workspace(
+        created.workspace.workspace_id,
+        UpdateWorkspaceRequest(
+            actor=actor,
+            harness=None,
+        ),
+    )
+
+    assert updated.workspace.harness is None
+    assert repository._workspaces[created.workspace.workspace_id].harness is None
+
+
+@pytest.mark.asyncio
 async def test_kernel_create_system_tool_rejects_read_write_workspace_access_for_untrusted_tool():
     repository = FakeRepository()
     kernel = CollaborationKernel(repository)
@@ -2004,6 +2199,205 @@ async def test_build_agent_execution_context_filters_messages_and_memory_by_view
     assert "tool:repo_search" in context.participants[0].capabilities
     assert context.tool_results[0].result is not None
     assert context.tool_results[0].result.output_payload["matches"][0].endswith("initial_schema.sql")
+
+
+@pytest.mark.asyncio
+async def test_build_agent_execution_context_applies_harness_memory_policy():
+    actor_id = uuid4()
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    system_agent_id = uuid4()
+    participant_id = uuid4()
+    task_id = uuid4()
+    run_id = uuid4()
+    trigger_message_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    agent = AgentDefinition(
+        agent_id=system_agent_id,
+        display_name="Harnessed Agent",
+        description="Uses harness state during execution.",
+        role="testing agent",
+        capabilities=["tests", "validation"],
+        endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+        system_prompt="Validate carefully.",
+        harness=AgentHarness(
+            summary="Ground work in evidence.",
+            memory_policy=AgentMemoryPolicy(
+                use_run_memory=False,
+                use_thread_memory=False,
+                use_workspace_memory=True,
+            ),
+        ),
+        interaction_contract=build_default_interaction_contract(
+            display_name="Harnessed Agent",
+            role="testing agent",
+            description="Uses harness state during execution.",
+            capabilities=["tests", "validation"],
+        ),
+        created_by=actor_id,
+        created_at=now,
+        updated_at=now,
+    )
+    repository = FakeRepository([agent])
+    repository._workspaces[workspace_id] = Workspace(
+        workspace_id=workspace_id,
+        name="Kernel",
+        description="Harnessed workspace",
+        harness=WorkspaceHarness(
+            summary="Prefer explicit validation artifacts.",
+            methodology=WorkspaceMethodology(
+                ontology="Artifacts and tests are primary evidence.",
+            ),
+            methodics=[
+                WorkspaceMethodic(
+                    name="Validate changes",
+                    goal="Check behavior incrementally.",
+                    steps=[
+                        WorkspaceMethodicStep(
+                            instruction="Read visible context before changing anything.",
+                            recommended_tool_patterns=["repo_search"],
+                            verification=["Confirm current state first."],
+                        )
+                    ],
+                )
+            ],
+            execution_rules=[
+                HarnessExecutionRule(
+                    name="evidence-first",
+                    instruction="Prefer direct verification over assumption.",
+                    priority="critical",
+                    scope="validation",
+                )
+            ],
+        ),
+        created_at=now,
+        updated_at=now,
+    )
+    repository._threads[thread_id] = Thread(
+        thread_id=thread_id,
+        workspace_id=workspace_id,
+        title="Visibility",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, participant_id)] = ParticipantProfile(
+        participant_id=participant_id,
+        workspace_id=workspace_id,
+        participant_type="agent",
+        system_agent_id=system_agent_id,
+        display_name="Harnessed Agent",
+        description="Uses harness state during execution.",
+        roles=["testing agent"],
+        capabilities=["tests", "validation"],
+        status="active",
+        visibility_scope="workspace",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._tasks[task_id] = Task(
+        task_id=task_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        title="Run harnessed validation",
+        requested_by=actor_id,
+        correlation_id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        metadata={
+            "target_system_agent_id": str(system_agent_id),
+            "target_participant_id": str(participant_id),
+            "trigger_message_id": str(trigger_message_id),
+            "sequence_ceiling": 1,
+            "response_visibility": "workspace",
+        },
+    )
+    repository._runs[run_id] = Run(
+        run_id=run_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        task_id=task_id,
+        participant_id=participant_id,
+        status="started",
+        correlation_id=repository._tasks[task_id].correlation_id,
+        causation_id=task_id,
+        created_at=now,
+        updated_at=now,
+    )
+    repository._messages[thread_id] = [
+        TimelineMessage(
+            message_id=trigger_message_id,
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+            actor=ActorRef(type="user", id=actor_id),
+            visibility="workspace",
+            content="Validate the rollout carefully",
+            sequence=1,
+            correlation_id=repository._tasks[task_id].correlation_id,
+            created_at=now,
+            updated_at=now,
+        )
+    ]
+    repository._memory_entries[run_id] = [
+        MemoryEntry(
+            memory_entry_id=uuid4(),
+            scope="run",
+            state="scratch",
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+            run_id=run_id,
+            entry_type="note",
+            content="Ephemeral scratchpad",
+            summary="Run scratch",
+            created_by=actor_id,
+            updated_by=actor_id,
+            visibility="workspace",
+            created_at=now,
+            updated_at=now,
+        )
+    ]
+    repository._memory_entries[thread_id] = [
+        MemoryEntry(
+            memory_entry_id=uuid4(),
+            scope="thread",
+            state="confirmed",
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+            entry_type="note",
+            content="Thread note",
+            summary="Thread memory",
+            created_by=actor_id,
+            updated_by=actor_id,
+            visibility="workspace",
+            created_at=now,
+            updated_at=now,
+        )
+    ]
+    repository._memory_entries[workspace_id] = [
+        MemoryEntry(
+            memory_entry_id=uuid4(),
+            scope="workspace",
+            state="confirmed",
+            workspace_id=workspace_id,
+            entry_type="note",
+            content="Workspace note",
+            summary="Workspace memory",
+            created_by=actor_id,
+            updated_by=actor_id,
+            visibility="workspace",
+            created_at=now,
+            updated_at=now,
+        )
+    ]
+
+    kernel = CollaborationKernel(repository)
+    context = await kernel.build_agent_execution_context(task_id, system_agent_id, run_id)
+
+    assert context.workspace_harness == repository._workspaces[workspace_id].harness
+    assert context.agent_harness == agent.harness
+    assert context.run_memory == []
+    assert context.thread_memory == []
+    assert [entry.summary for entry in context.workspace_memory] == ["Workspace memory"]
 
 
 @pytest.mark.asyncio

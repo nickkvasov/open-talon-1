@@ -35,7 +35,14 @@ export default function Workspaces() {
   const [workspaceFormData, setWorkspaceFormData] = useState({
     name: '',
     description: '',
-    metadata: '{}'
+    metadata: '{}',
+    harness_summary: '',
+    methodology_ontology: '',
+    methodology_axiology: '',
+    methodology_epistemology: '',
+    methodology_principles: '[]',
+    methodics: '[]',
+    execution_rules: '[]',
   });
 
   const [confirmModal, setConfirmModal] = useState({ 
@@ -83,7 +90,14 @@ export default function Workspaces() {
     setWorkspaceFormData({
       name: '',
       description: '',
-      metadata: '{}'
+      metadata: '{}',
+      harness_summary: '',
+      methodology_ontology: '',
+      methodology_axiology: '',
+      methodology_epistemology: '',
+      methodology_principles: '[]',
+      methodics: '[]',
+      execution_rules: '[]',
     });
     setModalMode('create');
   };
@@ -100,9 +114,70 @@ export default function Workspaces() {
     setWorkspaceFormData({
       name: ws.name,
       description: ws.description || '',
-      metadata: JSON.stringify(ws.metadata || {}, null, 2)
+      metadata: JSON.stringify(ws.metadata || {}, null, 2),
+      harness_summary: ws.harness?.summary || '',
+      methodology_ontology: ws.harness?.methodology?.ontology || '',
+      methodology_axiology: ws.harness?.methodology?.axiology || '',
+      methodology_epistemology: ws.harness?.methodology?.epistemology || '',
+      methodology_principles: JSON.stringify(ws.harness?.methodology?.principles || [], null, 2),
+      methodics: JSON.stringify(ws.harness?.methodics || [], null, 2),
+      execution_rules: JSON.stringify(ws.harness?.execution_rules || [], null, 2),
     });
     setIsEditModalOpen(true);
+  };
+
+  const parseJsonField = (raw, fallback, label) => {
+    if (!raw.trim()) {
+      return fallback;
+    }
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new Error(`${label} must be valid JSON`);
+    }
+  };
+
+  const buildWorkspaceHarness = () => {
+    const principles = parseJsonField(
+      workspaceFormData.methodology_principles,
+      [],
+      'Methodology principles',
+    );
+    const methodics = parseJsonField(workspaceFormData.methodics, [], 'Methodics');
+    const executionRules = parseJsonField(
+      workspaceFormData.execution_rules,
+      [],
+      'Execution rules',
+    );
+    const methodology = {
+      ontology: workspaceFormData.methodology_ontology || null,
+      axiology: workspaceFormData.methodology_axiology || null,
+      epistemology: workspaceFormData.methodology_epistemology || null,
+      principles,
+    };
+    const hasMethodology = Boolean(
+      methodology.ontology
+      || methodology.axiology
+      || methodology.epistemology
+      || methodology.principles.length,
+    );
+    const hasHarness = Boolean(
+      workspaceFormData.harness_summary.trim()
+      || hasMethodology
+      || methodics.length
+      || executionRules.length,
+    );
+    if (!hasHarness) {
+      return null;
+    }
+    return {
+      version: 1,
+      summary: workspaceFormData.harness_summary.trim() || null,
+      methodology: hasMethodology ? methodology : null,
+      methodics,
+      execution_rules: executionRules,
+      metadata: {},
+    };
   };
 
   const handleDeleteWorkspace = async (workspace_id, e) => {
@@ -138,7 +213,8 @@ export default function Workspaces() {
         organization_id: selectedOrganizationId || null,
         name: workspaceFormData.name,
         description: workspaceFormData.description,
-        metadata: JSON.parse(workspaceFormData.metadata || '{}')
+        metadata: JSON.parse(workspaceFormData.metadata || '{}'),
+        harness: buildWorkspaceHarness(),
       };
 
       if (modalMode === 'create') {
@@ -351,6 +427,80 @@ export default function Workspaces() {
                   className="w-full bg-slate-900 dark:bg-black border border-slate-700 rounded-lg px-4 py-3 font-mono text-xs text-blue-400 focus:ring-2 focus:ring-blue-500 outline-none resize-none shadow-inner"
                   placeholder="{}"
                 />
+              </div>
+              <div className="space-y-6 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 p-5">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-white">Workspace Harness</h3>
+                  <p className="mt-1 text-xs text-slate-500">Methodology, methodics, and execution rules for this workspace.</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Harness Summary</label>
+                  <textarea
+                    value={workspaceFormData.harness_summary}
+                    onChange={e => setWorkspaceFormData({...workspaceFormData, harness_summary: e.target.value})}
+                    rows={2}
+                    className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
+                    placeholder="High-level execution posture for this workspace..."
+                  />
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Ontology</label>
+                    <textarea
+                      value={workspaceFormData.methodology_ontology}
+                      onChange={e => setWorkspaceFormData({...workspaceFormData, methodology_ontology: e.target.value})}
+                      rows={4}
+                      className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Axiology</label>
+                    <textarea
+                      value={workspaceFormData.methodology_axiology}
+                      onChange={e => setWorkspaceFormData({...workspaceFormData, methodology_axiology: e.target.value})}
+                      rows={4}
+                      className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Epistemology</label>
+                    <textarea
+                      value={workspaceFormData.methodology_epistemology}
+                      onChange={e => setWorkspaceFormData({...workspaceFormData, methodology_epistemology: e.target.value})}
+                      rows={4}
+                      className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Methodology Principles (JSON array)</label>
+                  <textarea
+                    value={workspaceFormData.methodology_principles}
+                    onChange={e => setWorkspaceFormData({...workspaceFormData, methodology_principles: e.target.value})}
+                    rows={4}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                  />
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Methodics (JSON array)</label>
+                    <textarea
+                      value={workspaceFormData.methodics}
+                      onChange={e => setWorkspaceFormData({...workspaceFormData, methodics: e.target.value})}
+                      rows={8}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Execution Rules (JSON array)</label>
+                    <textarea
+                      value={workspaceFormData.execution_rules}
+                      onChange={e => setWorkspaceFormData({...workspaceFormData, execution_rules: e.target.value})}
+                      rows={8}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                    />
+                  </div>
+                </div>
               </div>
               
               <div className="flex justify-end space-x-4 pt-4">

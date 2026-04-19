@@ -1,0 +1,5 @@
+ALTER TABLE workspaces
+    ADD COLUMN IF NOT EXISTS harness JSONB;
+
+ALTER TABLE system_agents
+    ADD COLUMN IF NOT EXISTS harness JSONB;

@@ -55,10 +55,13 @@ from open_talon_contracts.models import (
     AgentDefinition,
     AgentEndpoint,
     AgentExecutionContext,
+    AgentHarness,
     AgentInteractionContract,
     AgentRunResult,
     AgentResponseContract,
     AgentTaskRouting,
+    AgentToolUsePolicy,
+    HarnessExecutionRule,
     InteractionAnswer,
     InteractionQuestion,
     InteractionRequest,
@@ -75,6 +78,10 @@ from open_talon_contracts.models import (
     Thread,
     TimelineMessage,
     Workspace,
+    WorkspaceHarness,
+    WorkspaceMethodic,
+    WorkspaceMethodicStep,
+    WorkspaceMethodology,
     WorkspaceTool,
 )
 from open_talon_contracts.llm_engines import (
@@ -882,6 +889,155 @@ def test_render_prompt_includes_participants_memory_and_thread_context():
     assert "Response contract:" in prompt
     assert "Validation Summary" in prompt
     assert "required sections: Summary, Checks performed, Findings, Residual risk, Next action" in prompt
+
+
+def test_render_prompt_includes_workspace_and_agent_harness_sections():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    workspace_harness = WorkspaceHarness(
+        summary="Workspace harness summary",
+        methodology=WorkspaceMethodology(
+            ontology="Evidence comes from visible artifacts.",
+            principles=["Prefer direct verification."],
+        ),
+        methodics=[
+            WorkspaceMethodic(
+                name="Validate release",
+                goal="Check rollout incrementally.",
+                steps=[
+                    WorkspaceMethodicStep(
+                        instruction="Inspect the current workspace tools before acting.",
+                        recommended_tool_patterns=["repo_search"],
+                        verification=["Confirm the tool catalog is current."],
+                    )
+                ],
+            )
+        ],
+        execution_rules=[
+            HarnessExecutionRule(
+                name="evidence-first",
+                instruction="Prefer direct evidence over assumptions.",
+                priority="critical",
+                scope="validation",
+            )
+        ],
+    )
+    agent_harness = AgentHarness(
+        summary="Agent harness summary",
+        operating_principles=["Stay incremental."],
+        tool_use_policy=AgentToolUsePolicy(
+            selection_principles=["Choose the narrowest tool that answers the question."],
+            fallback_when_no_tool_fits="Call out the gap and ask for clarification.",
+        ),
+    )
+    kernel.context = kernel.context.model_copy(
+        update={
+            "workspace_harness": workspace_harness,
+            "agent_harness": agent_harness,
+        }
+    )
+
+    prompt = render_prompt(kernel.context)
+
+    assert "Workspace harness:" in prompt
+    assert "Workspace harness summary" in prompt
+    assert "ontology: Evidence comes from visible artifacts." in prompt
+    assert "[critical/validation] evidence-first: Prefer direct evidence over assumptions." in prompt
+    assert "Agent harness:" in prompt
+    assert "Agent harness summary" in prompt
+    assert "select tools from the current workspace tool catalog dynamically" in prompt
+    assert "fallback when no tool fits: Call out the gap and ask for clarification." in prompt
+    assert "repo_search | enabled: yes | Searches the current workspace source tree." in prompt
+
+
+def test_render_prompt_keeps_full_workspace_tool_catalog_with_tool_use_guidance():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    now = _now()
+    kernel.context = kernel.context.model_copy(
+        update={
+            "workspace_tools": [
+                *kernel.context.workspace_tools,
+                WorkspaceTool(
+                    tool_id=uuid4(),
+                    name="db_query",
+                    description="Queries the attached database schema.",
+                    parameter_contract={
+                        "parameters": [
+                            {
+                                "name": "sql",
+                                "type": "string",
+                                "description": "Read-only SQL to execute.",
+                                "required": True,
+                            }
+                        ],
+                        "additional_properties": False,
+                    },
+                    attached_by=uuid4(),
+                    attached_at=now,
+                    updated_at=now,
+                ),
+            ],
+            "agent_harness": AgentHarness(
+                summary="Use the available tools carefully.",
+                tool_use_policy=AgentToolUsePolicy(
+                    selection_principles=[
+                        "Prefer the narrowest tool that provides direct evidence."
+                    ],
+                    fallback_when_no_tool_fits="Explain the gap and ask for clarification.",
+                ),
+            ),
+        }
+    )
+
+    prompt = render_prompt(kernel.context)
+
+    assert "select tools from the current workspace tool catalog dynamically" in prompt
+    assert "repo_search | enabled: yes | Searches the current workspace source tree." in prompt
+    assert "db_query | enabled: yes | Queries the attached database schema." in prompt
+
+
+def test_render_prompt_sorts_workspace_harness_execution_rules_by_priority():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    kernel.context = kernel.context.model_copy(
+        update={
+            "workspace_harness": WorkspaceHarness(
+                summary="Rules should render from highest to lowest priority.",
+                execution_rules=[
+                    HarnessExecutionRule(
+                        name="document-outcome",
+                        instruction="Summarize the completion state clearly.",
+                        priority="normal",
+                        scope="completion",
+                    ),
+                    HarnessExecutionRule(
+                        name="plan-first",
+                        instruction="Inspect visible context before changing anything.",
+                        priority="high",
+                        scope="planning",
+                    ),
+                    HarnessExecutionRule(
+                        name="verify-first",
+                        instruction="Prefer direct evidence over assumption.",
+                        priority="critical",
+                        scope="validation",
+                    ),
+                ],
+            )
+        }
+    )
+
+    prompt = render_prompt(kernel.context)
+
+    critical_index = prompt.index(
+        "[critical/validation] verify-first: Prefer direct evidence over assumption."
+    )
+    high_index = prompt.index(
+        "[high/planning] plan-first: Inspect visible context before changing anything."
+    )
+    normal_index = prompt.index(
+        "[normal/completion] document-outcome: Summarize the completion state clearly."
+    )
+
+    assert critical_index < high_index < normal_index
 
 
 def test_render_prompt_includes_interaction_request_summary():

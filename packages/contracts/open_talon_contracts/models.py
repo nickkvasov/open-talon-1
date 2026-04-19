@@ -58,6 +58,15 @@ StopReason = Literal[
     "cancelled",
     "superseded",
 ]
+HarnessRulePriority = Literal["critical", "high", "normal"]
+HarnessRuleScope = Literal[
+    "planning",
+    "tool_use",
+    "validation",
+    "communication",
+    "completion",
+    "security",
+]
 
 
 def utcnow() -> datetime:
@@ -107,9 +116,110 @@ class AgentEndpoint(BaseModel):
     provider: str | None = None
 
 
+class WorkspaceMethodology(BaseModel):
+    ontology: str | None = None
+    axiology: str | None = None
+    epistemology: str | None = None
+    principles: list[str] = Field(default_factory=list)
+
+
+class WorkspaceMethodicStep(BaseModel):
+    instruction: str
+    recommended_tool_patterns: list[str] = Field(default_factory=list)
+    expected_artifacts: list[str] = Field(default_factory=list)
+    verification: list[str] = Field(default_factory=list)
+
+
+class WorkspaceMethodic(BaseModel):
+    name: str
+    goal: str
+    applicability: str | None = None
+    steps: list[WorkspaceMethodicStep] = Field(default_factory=list)
+    success_criteria: list[str] = Field(default_factory=list)
+
+
+class HarnessExecutionRule(BaseModel):
+    name: str
+    instruction: str
+    priority: HarnessRulePriority = "normal"
+    scope: HarnessRuleScope = "planning"
+
+
+class WorkspaceHarness(BaseModel):
+    version: int = 1
+    summary: str | None = None
+    methodology: WorkspaceMethodology | None = None
+    methodics: list[WorkspaceMethodic] = Field(default_factory=list)
+    execution_rules: list[HarnessExecutionRule] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentPlanningPolicy(BaseModel):
+    plan_before_act: bool = True
+    incremental_execution: bool = True
+    one_goal_at_a_time: bool = True
+    explicit_uncertainty: bool = True
+    guidance: list[str] = Field(default_factory=list)
+
+
+class AgentToolUsePolicy(BaseModel):
+    selection_principles: list[str] = Field(default_factory=list)
+    read_before_write: bool = True
+    inspect_schema_before_use: bool = True
+    prefer_existing_workspace_tools: bool = True
+    cite_tool_results_in_reasoning: bool = True
+    verify_side_effects_after_mutation: bool = True
+    fallback_when_no_tool_fits: str | None = None
+
+
+class AgentMemoryPolicy(BaseModel):
+    use_run_memory: bool = True
+    use_thread_memory: bool = True
+    use_workspace_memory: bool = True
+
+
+class AgentCollaborationPolicy(BaseModel):
+    ask_user_when: list[str] = Field(default_factory=list)
+    escalate_when: list[str] = Field(default_factory=list)
+    delegation_guidance: list[str] = Field(default_factory=list)
+    handoff_guidance: list[str] = Field(default_factory=list)
+
+
+class AgentValidationPolicy(BaseModel):
+    required_checks: list[str] = Field(default_factory=list)
+    require_evidence_for_claims: bool = True
+    require_tool_results_for_completion: bool = False
+    require_tests_before_done: bool = False
+
+
+class AgentStopPolicy(BaseModel):
+    completion_conditions: list[str] = Field(default_factory=list)
+    stop_conditions: list[str] = Field(default_factory=list)
+    max_turns: int | None = None
+
+
+class AgentHarness(BaseModel):
+    version: int = 1
+    summary: str | None = None
+    operating_principles: list[str] = Field(default_factory=list)
+    planning: AgentPlanningPolicy = Field(default_factory=AgentPlanningPolicy)
+    tool_use_policy: AgentToolUsePolicy = Field(default_factory=AgentToolUsePolicy)
+    memory_policy: AgentMemoryPolicy = Field(default_factory=AgentMemoryPolicy)
+    collaboration_policy: AgentCollaborationPolicy = Field(
+        default_factory=AgentCollaborationPolicy
+    )
+    validation_policy: AgentValidationPolicy = Field(
+        default_factory=AgentValidationPolicy
+    )
+    stop_policy: AgentStopPolicy = Field(default_factory=AgentStopPolicy)
+    skill_refs: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentConfiguration(BaseModel):
     endpoint: AgentEndpoint
     system_prompt: str
+    harness: AgentHarness | None = None
     definition: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -139,6 +249,7 @@ class AgentDefinition(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     endpoint: AgentEndpoint
     system_prompt: str
+    harness: AgentHarness | None = None
     interaction_contract: AgentInteractionContract = Field(
         default_factory=AgentInteractionContract
     )
@@ -155,6 +266,7 @@ class Workspace(BaseModel):
     name: str
     description: str | None = None
     owner_user_id: UUID | None = None
+    harness: WorkspaceHarness | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -947,6 +1059,7 @@ class CreateWorkspaceRequest(BaseModel):
     description: str | None = None
     organization_id: UUID | None = None
     actor: ParticipantInput
+    harness: WorkspaceHarness | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -985,6 +1098,7 @@ class UpdateWorkspaceRequest(BaseModel):
     actor: ParticipantInput
     name: str | None = None
     description: str | None = None
+    harness: WorkspaceHarness | None = None
     metadata: dict[str, Any] | None = None
 
 
@@ -1136,6 +1250,7 @@ class CreateSystemAgentRequest(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     endpoint: AgentEndpoint
     system_prompt: str
+    harness: AgentHarness | None = None
     interaction_contract: AgentInteractionContract = Field(
         default_factory=AgentInteractionContract
     )
@@ -1155,6 +1270,7 @@ class UpdateSystemAgentRequest(BaseModel):
     capabilities: list[str] | None = None
     endpoint: AgentEndpoint | None = None
     system_prompt: str | None = None
+    harness: AgentHarness | None = None
     interaction_contract: AgentInteractionContract | None = None
     definition: dict[str, Any] | None = None
     metadata: dict[str, Any] | None = None
@@ -1352,12 +1468,14 @@ class WorkspaceCommunicationLogPage(BaseModel):
 
 class AgentExecutionContext(BaseModel):
     workspace: Workspace
+    workspace_harness: WorkspaceHarness | None = None
     thread: Thread
     task: Task
     run: Run
     run_step: RunStep | None = None
     routing: AgentTaskRouting
     system_agent: AgentDefinition
+    agent_harness: AgentHarness | None = None
     participant: ParticipantProfile
     participants: list[ParticipantProfile] = Field(default_factory=list)
     role_definitions: list[RoleDefinition] = Field(default_factory=list)

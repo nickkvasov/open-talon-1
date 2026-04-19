@@ -435,6 +435,7 @@ class CollaborationKernel:
             name=payload.name,
             description=payload.description,
             owner_user_id=actor_user_id,
+            harness=payload.harness,
             created_at=now,
             updated_at=now,
             metadata=self._workspace_metadata_for_create(
@@ -558,6 +559,11 @@ class CollaborationKernel:
                     payload.description
                     if payload.description is not None
                     else workspace.description
+                ),
+                "harness": (
+                    payload.harness
+                    if "harness" in payload.model_fields_set
+                    else workspace.harness
                 ),
                 "updated_at": now,
                 "metadata": (
@@ -690,6 +696,7 @@ class CollaborationKernel:
             capabilities=payload.capabilities,
             endpoint=payload.endpoint,
             system_prompt=payload.system_prompt,
+            harness=payload.harness,
             interaction_contract=interaction_contract,
             definition=payload.definition,
             created_by=payload.actor.participant_id,
@@ -1083,6 +1090,11 @@ class CollaborationKernel:
                 "capabilities": payload.capabilities or existing.capabilities,
                 "endpoint": payload.endpoint or existing.endpoint,
                 "system_prompt": payload.system_prompt or existing.system_prompt,
+                "harness": (
+                    payload.harness
+                    if "harness" in payload.model_fields_set
+                    else existing.harness
+                ),
                 "interaction_contract": interaction_contract,
                 "definition": payload.definition if payload.definition is not None else existing.definition,
                 "updated_at": self._now(),
@@ -2038,6 +2050,7 @@ class CollaborationKernel:
             agent_config=AgentConfiguration(
                 endpoint=system_agent.endpoint,
                 system_prompt=system_agent.system_prompt,
+                harness=system_agent.harness,
                 definition=system_agent.definition,
             ),
             created_at=now,

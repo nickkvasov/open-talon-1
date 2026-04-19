@@ -53,6 +53,117 @@ async def test_create_workspace_returns_workspace_and_participants(client, actor
     assert [role["name"] for role in body["role_definitions"]] == ["admin", "supervisor", "user"]
 
 
+async def test_create_and_update_workspace_round_trips_harness(client, actor_payload):
+    create_resp = await client.post(
+        "/v1/workspaces",
+        json={
+            "name": "Harnessed Workspace",
+            "description": "Carries workspace harness state.",
+            "actor": actor_payload,
+            "harness": {
+                "version": 1,
+                "summary": "Prefer evidence-backed execution.",
+                "methodology": {
+                    "ontology": "Artifacts and tests are first-class evidence.",
+                    "principles": ["Prefer direct verification."],
+                },
+                "methodics": [
+                    {
+                        "name": "Validate changes",
+                        "goal": "Check behavior incrementally.",
+                        "steps": [
+                            {
+                                "instruction": "Inspect visible tools first.",
+                                "recommended_tool_patterns": ["repo_search"],
+                                "verification": ["Confirm current state before changes."],
+                            }
+                        ],
+                    }
+                ],
+                "execution_rules": [
+                    {
+                        "name": "evidence-first",
+                        "instruction": "Prefer direct evidence over assumption.",
+                        "priority": "critical",
+                        "scope": "validation",
+                    }
+                ],
+            },
+        },
+    )
+
+    assert create_resp.status_code == 200
+    body = create_resp.json()
+    workspace_id = body["workspace"]["workspace_id"]
+    assert body["workspace"]["harness"]["summary"] == "Prefer evidence-backed execution."
+    assert body["workspace"]["harness"]["methodology"]["ontology"].startswith("Artifacts and tests")
+
+    update_resp = await client.patch(
+        f"/v1/workspaces/{workspace_id}",
+        json={
+            "actor": actor_payload,
+            "harness": {
+                "version": 1,
+                "summary": "Updated workspace harness.",
+                "methodics": [],
+                "execution_rules": [],
+                "metadata": {},
+            },
+        },
+    )
+
+    assert update_resp.status_code == 200
+    assert update_resp.json()["workspace"]["harness"]["summary"] == "Updated workspace harness."
+    assert update_resp.json()["workspace"]["harness"]["methodology"] is None
+
+
+async def test_update_workspace_preserves_harness_when_omitted_and_clears_with_null(
+    client,
+    actor_payload,
+):
+    create_resp = await client.post(
+        "/v1/workspaces",
+        json={
+            "name": "Stable Harness Workspace",
+            "description": "Carries workspace harness state.",
+            "actor": actor_payload,
+            "harness": {
+                "version": 1,
+                "summary": "Preserve this workspace harness.",
+                "methodology": {
+                    "ontology": "Artifacts and tests are first-class evidence.",
+                },
+                "methodics": [],
+                "execution_rules": [],
+            },
+        },
+    )
+
+    assert create_resp.status_code == 200
+    workspace_id = create_resp.json()["workspace"]["workspace_id"]
+
+    preserve_resp = await client.patch(
+        f"/v1/workspaces/{workspace_id}",
+        json={
+            "actor": actor_payload,
+            "description": "Updated description only.",
+        },
+    )
+    clear_resp = await client.patch(
+        f"/v1/workspaces/{workspace_id}",
+        json={
+            "actor": actor_payload,
+            "harness": None,
+        },
+    )
+
+    assert preserve_resp.status_code == 200
+    assert preserve_resp.json()["workspace"]["description"] == "Updated description only."
+    assert preserve_resp.json()["workspace"]["harness"]["summary"] == "Preserve this workspace harness."
+    assert clear_resp.status_code == 200
+    assert clear_resp.json()["workspace"]["harness"] is None
+
+
 async def test_list_workspaces_returns_created_workspace(client, actor_payload):
     await client.post(
         "/v1/workspaces",
@@ -2058,6 +2169,16 @@ async def test_create_agent_participant_advertises_capabilities_and_llm_config(c
                 "instructions": "Produce concise evidence-backed summaries.",
                 "specialty": "research",
             },
+            "harness": {
+                "version": 1,
+                "summary": "Choose tools dynamically from the workspace catalog.",
+                "tool_use_policy": {
+                    "selection_principles": [
+                        "Prefer the narrowest tool that provides direct evidence."
+                    ],
+                    "fallback_when_no_tool_fits": "Explain the gap and ask for clarification.",
+                },
+            },
         },
     )
     agent_id = create_resp.json()["agent_id"]
@@ -2099,6 +2220,10 @@ async def test_create_agent_participant_advertises_capabilities_and_llm_config(c
     assert body["agent_config"]["endpoint"]["url"] == "https://api.example.com/v1/responses"
     assert body["agent_config"]["endpoint"]["model"] == "gpt-5.4"
     assert body["agent_config"]["system_prompt"].startswith("You are a research-focused agent")
+    assert body["agent_config"]["harness"]["summary"] == "Choose tools dynamically from the workspace catalog."
+    assert body["agent_config"]["harness"]["tool_use_policy"]["selection_principles"] == [
+        "Prefer the narrowest tool that provides direct evidence."
+    ]
     assert body["agent_config"]["definition"]["specialty"] == "research"
 
     workspace_detail = await client.get(f"/v1/workspaces/{workspace_id}")
@@ -2111,6 +2236,9 @@ async def test_create_agent_participant_advertises_capabilities_and_llm_config(c
     assert len(agents) == 1
     assert agents[0]["display_name"] == "Research Analyst"
     assert agents[0]["agent_config"]["endpoint"]["kind"] == "remote"
+    assert agents[0]["agent_config"]["harness"]["summary"] == (
+        "Choose tools dynamically from the workspace catalog."
+    )
     assert "tool:repo_search" in agents[0]["capabilities"]
 
 
@@ -2185,6 +2313,142 @@ async def test_update_agent_participant_changes_endpoint_prompt_and_role(client,
     assert body["definition"]["runtime"] == "responses-api"
     assert attach_update_resp.status_code == 200
     assert attach_update_resp.json()["status"] == "busy"
+
+
+async def test_create_and_update_system_agent_round_trips_harness(client, actor_payload):
+    create_resp = await client.post(
+        "/v1/agents",
+        json={
+            "actor": actor_payload,
+            "display_name": "Harnessed Agent",
+            "description": "Carries explicit harness state.",
+            "role": "research agent",
+            "capabilities": ["research"],
+            "endpoint": {"kind": "local", "model": "gemma4:latest"},
+            "system_prompt": "Research carefully.",
+            "harness": {
+                "version": 1,
+                "summary": "Plan carefully and stay incremental.",
+                "operating_principles": ["Ground claims in evidence."],
+                "tool_use_policy": {
+                    "selection_principles": ["Choose tools dynamically from the workspace catalog."],
+                    "fallback_when_no_tool_fits": "Ask for clarification.",
+                },
+            },
+        },
+    )
+
+    assert create_resp.status_code == 200
+    agent_id = create_resp.json()["agent_id"]
+    assert create_resp.json()["harness"]["summary"] == "Plan carefully and stay incremental."
+
+    update_resp = await client.patch(
+        f"/v1/agents/{agent_id}",
+        json={
+            "actor": actor_payload,
+            "harness": {
+                "version": 1,
+                "summary": "Updated agent harness.",
+                "operating_principles": ["Verify before declaring completion."],
+                "planning": {
+                    "plan_before_act": True,
+                    "incremental_execution": True,
+                    "one_goal_at_a_time": True,
+                    "explicit_uncertainty": True,
+                    "guidance": [],
+                },
+                "tool_use_policy": {
+                    "selection_principles": ["Use the narrowest applicable tool."],
+                    "read_before_write": True,
+                    "inspect_schema_before_use": True,
+                    "prefer_existing_workspace_tools": True,
+                    "cite_tool_results_in_reasoning": True,
+                    "verify_side_effects_after_mutation": True,
+                    "fallback_when_no_tool_fits": "Escalate to the user.",
+                },
+                "memory_policy": {
+                    "use_run_memory": False,
+                    "use_thread_memory": True,
+                    "use_workspace_memory": True,
+                },
+                "collaboration_policy": {
+                    "ask_user_when": [],
+                    "escalate_when": ["The workspace lacks a suitable tool."],
+                    "delegation_guidance": [],
+                    "handoff_guidance": [],
+                },
+                "validation_policy": {
+                    "required_checks": ["Confirm visible tool output."],
+                    "require_evidence_for_claims": True,
+                    "require_tool_results_for_completion": True,
+                    "require_tests_before_done": False,
+                },
+                "stop_policy": {
+                    "completion_conditions": ["Evidence has been cited."],
+                    "stop_conditions": ["Required tools are unavailable."],
+                    "max_turns": 5,
+                },
+                "skill_refs": ["skill://research"],
+                "metadata": {},
+            },
+        },
+    )
+
+    assert update_resp.status_code == 200
+    assert update_resp.json()["harness"]["summary"] == "Updated agent harness."
+    assert update_resp.json()["harness"]["memory_policy"]["use_run_memory"] is False
+    assert update_resp.json()["harness"]["stop_policy"]["max_turns"] == 5
+
+
+async def test_update_system_agent_preserves_harness_when_omitted_and_clears_with_null(
+    client,
+    actor_payload,
+):
+    create_resp = await client.post(
+        "/v1/agents",
+        json={
+            "actor": actor_payload,
+            "display_name": "Stable Harness Agent",
+            "description": "Carries explicit harness state.",
+            "role": "research agent",
+            "capabilities": ["research"],
+            "endpoint": {"kind": "local", "model": "gemma4:latest"},
+            "system_prompt": "Research carefully.",
+            "harness": {
+                "version": 1,
+                "summary": "Preserve this agent harness.",
+                "tool_use_policy": {
+                    "selection_principles": [
+                        "Prefer the narrowest tool that provides direct evidence."
+                    ]
+                },
+            },
+        },
+    )
+
+    assert create_resp.status_code == 200
+    agent_id = create_resp.json()["agent_id"]
+
+    preserve_resp = await client.patch(
+        f"/v1/agents/{agent_id}",
+        json={
+            "actor": actor_payload,
+            "description": "Updated description only.",
+        },
+    )
+    clear_resp = await client.patch(
+        f"/v1/agents/{agent_id}",
+        json={
+            "actor": actor_payload,
+            "harness": None,
+        },
+    )
+
+    assert preserve_resp.status_code == 200
+    assert preserve_resp.json()["description"] == "Updated description only."
+    assert preserve_resp.json()["harness"]["summary"] == "Preserve this agent harness."
+    assert clear_resp.status_code == 200
+    assert clear_resp.json()["harness"] is None
 
 
 async def test_delete_system_agent_removes_definition(client, actor_payload):
