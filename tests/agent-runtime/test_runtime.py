@@ -38,6 +38,7 @@ from agent_runtime.runtime import (
     HttpEndpointExecutor,
     LangfuseRuntimeObserver,
     LocalOllamaExecutor,
+    _debug_prompt_payload,
     render_prompt,
 )
 from agent_runtime.secrets import (
@@ -1424,3 +1425,26 @@ async def test_local_ollama_executor_debug_dump_writes_request_payload(monkeypat
     assert record["source"] == "local-ollama"
     assert record["message_count"] == 2
     assert record["request"]["prompt"] == render_prompt(kernel.context)
+
+
+def test_debug_prompt_payload_rotates_dump_file(monkeypatch, tmp_path):
+    context = _build_fixture_context(endpoint_kind="local").context
+    debug_file = tmp_path / "agent-runtime-prompts.jsonl"
+
+    monkeypatch.setenv("AGENT_RUNTIME_DEBUG_PROMPTS", "1")
+    monkeypatch.setenv("AGENT_RUNTIME_DEBUG_PROMPTS_FILE", str(debug_file))
+    monkeypatch.setenv("AGENT_RUNTIME_DEBUG_PROMPTS_MAX_BYTES", "250")
+    monkeypatch.setenv("AGENT_RUNTIME_DEBUG_PROMPTS_BACKUP_COUNT", "2")
+
+    for index in range(5):
+        _debug_prompt_payload(
+            "local-ollama",
+            context,
+            {"prompt": f"payload-{index}-" + ("x" * 120)},
+        )
+
+    assert debug_file.exists()
+    assert (tmp_path / "agent-runtime-prompts.jsonl.1").exists()
+
+    latest_record = json.loads(debug_file.read_text(encoding="utf-8").strip())
+    assert latest_record["request"]["prompt"].startswith("payload-4-")

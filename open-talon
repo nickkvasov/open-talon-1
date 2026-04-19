@@ -109,22 +109,28 @@ start_python_module() {
 import os
 import subprocess
 
-env = os.environ.copy()
-with open(os.environ["LOG_FILE"], "ab", buffering=0) as log_file:
-    proc = subprocess.Popen(
-        [
-            os.environ["PYTHON_BIN"],
-            "-m",
-            os.environ["MODULE"],
-        ],
-        cwd=os.environ["ROOT_DIR"],
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        close_fds=True,
-    )
+proc = subprocess.Popen(
+    [
+        os.environ["PYTHON_BIN"],
+        "-m",
+        "open_talon_contracts.log_relay",
+        "--log-file",
+        os.environ["LOG_FILE"],
+        "--cwd",
+        os.environ["ROOT_DIR"],
+        "--",
+        os.environ["PYTHON_BIN"],
+        "-m",
+        os.environ["MODULE"],
+    ],
+    cwd=os.environ["ROOT_DIR"],
+    env=os.environ.copy(),
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+    close_fds=True,
+)
 print(proc.pid)
 PY
   )"
@@ -263,27 +269,33 @@ start_cmd() {
 import os
 import subprocess
 
-env = os.environ.copy()
-with open(os.environ["LOG_FILE"], "ab", buffering=0) as log_file:
-    proc = subprocess.Popen(
-        [
-            os.environ["PYTHON_BIN"],
-            "-m",
-            "uvicorn",
-            "gateway_edge.main:app",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            "8000",
-        ],
-        cwd=os.environ["ROOT_DIR"],
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        close_fds=True,
-    )
+proc = subprocess.Popen(
+    [
+        os.environ["PYTHON_BIN"],
+        "-m",
+        "open_talon_contracts.log_relay",
+        "--log-file",
+        os.environ["LOG_FILE"],
+        "--cwd",
+        os.environ["ROOT_DIR"],
+        "--",
+        os.environ["PYTHON_BIN"],
+        "-m",
+        "uvicorn",
+        "gateway_edge.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+    ],
+    cwd=os.environ["ROOT_DIR"],
+    env=os.environ.copy(),
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+    close_fds=True,
+)
 print(proc.pid)
 PY
     )"

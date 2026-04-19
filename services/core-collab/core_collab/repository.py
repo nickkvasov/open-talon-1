@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import asyncpg
+from open_talon_contracts.log_management import RotationPolicy, append_bytes_with_rotation
 
 from .contracts import (
     ActorRef,
@@ -106,6 +107,12 @@ class CollaborationRepository:
             Path(communication_log_dir).expanduser()
             if communication_log_dir is not None
             else None
+        )
+        self._communication_log_policy = RotationPolicy.from_env(
+            max_bytes_var="OPEN_TALON_COMMUNICATION_LOG_MAX_BYTES",
+            backup_count_var="OPEN_TALON_COMMUNICATION_LOG_BACKUP_COUNT",
+            default_max_bytes=20 * 1024 * 1024,
+            default_backup_count=10,
         )
 
     async def setup_schema(self) -> None:
@@ -4524,10 +4531,11 @@ class CollaborationRepository:
             )
             grouped_payloads.setdefault(file_path, []).append(payload)
         for file_path, payloads in grouped_payloads.items():
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            with file_path.open("ab") as handle:
-                for payload in payloads:
-                    handle.write(payload)
+            append_bytes_with_rotation(
+                file_path,
+                payloads,
+                policy=self._communication_log_policy,
+            )
 
     @staticmethod
     def _event_from_row(row: asyncpg.Record) -> EventEnvelope:

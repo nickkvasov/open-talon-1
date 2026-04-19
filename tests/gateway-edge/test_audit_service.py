@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import json
 import sys
@@ -270,11 +271,30 @@ async def test_export_chain_checkpoint_serializes_datetime_and_uuid(monkeypatch)
     service._repository = _Repository()
     service._storage = SimpleNamespace(put_object=_put_object)
 
-    await service._export_chain_checkpoint("2026-04-19")
+    exported = await service._export_chain_checkpoint("2026-04-19")
 
+    assert exported is True
     exported_head = checkpoint_payload["payload"]["chain_heads"][0]
     assert exported_head["organization_id"]
     assert exported_head["updated_at"].endswith("+00:00")
+
+
+@pytest.mark.asyncio
+async def test_export_chain_checkpoint_returns_false_on_storage_failure():
+    class _Repository:
+        async def list_audit_chain_heads(self):
+            return []
+
+    async def _put_object(**kwargs):
+        raise RuntimeError("storage unavailable")
+
+    service = AuditService()
+    service._repository = _Repository()
+    service._storage = SimpleNamespace(put_object=_put_object)
+
+    exported = await service._export_chain_checkpoint("2026-04-19")
+
+    assert exported is False
 
 
 @pytest.mark.asyncio
@@ -292,3 +312,139 @@ async def test_ensure_clickhouse_schema_uses_datetime_ttl(monkeypatch):
     await service._ensure_clickhouse_schema()
 
     assert "TTL toDateTime(recorded_at) + toIntervalDay(365)" in recorded["statement"]
+
+
+@pytest.mark.asyncio
+async def test_insert_clickhouse_events_uses_clickhouse_datetime_strings(monkeypatch):
+    service = AuditService()
+    event = _audit_event(ledger_offset=1, chain_partition="workspace:test")
+    event = event.model_copy(
+        update={
+            "organization_id": uuid4(),
+            "occurred_at": datetime(2026, 4, 19, 12, 34, 56, 789000, tzinfo=timezone.utc),
+            "recorded_at": datetime(2026, 4, 19, 12, 35, 1, 23000, tzinfo=timezone.utc),
+            "metadata": {"route": "/health"},
+        }
+    )
+    recorded = {}
+
+    async def _existing_clickhouse_ids(events):
+        return set()
+
+    async def _clickhouse_query(statement, *, body=None):
+        recorded["statement"] = statement
+        recorded["body"] = body
+
+    monkeypatch.setattr(service, "_existing_clickhouse_ids", _existing_clickhouse_ids)
+    monkeypatch.setattr(service, "_clickhouse_query", _clickhouse_query)
+
+    await service._insert_clickhouse_events([event])
+
+    assert recorded["statement"].startswith("INSERT INTO")
+    assert '"occurred_at": "2026-04-19 12:34:56.789"' in recorded["body"]
+    assert '"recorded_at": "2026-04-19 12:35:01.023"' in recorded["body"]
+    assert '"organization_id":' in recorded["body"]
+    assert '"metadata": "{\\"route\\": \\"/health\\"}"' in recorded["body"]
+    assert recorded["body"].endswith("\n")
+
+
+@pytest.mark.asyncio
+async def test_replay_loop_retries_after_iteration_failure(monkeypatch):
+    service = AuditService()
+    attempts = {"count": 0}
+
+    async def _ensure_clickhouse_schema():
+        return None
+
+    async def _replay_projection_once():
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("temporary clickhouse failure")
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(service, "_ensure_clickhouse_schema", _ensure_clickhouse_schema)
+    monkeypatch.setattr(service, "_replay_projection_once", _replay_projection_once)
+    monkeypatch.setattr(settings, "audit_clickhouse_enabled", True)
+
+    with pytest.raises(asyncio.CancelledError):
+        await service._replay_loop()
+
+    assert attempts["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_projector_loop_continues_after_event_failure(monkeypatch):
+    first = _audit_event(ledger_offset=1, chain_partition="workspace:test")
+    second = _audit_event(ledger_offset=2, chain_partition="workspace:test")
+    checkpoints = []
+    inserted = []
+
+    class _Repository:
+        async def advance_audit_export_checkpoint(
+            self,
+            conn,
+            *,
+            consumer_name,
+            last_ledger_offset,
+            metadata,
+        ):
+            checkpoints.append(
+                {
+                    "consumer_name": consumer_name,
+                    "last_ledger_offset": last_ledger_offset,
+                    "metadata": metadata,
+                }
+            )
+
+    class _FakeConsumer:
+        def __init__(self, *args, **kwargs):
+            self._messages = [
+                SimpleNamespace(value=first.model_dump(mode="json")),
+                SimpleNamespace(value=second.model_dump(mode="json")),
+            ]
+
+        async def start(self):
+            return None
+
+        async def stop(self):
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._messages:
+                return self._messages.pop(0)
+            raise asyncio.CancelledError()
+
+    async def _insert_clickhouse_events(events):
+        inserted.append(events[0].ledger_offset)
+        if events[0].ledger_offset == 1:
+            raise RuntimeError("temporary clickhouse failure")
+
+    async def _ensure_clickhouse_schema():
+        return None
+
+    async def _get_pool():
+        return _FakePool()
+
+    service = AuditService()
+    service._repository = _Repository()
+
+    monkeypatch.setattr("gateway_edge.services.audit.AIOKafkaConsumer", _FakeConsumer)
+    monkeypatch.setattr(service, "_insert_clickhouse_events", _insert_clickhouse_events)
+    monkeypatch.setattr(service, "_ensure_clickhouse_schema", _ensure_clickhouse_schema)
+    monkeypatch.setattr("gateway_edge.services.audit.get_pool", _get_pool)
+    monkeypatch.setattr(settings, "audit_clickhouse_enabled", True)
+
+    with pytest.raises(asyncio.CancelledError):
+        await service._projector_loop()
+
+    assert inserted == [1, 2]
+    assert checkpoints == [
+        {
+            "consumer_name": settings.audit_clickhouse_projector_consumer_name,
+            "last_ledger_offset": 2,
+            "metadata": {"source": "kafka"},
+        }
+    ]

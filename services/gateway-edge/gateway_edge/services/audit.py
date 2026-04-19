@@ -337,19 +337,37 @@ class AuditService:
         )
         try:
             await consumer.start()
-            await self._ensure_clickhouse_schema()
+            while True:
+                try:
+                    await self._ensure_clickhouse_schema()
+                    break
+                except asyncio.CancelledError:  # pragma: no cover - shutdown path
+                    raise
+                except Exception:
+                    logger.exception("Audit projector schema sync failed")
+                    await asyncio.sleep(
+                        settings.audit_clickhouse_replay_interval_seconds
+                    )
             async for message in consumer:
-                event = AuditEvent.model_validate(message.value)
-                await self._insert_clickhouse_events([event])
-                pool = await get_pool()
-                async with pool.acquire() as conn:
-                    async with conn.transaction():
-                        await self._require_repository().advance_audit_export_checkpoint(
-                            conn,
-                            consumer_name=settings.audit_clickhouse_projector_consumer_name,
-                            last_ledger_offset=event.ledger_offset,
-                            metadata={"source": "kafka"},
-                        )
+                try:
+                    event = AuditEvent.model_validate(message.value)
+                    await self._insert_clickhouse_events([event])
+                    pool = await get_pool()
+                    async with pool.acquire() as conn:
+                        async with conn.transaction():
+                            await self._require_repository().advance_audit_export_checkpoint(
+                                conn,
+                                consumer_name=settings.audit_clickhouse_projector_consumer_name,
+                                last_ledger_offset=event.ledger_offset,
+                                metadata={"source": "kafka"},
+                            )
+                except asyncio.CancelledError:  # pragma: no cover - shutdown path
+                    raise
+                except Exception:
+                    logger.exception(
+                        "Audit projector event failed ledger_offset=%s",
+                        message.value.get("ledger_offset"),
+                    )
         except asyncio.CancelledError:  # pragma: no cover - shutdown path
             raise
         except Exception:
@@ -361,22 +379,26 @@ class AuditService:
         if not settings.audit_clickhouse_enabled:
             return
         try:
-            await self._ensure_clickhouse_schema()
             while True:
-                await self._replay_projection_once()
+                try:
+                    await self._ensure_clickhouse_schema()
+                    await self._replay_projection_once()
+                except asyncio.CancelledError:  # pragma: no cover - shutdown path
+                    raise
+                except Exception:
+                    logger.exception("Audit replay iteration failed")
                 await asyncio.sleep(settings.audit_clickhouse_replay_interval_seconds)
         except asyncio.CancelledError:  # pragma: no cover - shutdown path
             raise
-        except Exception:
-            logger.exception("Audit replay loop failed")
 
     async def _checkpoint_loop(self) -> None:
         try:
             while True:
                 day_key = datetime.now(UTC).strftime("%Y-%m-%d")
                 if self._checkpoint_exported_for != day_key:
-                    await self._export_chain_checkpoint(day_key)
-                    self._checkpoint_exported_for = day_key
+                    exported = await self._export_chain_checkpoint(day_key)
+                    if exported:
+                        self._checkpoint_exported_for = day_key
                 await asyncio.sleep(3600)
         except asyncio.CancelledError:  # pragma: no cover - shutdown path
             raise
@@ -490,7 +512,7 @@ class AuditService:
                         max_ledger_offset=last_event.ledger_offset,
                     )
 
-    async def _export_chain_checkpoint(self, day_key: str) -> None:
+    async def _export_chain_checkpoint(self, day_key: str) -> bool:
         repository = self._require_repository()
         heads = await repository.list_audit_chain_heads()
         payload = json.dumps(
@@ -508,8 +530,10 @@ class AuditService:
                 payload=payload,
                 content_type="application/json",
             )
+            return True
         except Exception:
             logger.exception("Failed to export audit chain checkpoint")
+            return False
 
     async def _ensure_clickhouse_schema(self) -> None:
         ttl_days = max(settings.audit_clickhouse_retention_days, 1)
@@ -566,12 +590,12 @@ class AuditService:
         for event in events:
             if str(event.audit_event_id) in existing_ids:
                 continue
-            row = event.model_dump(mode="json")
+            row = self._clickhouse_event_row(event)
             row["metadata"] = json.dumps(row["metadata"], sort_keys=True)
             rows.append(row)
         if not rows:
             return
-        payload = "\n".join(json.dumps(row, sort_keys=True) for row in rows)
+        payload = "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n"
         statement = (
             f"INSERT INTO {settings.audit_clickhouse_db}.audit_events FORMAT JSONEachRow"
         )
@@ -609,7 +633,20 @@ class AuditService:
                 auth=(settings.audit_clickhouse_user, settings.audit_clickhouse_password),
                 content=body.encode("utf-8") if body is not None else None,
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                detail = response.text.strip()
+                if detail:
+                    message = (
+                        f"{exc}. ClickHouse response body: {detail[:1000]}"
+                    )
+                    raise httpx.HTTPStatusError(
+                        message,
+                        request=exc.request,
+                        response=exc.response,
+                    ) from exc
+                raise
 
     @staticmethod
     def _http_action_details(
@@ -691,6 +728,18 @@ class AuditService:
         if message is None:
             return None
         return _SECRET_PATTERN.sub("[REDACTED]", message)[:512]
+
+    @classmethod
+    def _clickhouse_event_row(cls, event: AuditEvent) -> dict[str, object]:
+        row = event.model_dump(mode="json")
+        row["occurred_at"] = cls._clickhouse_datetime(event.occurred_at)
+        row["recorded_at"] = cls._clickhouse_datetime(event.recorded_at)
+        return row
+
+    @staticmethod
+    def _clickhouse_datetime(value: datetime) -> str:
+        normalized = value.astimezone(UTC)
+        return normalized.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
     def _require_repository(self) -> CollaborationRepository:
         if self._repository is None:

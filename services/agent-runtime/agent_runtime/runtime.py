@@ -18,6 +18,10 @@ if _CONTRACTS_DIR.is_dir():
     if contracts_path not in sys.path:
         sys.path.insert(0, contracts_path)
 
+from open_talon_contracts.log_management import (  # noqa: E402
+    RotationPolicy,
+    append_bytes_with_rotation,
+)
 from open_talon_contracts.models import (  # noqa: E402
     AgentDefinition,
     AgentExecutionContext,
@@ -1158,7 +1162,18 @@ def _debug_prompt_payload(
     else:
         target_path = Path.cwd() / ".run" / "agent-runtime-prompts.jsonl"
 
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    with target_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=True, default=str))
-        handle.write("\n")
+    append_bytes_with_rotation(
+        target_path,
+        [
+            (
+                json.dumps(record, ensure_ascii=True, default=str).encode("utf-8")
+                + b"\n"
+            )
+        ],
+        policy=RotationPolicy.from_env(
+            max_bytes_var="AGENT_RUNTIME_DEBUG_PROMPTS_MAX_BYTES",
+            backup_count_var="AGENT_RUNTIME_DEBUG_PROMPTS_BACKUP_COUNT",
+            default_max_bytes=10 * 1024 * 1024,
+            default_backup_count=5,
+        ),
+    )

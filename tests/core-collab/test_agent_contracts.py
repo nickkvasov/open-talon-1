@@ -27,6 +27,10 @@ from open_talon_contracts.agent_contracts import (  # noqa: E402
     build_default_interaction_contract,
     interaction_contract_is_empty,
 )
+from open_talon_contracts.log_management import (  # noqa: E402
+    RotationPolicy,
+    append_jsonl_with_rotation,
+)
 from open_talon_contracts.models import (  # noqa: E402
     ActorRef,
     AgentDefinition,
@@ -122,6 +126,12 @@ class FakeRepository:
         self._pool = _FakePool()
         self._communication_log_dir = (
             Path(communication_log_dir) if communication_log_dir is not None else None
+        )
+        self._communication_log_policy = RotationPolicy.from_env(
+            max_bytes_var="OPEN_TALON_COMMUNICATION_LOG_MAX_BYTES",
+            backup_count_var="OPEN_TALON_COMMUNICATION_LOG_BACKUP_COUNT",
+            default_max_bytes=20 * 1024 * 1024,
+            default_backup_count=10,
         )
         self.setup_schema_calls = 0
         self.upserted_agents: list[AgentDefinition] = []
@@ -623,12 +633,10 @@ class FakeRepository:
                 json.dumps(entry.model_dump(mode="json"), sort_keys=True)
             )
         for file_path, lines in grouped_lines.items():
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            existing = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
-            suffix = "\n".join(lines)
-            file_path.write_text(
-                f"{existing}{suffix}\n",
-                encoding="utf-8",
+            append_jsonl_with_rotation(
+                file_path,
+                lines,
+                policy=self._communication_log_policy,
             )
 
     async def upsert_interaction_request(self, conn, request):
@@ -2855,3 +2863,50 @@ async def test_kernel_persists_workspace_communication_log_to_jsonl(tmp_path):
     assert entries[0]["actor_display_name"] == "Research Agent"
     assert entries[2]["actor_display_name"] == "Alice"
     assert entries[2]["content"] == "API review is blocking backend delivery."
+
+
+@pytest.mark.asyncio
+async def test_kernel_rotates_workspace_communication_logs(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPEN_TALON_COMMUNICATION_LOG_MAX_BYTES", "450")
+    monkeypatch.setenv("OPEN_TALON_COMMUNICATION_LOG_BACKUP_COUNT", "2")
+    repository = FakeRepository(communication_log_dir=tmp_path)
+    kernel = CollaborationKernel(repository)
+    seeded = _seed_interaction_workspace(
+        repository,
+        users=[("Alice", "backend")],
+    )
+
+    for index in range(6):
+        await kernel.post_message(
+            seeded["thread_id"],
+            CreateMessageRequest(
+                actor=ParticipantInput(
+                    participant_id=seeded["requester_id"],
+                    participant_type="agent",
+                    display_name="Research Agent",
+                ),
+                content=f"rotation-test-{index}-" + ("x" * 120),
+                visibility="workspace",
+                create_task=False,
+            ),
+        )
+
+    log_file = tmp_path / f"{seeded['workspace_id']}.jsonl"
+    rotated_file = tmp_path / f"{seeded['workspace_id']}.jsonl.1"
+
+    assert log_file.exists()
+    assert rotated_file.exists()
+
+    latest_entries = [
+        json.loads(line)
+        for line in log_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    rotated_entries = [
+        json.loads(line)
+        for line in rotated_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert latest_entries[-1]["content"].startswith("rotation-test-5-")
+    assert rotated_entries[0]["content"].startswith("rotation-test-")
