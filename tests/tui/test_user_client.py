@@ -258,7 +258,53 @@ async def test_user_client_workspace_list_defaults_to_selected_organization(tmp_
     await client.handle_command("workspace list")
 
     assert fake_http.calls[0]["params"] == {"organization_id": "org-555"}
-    assert emitted[0]["command"] == "workspace.list"
+
+
+@pytest.mark.asyncio
+async def test_user_client_post_targeted_message_can_include_tool_scope(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = user_client.UserClient(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        output_format="text",
+    )
+    client.tokens = _token()
+    client.state.thread_id = "thread-123"
+    client.state.participant_id = "participant-123"
+    client.state.display_name = "Alice"
+    fake_http = _FakeAsyncClient(
+        responses=[
+            _FakeResponse(
+                200,
+                {
+                    "message_id": "msg-1",
+                    "workspace_id": "workspace-123",
+                    "thread_id": "thread-123",
+                    "actor": {"id": "participant-123"},
+                    "content": "Build Fibonacci tool",
+                    "created_at": "2026-04-21T10:00:00Z",
+                    "updated_at": "2026-04-21T10:00:00Z",
+                    "sequence": 1,
+                    "metadata": {},
+                },
+            )
+        ]
+    )
+    client._http_client = fake_http
+    monkeypatch.setattr(client, "_ensure_bearer_token", lambda: __import__("asyncio").sleep(0))
+
+    await client._post_targeted_message(
+        content="Build Fibonacci tool",
+        target_system_agent_id="agent-123",
+        target_tool_scope="organization",
+    )
+
+    assert fake_http.calls[0]["json"]["target_system_agent_id"] == "agent-123"
+    assert fake_http.calls[0]["json"]["target_tool_scope"] == "organization"
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,8 @@ from .contracts import (
     ThreadDetail,
     TimelineMessage,
     ToolCall,
+    ToolGenerationRequestDetail,
+    ToolGenerationRevision,
     Workspace,
     WorkspaceAsset,
     WorkspaceAssetVersion,
@@ -130,6 +132,13 @@ class WorkspaceAssetCommandResult(CommandResult):
 
 
 @dataclass
+class ToolGenerationRequestCommandResult(CommandResult):
+    detail: ToolGenerationRequestDetail | None = None
+    revision: ToolGenerationRevision | None = None
+    message: TimelineMessage | None = None
+
+
+@dataclass
 class TaskCommandResult(CommandResult):
     task: Task | None = None
     run: Run | None = None
@@ -186,6 +195,7 @@ __all__ = [
     "TaskCommandResult",
     "ThreadCommandResult",
     "ToolCallCommandResult",
+    "ToolGenerationRequestCommandResult",
     "WorkspaceAssetCommandResult",
     "WorkspaceCommandResult",
     "WorkspaceToolCommandResult",

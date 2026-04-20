@@ -156,6 +156,7 @@ class ScrollbackTUI2:
         "/thread show",
         "/thread create",
         "/thread use",
+        "/tool request",
         "/links",
         "/open",
         "/copy",
@@ -1185,6 +1186,11 @@ class ScrollbackTUI2:
                 prefix = f"{prefix} [request {request_status or 'open'}{coverage}]"
             elif metadata.get("interaction_question_ids"):
                 prefix = f"{prefix} [answer]"
+            elif metadata.get("tool_generation_request_id"):
+                prefix = (
+                    f"{prefix} [tool request "
+                    f"{metadata.get('tool_generation_status') or metadata.get('tool_generation_request_status') or 'submitted'}]"
+                )
         time_mark = _format_timestamp(message.get("created_at") or message.get("updated_at"))
         self._record_line(f"{time_mark} {prefix}: {content}")
 
@@ -1375,6 +1381,93 @@ class ScrollbackTUI2:
             },
         )
         response.raise_for_status()
+
+    async def _resolve_tinker_agent_id(self) -> str | None:
+        if not self.state.workspace_id:
+            self._write_system("select a workspace first")
+            return None
+        assert self._http_client is not None
+        agents_response = await self._http_client.get(
+            f"{self.gateway}/v1/workspaces/{self.state.workspace_id}/catalog/agents"
+        )
+        agents_response.raise_for_status()
+        participants_response = await self._http_client.get(
+            f"{self.gateway}/v1/workspaces/{self.state.workspace_id}/participants"
+        )
+        participants_response.raise_for_status()
+        agents = agents_response.json()
+        participants = participants_response.json()
+        agent = next(
+            (
+                item
+                for item in agents
+                if isinstance(item, dict)
+                and (
+                    item.get("metadata", {}).get("tool_generation_agent")
+                    or str(item.get("display_name", "")).strip().lower() == "tinker"
+                )
+            ),
+            None,
+        )
+        if agent is None:
+            self._write_system("Tinker is not visible in this workspace catalog")
+            return None
+        agent_id = str(agent.get("agent_id") or "")
+        attached = any(
+            isinstance(item, dict)
+            and item.get("participant_type") == "agent"
+            and item.get("system_agent_id") == agent_id
+            and item.get("status") in {"active", "idle", "busy"}
+            for item in participants
+        )
+        if not attached:
+            self._write_system("attach Tinker to this workspace before requesting a tool")
+            return None
+        return agent_id
+
+    async def _send_tool_request(self, text: str) -> None:
+        if not self._is_authenticated:
+            self._write_system("sign in first with /auth login")
+            return
+        await self._ensure_bearer_token()
+        await self._validate_current_user_session()
+        if not self._is_authenticated:
+            return
+        if not self.state.thread_id:
+            self._write_system("thread not ready yet")
+            return
+        agent_id = await self._resolve_tinker_agent_id()
+        if not agent_id:
+            return
+        target_tool_scope, request_text = self._parse_tool_request_scope(text)
+        assert self._http_client is not None
+        response = await self._http_client.post(
+            f"{self.gateway}/v1/threads/{self.state.thread_id}/messages",
+            json={
+                "actor": self.actor_payload,
+                "content": request_text,
+                "visibility": "workspace",
+                "target_system_agent_id": agent_id,
+                **(
+                    {"target_tool_scope": target_tool_scope}
+                    if target_tool_scope is not None
+                    else {}
+                ),
+                "create_task": True,
+                "requests": _build_interaction_requests_from_text(request_text),
+            },
+        )
+        response.raise_for_status()
+
+    @staticmethod
+    def _parse_tool_request_scope(raw: str) -> tuple[str | None, str]:
+        stripped = raw.strip()
+        if not stripped.startswith("--scope "):
+            return None, stripped
+        parts = stripped.split(maxsplit=2)
+        if len(parts) < 3 or parts[1] not in {"global", "organization"}:
+            raise ValueError("tool request scope must be `global` or `organization`")
+        return parts[1], parts[2].strip()
 
     async def _handle_account_command(self, command: str) -> None:
         parts = command.strip().split(maxsplit=2)
@@ -1663,7 +1756,7 @@ class ScrollbackTUI2:
     async def _handle_command(self, text: str) -> None:
         if text == "/help":
             self._write_system(
-                "commands: /auth login | /auth logout | /account whoami | /account list | /account switch <profile> | /llm-provider list | /llm-provider show <id|engine_id|name> | /llm-provider create key=value ... | /llm-provider update <target> field=value ... | /organization list | /organization show [id|slug|name] | /organization use <id|slug|name> | /workspace list [all] | /workspace create <name> | /workspace use <id|name> | /thread list | /thread create <title> | /thread use <id|title> | /links | /open <n|last|url> | /copy | /quit"
+                "commands: /auth login | /auth logout | /account whoami | /account list | /account switch <profile> | /llm-provider list | /llm-provider show <id|engine_id|name> | /llm-provider create key=value ... | /llm-provider update <target> field=value ... | /organization list | /organization show [id|slug|name] | /organization use <id|slug|name> | /workspace list [all] | /workspace create <name> | /workspace use <id|name> | /thread list | /thread create <title> | /thread use <id|title> | /tool request [--scope global|organization] <text> | /links | /open <n|last|url> | /copy | /quit"
             )
             return
         if text == "/quit":
@@ -1703,6 +1796,9 @@ class ScrollbackTUI2:
             return
         if text == "/thread" or text.startswith("/thread "):
             await self._handle_thread_command(text)
+            return
+        if text.startswith("/tool request "):
+            await self._send_tool_request(text[len("/tool request ") :].strip())
             return
         self._write_system("unsupported command in tui2; use /help")
 

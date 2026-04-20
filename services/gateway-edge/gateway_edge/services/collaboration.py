@@ -40,6 +40,7 @@ from gateway_edge.models import (
     CreateMemoryEntryRequest,
     CreateThreadMemoryRequest,
     CreateMessageRequest,
+    CreateToolGenerationRevisionRequest,
     SearchMemoryRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
@@ -71,6 +72,7 @@ from gateway_edge.models import (
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    ToolGenerationRequestDetail,
     WorkspaceCommunicationLogPage,
     UpdateInteractionRequestRequest,
     UpdateWorkspaceRequest,
@@ -82,6 +84,7 @@ from gateway_edge.models import (
     UpdateMemoryProviderRequest,
     UpdateMemoryEntryRequest,
     UpdateOrganizationRequest,
+    ReviewToolGenerationRevisionRequest,
     UpdateWorkspaceToolRequest,
     Workspace,
     WorkspaceAsset,
@@ -911,6 +914,69 @@ class CollaborationService:
         await self._publish_events(result.events)
         assert result.message is not None
         return result.message
+
+    async def list_tool_generation_requests(
+        self,
+        *,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        thread_id: UUID | None = None,
+        status: str | None = None,
+    ) -> list[ToolGenerationRequestDetail]:
+        return await self._require_kernel().list_tool_generation_requests(
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+            status=status,
+        )
+
+    async def list_thread_tool_generation_requests(
+        self,
+        thread_id: UUID,
+    ) -> list[ToolGenerationRequestDetail]:
+        return await self._require_kernel().list_thread_tool_generation_requests(thread_id)
+
+    async def get_tool_generation_request(
+        self,
+        request_id: UUID,
+    ) -> ToolGenerationRequestDetail:
+        return await self._require_kernel().get_tool_generation_request(request_id)
+
+    async def create_tool_generation_revision(
+        self,
+        request_id: UUID,
+        payload: CreateToolGenerationRevisionRequest,
+    ) -> ToolGenerationRequestDetail:
+        result = await self._require_kernel().create_tool_generation_revision(request_id, payload)
+        await self._publish_events(result.events)
+        assert result.detail is not None
+        return result.detail
+
+    async def approve_tool_generation_revision(
+        self,
+        revision_id: UUID,
+        payload: ReviewToolGenerationRevisionRequest,
+    ) -> ToolGenerationRequestDetail:
+        result = await self._require_kernel().approve_tool_generation_revision(
+            revision_id,
+            payload,
+        )
+        await self._publish_events(result.events)
+        assert result.detail is not None
+        return result.detail
+
+    async def reject_tool_generation_revision(
+        self,
+        revision_id: UUID,
+        payload: ReviewToolGenerationRevisionRequest,
+    ) -> ToolGenerationRequestDetail:
+        result = await self._require_kernel().reject_tool_generation_revision(
+            revision_id,
+            payload,
+        )
+        await self._publish_events(result.events)
+        assert result.detail is not None
+        return result.detail
 
     async def list_interaction_requests(
         self,

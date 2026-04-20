@@ -681,6 +681,18 @@ def render_prompt(context: AgentExecutionContext) -> str:
             f"questions: {len(detail.questions)} | targets: {len(detail.targets)} | "
             f"answers: {len(detail.answers)}"
         )
+    tool_generation_lines = []
+    if context.tool_generation_request is not None:
+        request = context.tool_generation_request.request
+        tool_generation_lines.append(
+            f"- request_id: {request.request_id} | status: {request.status} | requested_scope: {request.requested_scope} | target_tool_name: {request.target_tool_name or 'unspecified'}"
+        )
+        if request.summary:
+            tool_generation_lines.append(f"- summary: {request.summary}")
+        for revision in context.tool_generation_request.revisions:
+            tool_generation_lines.append(
+                f"- revision {revision.revision_number} | status: {revision.status} | image: {revision.image_ref or '-'} | digest: {revision.image_digest or '-'}"
+            )
 
     role_lines = []
     for role_definition in context.role_definitions:
@@ -689,6 +701,11 @@ def render_prompt(context: AgentExecutionContext) -> str:
     tool_lines = []
     for tool in context.workspace_tools:
         tool_lines.append(
+            f"- {tool.name} | enabled: {'yes' if tool.enabled else 'no'} | {tool.description}"
+        )
+    internal_tool_lines = []
+    for tool in context.internal_tools:
+        internal_tool_lines.append(
             f"- {tool.name} | enabled: {'yes' if tool.enabled else 'no'} | {tool.description}"
         )
 
@@ -733,6 +750,10 @@ def render_prompt(context: AgentExecutionContext) -> str:
         "Do not assume unavailable tools exist, and do not invent tool capabilities.",
         "\n".join(tool_lines) or "- none",
         "",
+        "Agent internal tools:",
+        "These tools are private to this agent and are not visible in the workspace catalog.",
+        "\n".join(internal_tool_lines) or "- none",
+        "",
         "Completed tool results:",
         "\n".join(tool_result_lines) or "- none",
         "",
@@ -750,6 +771,9 @@ def render_prompt(context: AgentExecutionContext) -> str:
         "",
         "Interaction requests:",
         "\n".join(interaction_request_lines) or "- none",
+        "",
+        "Tool generation request:",
+        "\n".join(tool_generation_lines) or "- none",
         "",
         "Triggering message:",
         trigger_text or "- none",

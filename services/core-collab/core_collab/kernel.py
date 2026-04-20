@@ -26,6 +26,7 @@ from .contracts import (
     AgentConfiguration,
     AgentDefinition,
     AgentExecutionContext,
+    AgentInternalToolBinding,
     AgentRunResult,
     CompletionRule,
     AgentToolCallDraft,
@@ -54,6 +55,7 @@ from .contracts import (
     CreateMemoryEntryRequest,
     CreateThreadMemoryRequest,
     CreateMessageRequest,
+    CreateToolGenerationRevisionRequest,
     SearchMemoryRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
@@ -67,6 +69,8 @@ from .contracts import (
     DeleteWorkspaceRequest,
     ExecutionWorkspaceRef,
     EventEnvelope,
+    GeneratedToolManifest,
+    GeneratedToolValidationReport,
     InteractionAnswer,
     InteractionQuestion,
     InteractionRequest,
@@ -99,8 +103,12 @@ from .contracts import (
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    ToolGenerationRequest,
+    ToolGenerationRequestDetail,
+    ToolGenerationRevision,
     WorkspaceCommunicationLogPage,
     Run,
+    ReviewToolGenerationRevisionRequest,
     StopReason,
     ToolCall,
     ToolCallResult,
@@ -148,6 +156,7 @@ from .results import (
     TaskCommandResult,
     ThreadCommandResult,
     ToolCallCommandResult,
+    ToolGenerationRequestCommandResult,
     WorkspaceAssetCommandResult,
     WorkspaceCommandResult,
     WorkspaceToolCommandResult,
@@ -2400,13 +2409,18 @@ class CollaborationKernel:
             async with conn.transaction():
                 await self._repository.upsert_run_step(conn, queued_step)
                 for draft in drafts:
-                    tool = await self._repository.fetch_workspace_tool_by_name(
-                        task.workspace_id,
+                    tool = await self._repository.fetch_agent_internal_tool_by_name(
+                        step.system_agent_id,
                         draft.tool_name,
                     )
                     if tool is None:
+                        tool = await self._repository.fetch_workspace_tool_by_name(
+                            task.workspace_id,
+                            draft.tool_name,
+                        )
+                    if tool is None:
                         raise KeyError(
-                            f"Workspace tool {draft.tool_name!r} not found in workspace {task.workspace_id}"
+                            f"Tool {draft.tool_name!r} not found for system agent {step.system_agent_id} in workspace {task.workspace_id}"
                         )
                     tool_call = ToolCall(
                         tool_call_id=uuid4(),
@@ -3071,6 +3085,24 @@ class CollaborationKernel:
             now=now,
         )
         correlation_id = uuid4()
+        message_metadata = dict(payload.metadata)
+        if payload.target_system_agent_id is not None:
+            message_metadata["target_system_agent_id"] = str(payload.target_system_agent_id)
+        if payload.target_tool_scope is not None:
+            message_metadata["target_tool_scope"] = payload.target_tool_scope
+        tool_generation_request = await self._build_tool_generation_request_for_message(
+            thread=thread,
+            actor_input=payload.actor,
+            participant=participant,
+            content=payload.content,
+            metadata=message_metadata,
+            timestamp=now,
+        )
+        if tool_generation_request is not None:
+            message_metadata["tool_generation_request_id"] = str(
+                tool_generation_request.request_id
+            )
+            message_metadata["tool_generation_request_status"] = tool_generation_request.status
         message = TimelineMessage(
             message_id=uuid4(),
             workspace_id=thread.workspace_id,
@@ -3083,7 +3115,7 @@ class CollaborationKernel:
             sequence=0,
             created_at=now,
             updated_at=now,
-            metadata=payload.metadata,
+            metadata=message_metadata,
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
@@ -3133,6 +3165,30 @@ class CollaborationKernel:
                         payload=message.model_dump(mode="json"),
                     )
                 ]
+                if tool_generation_request is not None:
+                    tool_generation_request = tool_generation_request.model_copy(
+                        update={"requester_message_id": message.message_id}
+                    )
+                    await self._repository.upsert_tool_generation_request(
+                        conn,
+                        tool_generation_request,
+                    )
+                    events.append(
+                        await self._build_thread_event(
+                            conn,
+                            thread.workspace_id,
+                            thread_id,
+                            "tool_generation_request.created",
+                            actor=actor,
+                            target=TargetRef(
+                                type="tool_generation_request",
+                                id=tool_generation_request.request_id,
+                            ),
+                            visibility=payload.visibility,
+                            payload=tool_generation_request.model_dump(mode="json"),
+                            timestamp=now,
+                        )
+                    )
                 if payload.create_task:
                     for task in await self._build_message_tasks(
                         thread=thread,
@@ -3224,6 +3280,290 @@ class CollaborationKernel:
         if detail is None:
             raise KeyError(f"Interaction request {request_id} not found")
         return detail
+
+    async def list_tool_generation_requests(
+        self,
+        *,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        thread_id: UUID | None = None,
+        status: str | None = None,
+    ) -> list[ToolGenerationRequestDetail]:
+        requests = await self._repository.list_tool_generation_requests(
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+            status=status,
+        )
+        details: list[ToolGenerationRequestDetail] = []
+        for request in requests:
+            details.append(await self._tool_generation_request_detail(request.request_id))
+        return details
+
+    async def list_thread_tool_generation_requests(
+        self,
+        thread_id: UUID,
+    ) -> list[ToolGenerationRequestDetail]:
+        thread = await self._repository.fetch_thread(thread_id)
+        if thread is None:
+            raise KeyError(f"Thread {thread_id} not found")
+        return await self.list_tool_generation_requests(thread_id=thread_id)
+
+    async def get_tool_generation_request(
+        self,
+        request_id: UUID,
+    ) -> ToolGenerationRequestDetail:
+        return await self._tool_generation_request_detail(request_id)
+
+    async def create_tool_generation_revision(
+        self,
+        request_id: UUID,
+        payload: CreateToolGenerationRevisionRequest,
+    ) -> ToolGenerationRequestCommandResult:
+        request = await self._repository.fetch_tool_generation_request(request_id)
+        if request is None:
+            raise KeyError(f"Tool generation request {request_id} not found")
+        if request.final_tool_id is not None or request.status == "published":
+            raise ValueError("Tool generation requests that already published a tool cannot be revised")
+        now = self._now()
+        manifest = self._normalize_generated_tool_manifest(payload.manifest)
+        revision = ToolGenerationRevision(
+            revision_id=uuid4(),
+            request_id=request_id,
+            revision_number=1,
+            status=payload.status,
+            manifest=manifest,
+            validation_report=payload.validation_report,
+            source_asset_id=payload.source_asset_id,
+            source_asset_version_id=payload.source_asset_version_id,
+            manifest_asset_id=payload.manifest_asset_id,
+            manifest_asset_version_id=payload.manifest_asset_version_id,
+            report_asset_id=payload.report_asset_id,
+            report_asset_version_id=payload.report_asset_version_id,
+            image_ref=payload.image_ref,
+            image_digest=payload.image_digest,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        updated_request = request.model_copy(
+            update={
+                "status": payload.status,
+                "target_tool_name": manifest.name,
+                "summary": manifest.description,
+                "latest_revision_id": revision.revision_id,
+                "rejected_by": None,
+                "rejected_at": None,
+                "updated_at": now,
+            }
+        )
+        status_message: TimelineMessage | None = None
+        events: list[EventEnvelope] = []
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                revision_number = await self._repository.next_tool_generation_revision_number(
+                    conn,
+                    request_id,
+                )
+                revision = revision.model_copy(update={"revision_number": revision_number})
+                await self._repository.upsert_tool_generation_revision(conn, revision)
+                await self._repository.upsert_tool_generation_request(conn, updated_request)
+                events.append(
+                    await self._build_thread_event(
+                        conn,
+                        request.workspace_id,
+                        request.thread_id,
+                        "tool_generation_revision.created",
+                        actor=self._actor_from_input(payload.actor),
+                        target=TargetRef(
+                            type="tool_generation_revision",
+                            id=revision.revision_id,
+                        ),
+                        visibility="workspace",
+                        payload=revision.model_dump(mode="json"),
+                        timestamp=now,
+                    )
+                )
+                if payload.status == "pending_approval":
+                    status_message, message_event = await self._create_tool_generation_status_message(
+                        conn,
+                        request=updated_request,
+                        revision=revision,
+                        status="pending_approval",
+                        content=self._tool_generation_pending_approval_message(
+                            updated_request,
+                            revision,
+                        ),
+                        timestamp=now,
+                    )
+                    if message_event is not None:
+                        events.append(message_event)
+        if status_message is not None:
+            await self._persist_workspace_communication_messages([status_message])
+        detail = await self._tool_generation_request_detail(request_id)
+        return ToolGenerationRequestCommandResult(
+            detail=detail,
+            revision=revision,
+            message=status_message,
+            events=events,
+        )
+
+    async def approve_tool_generation_revision(
+        self,
+        revision_id: UUID,
+        payload: ReviewToolGenerationRevisionRequest,
+    ) -> ToolGenerationRequestCommandResult:
+        revision = await self._repository.fetch_tool_generation_revision(revision_id)
+        if revision is None:
+            raise KeyError(f"Tool generation revision {revision_id} not found")
+        request = await self._repository.fetch_tool_generation_request(revision.request_id)
+        if request is None:
+            raise KeyError(
+                f"Tool generation request {revision.request_id} not found for revision {revision_id}"
+            )
+        if request.final_tool_id is not None or request.status == "published":
+            raise ValueError("This tool-generation request has already been published")
+        if revision.status != "pending_approval":
+            raise ValueError("Only revisions pending approval can be approved")
+        now = self._now()
+        manifest = self._normalize_generated_tool_manifest(revision.manifest)
+        execution = manifest.execution.model_copy(
+            update={"handler_ref": manifest.execution.handler_ref or manifest.name}
+        )
+        tool_scope = request.requested_scope
+        tool = SystemToolDefinition(
+            tool_id=uuid4(),
+            scope=tool_scope,
+            organization_id=(request.organization_id if tool_scope == "organization" else None),
+            name=manifest.name,
+            description=manifest.description,
+            parameter_contract=manifest.parameter_contract,
+            input_schema=manifest.input_schema,
+            execution=execution,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata={
+                **manifest.metadata,
+                "generated": True,
+                "tool_generation_request_id": str(request.request_id),
+                "tool_generation_revision_id": str(revision.revision_id),
+                "tool_generation_requested_scope": tool_scope,
+                **(
+                    {"image_ref": revision.image_ref}
+                    if revision.image_ref is not None
+                    else {}
+                ),
+                **(
+                    {"image_digest": revision.image_digest}
+                    if revision.image_digest is not None
+                    else {}
+                ),
+            },
+        )
+        approved_revision = revision.model_copy(update={"status": "approved", "updated_at": now})
+        published_request = request.model_copy(
+            update={
+                "status": "published",
+                "target_tool_name": manifest.name,
+                "summary": manifest.description,
+                "final_tool_id": tool.tool_id,
+                "latest_revision_id": revision.revision_id,
+                "approved_by": payload.actor.participant_id,
+                "approved_at": now,
+                "published_at": now,
+                "rejected_by": None,
+                "rejected_at": None,
+                "updated_at": now,
+            }
+        )
+        status_message: TimelineMessage | None = None
+        events: list[EventEnvelope] = []
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_system_tool(conn, tool)
+                await self._repository.upsert_tool_generation_revision(conn, approved_revision)
+                await self._repository.upsert_tool_generation_request(conn, published_request)
+                await self._link_generated_tool_assets(
+                    conn,
+                    request=published_request,
+                    revision=approved_revision,
+                    tool=tool,
+                    actor_id=payload.actor.participant_id,
+                    timestamp=now,
+                )
+                status_message, message_event = await self._create_tool_generation_status_message(
+                    conn,
+                    request=published_request,
+                    revision=approved_revision,
+                    status="published",
+                    content=self._tool_generation_published_message(tool, approved_revision),
+                    timestamp=now,
+                )
+                if message_event is not None:
+                    events.append(message_event)
+        if status_message is not None:
+            await self._persist_workspace_communication_messages([status_message])
+        detail = await self._tool_generation_request_detail(request.request_id)
+        return ToolGenerationRequestCommandResult(
+            detail=detail,
+            revision=approved_revision,
+            message=status_message,
+            events=events,
+        )
+
+    async def reject_tool_generation_revision(
+        self,
+        revision_id: UUID,
+        payload: ReviewToolGenerationRevisionRequest,
+    ) -> ToolGenerationRequestCommandResult:
+        revision = await self._repository.fetch_tool_generation_revision(revision_id)
+        if revision is None:
+            raise KeyError(f"Tool generation revision {revision_id} not found")
+        request = await self._repository.fetch_tool_generation_request(revision.request_id)
+        if request is None:
+            raise KeyError(
+                f"Tool generation request {revision.request_id} not found for revision {revision_id}"
+            )
+        if request.status == "published":
+            raise ValueError("Published tool-generation requests cannot be rejected")
+        now = self._now()
+        rejected_revision = revision.model_copy(update={"status": "rejected", "updated_at": now})
+        rejected_request = request.model_copy(
+            update={
+                "status": "rejected",
+                "rejected_by": payload.actor.participant_id,
+                "rejected_at": now,
+                "updated_at": now,
+            }
+        )
+        status_message: TimelineMessage | None = None
+        events: list[EventEnvelope] = []
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_tool_generation_revision(conn, rejected_revision)
+                await self._repository.upsert_tool_generation_request(conn, rejected_request)
+                status_message, message_event = await self._create_tool_generation_status_message(
+                    conn,
+                    request=rejected_request,
+                    revision=rejected_revision,
+                    status="rejected",
+                    content=self._tool_generation_rejected_message(payload.reason),
+                    timestamp=now,
+                )
+                if message_event is not None:
+                    events.append(message_event)
+        if status_message is not None:
+            await self._persist_workspace_communication_messages([status_message])
+        detail = await self._tool_generation_request_detail(request.request_id)
+        return ToolGenerationRequestCommandResult(
+            detail=detail,
+            revision=rejected_revision,
+            message=status_message,
+            events=events,
+        )
 
     async def create_interaction_requests(
         self,
@@ -4280,6 +4620,10 @@ class CollaborationKernel:
         ]
         target_system_agent_id = self._metadata_uuid(message.metadata, "target_system_agent_id")
         target_participant_id = self._metadata_uuid(message.metadata, "target_participant_id")
+        tool_generation_request_id = self._metadata_uuid(
+            message.metadata,
+            "tool_generation_request_id",
+        )
         if target_system_agent_id is not None:
             active_agents = [
                 participant
@@ -4311,6 +4655,16 @@ class CollaborationKernel:
                         "sequence_ceiling": message.sequence,
                         "response_visibility": self._response_visibility(visibility),
                         "routing_reason": "no_attached_agents",
+                        **(
+                            {
+                                "tool_generation_request_id": str(tool_generation_request_id),
+                                "tool_generation_request_status": message.metadata.get(
+                                    "tool_generation_request_status",
+                                ),
+                            }
+                            if tool_generation_request_id is not None
+                            else {}
+                        ),
                     },
                 )
             )
@@ -4336,10 +4690,286 @@ class CollaborationKernel:
                         "sequence_ceiling": message.sequence,
                         "response_visibility": self._response_visibility(visibility),
                         "routing_reason": "workspace_attached_agent",
+                        **(
+                            {
+                                "tool_generation_request_id": str(tool_generation_request_id),
+                                "tool_generation_request_status": message.metadata.get(
+                                    "tool_generation_request_status",
+                                ),
+                            }
+                            if tool_generation_request_id is not None
+                            else {}
+                        ),
                     },
                 )
             )
         return tasks
+
+    async def _build_tool_generation_request_for_message(
+        self,
+        *,
+        thread: Thread,
+        actor_input: ParticipantInput,
+        participant: ParticipantProfile,
+        content: str,
+        metadata: dict[str, object],
+        timestamp: datetime,
+    ) -> ToolGenerationRequest | None:
+        if actor_input.participant_type != "user":
+            return None
+        if metadata.get("tool_generation_request_id") is not None:
+            return None
+        target_system_agent_id = self._metadata_uuid(metadata, "target_system_agent_id")
+        if target_system_agent_id is None:
+            return None
+        target_agent = await self._repository.fetch_system_agent(target_system_agent_id)
+        if target_agent is None or not self._is_tool_generation_agent(target_agent):
+            return None
+        target_participant = await self._repository.fetch_agent_participant(
+            thread.workspace_id,
+            target_system_agent_id,
+        )
+        if target_participant is None or target_participant.status not in {"active", "idle", "busy"}:
+            return None
+        workspace = await self._repository.fetch_workspace(thread.workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {thread.workspace_id} not found")
+        summary = content.strip()[:500] or None
+        return ToolGenerationRequest(
+            request_id=uuid4(),
+            organization_id=workspace.organization_id,
+            workspace_id=thread.workspace_id,
+            thread_id=thread.thread_id,
+            requester_participant_id=participant.participant_id,
+            requester_message_id=None,
+            target_system_agent_id=target_system_agent_id,
+            requested_scope=self._tool_generation_requested_scope(metadata),
+            status="submitted",
+            target_tool_name=self._tool_generation_target_name(metadata, content),
+            summary=summary,
+            created_at=timestamp,
+            updated_at=timestamp,
+            metadata={
+                "source": "targeted_message",
+                "target_system_agent_id": str(target_system_agent_id),
+                **dict(metadata),
+            },
+        )
+
+    async def _tool_generation_request_detail(
+        self,
+        request_id: UUID,
+    ) -> ToolGenerationRequestDetail:
+        request = await self._repository.fetch_tool_generation_request(request_id)
+        if request is None:
+            raise KeyError(f"Tool generation request {request_id} not found")
+        revisions = await self._repository.list_tool_generation_revisions(request_id)
+        return ToolGenerationRequestDetail(request=request, revisions=revisions)
+
+    @staticmethod
+    def _is_tool_generation_agent(agent: AgentDefinition) -> bool:
+        return bool(agent.metadata.get("tool_generation_agent")) or bool(
+            agent.definition.get("tool_generation_agent")
+        )
+
+    @staticmethod
+    def _tool_generation_target_name(
+        metadata: dict[str, object],
+        content: str,
+    ) -> str | None:
+        explicit = metadata.get("target_tool_name")
+        if isinstance(explicit, str) and explicit.strip():
+            return explicit.strip()
+        stripped = content.strip()
+        if not stripped:
+            return None
+        lowered = stripped.lower()
+        marker = "tool "
+        if marker in lowered:
+            index = lowered.find(marker) + len(marker)
+            candidate = stripped[index:].strip(" :.-")
+            return candidate[:200] or None
+        return None
+
+    @staticmethod
+    def _tool_generation_requested_scope(
+        metadata: dict[str, object],
+    ) -> str:
+        value = metadata.get("target_tool_scope")
+        if isinstance(value, str) and value in {"global", "organization"}:
+            return value
+        return "global"
+
+    def _normalize_generated_tool_manifest(
+        self,
+        manifest: GeneratedToolManifest,
+    ) -> GeneratedToolManifest:
+        execution_profile = dict(manifest.execution.execution_profile)
+        execution_profile["network"] = manifest.network_access
+        execution_profile["workspace_access"] = manifest.workspace_access
+        execution = manifest.execution.model_copy(update={"execution_profile": execution_profile})
+        self._validate_tool_execution_binding(execution)
+        return manifest.model_copy(update={"execution": execution})
+
+    async def _link_generated_tool_assets(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        request: ToolGenerationRequest,
+        revision: ToolGenerationRevision,
+        tool: SystemToolDefinition,
+        actor_id: UUID,
+        timestamp: datetime,
+    ) -> None:
+        for purpose, asset_id, asset_version_id in (
+            ("generated_source", revision.source_asset_id, revision.source_asset_version_id),
+            ("generated_manifest", revision.manifest_asset_id, revision.manifest_asset_version_id),
+            ("generated_report", revision.report_asset_id, revision.report_asset_version_id),
+        ):
+            if asset_id is None or asset_version_id is None:
+                continue
+            await self._repository.deactivate_asset_links(
+                conn,
+                target_type="system_tool",
+                target_id=tool.tool_id,
+                purpose=purpose,
+                organization_id=None,
+                workspace_id=None,
+            )
+            await self._repository.upsert_asset_link(
+                conn,
+                AssetLink(
+                    link_id=uuid4(),
+                    asset_id=asset_id,
+                    asset_version_id=asset_version_id,
+                    organization_id=None,
+                    workspace_id=None,
+                    target_type="system_tool",
+                    target_id=tool.tool_id,
+                    purpose=purpose,
+                    active=True,
+                    created_by=actor_id,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                    metadata={
+                        "tool_generation_request_id": str(request.request_id),
+                        "tool_generation_revision_id": str(revision.revision_id),
+                    },
+                ),
+            )
+
+    async def _create_tool_generation_status_message(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        request: ToolGenerationRequest,
+        revision: ToolGenerationRevision | None,
+        status: str,
+        content: str,
+        timestamp: datetime,
+    ) -> tuple[TimelineMessage | None, EventEnvelope | None]:
+        participant = await self._repository.fetch_agent_participant(
+            request.workspace_id,
+            request.target_system_agent_id,
+        )
+        if participant is None:
+            return None, None
+        membership = await self._repository.fetch_active_membership(
+            conn,
+            thread_id=request.thread_id,
+            participant_id=participant.participant_id,
+        )
+        if membership is None:
+            await self._repository.upsert_membership(
+                conn,
+                Membership(
+                    membership_id=uuid4(),
+                    workspace_id=request.workspace_id,
+                    thread_id=request.thread_id,
+                    participant_id=participant.participant_id,
+                    role="participant",
+                    permissions=["post_messages"],
+                    joined_at=timestamp,
+                ),
+            )
+        message = TimelineMessage(
+            message_id=uuid4(),
+            workspace_id=request.workspace_id,
+            thread_id=request.thread_id,
+            actor=ActorRef(type="agent", id=participant.participant_id),
+            visibility="workspace",
+            content=content,
+            status="completed",
+            correlation_id=uuid4(),
+            sequence=await self._repository.next_thread_sequence(conn, request.thread_id),
+            created_at=timestamp,
+            updated_at=timestamp,
+            metadata={
+                "tool_generation_request_id": str(request.request_id),
+                "tool_generation_status": status,
+                "tool_generation_request_status": request.status,
+                **(
+                    {"tool_generation_revision_id": str(revision.revision_id)}
+                    if revision is not None
+                    else {}
+                ),
+            },
+        )
+        await self._repository.upsert_message(conn, message)
+        event = await self._build_thread_event(
+            conn,
+            request.workspace_id,
+            request.thread_id,
+            "message.created",
+            actor=message.actor,
+            target=TargetRef(type="message", id=message.message_id),
+            visibility=message.visibility,
+            payload=message.model_dump(mode="json"),
+            timestamp=timestamp,
+        )
+        return message, event
+
+    @staticmethod
+    def _tool_generation_pending_approval_message(
+        request: ToolGenerationRequest,
+        revision: ToolGenerationRevision,
+    ) -> str:
+        lines = [
+            f"Tinker prepared tool revision `{revision.manifest.name}` for platform approval.",
+            f"Requested catalog scope: `{request.requested_scope}`.",
+            f"Status: pending approval. Trust: `{revision.manifest.execution.trust_level}`. Network: `{revision.manifest.network_access}`. Workspace access: `{revision.manifest.workspace_access}`.",
+        ]
+        if revision.image_ref:
+            lines.append(f"Image: `{revision.image_ref}`")
+        if revision.image_digest:
+            lines.append(f"Digest: `{revision.image_digest}`")
+        if revision.validation_report and revision.validation_report.summary:
+            lines.append(f"Validation: {revision.validation_report.summary}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _tool_generation_published_message(
+        tool: SystemToolDefinition,
+        revision: ToolGenerationRevision,
+    ) -> str:
+        catalog_label = (
+            "the organization system tools catalog"
+            if tool.scope == "organization"
+            else "the global system tools catalog"
+        )
+        lines = [
+            f"Tool `{tool.name}` was approved and added to {catalog_label}.",
+            "It is not attached to any workspace automatically. Workspace admins or supervisors can attach it when needed.",
+        ]
+        if revision.image_digest:
+            lines.append(f"Published image digest: `{revision.image_digest}`")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _tool_generation_rejected_message(reason: str | None) -> str:
+        if reason and reason.strip():
+            return f"Tool-generation revision was rejected for this request.\nReason: {reason.strip()}"
+        return "Tool-generation revision was rejected for this request."
 
     @staticmethod
     def _metadata_uuid(metadata: dict[str, object], key: str) -> UUID | None:
@@ -5225,7 +5855,7 @@ class CollaborationKernel:
     def _build_tool_execution_spec(
         self,
         *,
-        tool: WorkspaceTool,
+        tool: WorkspaceTool | AgentInternalToolBinding,
         draft: AgentToolCallDraft,
         workspace_id: UUID,
     ) -> ExecutionSpec:

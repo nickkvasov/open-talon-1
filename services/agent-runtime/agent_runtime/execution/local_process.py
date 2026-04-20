@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import logging
 import os
 from pathlib import Path
+import sys
 
 from open_talon_contracts.models import ExecutionHandle, ExecutionResult, ExecutionSpec
 
@@ -32,7 +33,9 @@ class LocalProcessExecutionBackend:
         invocation_dir, input_dir, output_dir = prepare_invocation_files(spec, self._execution_root)
         stdout_path = output_dir / "stdout.txt"
         stderr_path = output_dir / "stderr.txt"
-        command = list(spec.profile.get("command", [])) or [spec.handler_ref]
+        command = self._normalize_command(
+            list(spec.profile.get("command", [])) or [spec.handler_ref]
+        )
         env = {
             "OPEN_TALON_REQUEST_PATH": str(input_dir / "request.json"),
             "OPEN_TALON_OUTPUT_DIR": str(output_dir),
@@ -93,6 +96,14 @@ class LocalProcessExecutionBackend:
         result = collect_execution_result(record.output_dir, fallback_status=status)
         self._processes.pop(handle.handle, None)
         return result.model_copy(update={"started_at": record.started_at, "finished_at": utcnow()})
+
+    @staticmethod
+    def _normalize_command(command: list[str]) -> list[str]:
+        if not command:
+            return command
+        if command[0] in {"python", "python3"}:
+            command = [sys.executable, *command[1:]]
+        return command
 
     def _require_record(self, handle: ExecutionHandle) -> _ProcessRecord:
         try:

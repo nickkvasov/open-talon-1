@@ -256,6 +256,15 @@ def test_tui2_set_connection_status_updates_header_state(tmp_path, monkeypatch):
     assert calls == ["render"]
 
 
+def test_tui2_parse_tool_request_scope_supports_organization_flag():
+    scope, text = tui2.ScrollbackTUI2._parse_tool_request_scope(
+        "--scope organization Build Fibonacci tool"
+    )
+
+    assert scope == "organization"
+    assert text == "Build Fibonacci tool"
+
+
 def test_tui2_history_navigation_tracks_saved_buffer(tmp_path, monkeypatch):
     monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
 

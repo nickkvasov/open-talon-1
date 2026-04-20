@@ -12,6 +12,7 @@ import SwarmResources from './pages/SwarmResources';
 import Workspaces from './pages/Workspaces';
 import Providers from './pages/Providers';
 import ApiKeys from './pages/ApiKeys';
+import ToolGenerationRequests from './pages/ToolGenerationRequests';
 
 const App = () => {
   const auth = useAuth();
@@ -54,6 +55,7 @@ const App = () => {
             <Route path="/swarm" element={<SwarmResources />} />
             <Route path="/workspaces" element={<Workspaces />} />
             <Route path="/providers" element={<Providers />} />
+            <Route path="/tool-generation" element={<ToolGenerationRequests />} />
             <Route path="/api-keys" element={<ApiKeys />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>

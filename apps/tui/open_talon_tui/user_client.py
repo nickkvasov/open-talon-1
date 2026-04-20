@@ -335,6 +335,11 @@ class UserClient:
                 prefix = f"{prefix} [request {request_status or 'open'}{coverage}]"
             elif metadata.get("interaction_question_ids"):
                 prefix = f"{prefix} [answer]"
+            elif metadata.get("tool_generation_request_id"):
+                prefix = (
+                    f"{prefix} [tool request "
+                    f"{metadata.get('tool_generation_status') or metadata.get('tool_generation_request_status') or 'submitted'}]"
+                )
         return f"{_format_timestamp(message.get('created_at') or message.get('updated_at'))} {prefix}: {message.get('content', '')}"
 
     def _resolve_workspace_target(
@@ -534,6 +539,94 @@ class UserClient:
         self._update_state_from_message(body)
         return body
 
+    async def _resolve_tinker_agent_id(self) -> str:
+        if not self.state.workspace_id:
+            raise RuntimeError("select a workspace first with `workspace use` or `workspace create`")
+        agents = await self._request(
+            "GET",
+            f"/v1/workspaces/{self.state.workspace_id}/catalog/agents",
+        )
+        participants = await self._request(
+            "GET",
+            f"/v1/workspaces/{self.state.workspace_id}/participants",
+        )
+        if not isinstance(agents, list) or not isinstance(participants, list):
+            raise RuntimeError("unable to load workspace agent catalog")
+        agent = next(
+            (
+                item
+                for item in agents
+                if isinstance(item, dict)
+                and (
+                    item.get("metadata", {}).get("tool_generation_agent")
+                    or str(item.get("display_name", "")).strip().lower() == "tinker"
+                )
+            ),
+            None,
+        )
+        if agent is None:
+            raise RuntimeError("Tinker is not visible in this workspace catalog")
+        agent_id = str(agent.get("agent_id") or "")
+        attached = any(
+            isinstance(item, dict)
+            and item.get("participant_type") == "agent"
+            and item.get("system_agent_id") == agent_id
+            and item.get("status") in {"active", "idle", "busy"}
+            for item in participants
+        )
+        if not attached:
+            raise RuntimeError("attach Tinker to this workspace before requesting a tool")
+        return agent_id
+
+    async def _post_targeted_message(
+        self,
+        *,
+        content: str,
+        target_system_agent_id: str,
+        target_tool_scope: str | None = None,
+    ) -> dict[str, Any]:
+        if not self.state.thread_id:
+            raise RuntimeError("select a thread first with `thread use` or `thread create`")
+        body = await self._request(
+            "POST",
+            f"/v1/threads/{self.state.thread_id}/messages",
+            json_body={
+                "actor": self.actor_payload,
+                "content": content,
+                "visibility": "workspace",
+                "target_system_agent_id": target_system_agent_id,
+                **(
+                    {"target_tool_scope": target_tool_scope}
+                    if target_tool_scope is not None
+                    else {}
+                ),
+                "create_task": True,
+                "requests": _build_interaction_requests_from_text(content),
+            },
+        )
+        assert isinstance(body, dict)
+        self._update_state_from_message(body)
+        return body
+
+    @staticmethod
+    def _parse_tool_request_scope(raw: str) -> tuple[str | None, str]:
+        stripped = raw.strip()
+        if not stripped.startswith("--scope "):
+            return None, stripped
+        parts = stripped.split(maxsplit=2)
+        if len(parts) < 3 or parts[1] not in {"global", "organization"}:
+            raise ValueError("tool request scope must be `global` or `organization`")
+        return parts[1], parts[2].strip()
+
+    async def _request_tool_generation(self, content: str) -> dict[str, Any]:
+        agent_id = await self._resolve_tinker_agent_id()
+        target_tool_scope, request_content = self._parse_tool_request_scope(content)
+        return await self._post_targeted_message(
+            content=request_content,
+            target_system_agent_id=agent_id,
+            target_tool_scope=target_tool_scope,
+        )
+
     async def _answer_interaction_request(self, request_id: str, content: str) -> dict[str, Any]:
         body = await self._request(
             "POST",
@@ -585,6 +678,7 @@ class UserClient:
             "workspace",
             "thread",
             "role",
+            "tool",
             "send",
             "timeline",
             "request",
@@ -608,6 +702,7 @@ class UserClient:
                     "workspace list [all]|show|create <name>|use <id|name>|clear",
                     "thread list|show|create <title>|use <id|title>|clear",
                     "role list|use <role> [:: <description> :: <cap1,cap2>]",
+                    "tool request [--scope global|organization] <text>",
                     "send <text>",
                     "timeline [limit]",
                     "request list [open|all]",
@@ -830,6 +925,20 @@ class UserClient:
                     return
                 raise KeyError(f"workspace not found: {target}")
             raise ValueError("supported workspace commands: list, show, create, use, clear")
+
+        if normalized.startswith("tool "):
+            parts = normalized.split(maxsplit=2)
+            if len(parts) < 3 or parts[1].lower() != "request":
+                raise ValueError(
+                    "supported tool commands: request [--scope global|organization] <text>"
+                )
+            message = await self._request_tool_generation(parts[2].strip())
+            self._emit(
+                command="tool.request",
+                message=self._render_message(message),
+                data=message,
+            )
+            return
 
         if normalized.startswith("thread "):
             remainder = normalized.split(maxsplit=1)[1].strip()

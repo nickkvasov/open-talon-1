@@ -71,6 +71,49 @@ def test_local_process_backend_executes_file_protocol(tmp_path):
     assert result.output_payload == {"echo": {"query": "claim_task_for_system_agent"}}
 
 
+def test_local_process_backend_normalizes_python_command_to_current_interpreter(tmp_path, monkeypatch):
+    backend = LocalProcessExecutionBackend(execution_root=str(tmp_path / "exec"))
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 12345
+        returncode = 0
+
+        async def wait(self):
+            return 0
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["args"] = list(args)
+        captured["cwd"] = kwargs.get("cwd")
+        captured["env"] = kwargs.get("env")
+        stdout = kwargs["stdout"]
+        stderr = kwargs["stderr"]
+        stdout.close()
+        stderr.close()
+        output_dir = Path(captured["env"]["OPEN_TALON_OUTPUT_DIR"])
+        (output_dir / "result.json").write_text(
+            '{"status":"completed","output_payload":{"ok":true}}',
+            encoding="utf-8",
+        )
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    spec = ExecutionSpec(
+        invocation_id=uuid4(),
+        handler_ref="ignored",
+        inline_payload={"ok": True},
+        profile={"command": ["python", "-m", "agent_runtime.tinker_tools", "bootstrap-worktree"]},
+    )
+
+    handle = asyncio.run(backend.submit(spec))
+    result = asyncio.run(backend.collect(handle))
+
+    assert result.status == "completed"
+    assert captured["args"][0] == sys.executable
+    assert captured["args"][1:] == ["-m", "agent_runtime.tinker_tools", "bootstrap-worktree"]
+
+
 def test_docker_backend_submit_uses_isolation_flags(monkeypatch, tmp_path):
     captured: list[list[str]] = []
 

@@ -141,6 +141,10 @@ def _settings() -> RuntimeWorkerSettings:
         enable_kafka_wakeups=False,
         execution_root="/tmp/open-talon-executions",
         default_workspace_path=None,
+        forgejo_registry_url="127.0.0.1:3001",
+        forgejo_registry_username="forgejo",
+        forgejo_registry_password_secret_config={"env": "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD"},
+        forgejo_registry_validate_on_startup=False,
     )
 
 
@@ -193,6 +197,30 @@ def _tool_call_with_workspace_ref() -> ToolCall:
     )
 
 
+def _generated_fibonacci_tool_call() -> ToolCall:
+    spec = ExecutionSpec(
+        invocation_id=uuid4(),
+        handler_ref="registry.example/fibonacci-calculator:latest",
+        inline_payload={"n": 10},
+        limits={"timeout_seconds": 30},
+        metadata={"backend_kind": "docker"},
+    )
+    return ToolCall(
+        tool_call_id=uuid4(),
+        run_id=uuid4(),
+        run_step_id=uuid4(),
+        task_id=uuid4(),
+        workspace_id=uuid4(),
+        thread_id=uuid4(),
+        system_agent_id=uuid4(),
+        tool_id=uuid4(),
+        tool_name="fibonacci_calculator",
+        status="claimed",
+        execution_spec=spec.model_dump(mode="json"),
+        claimed_by_worker="tool-worker",
+    )
+
+
 def test_route_event_topic_sends_requeue_wakeups_to_agent_tasks_topic():
     settings = _settings()
     tool_event = EventEnvelope(
@@ -232,6 +260,46 @@ def test_tool_worker_persists_execution_handle_before_completion():
     assert kernel.updated_handle == "handle-1"
     assert kernel.completed is not None
     assert kernel.completed.output_payload == {"ok": True}
+    assert kernel.failed is None
+
+
+def test_tool_worker_executes_generated_fibonacci_tool_call_with_docker_backend():
+    class _FakeDockerBackend(_FakeBackend):
+        kind = "docker"
+
+        async def submit(self, spec: ExecutionSpec) -> ExecutionHandle:
+            self.submit_calls += 1
+            self.submitted_specs.append(spec)
+            return ExecutionHandle(
+                backend_kind="docker",
+                invocation_id=spec.invocation_id,
+                handle="docker-handle-1",
+            )
+
+        async def poll(self, handle: ExecutionHandle) -> ExecutionResult:
+            self.poll_calls += 1
+            return ExecutionResult(status="completed", output_payload={"n": 10, "value": 55})
+
+        async def collect(self, handle: ExecutionHandle) -> ExecutionResult:
+            return ExecutionResult(status="completed", output_payload={"n": 10, "value": 55})
+
+    backend = _FakeDockerBackend()
+    kernel = _FakeKernel()
+    worker = ToolWorker(
+        kernel=kernel,
+        publisher=_FakePublisher(),
+        settings=_settings(),
+        backend_registry=ExecutionBackendRegistry([backend]),
+    )
+
+    asyncio.run(worker._process_tool_call(_generated_fibonacci_tool_call()))
+
+    assert backend.submit_calls == 1
+    assert backend.submitted_specs[0].handler_ref == "registry.example/fibonacci-calculator:latest"
+    assert backend.submitted_specs[0].metadata["backend_kind"] == "docker"
+    assert kernel.updated_handle == "docker-handle-1"
+    assert kernel.completed is not None
+    assert kernel.completed.output_payload == {"n": 10, "value": 55}
     assert kernel.failed is None
 
 

@@ -68,6 +68,7 @@ from open_talon_contracts.models import (
     InteractionRequestDetail,
     InteractionRequestTarget,
     EventEnvelope,
+    GeneratedToolManifest,
     MemoryEntry,
     LlmProviderDefinition,
     ParticipantProfile,
@@ -77,6 +78,10 @@ from open_talon_contracts.models import (
     Task,
     Thread,
     TimelineMessage,
+    ToolExecutionBinding,
+    ToolGenerationRequest,
+    ToolGenerationRequestDetail,
+    ToolGenerationRevision,
     Workspace,
     WorkspaceHarness,
     WorkspaceMethodic,
@@ -1090,6 +1095,54 @@ def test_render_prompt_includes_interaction_request_summary():
 
     assert "Interaction requests:" in prompt
     assert "- Need coordinated feedback | status: open | questions: 1 | targets: 1 | answers: 1" in prompt
+
+
+def test_render_prompt_includes_tool_generation_requested_scope():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    now = _now()
+    request_id = uuid4()
+    kernel.context.tool_generation_request = ToolGenerationRequestDetail(
+        request=ToolGenerationRequest(
+            request_id=request_id,
+            organization_id=uuid4(),
+            workspace_id=kernel.context.workspace.workspace_id,
+            thread_id=kernel.context.thread.thread_id,
+            requester_participant_id=kernel.context.participants[0].participant_id,
+            target_system_agent_id=kernel.system_agent.agent_id,
+            requested_scope="organization",
+            status="pending_approval",
+            target_tool_name="fibonacci_calculator",
+            summary="Create an organization-scoped Fibonacci tool.",
+            created_at=now,
+            updated_at=now,
+        ),
+        revisions=[
+            ToolGenerationRevision(
+                revision_id=uuid4(),
+                request_id=request_id,
+                revision_number=1,
+                status="pending_approval",
+                manifest=GeneratedToolManifest(
+                    name="fibonacci_calculator",
+                    description="Calculates Fibonacci numbers.",
+                    build_context_path="/tmp/generated-tools/fibonacci_calculator",
+                    execution=ToolExecutionBinding(
+                        backend_kind="docker",
+                        handler_ref="registry.example/fibonacci-calculator:latest",
+                    ),
+                ),
+                created_by=kernel.context.participant.participant_id,
+                created_at=now,
+                updated_at=now,
+            )
+        ],
+    )
+
+    prompt = render_prompt(kernel.context)
+
+    assert "Tool generation request:" in prompt
+    assert "requested_scope: organization" in prompt
+    assert "target_tool_name: fibonacci_calculator" in prompt
 
 
 def kernel_safe_processing_tasks(runtime: AgentTaskRuntime) -> list[asyncio.Task[None]]:

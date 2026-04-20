@@ -20,6 +20,7 @@ from .contracts import (
     TargetRef,
     Task,
     TimelineMessage,
+    ToolGenerationRequestDetail,
     Workspace,
     WorkspaceTool,
 )
@@ -249,6 +250,7 @@ class RuntimeExecutionService:
             )
         run = await self._resolve_run_for_context(task, participant, run_id)
         workspace_tools = await self._repository.list_workspace_tools(task.workspace_id)
+        internal_tools = await self._repository.list_agent_internal_tools(system_agent_id)
         participants = [
             self._advertise_workspace_tools(item, workspace_tools)
             for item in await self._repository.list_participants(task.workspace_id)
@@ -306,6 +308,20 @@ class RuntimeExecutionService:
             detail = await self._repository.get_interaction_request_detail(UUID(request_id))
             if detail is not None:
                 interaction_requests.append(detail)
+        tool_generation_request = None
+        tool_generation_request_id = task.metadata.get("tool_generation_request_id")
+        if isinstance(tool_generation_request_id, str):
+            request = await self._repository.fetch_tool_generation_request(
+                UUID(tool_generation_request_id)
+            )
+            if request is not None:
+                revisions = await self._repository.list_tool_generation_revisions(
+                    request.request_id
+                )
+                tool_generation_request = ToolGenerationRequestDetail(
+                    request=request,
+                    revisions=revisions,
+                )
         return AgentExecutionContext(
             workspace=workspace,
             workspace_harness=workspace.harness,
@@ -319,8 +335,10 @@ class RuntimeExecutionService:
             participants=participants,
             role_definitions=self._role_definitions_from_workspace(workspace),
             workspace_tools=workspace_tools,
+            internal_tools=internal_tools,
             messages=visible_messages,
             interaction_requests=interaction_requests,
+            tool_generation_request=tool_generation_request,
             run_memory=visible_run_memory,
             thread_memory=visible_thread_memory,
             workspace_memory=visible_workspace_memory,

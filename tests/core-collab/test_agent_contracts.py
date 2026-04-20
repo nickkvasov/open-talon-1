@@ -36,6 +36,7 @@ from open_talon_contracts.models import (  # noqa: E402
     AgentDefinition,
     AgentEndpoint,
     AgentHarness,
+    AgentInternalToolBinding,
     AgentMemoryPolicy,
     AgentRunResult,
     AgentToolUsePolicy,
@@ -55,7 +56,10 @@ from open_talon_contracts.models import (  # noqa: E402
     CreateInteractionRequest,
     CreateInteractionRequestsRequest,
     CreateMessageRequest,
+    CreateToolGenerationRevisionRequest,
     DeleteLlmProviderRequest,
+    GeneratedToolManifest,
+    GeneratedToolValidationReport,
     InteractionAnswer,
     InteractionQuestion,
     InteractionQuestionDraft,
@@ -75,6 +79,8 @@ from open_talon_contracts.models import (  # noqa: E402
     ToolCallResult,
     SystemToolDefinition,
     ToolExecutionBinding,
+    ToolGenerationRequest,
+    ToolGenerationRevision,
     CreateSystemAgentRequest,
     HarnessExecutionRule,
     ParticipantInput,
@@ -84,6 +90,7 @@ from open_talon_contracts.models import (  # noqa: E402
     UpdateSystemAgentRequest,
     UpdateInteractionRequestRequest,
     UpdateLlmProviderRequest,
+    ReviewToolGenerationRevisionRequest,
     UpdateWorkspaceRequest,
     UpsertRoleDefinitionRequest,
     Workspace,
@@ -108,21 +115,47 @@ class _FakeTransaction:
 
 
 class _FakeConnection:
+    def __init__(self, repository):
+        self._repository = repository
+
     def transaction(self):
         return _FakeTransaction()
 
+    async def fetchval(self, query, *args):
+        normalized = " ".join(query.split())
+        if "FROM tool_calls" in normalized and "COUNT(*)" in normalized:
+            run_step_id = args[0]
+            return sum(
+                1
+                for tool_calls in self._repository._tool_calls.values()
+                for tool_call in tool_calls
+                if tool_call.run_step_id == run_step_id
+                and tool_call.status not in {"completed", "failed"}
+            )
+        if "FROM run_steps" in normalized and "SELECT status" in normalized:
+            step_id = args[0]
+            step = self._repository._run_steps.get(step_id)
+            return step.status if step is not None else None
+        raise NotImplementedError(f"Unsupported fake fetchval query: {normalized}")
+
 
 class _FakeAcquire:
+    def __init__(self, repository):
+        self._repository = repository
+
     async def __aenter__(self):
-        return _FakeConnection()
+        return _FakeConnection(self._repository)
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
 
 class _FakePool:
+    def __init__(self, repository):
+        self._repository = repository
+
     def acquire(self):
-        return _FakeAcquire()
+        return _FakeAcquire(self._repository)
 
 
 class FakeRepository:
@@ -133,7 +166,7 @@ class FakeRepository:
         communication_log_dir: str | Path | None = None,
     ) -> None:
         self._agents = {agent.agent_id: agent for agent in agents or []}
-        self._pool = _FakePool()
+        self._pool = _FakePool(self)
         self._communication_log_dir = (
             Path(communication_log_dir) if communication_log_dir is not None else None
         )
@@ -182,7 +215,10 @@ class FakeRepository:
         self._memory_providers = {postgres_provider.provider_id: postgres_provider}
         self._memory_provider_records = {}
         self._workspace_tools = {}
+        self._agent_internal_tools = {}
         self._tool_calls = {}
+        self._tool_generation_requests = {}
+        self._tool_generation_revisions = {}
         self._interaction_requests = {}
         self._interaction_questions = {}
         self._interaction_targets = {}
@@ -253,6 +289,36 @@ class FakeRepository:
 
     async def fetch_run_step(self, step_id):
         return self._run_steps.get(step_id)
+
+    async def claim_next_run_step(self, *, worker_id, lease_expires_at, now):
+        candidates = [
+            step
+            for step in self._run_steps.values()
+            if step.status == "created"
+            and (step.next_retry_at is None or step.next_retry_at <= now)
+        ]
+        candidates.sort(
+            key=lambda item: (
+                item.submitted_at or item.created_at,
+                item.step_index,
+                item.step_id,
+            )
+        )
+        if not candidates:
+            return None
+        step = candidates[0]
+        claimed = step.model_copy(
+            update={
+                "status": "claimed",
+                "claimed_by_worker": worker_id,
+                "attempt_count": step.attempt_count + 1,
+                "lease_expires_at": lease_expires_at,
+                "last_heartbeat_at": now,
+                "updated_at": now,
+            }
+        )
+        self._run_steps[step.step_id] = claimed
+        return claimed
 
     async def fetch_workspace(self, workspace_id):
         return self._workspaces.get(workspace_id)
@@ -502,9 +568,24 @@ class FakeRepository:
     async def list_workspace_tools(self, workspace_id):
         return list(self._workspace_tools.get(workspace_id, []))
 
+    async def list_agent_internal_tools(self, system_agent_id):
+        return list(self._agent_internal_tools.get(system_agent_id, []))
+
+    async def fetch_agent_internal_tool_by_name(self, system_agent_id, tool_name):
+        for tool in self._agent_internal_tools.get(system_agent_id, []):
+            if tool.name == tool_name:
+                return tool
+        return None
+
     async def fetch_workspace_tool(self, workspace_id, tool_id):
         for tool in self._workspace_tools.get(workspace_id, []):
             if tool.tool_id == tool_id:
+                return tool
+        return None
+
+    async def fetch_workspace_tool_by_name(self, workspace_id, tool_name):
+        for tool in self._workspace_tools.get(workspace_id, []):
+            if tool.name == tool_name:
                 return tool
         return None
 
@@ -516,6 +597,56 @@ class FakeRepository:
         ]
         tools.append(tool)
         self._workspace_tools[workspace_id] = tools
+
+    async def upsert_agent_internal_tool_binding(self, conn, binding):
+        tools = [
+            existing
+            for existing in self._agent_internal_tools.get(binding.system_agent_id, [])
+            if existing.tool_id != binding.tool_id
+        ]
+        tools.append(binding)
+        self._agent_internal_tools[binding.system_agent_id] = tools
+
+    async def fetch_tool_generation_request(self, request_id):
+        return self._tool_generation_requests.get(request_id)
+
+    async def list_tool_generation_requests(
+        self,
+        *,
+        organization_id=None,
+        workspace_id=None,
+        thread_id=None,
+        status=None,
+    ):
+        return [
+            request
+            for request in self._tool_generation_requests.values()
+            if (organization_id is None or request.organization_id == organization_id)
+            and (workspace_id is None or request.workspace_id == workspace_id)
+            and (thread_id is None or request.thread_id == thread_id)
+            and (status is None or request.status == status)
+        ]
+
+    async def upsert_tool_generation_request(self, conn, request):
+        self._tool_generation_requests[request.request_id] = request
+
+    async def fetch_tool_generation_revision(self, revision_id):
+        return self._tool_generation_revisions.get(revision_id)
+
+    async def list_tool_generation_revisions(self, request_id):
+        revisions = [
+            revision
+            for revision in self._tool_generation_revisions.values()
+            if revision.request_id == request_id
+        ]
+        return sorted(revisions, key=lambda item: item.revision_number, reverse=True)
+
+    async def upsert_tool_generation_revision(self, conn, revision):
+        self._tool_generation_revisions[revision.revision_id] = revision
+
+    async def next_tool_generation_revision_number(self, conn, request_id):
+        revisions = await self.list_tool_generation_revisions(request_id)
+        return (revisions[0].revision_number if revisions else 0) + 1
 
     async def upsert_git_repository(self, conn, repository) -> None:
         self._git_repositories[repository.repo_id] = repository
@@ -684,6 +815,58 @@ class FakeRepository:
             for tool_call in tool_calls:
                 if tool_call.tool_call_id == tool_call_id:
                     return tool_call
+        return None
+
+    async def claim_next_tool_call(
+        self,
+        *,
+        worker_id,
+        lease_expires_at,
+        now,
+        max_parallel_calls_per_run,
+        max_concurrent_calls_per_tool,
+    ):
+        claimed_per_run: dict[object, int] = {}
+        claimed_per_tool: dict[str, int] = {}
+        for tool_calls in self._tool_calls.values():
+            for tool_call in tool_calls:
+                if tool_call.status != "claimed":
+                    continue
+                claimed_per_run[tool_call.run_id] = claimed_per_run.get(tool_call.run_id, 0) + 1
+                claimed_per_tool[tool_call.tool_name] = (
+                    claimed_per_tool.get(tool_call.tool_name, 0) + 1
+                )
+
+        candidates = [
+            tool_call
+            for tool_calls in self._tool_calls.values()
+            for tool_call in tool_calls
+            if tool_call.status == "created"
+            and (tool_call.next_retry_at is None or tool_call.next_retry_at <= now)
+        ]
+        candidates.sort(
+            key=lambda item: (
+                item.submitted_at or item.created_at,
+                item.tool_call_id,
+            )
+        )
+        for tool_call in candidates:
+            if claimed_per_run.get(tool_call.run_id, 0) >= max_parallel_calls_per_run:
+                continue
+            if claimed_per_tool.get(tool_call.tool_name, 0) >= max_concurrent_calls_per_tool:
+                continue
+            claimed = tool_call.model_copy(
+                update={
+                    "status": "claimed",
+                    "claimed_by_worker": worker_id,
+                    "attempt_count": tool_call.attempt_count + 1,
+                    "lease_expires_at": lease_expires_at,
+                    "last_heartbeat_at": now,
+                    "updated_at": now,
+                }
+            )
+            await self.upsert_tool_call(None, claimed)
+            return claimed
         return None
 
     async def list_completed_tool_calls_for_run(self, run_id):
@@ -2746,6 +2929,76 @@ def _seed_interaction_workspace(
     }
 
 
+def _seed_tinker_workspace(repository: FakeRepository) -> dict[str, object]:
+    now = datetime.now(timezone.utc)
+    organization_id = uuid4()
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    user_id = uuid4()
+    tinker_agent_id = uuid4()
+    tinker_participant_id = uuid4()
+    repository._agents[tinker_agent_id] = AgentDefinition(
+        agent_id=tinker_agent_id,
+        display_name="Tinker",
+        description="Generates tools on demand.",
+        role="tool generation agent",
+        capabilities=["tool_generation"],
+        endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+        system_prompt="Build tools carefully.",
+        created_by=user_id,
+        created_at=now,
+        updated_at=now,
+        metadata={"tool_generation_agent": True},
+    )
+    repository._workspaces[workspace_id] = Workspace(
+        workspace_id=workspace_id,
+        organization_id=organization_id,
+        name="Tooling",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._threads[thread_id] = Thread(
+        thread_id=thread_id,
+        workspace_id=workspace_id,
+        title="Tool Request",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, user_id)] = ParticipantProfile(
+        participant_id=user_id,
+        workspace_id=workspace_id,
+        participant_type="user",
+        user_id=uuid4(),
+        display_name="Nikolay",
+        roles=["admin"],
+        capabilities=["planning"],
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, tinker_participant_id)] = ParticipantProfile(
+        participant_id=tinker_participant_id,
+        workspace_id=workspace_id,
+        participant_type="agent",
+        system_agent_id=tinker_agent_id,
+        display_name="Tinker",
+        roles=["tool generation agent"],
+        capabilities=["tool_generation"],
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    return {
+        "organization_id": organization_id,
+        "workspace_id": workspace_id,
+        "thread_id": thread_id,
+        "user_id": user_id,
+        "tinker_agent_id": tinker_agent_id,
+        "tinker_participant_id": tinker_participant_id,
+        "now": now,
+    }
+
+
 async def _claim_single_pending_task(
     kernel: CollaborationKernel,
     system_agent_id,
@@ -3304,3 +3557,315 @@ async def test_kernel_rotates_workspace_communication_logs(tmp_path, monkeypatch
 
     assert latest_entries[-1]["content"].startswith("rotation-test-5-")
     assert rotated_entries[0]["content"].startswith("rotation-test-")
+
+
+@pytest.mark.asyncio
+async def test_post_message_creates_tool_generation_request_for_targeted_tinker():
+    repository = FakeRepository()
+    seeded = _seed_tinker_workspace(repository)
+    kernel = CollaborationKernel(repository)
+
+    result = await kernel.post_message(
+        seeded["thread_id"],
+        CreateMessageRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["user_id"],
+                participant_type="user",
+                display_name="Nikolay",
+            ),
+            content="Please build a tool repo_stats for repository summaries.",
+            visibility="workspace",
+            target_system_agent_id=seeded["tinker_agent_id"],
+            create_task=True,
+        ),
+    )
+
+    assert len(repository._tool_generation_requests) == 1
+    request = next(iter(repository._tool_generation_requests.values()))
+    assert request.status == "submitted"
+    assert request.requester_message_id == result.message.message_id
+    assert request.target_system_agent_id == seeded["tinker_agent_id"]
+    assert request.requested_scope == "global"
+    assert result.message.metadata["tool_generation_request_id"] == str(request.request_id)
+
+    tasks = await kernel.list_pending_tasks_for_system_agent(seeded["tinker_agent_id"])
+    assert len(tasks) == 1
+    assert tasks[0].metadata["tool_generation_request_id"] == str(request.request_id)
+
+
+@pytest.mark.asyncio
+async def test_post_message_can_request_organization_scoped_tool_generation():
+    repository = FakeRepository()
+    seeded = _seed_tinker_workspace(repository)
+    kernel = CollaborationKernel(repository)
+
+    result = await kernel.post_message(
+        seeded["thread_id"],
+        CreateMessageRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["user_id"],
+                participant_type="user",
+                display_name="Nikolay",
+            ),
+            content="Please build a tool repo_stats for repository summaries.",
+            visibility="workspace",
+            target_system_agent_id=seeded["tinker_agent_id"],
+            target_tool_scope="organization",
+            create_task=True,
+        ),
+    )
+
+    request = next(iter(repository._tool_generation_requests.values()))
+    assert request.requested_scope == "organization"
+    assert result.message.metadata["tool_generation_request_id"] == str(request.request_id)
+    assert result.message.metadata["target_tool_scope"] == "organization"
+
+
+@pytest.mark.asyncio
+async def test_build_agent_execution_context_includes_internal_tools_and_tool_generation_request():
+    repository = FakeRepository()
+    seeded = _seed_tinker_workspace(repository)
+    kernel = CollaborationKernel(repository)
+    now = seeded["now"]
+    request_id = uuid4()
+    revision_id = uuid4()
+    task_id = uuid4()
+    run_id = uuid4()
+    internal_tool_id = uuid4()
+
+    repository._tool_generation_requests[request_id] = ToolGenerationRequest(
+        request_id=request_id,
+        organization_id=seeded["organization_id"],
+        workspace_id=seeded["workspace_id"],
+        thread_id=seeded["thread_id"],
+        requester_participant_id=seeded["user_id"],
+        target_system_agent_id=seeded["tinker_agent_id"],
+        status="pending_approval",
+        target_tool_name="repo_stats",
+        summary="Build a repository statistics tool.",
+        latest_revision_id=revision_id,
+        created_at=now,
+        updated_at=now,
+    )
+    repository._tool_generation_revisions[revision_id] = ToolGenerationRevision(
+        revision_id=revision_id,
+        request_id=request_id,
+        revision_number=1,
+        status="pending_approval",
+        manifest=GeneratedToolManifest(
+            name="repo_stats",
+            description="Builds repository summaries.",
+            build_context_path="/tmp/generated-tools/repo_stats",
+            execution=ToolExecutionBinding(
+                backend_kind="docker",
+                handler_ref="registry.example/repo_stats:latest",
+                execution_profile={"network": "none", "workspace_access": "none"},
+            ),
+            network_access="none",
+            workspace_access="none",
+        ),
+        validation_report=GeneratedToolValidationReport(summary="Smoke tests passed."),
+        image_ref="registry.example/repo_stats:latest",
+        image_digest="sha256:abcd",
+        created_by=seeded["tinker_participant_id"],
+        created_at=now,
+        updated_at=now,
+    )
+    repository._agent_internal_tools[seeded["tinker_agent_id"]] = [
+        AgentInternalToolBinding(
+            system_agent_id=seeded["tinker_agent_id"],
+            tool_id=internal_tool_id,
+            name="tinker_generated_tool_build",
+            description="Builds generated tool images.",
+            execution=ToolExecutionBinding(
+                backend_kind="local_process",
+                handler_ref="python",
+                execution_profile={"network": "none", "workspace_access": "none"},
+                trust_level="trusted",
+            ),
+            attached_by=seeded["user_id"],
+            attached_at=now,
+            updated_at=now,
+        )
+    ]
+    repository._tasks[task_id] = Task(
+        task_id=task_id,
+        workspace_id=seeded["workspace_id"],
+        thread_id=seeded["thread_id"],
+        title="Reply as Tinker",
+        requested_by=seeded["user_id"],
+        created_at=now,
+        updated_at=now,
+        metadata={
+            "target_system_agent_id": str(seeded["tinker_agent_id"]),
+            "target_participant_id": str(seeded["tinker_participant_id"]),
+            "tool_generation_request_id": str(request_id),
+        },
+    )
+    repository._runs[run_id] = Run(
+        run_id=run_id,
+        workspace_id=seeded["workspace_id"],
+        thread_id=seeded["thread_id"],
+        task_id=task_id,
+        participant_id=seeded["tinker_participant_id"],
+        created_at=now,
+        updated_at=now,
+    )
+
+    context = await kernel.build_agent_execution_context(
+        task_id,
+        seeded["tinker_agent_id"],
+        run_id,
+    )
+
+    assert [tool.name for tool in context.internal_tools] == ["tinker_generated_tool_build"]
+    assert context.tool_generation_request is not None
+    assert context.tool_generation_request.request.request_id == request_id
+    assert context.tool_generation_request.revisions[0].revision_id == revision_id
+
+
+@pytest.mark.asyncio
+async def test_approve_tool_generation_revision_publishes_global_tool_without_workspace_attachment():
+    repository = FakeRepository()
+    seeded = _seed_tinker_workspace(repository)
+    kernel = CollaborationKernel(repository)
+    now = seeded["now"]
+    request_id = uuid4()
+    revision_id = uuid4()
+
+    repository._tool_generation_requests[request_id] = ToolGenerationRequest(
+        request_id=request_id,
+        organization_id=seeded["organization_id"],
+        workspace_id=seeded["workspace_id"],
+        thread_id=seeded["thread_id"],
+        requester_participant_id=seeded["user_id"],
+        target_system_agent_id=seeded["tinker_agent_id"],
+        status="pending_approval",
+        target_tool_name="repo_stats",
+        summary="Build a repository statistics tool.",
+        latest_revision_id=revision_id,
+        created_at=now,
+        updated_at=now,
+    )
+    repository._tool_generation_revisions[revision_id] = ToolGenerationRevision(
+        revision_id=revision_id,
+        request_id=request_id,
+        revision_number=1,
+        status="pending_approval",
+        manifest=GeneratedToolManifest(
+            name="repo_stats",
+            description="Builds repository summaries.",
+            build_context_path="/tmp/generated-tools/repo_stats",
+            execution=ToolExecutionBinding(
+                backend_kind="docker",
+                handler_ref="registry.example/repo_stats:latest",
+                execution_profile={"network": "none", "workspace_access": "none"},
+            ),
+            network_access="none",
+            workspace_access="none",
+        ),
+        validation_report=GeneratedToolValidationReport(summary="Smoke tests passed."),
+        image_ref="registry.example/repo_stats:latest",
+        image_digest="sha256:abcd",
+        created_by=seeded["tinker_participant_id"],
+        created_at=now,
+        updated_at=now,
+    )
+
+    result = await kernel.approve_tool_generation_revision(
+        revision_id,
+        ReviewToolGenerationRevisionRequest(
+            actor=ParticipantInput(
+                participant_id=uuid4(),
+                participant_type="user",
+                display_name="Admin",
+            )
+        ),
+    )
+
+    assert result.detail is not None
+    assert result.detail.request.status == "published"
+    assert result.detail.request.final_tool_id is not None
+    assert repository._workspace_tools.get(seeded["workspace_id"]) in (None, [])
+
+    published_tool = repository._system_tools[result.detail.request.final_tool_id]
+    assert published_tool.scope == "global"
+    assert published_tool.name == "repo_stats"
+    assert published_tool.execution.handler_ref == "registry.example/repo_stats:latest"
+    assert any(
+        message.metadata.get("tool_generation_status") == "published"
+        for message in repository._messages[seeded["thread_id"]]
+    )
+
+
+@pytest.mark.asyncio
+async def test_approve_tool_generation_revision_can_publish_organization_scoped_tool():
+    repository = FakeRepository()
+    seeded = _seed_tinker_workspace(repository)
+    kernel = CollaborationKernel(repository)
+    now = seeded["now"]
+    request_id = uuid4()
+    revision_id = uuid4()
+
+    repository._tool_generation_requests[request_id] = ToolGenerationRequest(
+        request_id=request_id,
+        organization_id=seeded["organization_id"],
+        workspace_id=seeded["workspace_id"],
+        thread_id=seeded["thread_id"],
+        requester_participant_id=seeded["user_id"],
+        target_system_agent_id=seeded["tinker_agent_id"],
+        requested_scope="organization",
+        status="pending_approval",
+        target_tool_name="repo_stats",
+        summary="Build an organization repository statistics tool.",
+        latest_revision_id=revision_id,
+        created_at=now,
+        updated_at=now,
+    )
+    repository._tool_generation_revisions[revision_id] = ToolGenerationRevision(
+        revision_id=revision_id,
+        request_id=request_id,
+        revision_number=1,
+        status="pending_approval",
+        manifest=GeneratedToolManifest(
+            name="repo_stats",
+            description="Builds repository summaries.",
+            build_context_path="/tmp/generated-tools/repo_stats",
+            execution=ToolExecutionBinding(
+                backend_kind="docker",
+                handler_ref="registry.example/repo_stats:latest",
+                execution_profile={"network": "none", "workspace_access": "none"},
+            ),
+            network_access="none",
+            workspace_access="none",
+        ),
+        validation_report=GeneratedToolValidationReport(summary="Smoke tests passed."),
+        image_ref="registry.example/repo_stats:latest",
+        image_digest="sha256:abcd",
+        created_by=seeded["tinker_participant_id"],
+        created_at=now,
+        updated_at=now,
+    )
+
+    result = await kernel.approve_tool_generation_revision(
+        revision_id,
+        ReviewToolGenerationRevisionRequest(
+            actor=ParticipantInput(
+                participant_id=uuid4(),
+                participant_type="user",
+                display_name="Admin",
+            )
+        ),
+    )
+
+    assert result.detail is not None
+    published_tool = repository._system_tools[result.detail.request.final_tool_id]
+    assert published_tool.scope == "organization"
+    assert published_tool.organization_id == seeded["organization_id"]
+    assert repository._workspace_tools.get(seeded["workspace_id"]) in (None, [])
+    assert any(
+        message.content.startswith(
+            "Tool `repo_stats` was approved and added to the organization system tools catalog."
+        )
+        for message in repository._messages[seeded["thread_id"]]
+    )

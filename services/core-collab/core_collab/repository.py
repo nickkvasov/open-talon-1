@@ -15,6 +15,7 @@ from .contracts import (
     ActorRef,
     AgentConfiguration,
     AgentDefinition,
+    AgentInternalToolBinding,
     AgentEndpoint,
     AgentHarness,
     AgentInteractionContract,
@@ -26,6 +27,8 @@ from .contracts import (
     AssetLink,
     EventEnvelope,
     GitRepository,
+    GeneratedToolManifest,
+    GeneratedToolValidationReport,
     InteractionAnswer,
     InteractionQuestion,
     InteractionRequest,
@@ -46,6 +49,8 @@ from .contracts import (
     Task,
     ToolCall,
     ToolCallResult,
+    ToolGenerationRequest,
+    ToolGenerationRevision,
     ToolExecutionBinding,
     ToolParameterContract,
     Thread,
@@ -1360,6 +1365,163 @@ class CollaborationRepository:
             self._json_dumps(tool.metadata),
         )
 
+    async def upsert_agent_internal_tool_binding(
+        self,
+        conn: asyncpg.Connection,
+        binding: AgentInternalToolBinding,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO agent_internal_tools (
+                system_agent_id, tool_id, enabled, attached_by, attached_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (system_agent_id, tool_id) DO UPDATE
+                SET enabled = EXCLUDED.enabled,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            binding.system_agent_id,
+            binding.tool_id,
+            binding.enabled,
+            binding.attached_by,
+            binding.attached_at,
+            binding.updated_at,
+            self._json_dumps(binding.metadata),
+        )
+
+    async def upsert_tool_generation_request(
+        self,
+        conn: asyncpg.Connection,
+        request: ToolGenerationRequest,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO tool_generation_requests (
+                request_id, organization_id, workspace_id, thread_id, requester_participant_id,
+                requester_message_id, target_system_agent_id, requested_scope, status,
+                target_tool_name, summary, final_tool_id, latest_revision_id, approved_by,
+                approved_at, rejected_by, rejected_at, published_at, created_at, updated_at,
+                metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15,
+                $16, $17, $18, $19, $20,
+                $21
+            )
+            ON CONFLICT (request_id) DO UPDATE
+                SET requested_scope = EXCLUDED.requested_scope,
+                    status = EXCLUDED.status,
+                    target_tool_name = EXCLUDED.target_tool_name,
+                    summary = EXCLUDED.summary,
+                    final_tool_id = EXCLUDED.final_tool_id,
+                    latest_revision_id = EXCLUDED.latest_revision_id,
+                    approved_by = EXCLUDED.approved_by,
+                    approved_at = EXCLUDED.approved_at,
+                    rejected_by = EXCLUDED.rejected_by,
+                    rejected_at = EXCLUDED.rejected_at,
+                    published_at = EXCLUDED.published_at,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            request.request_id,
+            request.organization_id,
+            request.workspace_id,
+            request.thread_id,
+            request.requester_participant_id,
+            request.requester_message_id,
+            request.target_system_agent_id,
+            request.requested_scope,
+            request.status,
+            request.target_tool_name,
+            request.summary,
+            request.final_tool_id,
+            request.latest_revision_id,
+            request.approved_by,
+            request.approved_at,
+            request.rejected_by,
+            request.rejected_at,
+            request.published_at,
+            request.created_at,
+            request.updated_at,
+            self._json_dumps(request.metadata),
+        )
+
+    async def upsert_tool_generation_revision(
+        self,
+        conn: asyncpg.Connection,
+        revision: ToolGenerationRevision,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO tool_generation_revisions (
+                revision_id, request_id, revision_number, status, manifest, validation_report,
+                source_asset_id, source_asset_version_id, manifest_asset_id, manifest_asset_version_id,
+                report_asset_id, report_asset_version_id, image_ref, image_digest,
+                created_by, created_at, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10,
+                $11, $12, $13, $14,
+                $15, $16, $17, $18
+            )
+            ON CONFLICT (revision_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    manifest = EXCLUDED.manifest,
+                    validation_report = EXCLUDED.validation_report,
+                    source_asset_id = EXCLUDED.source_asset_id,
+                    source_asset_version_id = EXCLUDED.source_asset_version_id,
+                    manifest_asset_id = EXCLUDED.manifest_asset_id,
+                    manifest_asset_version_id = EXCLUDED.manifest_asset_version_id,
+                    report_asset_id = EXCLUDED.report_asset_id,
+                    report_asset_version_id = EXCLUDED.report_asset_version_id,
+                    image_ref = EXCLUDED.image_ref,
+                    image_digest = EXCLUDED.image_digest,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            revision.revision_id,
+            revision.request_id,
+            revision.revision_number,
+            revision.status,
+            self._json_dumps(revision.manifest.model_dump(mode="json")),
+            (
+                self._json_dumps(revision.validation_report.model_dump(mode="json"))
+                if revision.validation_report is not None
+                else None
+            ),
+            revision.source_asset_id,
+            revision.source_asset_version_id,
+            revision.manifest_asset_id,
+            revision.manifest_asset_version_id,
+            revision.report_asset_id,
+            revision.report_asset_version_id,
+            revision.image_ref,
+            revision.image_digest,
+            revision.created_by,
+            revision.created_at,
+            revision.updated_at,
+            self._json_dumps(revision.metadata),
+        )
+
+    async def next_tool_generation_revision_number(
+        self,
+        conn: asyncpg.Connection,
+        request_id: UUID,
+    ) -> int:
+        value = await conn.fetchval(
+            """
+            SELECT COALESCE(MAX(revision_number), 0) + 1
+            FROM tool_generation_revisions
+            WHERE request_id = $1
+            """,
+            request_id,
+        )
+        return int(value or 1)
+
     async def delete_workspace_tool(
         self,
         conn: asyncpg.Connection,
@@ -2478,6 +2640,129 @@ class CollaborationRepository:
             tool_name,
         )
         return self._workspace_tool_from_row(row) if row else None
+
+    async def list_agent_internal_tools(
+        self,
+        system_agent_id: UUID,
+    ) -> list[AgentInternalToolBinding]:
+        rows = await self._pool.fetch(
+            """
+            SELECT ait.system_agent_id, ait.tool_id, st.name, st.description, st.parameter_contract,
+                   st.input_schema, st.backend_kind, st.handler_ref, st.execution_profile,
+                   st.trust_level, ait.enabled, ait.attached_by, ait.attached_at, ait.updated_at,
+                   ait.metadata
+            FROM agent_internal_tools ait
+            JOIN system_tools st ON st.tool_id = ait.tool_id
+            WHERE ait.system_agent_id = $1
+            ORDER BY ait.attached_at ASC
+            """,
+            system_agent_id,
+        )
+        return [self._agent_internal_tool_from_row(row) for row in rows]
+
+    async def fetch_agent_internal_tool_by_name(
+        self,
+        system_agent_id: UUID,
+        tool_name: str,
+    ) -> AgentInternalToolBinding | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT ait.system_agent_id, ait.tool_id, st.name, st.description, st.parameter_contract,
+                   st.input_schema, st.backend_kind, st.handler_ref, st.execution_profile,
+                   st.trust_level, ait.enabled, ait.attached_by, ait.attached_at, ait.updated_at,
+                   ait.metadata
+            FROM agent_internal_tools ait
+            JOIN system_tools st ON st.tool_id = ait.tool_id
+            WHERE ait.system_agent_id = $1
+              AND st.name = $2
+            LIMIT 1
+            """,
+            system_agent_id,
+            tool_name,
+        )
+        return self._agent_internal_tool_from_row(row) if row else None
+
+    async def fetch_tool_generation_request(
+        self,
+        request_id: UUID,
+    ) -> ToolGenerationRequest | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT request_id, organization_id, workspace_id, thread_id, requester_participant_id,
+                   requester_message_id, target_system_agent_id, requested_scope, status,
+                   target_tool_name, summary, final_tool_id, latest_revision_id, approved_by,
+                   approved_at, rejected_by, rejected_at, published_at, created_at, updated_at,
+                   metadata
+            FROM tool_generation_requests
+            WHERE request_id = $1
+            """,
+            request_id,
+        )
+        return self._tool_generation_request_from_row(row) if row else None
+
+    async def list_tool_generation_requests(
+        self,
+        *,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        thread_id: UUID | None = None,
+        status: str | None = None,
+    ) -> list[ToolGenerationRequest]:
+        rows = await self._pool.fetch(
+            """
+            SELECT request_id, organization_id, workspace_id, thread_id, requester_participant_id,
+                   requester_message_id, target_system_agent_id, requested_scope, status,
+                   target_tool_name, summary, final_tool_id, latest_revision_id, approved_by,
+                   approved_at, rejected_by, rejected_at, published_at, created_at, updated_at,
+                   metadata
+            FROM tool_generation_requests
+            WHERE ($1::uuid IS NULL OR organization_id = $1)
+              AND ($2::uuid IS NULL OR workspace_id = $2)
+              AND ($3::uuid IS NULL OR thread_id = $3)
+              AND ($4::text IS NULL OR status = $4)
+            ORDER BY created_at DESC
+            """,
+            organization_id,
+            workspace_id,
+            thread_id,
+            status,
+        )
+        return [self._tool_generation_request_from_row(row) for row in rows]
+
+    async def fetch_tool_generation_revision(
+        self,
+        revision_id: UUID,
+    ) -> ToolGenerationRevision | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT revision_id, request_id, revision_number, status, manifest, validation_report,
+                   source_asset_id, source_asset_version_id, manifest_asset_id, manifest_asset_version_id,
+                   report_asset_id, report_asset_version_id, image_ref, image_digest,
+                   created_by, created_at, updated_at, metadata
+            FROM tool_generation_revisions
+            WHERE revision_id = $1
+            """,
+            revision_id,
+        )
+        return self._tool_generation_revision_from_row(row) if row else None
+
+    async def list_tool_generation_revisions(
+        self,
+        request_id: UUID,
+    ) -> list[ToolGenerationRevision]:
+        rows = await self._pool.fetch(
+            """
+            SELECT revision_id, request_id, revision_number, status, manifest, validation_report,
+                   source_asset_id, source_asset_version_id, manifest_asset_id, manifest_asset_version_id,
+                   report_asset_id, report_asset_version_id, image_ref, image_digest,
+                   created_by, created_at, updated_at, metadata
+            FROM tool_generation_revisions
+            WHERE request_id = $1
+            ORDER BY revision_number DESC
+            """,
+            request_id,
+        )
+        return [self._tool_generation_revision_from_row(row) for row in rows]
 
     async def fetch_agent_participant(
         self, workspace_id: UUID, system_agent_id: UUID
@@ -4193,6 +4478,99 @@ class CollaborationRepository:
             enabled=row["enabled"],
             attached_by=row["attached_by"],
             attached_at=row["attached_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _agent_internal_tool_from_row(row: asyncpg.Record) -> AgentInternalToolBinding:
+        return AgentInternalToolBinding(
+            system_agent_id=row["system_agent_id"],
+            tool_id=row["tool_id"],
+            name=row["name"],
+            description=row["description"],
+            parameter_contract=ToolParameterContract.model_validate(
+                CollaborationRepository._json_value(
+                    row["parameter_contract"], default={}
+                )
+            ),
+            input_schema=CollaborationRepository._json_value(
+                row["input_schema"], default={}
+            ),
+            execution=ToolExecutionBinding(
+                backend_kind=row["backend_kind"],
+                handler_ref=row["handler_ref"],
+                execution_profile=CollaborationRepository._json_value(
+                    row["execution_profile"], default={}
+                ),
+                trust_level=row["trust_level"],
+            ),
+            enabled=row["enabled"],
+            attached_by=row["attached_by"],
+            attached_at=row["attached_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _tool_generation_request_from_row(
+        row: asyncpg.Record,
+    ) -> ToolGenerationRequest:
+        return ToolGenerationRequest(
+            request_id=row["request_id"],
+            organization_id=row["organization_id"],
+            workspace_id=row["workspace_id"],
+            thread_id=row["thread_id"],
+            requester_participant_id=row["requester_participant_id"],
+            requester_message_id=row["requester_message_id"],
+            target_system_agent_id=row["target_system_agent_id"],
+            requested_scope=row["requested_scope"],
+            status=row["status"],
+            target_tool_name=row["target_tool_name"],
+            summary=row["summary"],
+            final_tool_id=row["final_tool_id"],
+            latest_revision_id=row["latest_revision_id"],
+            approved_by=row["approved_by"],
+            approved_at=row["approved_at"],
+            rejected_by=row["rejected_by"],
+            rejected_at=row["rejected_at"],
+            published_at=row["published_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _tool_generation_revision_from_row(
+        row: asyncpg.Record,
+    ) -> ToolGenerationRevision:
+        return ToolGenerationRevision(
+            revision_id=row["revision_id"],
+            request_id=row["request_id"],
+            revision_number=row["revision_number"],
+            status=row["status"],
+            manifest=GeneratedToolManifest.model_validate(
+                CollaborationRepository._json_value(row["manifest"], default={})
+            ),
+            validation_report=(
+                GeneratedToolValidationReport.model_validate(
+                    CollaborationRepository._json_value(
+                        row["validation_report"], default={}
+                    )
+                )
+                if row["validation_report"] is not None
+                else None
+            ),
+            source_asset_id=row["source_asset_id"],
+            source_asset_version_id=row["source_asset_version_id"],
+            manifest_asset_id=row["manifest_asset_id"],
+            manifest_asset_version_id=row["manifest_asset_version_id"],
+            report_asset_id=row["report_asset_id"],
+            report_asset_version_id=row["report_asset_version_id"],
+            image_ref=row["image_ref"],
+            image_digest=row["image_digest"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
             updated_at=row["updated_at"],
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),
         )

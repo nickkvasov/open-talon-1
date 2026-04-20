@@ -47,6 +47,25 @@ AuditActorType = Literal["user", "agent", "system", "api_key", "unknown"]
 AuditOutcome = Literal["success", "failure", "denied", "error"]
 AuditPayloadMode = Literal["metadata_only"]
 OrganizationRole = Literal["owner", "admin", "member"]
+ToolGenerationRequestStatus = Literal[
+    "submitted",
+    "clarification_needed",
+    "drafting",
+    "validating",
+    "pending_approval",
+    "published",
+    "rejected",
+    "failed",
+]
+ToolGenerationRevisionStatus = Literal[
+    "drafting",
+    "validating",
+    "pending_approval",
+    "approved",
+    "rejected",
+    "failed",
+]
+GeneratedToolValidationStatus = Literal["passed", "failed", "warning"]
 StopReason = Literal[
     "completed",
     "needs_user_input",
@@ -93,6 +112,8 @@ class TargetRef(BaseModel):
         "interaction_request",
         "interaction_request_target",
         "interaction_answer",
+        "tool_generation_request",
+        "tool_generation_revision",
     ]
     id: UUID
 
@@ -489,6 +510,107 @@ class MemoryProviderRecord(BaseModel):
 
 
 class WorkspaceTool(BaseModel):
+    tool_id: UUID
+    name: str
+    description: str
+    parameter_contract: ToolParameterContract = Field(default_factory=ToolParameterContract)
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    execution: ToolExecutionBinding = Field(default_factory=ToolExecutionBinding)
+    enabled: bool = True
+    attached_by: UUID
+    attached_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GeneratedToolSmokeTest(BaseModel):
+    command: list[str] = Field(default_factory=list)
+    input_payload: dict[str, Any] = Field(default_factory=dict)
+    expected_output_schema: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GeneratedToolValidationCheck(BaseModel):
+    name: str
+    status: GeneratedToolValidationStatus
+    detail: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GeneratedToolValidationReport(BaseModel):
+    status: GeneratedToolValidationStatus = "passed"
+    summary: str | None = None
+    checks: list[GeneratedToolValidationCheck] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GeneratedToolManifest(BaseModel):
+    name: str
+    description: str
+    parameter_contract: ToolParameterContract = Field(default_factory=ToolParameterContract)
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    execution: ToolExecutionBinding = Field(default_factory=ToolExecutionBinding)
+    build_context_path: str
+    smoke_test: GeneratedToolSmokeTest | None = None
+    trust_rationale: str | None = None
+    dependency_summary: list[str] = Field(default_factory=list)
+    network_access: NetworkPolicy = "none"
+    workspace_access: WorkspaceAccessMode = "none"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolGenerationRequest(BaseModel):
+    request_id: UUID
+    organization_id: UUID
+    workspace_id: UUID
+    thread_id: UUID
+    requester_participant_id: UUID
+    requester_message_id: UUID | None = None
+    target_system_agent_id: UUID
+    requested_scope: RegistryScope = "global"
+    status: ToolGenerationRequestStatus = "submitted"
+    target_tool_name: str | None = None
+    summary: str | None = None
+    final_tool_id: UUID | None = None
+    latest_revision_id: UUID | None = None
+    approved_by: UUID | None = None
+    approved_at: datetime | None = None
+    rejected_by: UUID | None = None
+    rejected_at: datetime | None = None
+    published_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolGenerationRevision(BaseModel):
+    revision_id: UUID
+    request_id: UUID
+    revision_number: int
+    status: ToolGenerationRevisionStatus = "drafting"
+    manifest: GeneratedToolManifest
+    validation_report: GeneratedToolValidationReport | None = None
+    source_asset_id: UUID | None = None
+    source_asset_version_id: UUID | None = None
+    manifest_asset_id: UUID | None = None
+    manifest_asset_version_id: UUID | None = None
+    report_asset_id: UUID | None = None
+    report_asset_version_id: UUID | None = None
+    image_ref: str | None = None
+    image_digest: str | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolGenerationRequestDetail(BaseModel):
+    request: ToolGenerationRequest
+    revisions: list[ToolGenerationRevision] = Field(default_factory=list)
+
+
+class AgentInternalToolBinding(BaseModel):
+    system_agent_id: UUID
     tool_id: UUID
     name: str
     description: str
@@ -1333,6 +1455,8 @@ class CreateMessageRequest(BaseModel):
     actor: ParticipantInput
     content: str
     visibility: Visibility = "public"
+    target_system_agent_id: UUID | None = None
+    target_tool_scope: RegistryScope | None = None
     create_task: bool = True
     requests: list["CreateInteractionRequest"] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -1359,6 +1483,28 @@ class CreateInteractionRequest(BaseModel):
 class CreateInteractionRequestsRequest(BaseModel):
     actor: ParticipantInput
     requests: list[CreateInteractionRequest] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateToolGenerationRevisionRequest(BaseModel):
+    actor: ParticipantInput
+    status: ToolGenerationRevisionStatus = "pending_approval"
+    manifest: GeneratedToolManifest
+    validation_report: GeneratedToolValidationReport | None = None
+    source_asset_id: UUID | None = None
+    source_asset_version_id: UUID | None = None
+    manifest_asset_id: UUID | None = None
+    manifest_asset_version_id: UUID | None = None
+    report_asset_id: UUID | None = None
+    report_asset_version_id: UUID | None = None
+    image_ref: str | None = None
+    image_digest: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReviewToolGenerationRevisionRequest(BaseModel):
+    actor: ParticipantInput
+    reason: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -1480,8 +1626,10 @@ class AgentExecutionContext(BaseModel):
     participants: list[ParticipantProfile] = Field(default_factory=list)
     role_definitions: list[RoleDefinition] = Field(default_factory=list)
     workspace_tools: list[WorkspaceTool] = Field(default_factory=list)
+    internal_tools: list[AgentInternalToolBinding] = Field(default_factory=list)
     messages: list[TimelineMessage] = Field(default_factory=list)
     interaction_requests: list[InteractionRequestDetail] = Field(default_factory=list)
+    tool_generation_request: ToolGenerationRequestDetail | None = None
     run_memory: list[MemoryEntry] = Field(default_factory=list)
     thread_memory: list[MemoryEntry] = Field(default_factory=list)
     workspace_memory: list[MemoryEntry] = Field(default_factory=list)
