@@ -51,6 +51,9 @@ Primary local flow:
 - Organization CRUD and organization-scoped management routes require org `owner` or `admin`, unless the caller is a platform admin.
 - Workspace role-definition changes, workspace tool management, workspace Git repository creation, and workspace asset publishing require workspace `admin` or `supervisor`.
 - Organization-scoped agents, tools, providers, repositories, and assets must stay inside the same organization as the consuming workspace.
+- Tinker-generated tools may publish to `global` or `organization` scope, but approval publishes into the system catalog only.
+- Tinker-generated tools must not be auto-attached to a workspace as part of approval; manual workspace attachment is a separate action.
+- Tinker authoring/build helpers are agent-internal tools and must not be exposed through `workspace_tools` or the normal workspace catalog.
 - Treat `collab_event_log` and `audit_event_ledger` as separate concerns: collaboration fanout vs. compliance/investigation.
 - `audit_event_ledger` is append-only in steady-state code; do not add update/delete flows for audit rows.
 - Audit integrity depends on `chain_partition`, `chain_sequence`, `prev_hash`, and `event_hash`; preserve chain semantics when changing audit writes.
@@ -218,6 +221,18 @@ If a change touches execution lease recovery, budget enforcement, or runtime ove
 - verify retry backoff, terminal failure propagation, and `budget_exhausted` handling together
 - keep `docs/system-quickstart.md`, `README.md`, and `infrastructure/.env.example` aligned with any new operator knobs or endpoints
 
+If a change touches Tinker, tool generation, generated-tool approval, or internal tool execution:
+
+- inspect `packages/contracts`, `services/core-collab`, `services/gateway-edge`, `services/agent-runtime`, `apps/admin-web`, and `apps/tui` together
+- preserve the rule that approval publishes only to the system catalog, not to `workspace_tools`
+- verify global and organization-scoped publication paths separately when scope behavior changes
+- keep Tinker-only helper tools private to Tinker
+- run `tests/core-collab/test_agent_contracts.py`
+- run `tests/gateway-edge/test_tool_generation.py`
+- run `tests/business-cases/test_tinker_tool_generation.py`
+- run `tests/agent-runtime/test_execution.py` when local helper execution or execution backends changed
+- run `pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s` when the end-to-end Tinker/runtime path changes and the local machine has `gemma4:latest`
+
 ## Code Change Rules
 
 - Preserve the normalized participant model.
@@ -276,6 +291,7 @@ If a change touches execution lease recovery, budget enforcement, or runtime ove
 - `apps/admin-web/src/providers/AuthProvider.jsx`
 - `docs/db-migrations.md`
 - `docs/system-quickstart.md`
+- `docs/tinker-tool-generation.md`
 - `services/core-collab/core_collab/migrations.py`
 - `services/core-collab/core_collab/repository.py`
 - `services/core-collab/core_collab/kernel.py`
@@ -296,11 +312,14 @@ If a change touches execution lease recovery, budget enforcement, or runtime ove
 - `services/gateway-edge/gateway_edge/audit_middleware.py`
 - `services/gateway-edge/gateway_edge/db/postgres.py`
 - `services/gateway-edge/gateway_edge/routers/admin.py`
+- `apps/admin-web/src/pages/ToolGenerationRequests.jsx`
 - `services/agent-runtime/agent_runtime/observability.py`
+- `services/agent-runtime/agent_runtime/tinker_tools.py`
 - `packages/contracts/open_talon_contracts/llm_engines.py`
 - `packages/contracts/open_talon_contracts/telemetry.py`
 - `apps/tui/open_talon_tui/main.py`
 - `apps/tui/open_talon_tui/tui2.py`
+- `tests/infrastructure/test_tinker_live_system.py`
 
 ## When In Doubt
 

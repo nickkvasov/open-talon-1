@@ -9,6 +9,7 @@ For coding-agent-specific project guidance, see [`AGENTS.md`](/Users/nikolay.kva
 - [docs/system-quickstart.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/system-quickstart.md): fastest path to a running local stack
 - [docs/system-api-reference.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/system-api-reference.md): current system and API reference for engineers and client builders
 - [docs/agent-operations-guide.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/agent-operations-guide.md): operating guide for software development agents and scripted test users
+- [docs/tinker-tool-generation.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/tinker-tool-generation.md): Tinker request, approval, catalog, and live-test workflow
 - [docs/db-migrations.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/db-migrations.md): migration workflow and schema rules
 - [docs/collaboration-system-design.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/collaboration-system-design.md): design background and architecture evolution
 - [AGENTS.md](/Users/nikolay.kvasov/Development/open-talon-1/AGENTS.md): repository contribution rules for coding agents
@@ -133,6 +134,7 @@ The admin web app lives in [apps/admin-web](/Users/nikolay.kvasov/Development/op
 - runtime overview and operator visibility
 - platform-global and organization-scoped LLM and memory provider management
 - platform-global and organization-scoped system agent and system tool management
+- Tinker tool-generation request review and approve/reject workflows
 - workspace create, update, role override, and delete flows inside the selected organization
 - admin API key management
 
@@ -251,6 +253,14 @@ Open Talon models tools in two layers:
 
 This means a tool is defined once at the platform or organization layer, then added to any compatible workspace that wants to advertise it to attached agents.
 
+Generated tools now follow the same model through `Tinker`:
+
+- `Tinker` is a seeded system agent that must be attached to a workspace before users can ask it for new tools
+- a request can target `global` or `organization` scope
+- approval publishes the generated tool into the matching system catalog only
+- generated tools are never auto-attached to workspaces
+- workspace `admin` or `supervisor` users attach the published tool later with `PUT /v1/workspaces/{workspace_id}/tools/{tool_id}`
+
 Each system tool includes:
 
 - a human-readable name and description
@@ -299,11 +309,15 @@ Common tool endpoints:
 
 - `POST /v1/tools`: create a system-wide tool definition
 - `GET /v1/tools`: list system-wide tool definitions
+- `GET /v1/organizations/{organization_id}/tools`: list organization-scoped tool definitions
 - `PATCH /v1/tools/{tool_id}`: update a system-wide tool definition
 - `GET /v1/workspaces/{workspace_id}/tools`: list tools attached to a workspace
 - `PUT /v1/workspaces/{workspace_id}/tools/{tool_id}`: attach a system tool to a workspace
 - `PATCH /v1/workspaces/{workspace_id}/tools/{tool_id}`: update workspace attachment state
 - `DELETE /v1/workspaces/{workspace_id}/tools/{tool_id}`: detach a tool from a workspace
+- `GET /v1/tool-generation/requests`: list tool-generation requests for admins
+- `GET /v1/threads/{thread_id}/tool-generation/requests`: list tool-generation requests for a thread
+- `POST /v1/tool-generation/revisions/{revision_id}/approve`: publish a generated tool into the system catalog
 
 ## Layered Memory
 
@@ -749,6 +763,8 @@ For the shortest end-to-end local setup flow, see [`docs/system-quickstart.md`](
 
 For TUI setup, usage, and slash command documentation, see [`apps/tui/README.md`](/Users/nikolay.kvasov/Development/open-talon-1/apps/tui/README.md).
 
+For the end-to-end Tinker flow, including approval and manual workspace attachment, see [`docs/tinker-tool-generation.md`](/Users/nikolay.kvasov/Development/open-talon-1/docs/tinker-tool-generation.md).
+
 In the current auth model, the TUI is a **multi-profile** client:
 
 - each local profile lives under `~/.open-talon/profiles/<profile>/`
@@ -792,6 +808,13 @@ Inside `tui2`, the minimum auth path is:
 /organization list
 /organization use <id|slug|name>
 /workspace list
+```
+
+Tinker requests can also be opened directly from `tui2`:
+
+```text
+/tool request Build a repo statistics tool for this platform
+/tool request --scope organization Build a Fibonacci calculator tool that accepts integer n and returns the Fibonacci value
 ```
 
 Inside `user-client`, the minimum multi-user path is:
@@ -893,6 +916,9 @@ pytest tests/business-cases -q
 
 # Infrastructure integration tests
 pytest -m integration tests/infrastructure/test_infrastructure.py -v -s
+
+# Live Tinker tool-generation system test
+pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s
 
 # Full test coverage: default suite plus integration suite
 pytest -q
