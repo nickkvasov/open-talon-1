@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
-from datetime import datetime, timezone
+from pathlib import Path
 from uuid import UUID
 
 import redis.asyncio as aioredis
 from redis.exceptions import ConnectionError as RedisConnectionError
+
+_PRESENCE_DIRECTORY_DIR = Path(__file__).resolve().parents[4] / "services" / "presence-directory"
+if _PRESENCE_DIRECTORY_DIR.is_dir():
+    import sys
+
+    presence_path = str(_PRESENCE_DIRECTORY_DIR)
+    if presence_path not in sys.path:
+        sys.path.insert(0, presence_path)
+
+from presence_directory import ThreadPresenceDirectory, connection_key, presence_key
 
 from gateway_edge.config import settings
 from gateway_edge.db.postgres import get_pool
@@ -18,16 +27,13 @@ logger = logging.getLogger(__name__)
 
 _redis: aioredis.Redis | None = None
 
-_THREAD_CONN_PREFIX = "thread-connection:"
-_PRESENCE_PREFIX = "thread-presence:"
+
+def _presence_key(thread_id: UUID, participant_id: UUID) -> str:
+    return presence_key(thread_id, participant_id)
 
 
 def _connection_key(thread_id: UUID, connection_id: str) -> str:
-    return f"{_THREAD_CONN_PREFIX}{thread_id}:{connection_id}"
-
-
-def _presence_key(thread_id: UUID, participant_id: UUID) -> str:
-    return f"{_PRESENCE_PREFIX}{thread_id}:{participant_id}"
+    return connection_key(thread_id, connection_id)
 
 
 async def get_redis() -> aioredis.Redis:
@@ -79,80 +85,78 @@ async def teardown_valkey() -> None:
 
 async def register_thread_connection(
     *,
+    workspace_id: UUID | None = None,
     thread_id: UUID,
     participant_id: UUID,
     connection_id: str,
     status: str = "active",
 ) -> None:
-    redis = await get_redis()
-    now = datetime.now(timezone.utc).isoformat()
-    payload = {
-        "thread_id": str(thread_id),
-        "participant_id": str(participant_id),
-        "connection_id": connection_id,
-        "status": status,
-        "last_seen_at": now,
-    }
-    await redis.set(
-        _connection_key(thread_id, connection_id),
-        json.dumps(payload),
-        ex=settings.session_ttl_seconds,
+    directory = ThreadPresenceDirectory(
+        await get_redis(),
+        ttl_seconds=settings.session_ttl_seconds,
     )
-    await redis.set(
-        _presence_key(thread_id, participant_id),
-        json.dumps(payload),
-        ex=settings.session_ttl_seconds,
+    await directory.register_thread_connection(
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        participant_id=participant_id,
+        connection_id=connection_id,
+        status=status,
     )
 
 
 async def unregister_thread_connection(
     *,
+    workspace_id: UUID | None = None,
     thread_id: UUID,
     participant_id: UUID,
     connection_id: str,
 ) -> dict[str, str] | None:
-    redis = await get_redis()
-    await redis.delete(_connection_key(thread_id, connection_id))
-    remaining_connections = await _list_participant_connections(redis, thread_id, participant_id)
-    if remaining_connections:
-        replacement = remaining_connections[0]
-        await redis.set(
-            _presence_key(thread_id, participant_id),
-            json.dumps(replacement),
-            ex=settings.session_ttl_seconds,
-        )
-        return replacement
-    await redis.delete(_presence_key(thread_id, participant_id))
-    return None
+    directory = ThreadPresenceDirectory(
+        await get_redis(),
+        ttl_seconds=settings.session_ttl_seconds,
+    )
+    return await directory.unregister_thread_connection(
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        participant_id=participant_id,
+        connection_id=connection_id,
+    )
 
 
 async def touch_thread_presence(
     *,
+    workspace_id: UUID | None = None,
     thread_id: UUID,
     participant_id: UUID,
     connection_id: str | None = None,
     status: str = "active",
 ) -> None:
-    redis = await get_redis()
-    now = datetime.now(timezone.utc).isoformat()
-    payload = {
-        "thread_id": str(thread_id),
-        "participant_id": str(participant_id),
-        "connection_id": connection_id,
-        "status": status,
-        "last_seen_at": now,
-    }
-    await redis.set(
-        _presence_key(thread_id, participant_id),
-        json.dumps(payload),
-        ex=settings.session_ttl_seconds,
+    directory = ThreadPresenceDirectory(
+        await get_redis(),
+        ttl_seconds=settings.session_ttl_seconds,
     )
-    if connection_id is not None:
-        await redis.set(
-            _connection_key(thread_id, connection_id),
-            json.dumps(payload),
-            ex=settings.session_ttl_seconds,
-        )
+    await directory.touch_thread_presence(
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        participant_id=participant_id,
+        connection_id=connection_id,
+        status=status,
+    )
+
+
+async def get_workspace_participant_presence(
+    *,
+    workspace_id: UUID,
+    participant_id: UUID,
+) -> dict[str, str] | None:
+    directory = ThreadPresenceDirectory(
+        await get_redis(),
+        ttl_seconds=settings.session_ttl_seconds,
+    )
+    return await directory.get_workspace_participant_presence(
+        workspace_id=workspace_id,
+        participant_id=participant_id,
+    )
 
 
 async def create_session(session_id: UUID) -> SessionInfo:
@@ -215,32 +219,3 @@ async def delete_session(session_id: UUID) -> bool:
             session_id,
         )
     return result.endswith("1")
-
-
-async def _list_participant_connections(
-    redis: aioredis.Redis,
-    thread_id: UUID,
-    participant_id: UUID,
-) -> list[dict[str, str]]:
-    pattern = _connection_key(thread_id, "*")
-    payloads: list[dict[str, str]] = []
-
-    if hasattr(redis, "scan_iter"):
-        async for key in redis.scan_iter(match=pattern):
-            raw = await redis.get(key)
-            if raw is None:
-                continue
-            payload = json.loads(raw)
-            if payload.get("participant_id") == str(participant_id):
-                payloads.append(payload)
-        return payloads
-
-    values = getattr(redis, "values", None)
-    if isinstance(values, dict):
-        for key, raw in values.items():
-            if not key.startswith(_connection_key(thread_id, "")):
-                continue
-            payload = json.loads(raw)
-            if payload.get("participant_id") == str(participant_id):
-                payloads.append(payload)
-    return payloads

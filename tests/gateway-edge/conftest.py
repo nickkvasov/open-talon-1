@@ -77,6 +77,7 @@ class MockCollaborationService:
         self.workspace_sequences = {}
         self.thread_sequences = {}
         self.subscriptions = {}
+        self.workspace_presence_connections = {}
         self.git_repositories = {}
         self.assets = {}
         self.asset_versions = {}
@@ -361,7 +362,7 @@ class MockCollaborationService:
         workspace = self.workspaces.get(str(workspace_id))
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
-        participants = list(self.participants.get(str(workspace_id), {}).values())
+        participants = self._workspace_participants_with_presence(workspace_id)
         role_definitions = list(self.role_definitions.get(str(workspace_id), {}).values())
         tools = list(self.workspace_tools.get(str(workspace_id), {}).values())
         return WorkspaceDetail(
@@ -375,7 +376,7 @@ class MockCollaborationService:
         workspace = self.workspaces.get(str(workspace_id))
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
-        return list(self.participants.get(str(workspace_id), {}).values())
+        return self._workspace_participants_with_presence(workspace_id)
 
     async def delete_participant(self, workspace_id: UUID, participant_id: UUID, payload):
         workspace = self.workspaces.get(str(workspace_id))
@@ -1860,6 +1861,15 @@ class MockCollaborationService:
         thread = self.threads.get(str(thread_id))
         if thread is None:
             raise KeyError(f"Thread {thread_id} not found")
+        workspace_participants = self.participants.setdefault(str(thread.workspace_id), {})
+        existing_participant = workspace_participants.get(str(actor.participant_id))
+        if existing_participant is not None:
+            workspace_participants[str(actor.participant_id)] = existing_participant.model_copy(
+                update={
+                    "status": status,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            )
         sequence = self.thread_sequences.get(str(thread_id), 0) + 1
         self.thread_sequences[str(thread_id)] = sequence
         event = EventEnvelope(
@@ -1883,6 +1893,12 @@ class MockCollaborationService:
         return event
 
     async def on_thread_connected(self, *, thread_id: UUID, actor, connection_id: str):
+        thread = self.threads.get(str(thread_id))
+        if thread is not None:
+            self.workspace_presence_connections.setdefault(
+                (str(thread.workspace_id), str(actor.participant_id)),
+                set(),
+            ).add(connection_id)
         return await self.publish_presence(
             thread_id=thread_id,
             actor=actor,
@@ -1891,10 +1907,17 @@ class MockCollaborationService:
         )
 
     async def on_thread_disconnected(self, *, thread_id: UUID, actor, connection_id: str):
+        thread = self.threads.get(str(thread_id))
+        status = "offline"
+        if thread is not None:
+            key = (str(thread.workspace_id), str(actor.participant_id))
+            connections = self.workspace_presence_connections.setdefault(key, set())
+            connections.discard(connection_id)
+            status = "active" if connections else "offline"
         return await self.publish_presence(
             thread_id=thread_id,
             actor=actor,
-            status="offline",
+            status=status,
             connection_id=connection_id,
         )
 
@@ -1945,6 +1968,18 @@ class MockCollaborationService:
                 and event.target.id == viewer.participant_id
             )
         return False
+
+    def _workspace_participants_with_presence(self, workspace_id: UUID):
+        participants = list(self.participants.get(str(workspace_id), {}).values())
+        enriched = []
+        for participant in participants:
+            live_connections = self.workspace_presence_connections.get(
+                (str(workspace_id), str(participant.participant_id)),
+                set(),
+            )
+            status = "active" if live_connections else participant.status
+            enriched.append(participant.model_copy(update={"status": status}))
+        return enriched
 
 
 class MockAuditService:

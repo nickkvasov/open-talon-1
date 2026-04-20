@@ -1800,6 +1800,114 @@ async def test_delete_participant_removes_them_from_workspace_listing(client, ac
     assert second_actor["participant_id"] not in participant_ids
 
 
+def test_workspace_participants_listing_reflects_live_presence(sync_client, actor_payload):
+    workspace_resp = sync_client.post(
+        "/v1/workspaces",
+        json={"name": "Presence Directory", "actor": actor_payload},
+    )
+    workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+    thread_resp = sync_client.post(
+        f"/v1/workspaces/{workspace_id}/threads",
+        json={"title": "Presence", "actor": actor_payload},
+    )
+    thread_id = thread_resp.json()["thread"]["thread_id"]
+
+    initial_resp = sync_client.get(f"/v1/workspaces/{workspace_id}/participants")
+    assert initial_resp.status_code == 200
+    initial_participant = next(
+        participant
+        for participant in initial_resp.json()
+        if participant["participant_id"] == actor_payload["participant_id"]
+    )
+    assert initial_participant["status"] == "active"
+
+    with sync_client.websocket_connect(
+        f"/v1/threads/{thread_id}/ws"
+        f"?participant_id={actor_payload['participant_id']}"
+        f"&display_name={actor_payload['display_name']}"
+        "&participant_type=user"
+        "&after_sequence=0"
+    ) as websocket:
+        websocket.receive_json()
+        active_resp = sync_client.get(f"/v1/workspaces/{workspace_id}/participants")
+        assert active_resp.status_code == 200
+        active_participant = next(
+            participant
+            for participant in active_resp.json()
+            if participant["participant_id"] == actor_payload["participant_id"]
+        )
+        assert active_participant["status"] == "active"
+
+    offline_resp = sync_client.get(f"/v1/workspaces/{workspace_id}/participants")
+    assert offline_resp.status_code == 200
+    offline_participant = next(
+        participant
+        for participant in offline_resp.json()
+        if participant["participant_id"] == actor_payload["participant_id"]
+    )
+    assert offline_participant["status"] == "offline"
+
+
+def test_workspace_participants_listing_stays_active_until_last_workspace_connection_closes(
+    sync_client, actor_payload
+):
+    workspace_resp = sync_client.post(
+        "/v1/workspaces",
+        json={"name": "Presence Aggregation", "actor": actor_payload},
+    )
+    workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+    first_thread_resp = sync_client.post(
+        f"/v1/workspaces/{workspace_id}/threads",
+        json={"title": "First", "actor": actor_payload},
+    )
+    first_thread_id = first_thread_resp.json()["thread"]["thread_id"]
+    second_thread_resp = sync_client.post(
+        f"/v1/workspaces/{workspace_id}/threads",
+        json={"title": "Second", "actor": actor_payload},
+    )
+    second_thread_id = second_thread_resp.json()["thread"]["thread_id"]
+
+    with sync_client.websocket_connect(
+        f"/v1/threads/{first_thread_id}/ws"
+        f"?participant_id={actor_payload['participant_id']}"
+        f"&display_name={actor_payload['display_name']}"
+        "&participant_type=user"
+        "&after_sequence=0"
+    ) as first_ws:
+        first_ws.receive_json()
+        with sync_client.websocket_connect(
+            f"/v1/threads/{second_thread_id}/ws"
+            f"?participant_id={actor_payload['participant_id']}"
+            f"&display_name={actor_payload['display_name']}"
+            "&participant_type=user"
+            "&after_sequence=0"
+        ) as second_ws:
+            second_ws.receive_json()
+            active_resp = sync_client.get(f"/v1/workspaces/{workspace_id}/participants")
+            active_participant = next(
+                participant
+                for participant in active_resp.json()
+                if participant["participant_id"] == actor_payload["participant_id"]
+            )
+            assert active_participant["status"] == "active"
+
+        still_active_resp = sync_client.get(f"/v1/workspaces/{workspace_id}/participants")
+        still_active_participant = next(
+            participant
+            for participant in still_active_resp.json()
+            if participant["participant_id"] == actor_payload["participant_id"]
+        )
+        assert still_active_participant["status"] == "active"
+
+    offline_resp = sync_client.get(f"/v1/workspaces/{workspace_id}/participants")
+    offline_participant = next(
+        participant
+        for participant in offline_resp.json()
+        if participant["participant_id"] == actor_payload["participant_id"]
+    )
+    assert offline_participant["status"] == "offline"
+
+
 async def test_create_or_update_named_role_definition_in_workspace(client, actor_payload):
     workspace_resp = await client.post(
         "/v1/workspaces",

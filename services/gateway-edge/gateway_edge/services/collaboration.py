@@ -62,6 +62,7 @@ from gateway_edge.models import (
     Organization,
     OrganizationMembership,
     ParticipantInput,
+    ParticipantProfile,
     RoleDefinition,
     PublishAssetFromGitRequest,
     ResolvedAssetBinding,
@@ -94,6 +95,7 @@ from gateway_edge.services.git_publish import GitPublishService
 from gateway_edge.services.object_storage import MinioObjectStorage
 from gateway_edge.services.events import event_service
 from gateway_edge.services.session import (
+    get_workspace_participant_presence,
     register_thread_connection,
     touch_thread_presence,
     unregister_thread_connection,
@@ -293,11 +295,23 @@ class CollaborationService:
 
     async def get_workspace(self, workspace_id: UUID) -> WorkspaceDetail:
         logger.debug("Service get_workspace workspace_id=%s", workspace_id)
-        return await self._require_kernel().get_workspace_detail(workspace_id)
+        detail = await self._require_kernel().get_workspace_detail(workspace_id)
+        return detail.model_copy(
+            update={
+                "participants": await self._overlay_workspace_presence(
+                    workspace_id=workspace_id,
+                    participants=detail.participants,
+                )
+            }
+        )
 
     async def list_workspace_participants(self, workspace_id: UUID):
         logger.debug("Service list_workspace_participants workspace_id=%s", workspace_id)
-        return await self._require_kernel().list_workspace_participants(workspace_id)
+        participants = await self._require_kernel().list_workspace_participants(workspace_id)
+        return await self._overlay_workspace_presence(
+            workspace_id=workspace_id,
+            participants=participants,
+        )
 
     async def delete_participant(
         self,
@@ -1133,7 +1147,9 @@ class CollaborationService:
             actor.participant_id,
             connection_id,
         )
+        workspace_id = await self._workspace_id_for_thread(thread_id)
         await register_thread_connection(
+            workspace_id=workspace_id,
             thread_id=thread_id,
             participant_id=actor.participant_id,
             connection_id=connection_id,
@@ -1159,7 +1175,9 @@ class CollaborationService:
             actor.participant_id,
             connection_id,
         )
+        workspace_id = await self._workspace_id_for_thread(thread_id)
         remaining_connection = await unregister_thread_connection(
+            workspace_id=workspace_id,
             thread_id=thread_id,
             participant_id=actor.participant_id,
             connection_id=connection_id,
@@ -1240,6 +1258,7 @@ class CollaborationService:
             connection_id,
         )
         await touch_thread_presence(
+            workspace_id=await self._workspace_id_for_thread(thread_id),
             thread_id=thread_id,
             participant_id=actor.participant_id,
             connection_id=connection_id,
@@ -1266,6 +1285,35 @@ class CollaborationService:
         if self._kernel is None:
             raise RuntimeError("Collaboration service is not started")
         return self._kernel
+
+    async def _workspace_id_for_thread(self, thread_id: UUID) -> UUID:
+        detail = await self._require_kernel().get_thread_detail(thread_id)
+        return detail.thread.workspace_id
+
+    async def _overlay_workspace_presence(
+        self,
+        *,
+        workspace_id: UUID,
+        participants: list[ParticipantProfile],
+    ) -> list[ParticipantProfile]:
+        enriched: list[ParticipantProfile] = []
+        for participant in participants:
+            try:
+                presence = await get_workspace_participant_presence(
+                    workspace_id=workspace_id,
+                    participant_id=participant.participant_id,
+                )
+            except RuntimeError:
+                presence = None
+            if presence is None:
+                enriched.append(participant)
+                continue
+            status = presence.get("status")
+            if status is None:
+                enriched.append(participant)
+                continue
+            enriched.append(participant.model_copy(update={"status": status}))
+        return enriched
 
     @staticmethod
     def _content_type_for_path(path: str) -> str:
