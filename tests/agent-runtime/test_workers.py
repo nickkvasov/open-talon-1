@@ -84,6 +84,54 @@ class _FakeKernel:
         return _FakeCommandResult()
 
 
+class _RecordingObservation:
+    def __init__(self, sink: list[dict[str, object]], payload: dict[str, object]) -> None:
+        self._sink = sink
+        self._entry = {**payload, "updates": []}
+
+    def __enter__(self):
+        self._sink.append(self._entry)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._entry["error"] = str(exc) if exc is not None else None
+        return False
+
+    def update(self, **kwargs):
+        self._entry["updates"].append(kwargs)
+
+
+class _RecordingObserver:
+    def __init__(self) -> None:
+        self.spans: list[dict[str, object]] = []
+        self.events: list[dict[str, object]] = []
+        self.flush_count = 0
+
+    def start_span(self, *, name, input=None, metadata=None):
+        return _RecordingObservation(
+            self.spans,
+            {"kind": "span", "name": name, "input": input, "metadata": metadata},
+        )
+
+    def start_generation(self, *, name, model=None, input=None, metadata=None):
+        return _RecordingObservation(
+            self.spans,
+            {
+                "kind": "generation",
+                "name": name,
+                "model": model,
+                "input": input,
+                "metadata": metadata,
+            },
+        )
+
+    def record_event(self, *, name, input=None, metadata=None):
+        self.events.append({"name": name, "input": input, "metadata": metadata})
+
+    def flush(self):
+        self.flush_count += 1
+
+
 class _FakeBackend:
     kind = "local_process"
 
@@ -141,6 +189,10 @@ def _settings() -> RuntimeWorkerSettings:
         enable_kafka_wakeups=False,
         execution_root="/tmp/open-talon-executions",
         default_workspace_path=None,
+        forgejo_registry_url="127.0.0.1:3001",
+        forgejo_registry_username="forgejo",
+        forgejo_registry_password_secret_config={"env": "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD"},
+        forgejo_registry_validate_on_startup=False,
     )
 
 
@@ -193,6 +245,30 @@ def _tool_call_with_workspace_ref() -> ToolCall:
     )
 
 
+def _generated_fibonacci_tool_call() -> ToolCall:
+    spec = ExecutionSpec(
+        invocation_id=uuid4(),
+        handler_ref="registry.example/fibonacci-calculator@sha256:fibonacci55",
+        inline_payload={"n": 10},
+        limits={"timeout_seconds": 30},
+        metadata={"backend_kind": "docker"},
+    )
+    return ToolCall(
+        tool_call_id=uuid4(),
+        run_id=uuid4(),
+        run_step_id=uuid4(),
+        task_id=uuid4(),
+        workspace_id=uuid4(),
+        thread_id=uuid4(),
+        system_agent_id=uuid4(),
+        tool_id=uuid4(),
+        tool_name="fibonacci_calculator",
+        status="claimed",
+        execution_spec=spec.model_dump(mode="json"),
+        claimed_by_worker="tool-worker",
+    )
+
+
 def test_route_event_topic_sends_requeue_wakeups_to_agent_tasks_topic():
     settings = _settings()
     tool_event = EventEnvelope(
@@ -233,6 +309,73 @@ def test_tool_worker_persists_execution_handle_before_completion():
     assert kernel.completed is not None
     assert kernel.completed.output_payload == {"ok": True}
     assert kernel.failed is None
+
+
+def test_tool_worker_executes_generated_fibonacci_tool_call_with_docker_backend():
+    class _FakeDockerBackend(_FakeBackend):
+        kind = "docker"
+
+        async def submit(self, spec: ExecutionSpec) -> ExecutionHandle:
+            self.submit_calls += 1
+            self.submitted_specs.append(spec)
+            return ExecutionHandle(
+                backend_kind="docker",
+                invocation_id=spec.invocation_id,
+                handle="docker-handle-1",
+            )
+
+        async def poll(self, handle: ExecutionHandle) -> ExecutionResult:
+            self.poll_calls += 1
+            return ExecutionResult(status="completed", output_payload={"n": 10, "value": 55})
+
+        async def collect(self, handle: ExecutionHandle) -> ExecutionResult:
+            return ExecutionResult(status="completed", output_payload={"n": 10, "value": 55})
+
+    backend = _FakeDockerBackend()
+    kernel = _FakeKernel()
+    worker = ToolWorker(
+        kernel=kernel,
+        publisher=_FakePublisher(),
+        settings=_settings(),
+        backend_registry=ExecutionBackendRegistry([backend]),
+    )
+
+    asyncio.run(worker._process_tool_call(_generated_fibonacci_tool_call()))
+
+    assert backend.submit_calls == 1
+    assert backend.submitted_specs[0].handler_ref == "registry.example/fibonacci-calculator@sha256:fibonacci55"
+    assert backend.submitted_specs[0].metadata["backend_kind"] == "docker"
+    assert kernel.updated_handle == "docker-handle-1"
+    assert kernel.completed is not None
+    assert kernel.completed.output_payload == {"n": 10, "value": 55}
+    assert kernel.failed is None
+
+
+def test_tool_worker_emits_observability_span_for_execution():
+    backend = _FakeBackend()
+    kernel = _FakeKernel()
+    observer = _RecordingObserver()
+    worker = ToolWorker(
+        kernel=kernel,
+        publisher=_FakePublisher(),
+        settings=_settings(),
+        backend_registry=ExecutionBackendRegistry([backend]),
+        observability=observer,
+    )
+    tool_call = _tool_call()
+
+    asyncio.run(worker._process_tool_call(tool_call))
+
+    assert len(observer.spans) == 1
+    span = observer.spans[0]
+    assert span["name"] == "tool-call-execution"
+    assert span["metadata"]["tool_call_id"] == str(tool_call.tool_call_id)
+    assert span["metadata"]["tool_name"] == tool_call.tool_name
+    assert span["metadata"]["backend_kind"] == "local_process"
+    assert span["metadata"]["workspace_id"] == str(tool_call.workspace_id)
+    assert any(update["status"] == "submitted" for update in span["updates"])
+    assert any(update["status"] == "completed" for update in span["updates"])
+    assert observer.flush_count == 1
 
 
 def test_tool_worker_cancels_execution_on_timeout():

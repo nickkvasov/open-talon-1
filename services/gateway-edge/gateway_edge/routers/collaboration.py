@@ -39,6 +39,7 @@ from gateway_edge.models import (
     CreateMemoryEntryRequest,
     CreateThreadMemoryRequest,
     CreateMessageRequest,
+    CreateToolGenerationRevisionRequest,
     SearchMemoryRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
@@ -73,6 +74,7 @@ from gateway_edge.models import (
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    ToolGenerationRequestDetail,
     WorkspaceCommunicationLogPage,
     UpdateSystemAgentRequest,
     UpdateInteractionRequestRequest,
@@ -83,6 +85,7 @@ from gateway_edge.models import (
     UpdateMemoryProviderRequest,
     UpdateMemoryEntryRequest,
     UpdateOrganizationRequest,
+    ReviewToolGenerationRevisionRequest,
     UpdateWorkspaceToolRequest,
     UpdateWorkspaceRequest,
     Workspace,
@@ -2362,6 +2365,141 @@ async def post_message(
     )
     try:
         return await collab_svc.collaboration_service.post_message(thread_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/tool-generation/requests",
+    response_model=list[ToolGenerationRequestDetail],
+    summary="List tool-generation requests",
+)
+async def list_tool_generation_requests(
+    request: Request,
+    organization_id: UUID | None = Query(default=None),
+    workspace_id: UUID | None = Query(default=None),
+    status: str | None = Query(default=None),
+) -> list[ToolGenerationRequestDetail]:
+    require_admin_access(request)
+    logger.debug(
+        "HTTP list_tool_generation_requests organization_id=%s workspace_id=%s status=%s",
+        organization_id,
+        workspace_id,
+        status,
+    )
+    try:
+        return await collab_svc.collaboration_service.list_tool_generation_requests(
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            status=status,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/threads/{thread_id}/tool-generation/requests",
+    response_model=list[ToolGenerationRequestDetail],
+    summary="List tool-generation requests for a thread",
+)
+async def list_thread_tool_generation_requests(
+    request: Request,
+    thread_id: UUID,
+) -> list[ToolGenerationRequestDetail]:
+    try:
+        await _require_thread_membership(request, thread_id)
+        return await collab_svc.collaboration_service.list_thread_tool_generation_requests(
+            thread_id
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/tool-generation/requests/{request_id}",
+    response_model=ToolGenerationRequestDetail,
+    summary="Get one tool-generation request",
+)
+async def get_tool_generation_request(
+    request: Request,
+    request_id: UUID,
+) -> ToolGenerationRequestDetail:
+    try:
+        detail = await collab_svc.collaboration_service.get_tool_generation_request(request_id)
+        if not has_admin_access(request):
+            await _require_thread_membership(request, detail.request.thread_id)
+        return detail
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/tool-generation/requests/{request_id}/revisions",
+    response_model=ToolGenerationRequestDetail,
+    summary="Create a new tool-generation revision for a request",
+)
+async def create_tool_generation_revision(
+    request: Request,
+    request_id: UUID,
+    payload: CreateToolGenerationRevisionRequest,
+) -> ToolGenerationRequestDetail:
+    try:
+        existing = await collab_svc.collaboration_service.get_tool_generation_request(request_id)
+        payload = payload.model_copy(
+            update={
+                "actor": await _resolve_thread_actor(
+                    request,
+                    payload.actor,
+                    thread_id=existing.request.thread_id,
+                )
+            }
+        )
+        return await collab_svc.collaboration_service.create_tool_generation_revision(
+            request_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/tool-generation/revisions/{revision_id}/approve",
+    response_model=ToolGenerationRequestDetail,
+    summary="Approve a tool-generation revision and start worker-side registry verification",
+)
+async def approve_tool_generation_revision(
+    request: Request,
+    revision_id: UUID,
+    payload: ReviewToolGenerationRevisionRequest,
+) -> ToolGenerationRequestDetail:
+    require_admin_access(request)
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.approve_tool_generation_revision(
+            revision_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/tool-generation/revisions/{revision_id}/reject",
+    response_model=ToolGenerationRequestDetail,
+    summary="Reject a tool-generation revision",
+)
+async def reject_tool_generation_revision(
+    request: Request,
+    revision_id: UUID,
+    payload: ReviewToolGenerationRevisionRequest,
+) -> ToolGenerationRequestDetail:
+    require_admin_access(request)
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.reject_tool_generation_revision(
+            revision_id,
+            payload,
+        )
     except Exception as exc:
         raise _http_error(exc) from exc
 

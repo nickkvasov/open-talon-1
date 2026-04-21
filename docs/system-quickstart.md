@@ -424,6 +424,7 @@ Useful `tui2` commands:
 /thread list
 /thread create <title>
 /thread use <id|title>
+/tool request [--scope global|organization] <text>
 /links
 /open <number|last|url>
 /copy
@@ -471,6 +472,46 @@ That lets multiple humans use the same machine without sharing identity. Each pr
 
 Recent live verification in local dev confirmed the end-to-end `tui2` flow for the realm user `admin`: profile bootstrap, `/account whoami`, `/thread create`, and a real message send all completed successfully against the running stack.
 
+## 8A. Generate A Tool With Tinker
+
+Tinker is the seeded tool-generation agent. It must be attached to a workspace before it can accept tool requests there.
+
+Typical local flow:
+
+1. Sign in as a workspace `admin` or `supervisor`.
+2. Select an organization and workspace.
+3. Attach `Tinker` to that workspace.
+4. Open a thread and ask Tinker for a tool.
+5. Approve the generated revision in the admin web `Tool Generation` page.
+6. Manually attach the published tool to the workspace.
+7. Ask another attached agent to use the tool.
+
+In `tui2`, a request looks like:
+
+```text
+/tool request Build a repo statistics tool for this platform
+/tool request --scope organization Build a Fibonacci calculator tool that accepts integer n and returns the Fibonacci value
+```
+
+Current publication rules:
+
+- `global` requests publish to the global system catalog
+- `organization` requests publish to the current organization catalog
+- approval never auto-attaches the tool to a workspace
+- workspace `admin` or `supervisor` users attach it later with `PUT /v1/workspaces/{workspace_id}/tools/{tool_id}`
+
+Useful routes:
+
+```text
+POST /v1/workspaces/{workspace_id}/agents
+POST /v1/threads/{thread_id}/messages
+GET /v1/threads/{thread_id}/tool-generation/requests
+POST /v1/tool-generation/revisions/{revision_id}/approve
+PUT /v1/workspaces/{workspace_id}/tools/{tool_id}
+```
+
+For a deeper walkthrough, see [tinker-tool-generation.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/tinker-tool-generation.md).
+
 ## 9. Quick Verification
 
 Fast endpoint checks:
@@ -506,6 +547,15 @@ pytest tests/tui -q
 pytest tests/core-collab -q
 pytest tests/infrastructure/test_keycloak_local_config.py -q
 ```
+
+Tinker-specific verification:
+
+```bash
+pytest tests/business-cases/test_tinker_tool_generation.py -q
+pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s
+```
+
+The live Tinker system test expects `gemma4:latest` to be available in the local Ollama instance.
 
 If you changed schema, auth, routing, or participant identity behavior, run:
 

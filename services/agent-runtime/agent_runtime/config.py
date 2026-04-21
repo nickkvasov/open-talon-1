@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 
@@ -25,6 +26,16 @@ def _get_int(name: str, default: int) -> int:
 def _get_float(name: str, default: float) -> float:
     value = os.getenv(name)
     return float(value) if value is not None else default
+
+
+def _get_json_dict(name: str, default: dict[str, object]) -> dict[str, object]:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return dict(default)
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{name} must decode to a JSON object")
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -52,6 +63,11 @@ class RuntimeWorkerSettings:
     enable_kafka_wakeups: bool
     execution_root: str
     default_workspace_path: str | None
+    forgejo_registry_url: str | None
+    forgejo_registry_username: str | None
+    forgejo_registry_password_secret_config: dict[str, object]
+    forgejo_registry_validate_on_startup: bool
+    oci_registry_repository_prefix: str | None = None
     communication_log_dir: str | None = None
 
     @classmethod
@@ -93,6 +109,20 @@ class RuntimeWorkerSettings:
             enable_kafka_wakeups=_get_bool("ENABLE_KAFKA_WAKEUPS", True),
             execution_root=os.getenv("OPEN_TALON_EXECUTION_ROOT", "/tmp/open-talon-executions"),
             default_workspace_path=os.getenv("OPEN_TALON_DEFAULT_WORKSPACE_PATH"),
+            forgejo_registry_url=os.getenv("OPEN_TALON_FORGEJO_REGISTRY_URL", "localhost:3001"),
+            forgejo_registry_username=os.getenv("OPEN_TALON_FORGEJO_REGISTRY_USERNAME", "forgejo"),
+            forgejo_registry_password_secret_config=_get_json_dict(
+                "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD_SECRET_CONFIG",
+                {"env": "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD"},
+            ),
+            forgejo_registry_validate_on_startup=_get_bool(
+                "OPEN_TALON_FORGEJO_REGISTRY_VALIDATE_ON_STARTUP",
+                True,
+            ),
+            oci_registry_repository_prefix=os.getenv(
+                "OPEN_TALON_OCI_REGISTRY_REPOSITORY_PREFIX",
+                "forgejo/generated-tools",
+            ),
             communication_log_dir=os.getenv(
                 "OPEN_TALON_COMMUNICATION_LOG_DIR",
                 str(_ROOT_DIR / "infrastructure" / "data" / "communication-logs"),

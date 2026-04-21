@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import asyncpg
 import pytest
@@ -179,6 +179,48 @@ async def test_repository_migrations_seed_default_reasoning_planner_agent():
         ]
         assert seeded.metadata["seeded"] is True
         assert seeded.metadata["example"] is True
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_repository_migrations_seed_tinker_agent_with_internal_tools():
+    try:
+        pool = await asyncpg.create_pool(dsn=_postgres_dsn(), min_size=1, max_size=2)
+    except Exception as exc:  # pragma: no cover - integration environment dependent
+        pytest.skip(f"Postgres not available for repository integration test: {exc}")
+
+    repository = CollaborationRepository(pool)
+    await apply_pending_migrations(pool)
+
+    try:
+        tinker_agent_id = UUID("44444444-4444-4444-4444-444444444444")
+        tinker = await repository.fetch_system_agent(tinker_agent_id)
+
+        assert tinker is not None
+        assert tinker.display_name == "Tinker"
+        assert tinker.role == "tool generation agent"
+        assert set(tinker.capabilities) == {
+            "tool_generation",
+            "tool_validation",
+            "tool_catalog",
+            "tool_authoring",
+        }
+        assert tinker.metadata["tool_generation_agent"] is True
+
+        internal_tools = await repository.list_agent_internal_tools(tinker_agent_id)
+        assert {tool.name for tool in internal_tools} == {
+            "tinker_generated_repo_bootstrap",
+            "tinker_generated_repo_write",
+            "tinker_generated_tool_build",
+            "tinker_generated_tool_registry_push",
+            "tinker_generated_tool_registry_pull_verify",
+            "tinker_generated_tool_smoke_test",
+            "tinker_generated_tool_asset_publish",
+            "tinker_tool_request_status_update",
+        }
+        assert all(tool.execution.trust_level == "trusted" for tool in internal_tools)
+        assert all(tool.metadata["managed"] is True for tool in internal_tools)
     finally:
         await pool.close()
 

@@ -18,6 +18,11 @@ if _CORE_COLLAB_DIR.is_dir():
 
 from core_collab import CollaborationKernel, CollaborationRepository  # noqa: E402
 from open_talon_contracts.models import AuditEventDraft, ExecutionSpec, ParticipantInput  # noqa: E402
+from open_talon_contracts.observability import (  # noqa: E402
+    ObservabilityProvider,
+    build_observability_provider_from_env,
+)
+from open_talon_contracts.telemetry import TelemetryContext, telemetry_metadata  # noqa: E402
 
 from .config import RuntimeWorkerSettings
 from .events import KafkaEventPublisher, KafkaWakeConsumer
@@ -116,13 +121,14 @@ class AgentLoopWorker:
         settings: RuntimeWorkerSettings,
         engine_registry=None,
         secret_resolver=None,
+        observability: ObservabilityProvider | None = None,
     ) -> None:
         self._kernel = kernel
         self._publisher = publisher
         self._settings = settings
         self._execution = RuntimeExecutionManager(
             model_timeout_seconds=settings.model_timeout_seconds,
-            observability=None,
+            observability=observability,
             engine_registry=engine_registry,
             secret_resolver=secret_resolver,
         )
@@ -301,11 +307,16 @@ class ToolWorker:
         publisher: KafkaEventPublisher,
         settings: RuntimeWorkerSettings,
         backend_registry: ExecutionBackendRegistry,
+        observability: ObservabilityProvider | None = None,
     ) -> None:
         self._kernel = kernel
         self._publisher = publisher
         self._settings = settings
         self._backend_registry = backend_registry
+        self._observability = observability or build_observability_provider_from_env(
+            service_name="agent-runtime",
+            legacy_env_prefix="AGENT_RUNTIME",
+        )
         self._processing: dict[UUID, asyncio.Task[None]] = {}
         self._wake = asyncio.Event()
         self._wake_consumer = (
@@ -337,6 +348,7 @@ class ToolWorker:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self._processing.clear()
+        self._observability.flush()
 
     async def run_forever(self) -> None:
         await self.start()
@@ -385,6 +397,8 @@ class ToolWorker:
         )
         await heartbeat.start()
         handle = None
+        observation = None
+        observation_cm = None
         try:
             spec = ExecutionSpec.model_validate(tool_call.execution_spec)
             if (
@@ -401,6 +415,34 @@ class ToolWorker:
                     }
                 )
             backend_kind = str(spec.metadata.get("backend_kind", "docker"))
+            observation_context = TelemetryContext(
+                source_service="agent-runtime",
+                source_component="tool-worker",
+                workspace_id=tool_call.workspace_id,
+                thread_id=tool_call.thread_id,
+                system_agent_id=tool_call.system_agent_id,
+                task_id=tool_call.task_id,
+                run_id=tool_call.run_id,
+                run_step_id=tool_call.run_step_id,
+                tool_call_id=tool_call.tool_call_id,
+                metadata={
+                    "tool_id": str(tool_call.tool_id),
+                    "tool_name": tool_call.tool_name,
+                    "worker_id": "tool-worker",
+                    "backend_kind": backend_kind,
+                    "handler_ref": spec.handler_ref,
+                },
+            )
+            observation_cm = self._observability.start_span(
+                name="tool-call-execution",
+                input={
+                    "tool_call_id": str(tool_call.tool_call_id),
+                    "tool_name": tool_call.tool_name,
+                    "inline_payload": spec.inline_payload,
+                },
+                metadata=telemetry_metadata(observation_context),
+            )
+            observation = observation_cm.__enter__()
             backend = self._backend_registry.resolve(backend_kind)
             handle = await backend.submit(spec)
             await self._kernel.update_tool_call_execution_handle(
@@ -408,6 +450,7 @@ class ToolWorker:
                 "tool-worker",
                 handle.handle,
             )
+            observation.update(execution_handle=handle.handle, status="submitted")
             deadline = time.monotonic() + spec.limits.timeout_seconds
             result: Any
             while True:
@@ -426,6 +469,10 @@ class ToolWorker:
                 break
             result = await backend.collect(handle)
             tool_result = to_tool_call_result(result)
+            observation.update(
+                status=result.status,
+                output=tool_result.model_dump(mode="json"),
+            )
             if result.status == "completed":
                 completion = await self._kernel.complete_tool_call(
                     tool_call_id,
@@ -448,6 +495,8 @@ class ToolWorker:
             raise
         except Exception as exc:
             logger.exception("Tool worker failed tool_call_id=%s", tool_call_id)
+            if observation is not None:
+                observation.update(status="failed", error=str(exc))
             await _record_runtime_audit(
                 self._kernel,
                 workspace_id=tool_call.workspace_id,
@@ -471,6 +520,9 @@ class ToolWorker:
             )
             await self._publisher.publish(failure.events)
         finally:
+            if observation_cm is not None:
+                observation_cm.__exit__(None, None, None)
+            self._observability.flush()
             await heartbeat.stop()
 
     async def _watch_wake_events(self) -> None:

@@ -82,6 +82,7 @@ class MockCollaborationService:
         self.assets = {}
         self.asset_versions = {}
         self.asset_links = {}
+        self.tool_generation_requests = {}
 
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
@@ -1063,6 +1064,139 @@ class MockCollaborationService:
         _ = workspace_id
         return list(self.system_tools.values())
 
+    async def list_tool_generation_requests(
+        self,
+        *,
+        organization_id=None,
+        workspace_id=None,
+        thread_id=None,
+        status=None,
+    ):
+        return [
+            detail
+            for detail in self.tool_generation_requests.values()
+            if (organization_id is None or detail.request.organization_id == organization_id)
+            and (workspace_id is None or detail.request.workspace_id == workspace_id)
+            and (thread_id is None or detail.request.thread_id == thread_id)
+            and (status is None or detail.request.status == status)
+        ]
+
+    async def list_thread_tool_generation_requests(self, thread_id: UUID):
+        return await self.list_tool_generation_requests(thread_id=thread_id)
+
+    async def get_tool_generation_request(self, request_id: UUID):
+        detail = self.tool_generation_requests.get(str(request_id))
+        if detail is None:
+            raise KeyError(f"Tool generation request {request_id} not found")
+        return detail
+
+    async def create_tool_generation_revision(self, request_id: UUID, payload):
+        from gateway_edge.models import ToolGenerationRevision
+
+        detail = await self.get_tool_generation_request(request_id)
+        revision_number = max((item.revision_number for item in detail.revisions), default=0) + 1
+        revision = ToolGenerationRevision(
+            revision_id=uuid4(),
+            request_id=request_id,
+            revision_number=revision_number,
+            status=payload.status,
+            manifest=payload.manifest,
+            validation_report=payload.validation_report,
+            source_asset_id=payload.source_asset_id,
+            source_asset_version_id=payload.source_asset_version_id,
+            manifest_asset_id=payload.manifest_asset_id,
+            manifest_asset_version_id=payload.manifest_asset_version_id,
+            report_asset_id=payload.report_asset_id,
+            report_asset_version_id=payload.report_asset_version_id,
+            image_ref=payload.image_ref,
+            image_digest=payload.image_digest,
+            created_by=payload.actor.participant_id,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            metadata=payload.metadata,
+        )
+        detail = detail.model_copy(
+            update={
+                "request": detail.request.model_copy(
+                    update={
+                        "status": payload.status,
+                        "target_tool_name": payload.manifest.name,
+                        "summary": payload.manifest.description,
+                        "latest_revision_id": revision.revision_id,
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                ),
+                "revisions": [revision, *detail.revisions],
+            }
+        )
+        self.tool_generation_requests[str(request_id)] = detail
+        return detail
+
+    async def approve_tool_generation_revision(self, revision_id: UUID, payload):
+        for request_id, detail in self.tool_generation_requests.items():
+            for revision in detail.revisions:
+                if revision.revision_id != revision_id:
+                    continue
+                now = datetime.now(timezone.utc)
+                updated_revisions = [
+                    item.model_copy(
+                        update={
+                            "status": "verifying_registry_pull",
+                            "updated_at": now,
+                            "metadata": {
+                                **item.metadata,
+                                "approval_verification_immutable_ref": "registry.example/repo_stats@sha256:abcd",
+                            },
+                        }
+                    )
+                    if item.revision_id == revision_id
+                    else item
+                    for item in detail.revisions
+                ]
+                updated_request = detail.request.model_copy(
+                    update={
+                        "status": "verifying_registry_pull",
+                        "updated_at": now,
+                        "metadata": {
+                            **detail.request.metadata,
+                            "approval_verification_immutable_ref": "registry.example/repo_stats@sha256:abcd",
+                        },
+                    }
+                )
+                updated_detail = detail.model_copy(
+                    update={"request": updated_request, "revisions": updated_revisions}
+                )
+                self.tool_generation_requests[request_id] = updated_detail
+                return updated_detail
+        raise KeyError(f"Tool generation revision {revision_id} not found")
+
+    async def reject_tool_generation_revision(self, revision_id: UUID, payload):
+        for request_id, detail in self.tool_generation_requests.items():
+            for revision in detail.revisions:
+                if revision.revision_id != revision_id:
+                    continue
+                now = datetime.now(timezone.utc)
+                updated_revisions = [
+                    item.model_copy(update={"status": "rejected", "updated_at": now})
+                    if item.revision_id == revision_id
+                    else item
+                    for item in detail.revisions
+                ]
+                updated_request = detail.request.model_copy(
+                    update={
+                        "status": "rejected",
+                        "rejected_by": payload.actor.participant_id,
+                        "rejected_at": now,
+                        "updated_at": now,
+                    }
+                )
+                updated_detail = detail.model_copy(
+                    update={"request": updated_request, "revisions": updated_revisions}
+                )
+                self.tool_generation_requests[request_id] = updated_detail
+                return updated_detail
+        raise KeyError(f"Tool generation revision {revision_id} not found")
+
     async def assume_participant_role(self, workspace_id: UUID, participant_id: UUID, payload):
         from gateway_edge.models import ParticipantProfile
 
@@ -1319,7 +1453,14 @@ class MockCollaborationService:
         )
 
     async def post_message(self, thread_id: UUID, payload):
-        from gateway_edge.models import ActorRef, EventEnvelope, TargetRef, TimelineMessage
+        from gateway_edge.models import (
+            ActorRef,
+            EventEnvelope,
+            TargetRef,
+            TimelineMessage,
+            ToolGenerationRequest,
+            ToolGenerationRequestDetail,
+        )
 
         thread = self.threads.get(str(thread_id))
         if thread is None:
@@ -1327,8 +1468,65 @@ class MockCollaborationService:
         now = datetime.now(timezone.utc)
         next_sequence = self.thread_sequences.get(str(thread_id), 0) + 1
         self.thread_sequences[str(thread_id)] = next_sequence
+        metadata = dict(payload.metadata)
+        target_system_agent_id = getattr(payload, "target_system_agent_id", None)
+        if target_system_agent_id is not None:
+            metadata["target_system_agent_id"] = str(target_system_agent_id)
+        target_tool_scope = getattr(payload, "target_tool_scope", None)
+        if target_tool_scope is not None:
+            metadata["target_tool_scope"] = target_tool_scope
+        message_id = uuid4()
+        if (
+            target_system_agent_id is not None
+            and metadata.get("tool_generation_request_id") is None
+        ):
+            target_agent = self.system_agents.get(str(target_system_agent_id))
+            target_definition = target_agent.definition if target_agent is not None else {}
+            if target_agent is not None and (
+                target_agent.metadata.get("tool_generation_agent")
+                or target_definition.get("tool_generation_agent")
+            ):
+                target_tool_name = metadata.get("target_tool_name")
+                if not isinstance(target_tool_name, str) or not target_tool_name.strip():
+                    lowered = payload.content.lower()
+                    marker = "tool "
+                    if marker in lowered:
+                        index = lowered.find(marker) + len(marker)
+                        target_tool_name = payload.content[index:].strip(" :.-")[:200] or None
+                    else:
+                        target_tool_name = None
+                workspace = self.workspaces.get(str(thread.workspace_id))
+                request = ToolGenerationRequest(
+                    request_id=uuid4(),
+                    organization_id=(
+                        workspace.organization_id
+                        if workspace is not None
+                        else self.default_organization.organization_id
+                    ),
+                    workspace_id=thread.workspace_id,
+                    thread_id=thread_id,
+                    requester_participant_id=payload.actor.participant_id,
+                    requester_message_id=message_id,
+                    target_system_agent_id=target_system_agent_id,
+                    requested_scope=(
+                        target_tool_scope if target_tool_scope in {"global", "organization"} else "global"
+                    ),
+                    status="submitted",
+                    target_tool_name=target_tool_name,
+                    summary=payload.content,
+                    created_at=now,
+                    updated_at=now,
+                )
+                self.tool_generation_requests[str(request.request_id)] = (
+                    ToolGenerationRequestDetail(
+                        request=request,
+                        revisions=[],
+                    )
+                )
+                metadata["tool_generation_request_id"] = str(request.request_id)
+                metadata["tool_generation_request_status"] = request.status
         message = TimelineMessage(
-            message_id=uuid4(),
+            message_id=message_id,
             workspace_id=thread.workspace_id,
             thread_id=thread_id,
             actor=ActorRef(type=payload.actor.participant_type, id=payload.actor.participant_id),
@@ -1339,7 +1537,7 @@ class MockCollaborationService:
             sequence=next_sequence,
             created_at=now,
             updated_at=now,
-            metadata=payload.metadata,
+            metadata=metadata,
         )
         self.messages.setdefault(str(thread_id), []).append(message)
         event = EventEnvelope(
