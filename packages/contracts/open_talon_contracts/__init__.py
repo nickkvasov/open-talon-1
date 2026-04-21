@@ -167,6 +167,16 @@ from .models import (
     WorkspaceTool,
 )
 from .telemetry import PayloadRedactionPolicy, TelemetryContext, redact_payload
+from .telemetry import telemetry_metadata
+from .observability import (
+    LangfuseRuntimeObserver,
+    NoopObservabilityProvider,
+    ObservabilityProvider,
+    OtlpHttpObservabilityProvider,
+    RuntimeObservation,
+    RuntimeObservability,
+    build_observability_provider_from_env,
+)
 
 __all__ = [
     "ActorRef",
@@ -286,6 +296,9 @@ __all__ = [
     "ServiceStatus",
     "SystemToolDefinition",
     "TelemetryContext",
+    "RuntimeObservation",
+    "RuntimeObservability",
+    "ObservabilityProvider",
     "StopReason",
     "AgentStopPolicy",
     "ToolCall",
@@ -326,6 +339,10 @@ __all__ = [
     "WorkspaceMethodology",
     "WorkspaceTool",
     "PayloadRedactionPolicy",
+    "NoopObservabilityProvider",
+    "LangfuseRuntimeObserver",
+    "OtlpHttpObservabilityProvider",
+    "build_observability_provider_from_env",
     "LlmEngineDescriptor",
     "LlmEngineRegistry",
     "LlmEngineSelection",
@@ -333,5 +350,6 @@ __all__ = [
     "load_repo_local_env",
     "interaction_contract_is_empty",
     "redact_payload",
+    "telemetry_metadata",
     "runtime_preferences_from_definition",
 ]

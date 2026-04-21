@@ -84,6 +84,54 @@ class _FakeKernel:
         return _FakeCommandResult()
 
 
+class _RecordingObservation:
+    def __init__(self, sink: list[dict[str, object]], payload: dict[str, object]) -> None:
+        self._sink = sink
+        self._entry = {**payload, "updates": []}
+
+    def __enter__(self):
+        self._sink.append(self._entry)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._entry["error"] = str(exc) if exc is not None else None
+        return False
+
+    def update(self, **kwargs):
+        self._entry["updates"].append(kwargs)
+
+
+class _RecordingObserver:
+    def __init__(self) -> None:
+        self.spans: list[dict[str, object]] = []
+        self.events: list[dict[str, object]] = []
+        self.flush_count = 0
+
+    def start_span(self, *, name, input=None, metadata=None):
+        return _RecordingObservation(
+            self.spans,
+            {"kind": "span", "name": name, "input": input, "metadata": metadata},
+        )
+
+    def start_generation(self, *, name, model=None, input=None, metadata=None):
+        return _RecordingObservation(
+            self.spans,
+            {
+                "kind": "generation",
+                "name": name,
+                "model": model,
+                "input": input,
+                "metadata": metadata,
+            },
+        )
+
+    def record_event(self, *, name, input=None, metadata=None):
+        self.events.append({"name": name, "input": input, "metadata": metadata})
+
+    def flush(self):
+        self.flush_count += 1
+
+
 class _FakeBackend:
     kind = "local_process"
 
@@ -301,6 +349,33 @@ def test_tool_worker_executes_generated_fibonacci_tool_call_with_docker_backend(
     assert kernel.completed is not None
     assert kernel.completed.output_payload == {"n": 10, "value": 55}
     assert kernel.failed is None
+
+
+def test_tool_worker_emits_observability_span_for_execution():
+    backend = _FakeBackend()
+    kernel = _FakeKernel()
+    observer = _RecordingObserver()
+    worker = ToolWorker(
+        kernel=kernel,
+        publisher=_FakePublisher(),
+        settings=_settings(),
+        backend_registry=ExecutionBackendRegistry([backend]),
+        observability=observer,
+    )
+    tool_call = _tool_call()
+
+    asyncio.run(worker._process_tool_call(tool_call))
+
+    assert len(observer.spans) == 1
+    span = observer.spans[0]
+    assert span["name"] == "tool-call-execution"
+    assert span["metadata"]["tool_call_id"] == str(tool_call.tool_call_id)
+    assert span["metadata"]["tool_name"] == tool_call.tool_name
+    assert span["metadata"]["backend_kind"] == "local_process"
+    assert span["metadata"]["workspace_id"] == str(tool_call.workspace_id)
+    assert any(update["status"] == "submitted" for update in span["updates"])
+    assert any(update["status"] == "completed" for update in span["updates"])
+    assert observer.flush_count == 1
 
 
 def test_tool_worker_cancels_execution_on_timeout():

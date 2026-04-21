@@ -30,7 +30,7 @@ from open_talon_contracts.models import (  # noqa: E402
     AuditEventDraft,
     EventEnvelope,
 )
-from open_talon_contracts.telemetry import TelemetryContext  # noqa: E402
+from open_talon_contracts.telemetry import TelemetryContext, telemetry_metadata  # noqa: E402
 from open_talon_contracts.llm_engines import (  # noqa: E402
     LlmEngineRegistry,
     llm_engine_descriptor_from_provider_definition,
@@ -1189,26 +1189,7 @@ def _langfuse_metadata(
             "provider": provider,
         },
     )
-    metadata = {
-        "workspace_id": str(telemetry_context.workspace_id),
-        "thread_id": str(telemetry_context.thread_id),
-        "system_agent_id": str(telemetry_context.system_agent_id),
-        "participant_id": str(telemetry_context.participant_id),
-        "correlation_id": (
-            str(telemetry_context.correlation_id)
-            if telemetry_context.correlation_id is not None
-            else None
-        ),
-        "causation_id": (
-            str(telemetry_context.causation_id)
-            if telemetry_context.causation_id is not None
-            else None
-        ),
-        "task_id": str(telemetry_context.task_id) if telemetry_context.task_id else None,
-        "run_id": str(telemetry_context.run_id) if telemetry_context.run_id else None,
-    }
-    metadata.update(telemetry_context.metadata)
-    return metadata
+    return telemetry_metadata(telemetry_context)
 
 
 def _usage_metadata(

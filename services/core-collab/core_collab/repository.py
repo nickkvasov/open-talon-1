@@ -4,12 +4,18 @@ import asyncio
 from collections.abc import Sequence
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 import asyncpg
 from open_talon_contracts.log_management import RotationPolicy, append_bytes_with_rotation
+from open_talon_contracts.observability import (
+    ObservabilityProvider,
+    build_observability_provider_from_env,
+)
+from open_talon_contracts.telemetry import TelemetryContext, telemetry_metadata
 
 from .contracts import (
     ActorRef,
@@ -66,6 +72,9 @@ from .contracts import (
 from .migrations import apply_pending_migrations
 
 
+logger = logging.getLogger(__name__)
+
+
 class UserRecord:
     def __init__(
         self,
@@ -108,12 +117,16 @@ class CollaborationRepository:
         pool: asyncpg.Pool,
         *,
         communication_log_dir: str | Path | None = None,
+        observability: ObservabilityProvider | None = None,
     ) -> None:
         self._pool = pool
         self._communication_log_dir = (
             Path(communication_log_dir).expanduser()
             if communication_log_dir is not None
             else None
+        )
+        self._observability = observability or build_observability_provider_from_env(
+            service_name="core-collab"
         )
         self._communication_log_policy = RotationPolicy.from_env(
             max_bytes_var="OPEN_TALON_COMMUNICATION_LOG_MAX_BYTES",
@@ -207,6 +220,7 @@ class CollaborationRepository:
         if result.endswith("1"):
             draft = await self._audit_draft_from_event(conn, event)
             await self.append_audit_event(conn, draft)
+            self._record_collaboration_event_observation(event)
 
     async def append_audit_event(
         self,
@@ -325,7 +339,82 @@ class CollaborationRepository:
             chain_sequence,
             event_hash,
         )
-        return self._audit_event_from_row(row)
+        event = self._audit_event_from_row(row)
+        if event is not None:
+            self._record_audit_event_observation(event)
+        return event
+
+    def _record_collaboration_event_observation(self, event: EventEnvelope) -> None:
+        actor_participant_id = (
+            event.actor.id if event.actor.type in {"human", "agent"} else None
+        )
+        context = TelemetryContext(
+            source_service="core-collab",
+            source_component="repository",
+            correlation_id=event.correlation_id,
+            causation_id=event.causation_id,
+            workspace_id=event.workspace_id,
+            thread_id=event.thread_id,
+            participant_id=actor_participant_id,
+            metadata={
+                "event_type": event.event_type,
+                "actor_type": event.actor.type,
+                "actor_id": str(event.actor.id),
+                "target_type": event.target.type,
+                "target_id": str(event.target.id),
+                "visibility": event.visibility,
+                "sequence": event.sequence,
+            },
+        )
+        self._record_observability_event(
+            name="collaboration.event.recorded",
+            input={
+                "event_id": str(event.event_id),
+                "payload": event.payload,
+            },
+            metadata=telemetry_metadata(context),
+        )
+
+    def _record_audit_event_observation(self, event: AuditEvent) -> None:
+        context = TelemetryContext(
+            source_service=event.source_service,
+            source_component=event.source_component,
+            request_id=event.request_id,
+            correlation_id=event.correlation_id,
+            causation_id=event.causation_id,
+            organization_id=event.organization_id,
+            workspace_id=event.workspace_id,
+            thread_id=event.thread_id,
+            system_agent_id=event.system_agent_id,
+            trace_id=event.trace_id,
+            metadata={
+                "action_category": event.action_category,
+                "action_name": event.action_name,
+                "target_type": event.target_type,
+                "target_id": str(event.target_id) if event.target_id is not None else None,
+                "outcome": event.outcome,
+                "chain_partition": event.chain_partition,
+                "chain_sequence": event.chain_sequence,
+            },
+        )
+        self._record_observability_event(
+            name="audit.event.recorded",
+            input={"audit_event_id": str(event.audit_event_id)},
+            metadata=telemetry_metadata(context),
+        )
+
+    def _record_observability_event(
+        self,
+        *,
+        name: str,
+        input: Any | None,
+        metadata: dict[str, Any],
+    ) -> None:
+        try:
+            self._observability.record_event(name=name, input=input, metadata=metadata)
+            self._observability.flush()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to record observability event name=%s", name)
 
     async def get_audit_event(self, audit_event_id: UUID) -> AuditEvent | None:
         row = await self._pool.fetchrow(

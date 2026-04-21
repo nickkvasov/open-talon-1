@@ -79,3 +79,40 @@ def redact_payload(
         redacted = _SECRET_VALUE_PATTERN.sub(policy.redacted_text, value)
         return redacted[: policy.max_string_length]
     return value
+
+
+def telemetry_metadata(
+    context: TelemetryContext | None,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    if context is not None:
+        fields = {
+            "source_service": context.source_service,
+            "source_component": context.source_component,
+            "request_id": context.request_id,
+            "correlation_id": context.correlation_id,
+            "causation_id": context.causation_id,
+            "organization_id": context.organization_id,
+            "workspace_id": context.workspace_id,
+            "thread_id": context.thread_id,
+            "participant_id": context.participant_id,
+            "system_agent_id": context.system_agent_id,
+            "task_id": context.task_id,
+            "run_id": context.run_id,
+            "run_step_id": context.run_step_id,
+            "tool_call_id": context.tool_call_id,
+            "trace_id": context.trace_id,
+        }
+        merged.update(
+            {
+                key: str(value) if isinstance(value, UUID) else value
+                for key, value in fields.items()
+                if value is not None
+            }
+        )
+        merged.update(context.metadata)
+    if metadata:
+        merged.update(metadata)
+    return merged
