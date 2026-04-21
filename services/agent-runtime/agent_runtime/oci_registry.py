@@ -10,11 +10,11 @@ from .config import RuntimeWorkerSettings
 
 def config_from_settings(settings: RuntimeWorkerSettings) -> OciRegistryConfig:
     return OciRegistryConfig(
-        base_url=settings.forgejo_registry_url,
-        username=settings.forgejo_registry_username,
-        password_secret_config=settings.forgejo_registry_password_secret_config,
+        base_url=settings.oci_registry_url,
+        username=settings.oci_registry_username,
+        password_secret_config=settings.oci_registry_password_secret_config,
         repository_prefix=settings.oci_registry_repository_prefix,
-        validate_on_startup=settings.forgejo_registry_validate_on_startup,
+        validate_on_startup=settings.oci_registry_validate_on_startup,
     )
 
 

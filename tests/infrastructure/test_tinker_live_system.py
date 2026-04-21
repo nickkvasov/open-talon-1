@@ -532,11 +532,11 @@ class _HarnessState:
                 self.request_ids.append(request_id)
         tool_results = context.get("tool_results") or []
         for tool_name in (
-            "tinker_generated_repo_bootstrap",
-            "tinker_generated_repo_write",
-            "tinker_generated_tool_build",
-            "tinker_generated_tool_registry_push",
-            "tinker_generated_tool_smoke_test",
+            "generated_tool_repo_bootstrap",
+            "generated_tool_repo_write",
+            "generated_tool_build",
+            "generated_tool_registry_push",
+            "generated_tool_smoke_test",
         ):
             tool_result = self._tool_result(tool_results, tool_name)
             if tool_result is None:
@@ -545,11 +545,11 @@ class _HarnessState:
                 result = tool_result.get("result") or {}
                 error = result.get("error") or tool_result.get("error") or "unknown tool failure"
                 raise RuntimeError(f"{tool_name} failed: {error}")
-        bootstrap = self._tool_output(tool_results, "tinker_generated_repo_bootstrap")
-        write_result = self._tool_output(tool_results, "tinker_generated_repo_write")
-        build_result = self._tool_output(tool_results, "tinker_generated_tool_build")
-        push_result = self._tool_output(tool_results, "tinker_generated_tool_registry_push")
-        smoke_result = self._tool_output(tool_results, "tinker_generated_tool_smoke_test")
+        bootstrap = self._tool_output(tool_results, "generated_tool_repo_bootstrap")
+        write_result = self._tool_output(tool_results, "generated_tool_repo_write")
+        build_result = self._tool_output(tool_results, "generated_tool_build")
+        push_result = self._tool_output(tool_results, "generated_tool_registry_push")
+        smoke_result = self._tool_output(tool_results, "generated_tool_smoke_test")
 
         if bootstrap is None:
             return {
@@ -557,7 +557,7 @@ class _HarnessState:
                 "summary": "Bootstrapping generated tool worktree.",
                 "tool_calls": [
                     {
-                        "tool_name": "tinker_generated_repo_bootstrap",
+                        "tool_name": "generated_tool_repo_bootstrap",
                         "arguments": {"request_id": request_id},
                         "summary": "Create an isolated worktree for the generated tool.",
                     }
@@ -570,7 +570,7 @@ class _HarnessState:
                 "summary": "Writing generated Fibonacci tool files.",
                 "tool_calls": [
                     {
-                        "tool_name": "tinker_generated_repo_write",
+                        "tool_name": "generated_tool_repo_write",
                         "arguments": {
                             "worktree_path": bootstrap["worktree_path"],
                             "files": self._build_files(),
@@ -590,7 +590,7 @@ class _HarnessState:
                 "summary": "Building generated Fibonacci tool image.",
                 "tool_calls": [
                     {
-                        "tool_name": "tinker_generated_tool_build",
+                        "tool_name": "generated_tool_build",
                         "arguments": {
                             "worktree_path": bootstrap["worktree_path"],
                             "image_ref": image_ref,
@@ -608,7 +608,7 @@ class _HarnessState:
                 "summary": "Pushing generated Fibonacci tool image to the registry.",
                 "tool_calls": [
                     {
-                        "tool_name": "tinker_generated_tool_registry_push",
+                        "tool_name": "generated_tool_registry_push",
                         "arguments": {
                             "image_ref": build_result["image_ref"],
                         },
@@ -623,7 +623,7 @@ class _HarnessState:
                 "summary": "Running Fibonacci smoke test.",
                 "tool_calls": [
                     {
-                        "tool_name": "tinker_generated_tool_smoke_test",
+                        "tool_name": "generated_tool_smoke_test",
                         "arguments": {
                             "image_ref": push_result["image_ref"],
                             "network": "none",
@@ -770,24 +770,24 @@ class _LiveSystem:
     temp_root: Path
     env: dict[str, str]
     executor_model: str
-    forgejo_registry_secret_path: str
-    forgejo_registry_token_id: int | None
-    forgejo_registry_token_name: str
-    forgejo_registry_token: str
+    oci_registry_secret_path: str
+    oci_registry_token_id: int | None
+    oci_registry_token_name: str
+    oci_registry_token: str
 
 
 @pytest.fixture(scope="module")
 def live_open_talon_system(tmp_path_factory: pytest.TempPathFactory):
     temp_root = tmp_path_factory.mktemp("tinker-live-system")
-    registry_secret_path = f"open-talon/forgejo-registry/{uuid4().hex}"
+    registry_secret_path = f"open-talon/oci-registry/{uuid4().hex}"
     env = os.environ.copy()
     env.update(
         {
             "AUTH_MODE": "none",
             "ENABLE_KAFKA_WAKEUPS": "false",
-            "OPEN_TALON_FORGEJO_REGISTRY_URL": _FORGEJO_REGISTRY_URL,
-            "OPEN_TALON_FORGEJO_REGISTRY_USERNAME": _FORGEJO_USERNAME,
-            "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD_SECRET_CONFIG": json.dumps(
+            "OPEN_TALON_OCI_REGISTRY_URL": _FORGEJO_REGISTRY_URL,
+            "OPEN_TALON_OCI_REGISTRY_USERNAME": _FORGEJO_USERNAME,
+            "OPEN_TALON_OCI_REGISTRY_PASSWORD_SECRET_CONFIG": json.dumps(
                 {
                     "openbao": {
                         "mount": _OPENBAO_KV_MOUNT,
@@ -796,12 +796,12 @@ def live_open_talon_system(tmp_path_factory: pytest.TempPathFactory):
                     }
                 }
             ),
-            "OPEN_TALON_FORGEJO_REGISTRY_VALIDATE_ON_STARTUP": "false",
+            "OPEN_TALON_OCI_REGISTRY_VALIDATE_ON_STARTUP": "false",
             "OPEN_TALON_OCI_REGISTRY_REPOSITORY_PREFIX": "forgejo/generated-tools",
             "OPEN_TALON_OPENBAO_ADDRESS": _OPENBAO_URL,
             "BAO_ROOT_TOKEN": _OPENBAO_ROOT_TOKEN,
             "OPEN_TALON_EXECUTION_ROOT": str(temp_root / "executions"),
-            "OPEN_TALON_TINKER_GENERATED_TOOLS_ROOT": str(temp_root / "generated-tools"),
+            "OPEN_TALON_GENERATED_TOOLS_ROOT": str(temp_root / "generated-tools"),
             "OPEN_TALON_DEFAULT_WORKSPACE_PATH": str(_ROOT_DIR),
             "AGENT_LOOP_POLL_INTERVAL_SECONDS": "0.5",
             "RECONCILE_INTERVAL_SECONDS": "1.0",
@@ -848,12 +848,12 @@ def live_open_talon_system(tmp_path_factory: pytest.TempPathFactory):
             temp_root=temp_root,
             env=env,
             executor_model=_EXECUTOR_MODEL,
-            forgejo_registry_secret_path=registry_secret_path,
-            forgejo_registry_token_id=(
+            oci_registry_secret_path=registry_secret_path,
+            oci_registry_token_id=(
                 int(token_detail["token_id"]) if token_detail["token_id"] is not None else None
             ),
-            forgejo_registry_token_name=str(token_detail["token_name"]),
-            forgejo_registry_token=str(token_detail["token"]),
+            oci_registry_token_name=str(token_detail["token_name"]),
+            oci_registry_token=str(token_detail["token"]),
         )
     finally:
         _delete_openbao_secret(registry_secret_path)
@@ -1240,7 +1240,7 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
         try:
             _delete_registry_manifest(
                 published_handler_ref,
-                registry_token=live_open_talon_system.forgejo_registry_token,
+                registry_token=live_open_talon_system.oci_registry_token,
             )
         except Exception:
             pass

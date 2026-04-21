@@ -17,6 +17,9 @@ _CORE_COLLAB_DIR = os.path.abspath(
 _CORE_COLLAB_TESTS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../core-collab")
 )
+_GENERATED_TOOLS_BUILDER_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../services/generated-tools-builder")
+)
 _WORKSPACE_MEMORY_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../../services/workspace-memory")
 )
@@ -24,6 +27,7 @@ for path in (
     _CONTRACTS_DIR,
     _CORE_COLLAB_DIR,
     _CORE_COLLAB_TESTS_DIR,
+    _GENERATED_TOOLS_BUILDER_DIR,
     _WORKSPACE_MEMORY_DIR,
 ):
     if path not in sys.path:
@@ -58,15 +62,15 @@ from test_agent_contracts import (  # noqa: E402
 )
 
 
-_TINKER_INTERNAL_HELPERS: tuple[tuple[str, str, int, str], ...] = (
-    ("tinker_generated_repo_bootstrap", "bootstrap-worktree", 120, "none"),
-    ("tinker_generated_repo_write", "write-files", 120, "none"),
-    ("tinker_generated_tool_build", "build-image", 600, "none"),
-    ("tinker_generated_tool_registry_push", "push-image", 600, "full"),
-    ("tinker_generated_tool_registry_pull_verify", "verify-registry-pull", 300, "full"),
-    ("tinker_generated_tool_smoke_test", "smoke-test", 300, "none"),
-    ("tinker_generated_tool_asset_publish", "publish-assets", 300, "none"),
-    ("tinker_tool_request_status_update", "update-request-status", 60, "none"),
+_GENERATED_TOOL_INTERNAL_HELPERS: tuple[tuple[str, str, int, str], ...] = (
+    ("generated_tool_repo_bootstrap", "bootstrap-worktree", 120, "none"),
+    ("generated_tool_repo_write", "write-files", 120, "none"),
+    ("generated_tool_build", "build-image", 600, "none"),
+    ("generated_tool_registry_push", "push-image", 600, "full"),
+    ("generated_tool_registry_pull_verify", "verify-registry-pull", 300, "full"),
+    ("generated_tool_smoke_test", "smoke-test", 300, "none"),
+    ("generated_tool_asset_publish", "publish-assets", 300, "none"),
+    ("generated_tool_request_status_update", "update-request-status", 60, "none"),
 )
 
 
@@ -87,7 +91,7 @@ def _attach_tinker_internal_tools(
                 backend_kind="local_process",
                 handler_ref="python",
                 execution_profile={
-                    "command": ["python", "-m", "agent_runtime.tinker_tools", action],
+                    "command": ["python", "-m", "generated_tools_builder.cli", action],
                     "timeout_seconds": timeout_seconds,
                     "network": network,
                     "workspace_access": "none",
@@ -99,7 +103,7 @@ def _attach_tinker_internal_tools(
             updated_at=now,
             metadata={"managed": True, "seeded": True, "internal_only": True},
         )
-        for name, action, timeout_seconds, network in _TINKER_INTERNAL_HELPERS
+        for name, action, timeout_seconds, network in _GENERATED_TOOL_INTERNAL_HELPERS
     ]
 
 
@@ -222,7 +226,7 @@ async def test_tinker_can_publish_and_execute_fibonacci_tool(
     tinker_task_claim = await _claim_single_pending_task(kernel, tinker_agent_id)
     assert tinker_task_claim.context is not None
     assert {tool.name for tool in tinker_task_claim.context.internal_tools} == {
-        helper_name for helper_name, _, _, _ in _TINKER_INTERNAL_HELPERS
+        helper_name for helper_name, _, _, _ in _GENERATED_TOOL_INTERNAL_HELPERS
     }
     assert tinker_task_claim.context.tool_generation_request is not None
     assert (
@@ -238,7 +242,7 @@ async def test_tinker_can_publish_and_execute_fibonacci_tool(
     assert tinker_step_claim.context is not None
     assert tinker_step_claim.step.system_agent_id == tinker_agent_id
     assert {tool.name for tool in tinker_step_claim.context.internal_tools} == {
-        helper_name for helper_name, _, _, _ in _TINKER_INTERNAL_HELPERS
+        helper_name for helper_name, _, _, _ in _GENERATED_TOOL_INTERNAL_HELPERS
     }
 
     revision_result = await kernel.create_tool_generation_revision(
@@ -333,7 +337,7 @@ async def test_tinker_can_publish_and_execute_fibonacci_tool(
     assert verification_claim.tool_call is not None
     assert (
         verification_claim.tool_call.tool_name
-        == "tinker_generated_tool_registry_pull_verify"
+        == "generated_tool_registry_pull_verify"
     )
     immutable_ref = "registry.example/fibonacci-calculator@sha256:fibonacci55"
     await kernel.update_tool_call_execution_handle(

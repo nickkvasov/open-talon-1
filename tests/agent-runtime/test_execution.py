@@ -10,6 +10,9 @@ from uuid import uuid4
 _AGENT_RUNTIME_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../../services/agent-runtime")
 )
+_GENERATED_TOOLS_BUILDER_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../services/generated-tools-builder")
+)
 _CONTRACTS_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../../packages/contracts")
 )
@@ -21,6 +24,7 @@ _WORKSPACE_MEMORY_DIR = os.path.abspath(
 )
 for path in (
     _AGENT_RUNTIME_DIR,
+    _GENERATED_TOOLS_BUILDER_DIR,
     _CONTRACTS_DIR,
     _CORE_COLLAB_DIR,
     _WORKSPACE_MEMORY_DIR,
@@ -37,7 +41,7 @@ from open_talon_contracts.models import (
 
 from agent_runtime.execution.docker import DockerExecutionBackend
 from agent_runtime.execution.local_process import LocalProcessExecutionBackend
-from agent_runtime.tinker_tools import main as tinker_tools_main
+from generated_tools_builder.cli import main as generated_tools_builder_main
 
 
 async def _collect_local_result(tmp_path: Path):
@@ -105,7 +109,7 @@ def test_local_process_backend_normalizes_python_command_to_current_interpreter(
         invocation_id=uuid4(),
         handler_ref="ignored",
         inline_payload={"ok": True},
-        profile={"command": ["python", "-m", "agent_runtime.tinker_tools", "bootstrap-worktree"]},
+        profile={"command": ["python", "-m", "generated_tools_builder.cli", "bootstrap-worktree"]},
     )
 
     handle = asyncio.run(backend.submit(spec))
@@ -113,7 +117,7 @@ def test_local_process_backend_normalizes_python_command_to_current_interpreter(
 
     assert result.status == "completed"
     assert captured["args"][0] == sys.executable
-    assert captured["args"][1:] == ["-m", "agent_runtime.tinker_tools", "bootstrap-worktree"]
+    assert captured["args"][1:] == ["-m", "generated_tools_builder.cli", "bootstrap-worktree"]
 
 
 def test_docker_backend_submit_uses_isolation_flags(monkeypatch, tmp_path):
@@ -223,9 +227,9 @@ def test_tinker_verify_registry_pull_helper_pulls_immutable_ref(monkeypatch, tmp
             return _CompletedProcess(stdout='["registry.example/repo_stats@sha256:abcd"]\n')
         raise AssertionError(f"Unexpected command: {command}")
 
-    monkeypatch.setattr("agent_runtime.tinker_tools.subprocess.run", fake_run)
+    monkeypatch.setattr("generated_tools_builder.cli.subprocess.run", fake_run)
 
-    assert tinker_tools_main(["verify-registry-pull"]) == 0
+    assert generated_tools_builder_main(["verify-registry-pull"]) == 0
     result = json.loads((output_dir / "result.json").read_text(encoding="utf-8"))
 
     assert calls[0] == ["docker", "pull", "registry.example/repo_stats@sha256:abcd"]
@@ -270,10 +274,10 @@ def test_tinker_push_helper_logs_into_registry_from_secret_config(monkeypatch, t
             return _CompletedProcess(stdout='["registry.example/repo_stats@sha256:abcd"]\n')
         raise AssertionError(f"Unexpected command: {command}")
 
-    monkeypatch.setattr("agent_runtime.tinker_tools.docker_login", fake_docker_login)
-    monkeypatch.setattr("agent_runtime.tinker_tools.subprocess.run", fake_run)
+    monkeypatch.setattr("generated_tools_builder.cli.docker_login", fake_docker_login)
+    monkeypatch.setattr("generated_tools_builder.cli.subprocess.run", fake_run)
 
-    assert tinker_tools_main(["push-image"]) == 0
+    assert generated_tools_builder_main(["push-image"]) == 0
     result = json.loads((output_dir / "result.json").read_text(encoding="utf-8"))
 
     assert login_calls == [("registry.example", "forgejo", "secret-token")]

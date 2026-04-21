@@ -210,14 +210,14 @@ async def test_repository_migrations_seed_tinker_agent_with_internal_tools():
 
         internal_tools = await repository.list_agent_internal_tools(tinker_agent_id)
         assert {tool.name for tool in internal_tools} == {
-            "tinker_generated_repo_bootstrap",
-            "tinker_generated_repo_write",
-            "tinker_generated_tool_build",
-            "tinker_generated_tool_registry_push",
-            "tinker_generated_tool_registry_pull_verify",
-            "tinker_generated_tool_smoke_test",
-            "tinker_generated_tool_asset_publish",
-            "tinker_tool_request_status_update",
+            "generated_tool_repo_bootstrap",
+            "generated_tool_repo_write",
+            "generated_tool_build",
+            "generated_tool_registry_push",
+            "generated_tool_registry_pull_verify",
+            "generated_tool_smoke_test",
+            "generated_tool_asset_publish",
+            "generated_tool_request_status_update",
         }
         assert all(tool.execution.trust_level == "trusted" for tool in internal_tools)
         assert all(tool.metadata["managed"] is True for tool in internal_tools)

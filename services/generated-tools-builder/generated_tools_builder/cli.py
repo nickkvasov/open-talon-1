@@ -9,13 +9,10 @@ import subprocess
 import sys
 from typing import Any
 
-from open_talon_contracts.oci_registry import OciRegistryConfig, digest_pinned_image_ref
-from open_talon_contracts.secrets import (
-    build_default_secret_resolver,
-    secret_references_from_config,
-)
+from open_talon_contracts.oci_registry import digest_pinned_image_ref
+from open_talon_contracts.secrets import build_default_secret_resolver
 
-from .oci_registry import docker_login
+from .registry import docker_login, registry_config_from_env, resolve_registry_password
 
 
 def _request_payload() -> dict[str, Any]:
@@ -63,7 +60,9 @@ def _write_result(
 
 
 def _generated_tools_root() -> Path:
-    configured = os.getenv("OPEN_TALON_TINKER_GENERATED_TOOLS_ROOT")
+    configured = os.getenv("OPEN_TALON_GENERATED_TOOLS_ROOT") or os.getenv(
+        "OPEN_TALON_TINKER_GENERATED_TOOLS_ROOT"
+    )
     if configured:
         root = Path(configured)
     elif os.getenv("OPEN_TALON_WORKSPACE_PATH"):
@@ -97,7 +96,7 @@ def _run(command: list[str], *, cwd: Path | None = None) -> tuple[int, str, str]
 
 
 def _registry_image_ref(*, request_id: str, tool_name: str) -> str:
-    config = _registry_config_from_env()
+    config = registry_config_from_env()
     registry_url = str(config.base_url or "localhost:3001").strip()
     repository_prefix = str(config.repository_prefix or "forgejo/generated-tools").strip("/")
     slug = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in tool_name).strip("-")
@@ -105,59 +104,12 @@ def _registry_image_ref(*, request_id: str, tool_name: str) -> str:
     return f"{registry_url}/{repository_prefix}/{slug}:{request_id}"
 
 
-def _registry_secret_config() -> dict[str, Any]:
-    raw = os.getenv("OPEN_TALON_OCI_REGISTRY_PASSWORD_SECRET_CONFIG")
-    if raw and raw.strip():
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict):
-            return parsed
-    raw = os.getenv("OPEN_TALON_FORGEJO_REGISTRY_PASSWORD_SECRET_CONFIG")
-    if raw and raw.strip():
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict):
-            return parsed
-    env_name = str(os.getenv("OPEN_TALON_OCI_REGISTRY_PASSWORD_ENV") or "").strip()
-    if env_name:
-        return {"env": env_name}
-    env_name = str(os.getenv("OPEN_TALON_FORGEJO_REGISTRY_PASSWORD_ENV") or "").strip()
-    return {"env": env_name or "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD"}
-
-
-def _registry_config_from_env() -> OciRegistryConfig:
-    return OciRegistryConfig(
-        base_url=str(
-            os.getenv("OPEN_TALON_OCI_REGISTRY_URL")
-            or os.getenv("OPEN_TALON_FORGEJO_REGISTRY_URL")
-            or "localhost:3001"
-        ).strip()
-        or None,
-        username=str(
-            os.getenv("OPEN_TALON_OCI_REGISTRY_USERNAME")
-            or os.getenv("OPEN_TALON_FORGEJO_REGISTRY_USERNAME")
-            or "forgejo"
-        ).strip()
-        or None,
-        password_secret_config=_registry_secret_config(),
-        repository_prefix=str(
-            os.getenv("OPEN_TALON_OCI_REGISTRY_REPOSITORY_PREFIX") or "forgejo/generated-tools"
-        ).strip("/")
-        or None,
-        validate_on_startup=True,
-    )
-
-
 def _ensure_registry_login_from_secret_config() -> None:
-    config = _registry_config_from_env()
+    config = registry_config_from_env()
     if not config.base_url or not config.username:
         return
     resolver = build_default_secret_resolver()
-    password = asyncio.run(
-        resolver.resolve(
-            secret_references_from_config(config.password_secret_config),
-            label="OCI registry password",
-            required=False,
-        )
-    )
+    password = asyncio.run(resolve_registry_password(config, secret_resolver=resolver))
     if not password:
         return
     asyncio.run(docker_login(config, password=password))
@@ -166,7 +118,7 @@ def _ensure_registry_login_from_secret_config() -> None:
 def bootstrap_worktree() -> None:
     payload = _request_payload()
     request_id = str(payload.get("request_id") or "default").strip()
-    branch = str(payload.get("branch_name") or f"tinker/{request_id}").strip()
+    branch = str(payload.get("branch_name") or f"generated-tools/{request_id}").strip()
     root = _generated_tools_root()
     worktree = _safe_child_path(root, request_id)
     worktree.mkdir(parents=True, exist_ok=True)
@@ -373,7 +325,10 @@ _ACTIONS = {
 def main(argv: list[str] | None = None) -> int:
     args = list(argv if argv is not None else sys.argv[1:])
     if not args:
-        print(f"usage: python -m agent_runtime.tinker_tools <{'|'.join(sorted(_ACTIONS))}>", file=sys.stderr)
+        print(
+            f"usage: python -m generated_tools_builder.cli <{'|'.join(sorted(_ACTIONS))}>",
+            file=sys.stderr,
+        )
         return 2
     action = args[0]
     handler = _ACTIONS.get(action)
@@ -389,5 +344,9 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
+def entrypoint() -> None:
     raise SystemExit(main())
+
+
+if __name__ == "__main__":
+    entrypoint()

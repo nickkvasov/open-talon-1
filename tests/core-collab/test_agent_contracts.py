@@ -3675,7 +3675,7 @@ async def test_build_agent_execution_context_includes_internal_tools_and_tool_ge
         AgentInternalToolBinding(
             system_agent_id=seeded["tinker_agent_id"],
             tool_id=internal_tool_id,
-            name="tinker_generated_tool_build",
+            name="generated_tool_build",
             description="Builds generated tool images.",
             execution=ToolExecutionBinding(
                 backend_kind="local_process",
@@ -3718,7 +3718,7 @@ async def test_build_agent_execution_context_includes_internal_tools_and_tool_ge
         run_id,
     )
 
-    assert [tool.name for tool in context.internal_tools] == ["tinker_generated_tool_build"]
+    assert [tool.name for tool in context.internal_tools] == ["generated_tool_build"]
     assert context.tool_generation_request is not None
     assert context.tool_generation_request.request.request_id == request_id
     assert context.tool_generation_request.revisions[0].revision_id == revision_id
@@ -3899,7 +3899,7 @@ async def test_approve_tool_generation_revision_rejects_local_image_refs():
         AgentInternalToolBinding(
             system_agent_id=seeded["tinker_agent_id"],
             tool_id=verification_tool_id,
-            name="tinker_generated_tool_registry_pull_verify",
+            name="generated_tool_registry_pull_verify",
             description="Verifies worker-side OCI pulls.",
             execution=ToolExecutionBinding(
                 backend_kind="local_process",
@@ -3978,7 +3978,7 @@ async def test_approve_tool_generation_revision_starts_registry_pull_verificatio
         AgentInternalToolBinding(
             system_agent_id=seeded["tinker_agent_id"],
             tool_id=verification_tool_id,
-            name="tinker_generated_tool_registry_pull_verify",
+            name="generated_tool_registry_pull_verify",
             description="Verifies worker-side OCI pulls.",
             execution=ToolExecutionBinding(
                 backend_kind="local_process",
@@ -4012,7 +4012,7 @@ async def test_approve_tool_generation_revision_starts_registry_pull_verificatio
         tool_call
         for tool_calls in repository._tool_calls.values()
         for tool_call in tool_calls
-        if tool_call.tool_name == "tinker_generated_tool_registry_pull_verify"
+        if tool_call.tool_name == "generated_tool_registry_pull_verify"
     ]
     assert len(pending_tool_calls) == 1
     assert pending_tool_calls[0].arguments["immutable_ref"] == "registry.example/repo_stats@sha256:abcd"
@@ -4084,7 +4084,7 @@ async def test_tool_generation_registry_pull_verification_completion_publishes_o
         AgentInternalToolBinding(
             system_agent_id=seeded["tinker_agent_id"],
             tool_id=verification_tool_id,
-            name="tinker_generated_tool_registry_pull_verify",
+            name="generated_tool_registry_pull_verify",
             description="Verifies worker-side OCI pulls.",
             execution=ToolExecutionBinding(
                 backend_kind="local_process",
@@ -4114,7 +4114,7 @@ async def test_tool_generation_registry_pull_verification_completion_publishes_o
         tool_call
         for tool_calls in repository._tool_calls.values()
         for tool_call in tool_calls
-        if tool_call.tool_name == "tinker_generated_tool_registry_pull_verify"
+        if tool_call.tool_name == "generated_tool_registry_pull_verify"
     )
     claimed = await kernel.claim_next_tool_call(
         worker_id="tool-worker",
@@ -4210,7 +4210,7 @@ async def test_tool_generation_registry_pull_verification_failure_returns_reques
         AgentInternalToolBinding(
             system_agent_id=seeded["tinker_agent_id"],
             tool_id=verification_tool_id,
-            name="tinker_generated_tool_registry_pull_verify",
+            name="generated_tool_registry_pull_verify",
             description="Verifies worker-side OCI pulls.",
             execution=ToolExecutionBinding(
                 backend_kind="local_process",

@@ -38,6 +38,18 @@ def _get_json_dict(name: str, default: dict[str, object]) -> dict[str, object]:
     return parsed
 
 
+def _default_registry_password_secret_config() -> dict[str, object]:
+    env_name = str(os.getenv("OPEN_TALON_OCI_REGISTRY_PASSWORD_ENV") or "").strip()
+    if env_name:
+        return {"env": env_name}
+    env_name = str(os.getenv("OPEN_TALON_FORGEJO_REGISTRY_PASSWORD_ENV") or "").strip()
+    if env_name:
+        return {"env": env_name}
+    if os.getenv("OPEN_TALON_FORGEJO_REGISTRY_PASSWORD") is not None:
+        return {"env": "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD"}
+    return {"env": "OPEN_TALON_OCI_REGISTRY_PASSWORD"}
+
+
 @dataclass(frozen=True)
 class RuntimeWorkerSettings:
     postgres_dsn: str
@@ -63,10 +75,10 @@ class RuntimeWorkerSettings:
     enable_kafka_wakeups: bool
     execution_root: str
     default_workspace_path: str | None
-    forgejo_registry_url: str | None
-    forgejo_registry_username: str | None
-    forgejo_registry_password_secret_config: dict[str, object]
-    forgejo_registry_validate_on_startup: bool
+    oci_registry_url: str | None
+    oci_registry_username: str | None
+    oci_registry_password_secret_config: dict[str, object]
+    oci_registry_validate_on_startup: bool
     oci_registry_repository_prefix: str | None = None
     communication_log_dir: str | None = None
 
@@ -109,15 +121,24 @@ class RuntimeWorkerSettings:
             enable_kafka_wakeups=_get_bool("ENABLE_KAFKA_WAKEUPS", True),
             execution_root=os.getenv("OPEN_TALON_EXECUTION_ROOT", "/tmp/open-talon-executions"),
             default_workspace_path=os.getenv("OPEN_TALON_DEFAULT_WORKSPACE_PATH"),
-            forgejo_registry_url=os.getenv("OPEN_TALON_FORGEJO_REGISTRY_URL", "localhost:3001"),
-            forgejo_registry_username=os.getenv("OPEN_TALON_FORGEJO_REGISTRY_USERNAME", "forgejo"),
-            forgejo_registry_password_secret_config=_get_json_dict(
-                "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD_SECRET_CONFIG",
-                {"env": "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD"},
+            oci_registry_url=os.getenv(
+                "OPEN_TALON_OCI_REGISTRY_URL",
+                os.getenv("OPEN_TALON_FORGEJO_REGISTRY_URL", "localhost:3001"),
             ),
-            forgejo_registry_validate_on_startup=_get_bool(
-                "OPEN_TALON_FORGEJO_REGISTRY_VALIDATE_ON_STARTUP",
-                True,
+            oci_registry_username=os.getenv(
+                "OPEN_TALON_OCI_REGISTRY_USERNAME",
+                os.getenv("OPEN_TALON_FORGEJO_REGISTRY_USERNAME", "forgejo"),
+            ),
+            oci_registry_password_secret_config=_get_json_dict(
+                "OPEN_TALON_OCI_REGISTRY_PASSWORD_SECRET_CONFIG",
+                _get_json_dict(
+                    "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD_SECRET_CONFIG",
+                    _default_registry_password_secret_config(),
+                ),
+            ),
+            oci_registry_validate_on_startup=_get_bool(
+                "OPEN_TALON_OCI_REGISTRY_VALIDATE_ON_STARTUP",
+                _get_bool("OPEN_TALON_FORGEJO_REGISTRY_VALIDATE_ON_STARTUP", True),
             ),
             oci_registry_repository_prefix=os.getenv(
                 "OPEN_TALON_OCI_REGISTRY_REPOSITORY_PREFIX",

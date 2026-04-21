@@ -181,7 +181,7 @@ _WORKSPACE_MANAGER_ROLES = {"admin", "supervisor"}
 _ORGANIZATION_ADMIN_ROLES = {"owner", "admin"}
 _MAX_RUN_STEP_ATTEMPTS = 3
 _MAX_TOOL_CALL_ATTEMPTS = 3
-_TOOL_GENERATION_REGISTRY_VERIFY_TOOL = "tinker_generated_tool_registry_pull_verify"
+_TOOL_GENERATION_REGISTRY_VERIFY_TOOL = "generated_tool_registry_pull_verify"
 _TOOL_GENERATION_APPROVAL_WORKER_ID = "tool-generation-approval"
 _RETRY_BACKOFF_SECONDS = (30, 120, 600)
 

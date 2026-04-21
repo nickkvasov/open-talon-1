@@ -28,7 +28,7 @@ from agent_runtime.config import RuntimeWorkerSettings
 from agent_runtime.oci_registry import config_from_settings
 
 
-def test_runtime_registry_config_maps_forgejo_settings_into_oci_registry_config():
+def test_runtime_registry_config_maps_oci_settings_into_oci_registry_config():
     settings = RuntimeWorkerSettings(
         postgres_dsn="postgresql://admin:password@localhost:5432/app_db",
         kafka_bootstrap_servers="localhost:9092",
@@ -53,10 +53,10 @@ def test_runtime_registry_config_maps_forgejo_settings_into_oci_registry_config(
         enable_kafka_wakeups=False,
         execution_root="/tmp/open-talon-executions",
         default_workspace_path=None,
-        forgejo_registry_url="127.0.0.1:3001",
-        forgejo_registry_username="forgejo",
-        forgejo_registry_password_secret_config={"env": "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD"},
-        forgejo_registry_validate_on_startup=True,
+        oci_registry_url="127.0.0.1:3001",
+        oci_registry_username="forgejo",
+        oci_registry_password_secret_config={"env": "OPEN_TALON_OCI_REGISTRY_PASSWORD"},
+        oci_registry_validate_on_startup=True,
         oci_registry_repository_prefix="forgejo/generated-tools",
     )
 
@@ -64,6 +64,6 @@ def test_runtime_registry_config_maps_forgejo_settings_into_oci_registry_config(
 
     assert config.base_url == "127.0.0.1:3001"
     assert config.username == "forgejo"
-    assert config.password_secret_config == {"env": "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD"}
+    assert config.password_secret_config == {"env": "OPEN_TALON_OCI_REGISTRY_PASSWORD"}
     assert config.repository_prefix == "forgejo/generated-tools"
     assert config.validate_on_startup is True

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "open-talon-generated-tools-builder"
+version = "0.1.0"
+description = "Standalone generated tools builder helpers for Open Talon"
+requires-python = ">=3.12"
+dependencies = [
+    "open-talon-contracts",
+]
+
+[project.scripts]
+talon-generated-tools-builder = "generated_tools_builder.cli:entrypoint"
+
+[tool.hatch.build.targets.wheel]
+packages = ["generated_tools_builder"]

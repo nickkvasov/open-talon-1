@@ -189,10 +189,10 @@ def _settings() -> RuntimeWorkerSettings:
         enable_kafka_wakeups=False,
         execution_root="/tmp/open-talon-executions",
         default_workspace_path=None,
-        forgejo_registry_url="127.0.0.1:3001",
-        forgejo_registry_username="forgejo",
-        forgejo_registry_password_secret_config={"env": "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD"},
-        forgejo_registry_validate_on_startup=False,
+        oci_registry_url="127.0.0.1:3001",
+        oci_registry_username="forgejo",
+        oci_registry_password_secret_config={"env": "OPEN_TALON_OCI_REGISTRY_PASSWORD"},
+        oci_registry_validate_on_startup=False,
     )
 
 

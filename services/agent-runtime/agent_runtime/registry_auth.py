@@ -10,7 +10,7 @@ from .oci_registry import config_from_settings, docker_login, resolve_registry_p
 logger = logging.getLogger(__name__)
 
 
-async def ensure_forgejo_registry_login(
+async def ensure_oci_registry_login(
     settings: RuntimeWorkerSettings,
     *,
     secret_resolver: SecretResolver,
@@ -29,4 +29,4 @@ async def ensure_forgejo_registry_login(
     logger.info("Validated OCI registry login for %s", config.base_url)
 
 
-__all__ = ["ensure_forgejo_registry_login"]
+__all__ = ["ensure_oci_registry_login"]

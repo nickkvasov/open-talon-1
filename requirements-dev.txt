@@ -1,6 +1,7 @@
 -e ./packages/contracts
 -e ./services/core-collab
 -e ./services/agent-runtime
+-e ./services/generated-tools-builder
 -e ./services/gateway-edge
 -e ./services/workspace-memory
 -e ./apps/tui

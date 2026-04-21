@@ -53,6 +53,7 @@ repo_pythonpath() {
     "${ROOT_DIR}/services/core-collab"
     "${ROOT_DIR}/services/gateway-edge"
     "${ROOT_DIR}/services/agent-runtime"
+    "${ROOT_DIR}/services/generated-tools-builder"
     "${ROOT_DIR}/services/workspace-memory"
     "${ROOT_DIR}/apps/tui"
   )
