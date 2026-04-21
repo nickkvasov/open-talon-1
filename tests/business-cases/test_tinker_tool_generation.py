@@ -63,6 +63,7 @@ _TINKER_INTERNAL_HELPERS: tuple[tuple[str, str, int, str], ...] = (
     ("tinker_generated_repo_write", "write-files", 120, "none"),
     ("tinker_generated_tool_build", "build-image", 600, "none"),
     ("tinker_generated_tool_registry_push", "push-image", 600, "full"),
+    ("tinker_generated_tool_registry_pull_verify", "verify-registry-pull", 300, "full"),
     ("tinker_generated_tool_smoke_test", "smoke-test", 300, "none"),
     ("tinker_generated_tool_asset_publish", "publish-assets", 300, "none"),
     ("tinker_tool_request_status_update", "update-request-status", 60, "none"),
@@ -318,19 +319,49 @@ async def test_tinker_can_publish_and_execute_fibonacci_tool(
         ReviewToolGenerationRevisionRequest(actor=admin_actor),
     )
     assert approval.detail is not None
-    assert approval.detail.request.status == "published"
-    assert approval.detail.request.final_tool_id is not None
+    assert approval.detail.request.status == "verifying_registry_pull"
+    assert approval.detail.request.final_tool_id is None
     assert approval.detail.request.requested_scope == "organization"
     assert await kernel.list_workspace_tools(workspace_id) == []
-    published_tool = repository._system_tools[approval.detail.request.final_tool_id]
+
+    verification_claim = await kernel.claim_next_tool_call(
+        worker_id="tool-worker",
+        lease_ttl_seconds=30,
+        max_parallel_calls_per_run=1,
+        max_concurrent_calls_per_tool=1,
+    )
+    assert verification_claim.tool_call is not None
+    assert (
+        verification_claim.tool_call.tool_name
+        == "tinker_generated_tool_registry_pull_verify"
+    )
+    immutable_ref = "registry.example/fibonacci-calculator@sha256:fibonacci55"
+    await kernel.update_tool_call_execution_handle(
+        verification_claim.tool_call.tool_call_id,
+        "tool-worker",
+        "registry-pull-verification",
+    )
+    await kernel.complete_tool_call(
+        verification_claim.tool_call.tool_call_id,
+        "tool-worker",
+        result=ToolCallResult(output_payload={"immutable_ref": immutable_ref}),
+    )
+
+    published_detail = await kernel.get_tool_generation_request(
+        approval.detail.request.request_id
+    )
+    assert published_detail.request.status == "published"
+    assert published_detail.request.final_tool_id is not None
+    published_tool = repository._system_tools[published_detail.request.final_tool_id]
     assert published_tool.scope == "organization"
     assert published_tool.organization_id == created_workspace.workspace.organization_id
+    assert published_tool.execution.handler_ref == immutable_ref
 
     attach_result = await kernel.attach_workspace_tool(
         workspace_id,
         AttachWorkspaceToolRequest(
             actor=admin_actor,
-            tool_id=approval.detail.request.final_tool_id,
+            tool_id=published_detail.request.final_tool_id,
         ),
     )
     assert attach_result.tool is not None
@@ -442,6 +473,10 @@ async def test_tinker_can_publish_and_execute_fibonacci_tool(
         entry.content.startswith(
             "Tinker prepared tool revision `fibonacci_calculator` for platform approval."
         )
+        for entry in communication_log.entries
+    )
+    assert any(
+        entry.content.startswith("Approval started for generated tool `fibonacci_calculator`.")
         for entry in communication_log.entries
     )
     assert any(

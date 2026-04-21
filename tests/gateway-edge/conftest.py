@@ -1133,48 +1133,34 @@ class MockCollaborationService:
         return detail
 
     async def approve_tool_generation_revision(self, revision_id: UUID, payload):
-        from gateway_edge.models import SystemToolDefinition
-
         for request_id, detail in self.tool_generation_requests.items():
             for revision in detail.revisions:
                 if revision.revision_id != revision_id:
                     continue
                 now = datetime.now(timezone.utc)
-                tool_scope = detail.request.requested_scope
-                tool = SystemToolDefinition(
-                    tool_id=uuid4(),
-                    scope=tool_scope,
-                    organization_id=(
-                        detail.request.organization_id
-                        if tool_scope == "organization"
-                        else None
-                    ),
-                    name=revision.manifest.name,
-                    description=revision.manifest.description,
-                    parameter_contract=revision.manifest.parameter_contract,
-                    input_schema=revision.manifest.input_schema,
-                    execution=revision.manifest.execution,
-                    created_by=payload.actor.participant_id,
-                    created_at=now,
-                    updated_by=payload.actor.participant_id,
-                    updated_at=now,
-                    metadata={},
-                )
-                self.system_tools[str(tool.tool_id)] = tool
                 updated_revisions = [
-                    item.model_copy(update={"status": "approved", "updated_at": now})
+                    item.model_copy(
+                        update={
+                            "status": "verifying_registry_pull",
+                            "updated_at": now,
+                            "metadata": {
+                                **item.metadata,
+                                "approval_verification_immutable_ref": "registry.example/repo_stats@sha256:abcd",
+                            },
+                        }
+                    )
                     if item.revision_id == revision_id
                     else item
                     for item in detail.revisions
                 ]
                 updated_request = detail.request.model_copy(
                     update={
-                        "status": "published",
-                        "final_tool_id": tool.tool_id,
-                        "approved_by": payload.actor.participant_id,
-                        "approved_at": now,
-                        "published_at": now,
+                        "status": "verifying_registry_pull",
                         "updated_at": now,
+                        "metadata": {
+                            **detail.request.metadata,
+                            "approval_verification_immutable_ref": "registry.example/repo_stats@sha256:abcd",
+                        },
                     }
                 )
                 updated_detail = detail.model_copy(

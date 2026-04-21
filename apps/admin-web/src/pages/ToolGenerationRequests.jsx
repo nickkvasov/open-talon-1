@@ -10,6 +10,7 @@ const STATUS_BADGE = {
   drafting: 'bg-blue-100 text-blue-800',
   validating: 'bg-cyan-100 text-cyan-800',
   pending_approval: 'bg-violet-100 text-violet-800',
+  verifying_registry_pull: 'bg-amber-100 text-amber-900',
   published: 'bg-emerald-100 text-emerald-800',
   rejected: 'bg-rose-100 text-rose-800',
   failed: 'bg-red-100 text-red-800',
@@ -141,6 +142,7 @@ export default function ToolGenerationRequests() {
           className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
         >
           <option value="pending_approval">Pending approval</option>
+          <option value="verifying_registry_pull">Verifying registry pull</option>
           <option value="submitted">Submitted</option>
           <option value="drafting">Drafting</option>
           <option value="validating">Validating</option>
@@ -253,8 +255,18 @@ export default function ToolGenerationRequests() {
                     <div className="space-y-1 text-sm text-slate-600 dark:text-slate-400">
                       <div>Ref: {selectedRevision.image_ref || 'Not recorded'}</div>
                       <div>Digest: {selectedRevision.image_digest || 'Not recorded'}</div>
+                      <div>
+                        Immutable ref:{' '}
+                        {selectedRevision.metadata?.approval_verification_immutable_ref || selectedDetail.request.metadata?.approval_verification_immutable_ref || 'Not recorded'}
+                      </div>
                     </div>
                   </div>
+
+                  {selectedRevision.metadata?.approval_verification_error || selectedDetail.request.metadata?.approval_verification_error ? (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+                      Latest verification error: {selectedRevision.metadata?.approval_verification_error || selectedDetail.request.metadata?.approval_verification_error}
+                    </div>
+                  ) : null}
 
                   <div className="rounded-xl border border-slate-200 p-4 dark:border-slate-800">
                     <div className="mb-3 text-sm font-medium text-slate-700 dark:text-slate-200">Validation</div>
@@ -299,7 +311,7 @@ export default function ToolGenerationRequests() {
                       <button
                         type="button"
                         onClick={handleReject}
-                        disabled={!['pending_approval', 'validating', 'drafting'].includes(selectedRevision.status)}
+                        disabled={!['pending_approval', 'verifying_registry_pull', 'validating', 'drafting'].includes(selectedRevision.status)}
                         className="inline-flex items-center gap-2 rounded-lg bg-rose-600 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-slate-400"
                       >
                         <XCircle className="h-4 w-4" />

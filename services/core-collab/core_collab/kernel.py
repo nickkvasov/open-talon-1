@@ -7,6 +7,12 @@ import sys
 from uuid import UUID, uuid4
 
 import asyncpg
+from open_talon_contracts.oci_registry import (
+    digest_pinned_image_ref,
+    is_digest,
+    is_digest_pinned_image_ref,
+    is_registry_backed_image_ref,
+)
 
 _WORKSPACE_MEMORY_DIR = Path(__file__).resolve().parents[2] / "workspace-memory"
 if _WORKSPACE_MEMORY_DIR.is_dir():
@@ -175,6 +181,8 @@ _WORKSPACE_MANAGER_ROLES = {"admin", "supervisor"}
 _ORGANIZATION_ADMIN_ROLES = {"owner", "admin"}
 _MAX_RUN_STEP_ATTEMPTS = 3
 _MAX_TOOL_CALL_ATTEMPTS = 3
+_TOOL_GENERATION_REGISTRY_VERIFY_TOOL = "tinker_generated_tool_registry_pull_verify"
+_TOOL_GENERATION_APPROVAL_WORKER_ID = "tool-generation-approval"
 _RETRY_BACKOFF_SECONDS = (30, 120, 600)
 
 
@@ -1805,6 +1813,10 @@ class CollaborationKernel:
         system_tool = await self._repository.fetch_system_tool(payload.tool_id)
         if system_tool is None:
             raise KeyError(f"System tool {payload.tool_id} not found")
+        if bool(system_tool.metadata.get("internal_only")):
+            raise PermissionError(
+                f"System tool {payload.tool_id} is internal-only and cannot be attached to workspaces"
+            )
         if not self._resource_visible_to_workspace(
             system_tool.scope,
             system_tool.organization_id,
@@ -3347,6 +3359,7 @@ class CollaborationKernel:
             updated_at=now,
             metadata=payload.metadata,
         )
+        self._validate_tool_generation_revision_submission(revision, status=payload.status)
         updated_request = request.model_copy(
             update={
                 "status": payload.status,
@@ -3386,6 +3399,22 @@ class CollaborationKernel:
                     )
                 )
                 if payload.status == "pending_approval":
+                    events.append(
+                        await self._build_thread_event(
+                            conn,
+                            request.workspace_id,
+                            request.thread_id,
+                            "tool_generation_request.pending_approval",
+                            actor=self._actor_from_input(payload.actor),
+                            target=TargetRef(
+                                type="tool_generation_request",
+                                id=updated_request.request_id,
+                            ),
+                            visibility="workspace",
+                            payload=updated_request.model_dump(mode="json"),
+                            timestamp=now,
+                        )
+                    )
                     status_message, message_event = await self._create_tool_generation_status_message(
                         conn,
                         request=updated_request,
@@ -3399,6 +3428,8 @@ class CollaborationKernel:
                     )
                     if message_event is not None:
                         events.append(message_event)
+                for event in events:
+                    await self._repository.record_event(conn, event)
         if status_message is not None:
             await self._persist_workspace_communication_messages([status_message])
         detail = await self._tool_generation_request_detail(request_id)
@@ -3427,89 +3458,155 @@ class CollaborationKernel:
         if revision.status != "pending_approval":
             raise ValueError("Only revisions pending approval can be approved")
         now = self._now()
-        manifest = self._normalize_generated_tool_manifest(revision.manifest)
-        execution = manifest.execution.model_copy(
-            update={"handler_ref": manifest.execution.handler_ref or manifest.name}
+        immutable_ref = self._require_generated_tool_immutable_ref(revision)
+        verification_task = await self._build_tool_generation_verification_task(
+            request=request,
+            revision=revision,
+            approver_id=payload.actor.participant_id,
+            review_reason=payload.reason,
+            immutable_ref=immutable_ref,
+            timestamp=now,
         )
-        tool_scope = request.requested_scope
-        tool = SystemToolDefinition(
-            tool_id=uuid4(),
-            scope=tool_scope,
-            organization_id=(request.organization_id if tool_scope == "organization" else None),
-            name=manifest.name,
-            description=manifest.description,
-            parameter_contract=manifest.parameter_contract,
-            input_schema=manifest.input_schema,
-            execution=execution,
-            created_by=payload.actor.participant_id,
-            created_at=now,
-            updated_by=payload.actor.participant_id,
-            updated_at=now,
-            metadata={
-                **manifest.metadata,
-                "generated": True,
-                "tool_generation_request_id": str(request.request_id),
-                "tool_generation_revision_id": str(revision.revision_id),
-                "tool_generation_requested_scope": tool_scope,
-                **(
-                    {"image_ref": revision.image_ref}
-                    if revision.image_ref is not None
-                    else {}
-                ),
-                **(
-                    {"image_digest": revision.image_digest}
-                    if revision.image_digest is not None
-                    else {}
-                ),
-            },
-        )
-        approved_revision = revision.model_copy(update={"status": "approved", "updated_at": now})
-        published_request = request.model_copy(
+        verifying_request = request.model_copy(
             update={
-                "status": "published",
-                "target_tool_name": manifest.name,
-                "summary": manifest.description,
-                "final_tool_id": tool.tool_id,
-                "latest_revision_id": revision.revision_id,
-                "approved_by": payload.actor.participant_id,
-                "approved_at": now,
-                "published_at": now,
-                "rejected_by": None,
-                "rejected_at": None,
+                "status": "verifying_registry_pull",
                 "updated_at": now,
+                "metadata": self._tool_generation_metadata_with_update(
+                    request.metadata,
+                    approval_verification_error=None,
+                    approval_verification_requested_at=now.isoformat(),
+                    approval_verification_requested_by=str(payload.actor.participant_id),
+                    approval_verification_reason=payload.reason,
+                    approval_verification_task_id=str(verification_task["task"].task_id),
+                    approval_verification_run_id=str(verification_task["run"].run_id),
+                    approval_verification_tool_call_id=str(
+                        verification_task["tool_call"].tool_call_id
+                    ),
+                    approval_verification_immutable_ref=immutable_ref,
+                ),
+            }
+        )
+        verifying_revision = revision.model_copy(
+            update={
+                "status": "verifying_registry_pull",
+                "updated_at": now,
+                "metadata": self._tool_generation_metadata_with_update(
+                    revision.metadata,
+                    approval_verification_error=None,
+                    approval_verification_requested_at=now.isoformat(),
+                    approval_verification_requested_by=str(payload.actor.participant_id),
+                    approval_verification_reason=payload.reason,
+                    approval_verification_task_id=str(verification_task["task"].task_id),
+                    approval_verification_run_id=str(verification_task["run"].run_id),
+                    approval_verification_tool_call_id=str(
+                        verification_task["tool_call"].tool_call_id
+                    ),
+                    approval_verification_immutable_ref=immutable_ref,
+                ),
             }
         )
         status_message: TimelineMessage | None = None
         events: list[EventEnvelope] = []
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
-                await self._repository.upsert_system_tool(conn, tool)
-                await self._repository.upsert_tool_generation_revision(conn, approved_revision)
-                await self._repository.upsert_tool_generation_request(conn, published_request)
-                await self._link_generated_tool_assets(
+                await self._repository.upsert_task(conn, verification_task["task"])
+                await self._repository.upsert_run(conn, verification_task["run"])
+                await self._repository.upsert_run_step(conn, verification_task["step"])
+                await self._repository.upsert_tool_call(conn, verification_task["tool_call"])
+                await self._repository.upsert_tool_generation_revision(conn, verifying_revision)
+                await self._repository.upsert_tool_generation_request(conn, verifying_request)
+                actor = ActorRef(
+                    type="agent",
+                    id=verification_task["participant"].participant_id,
+                )
+                verification_events = [
+                    await self._build_thread_event(
+                        conn,
+                        request.workspace_id,
+                        request.thread_id,
+                        "task.claimed",
+                        actor=actor,
+                        target=TargetRef(type="task", id=verification_task["task"].task_id),
+                        payload={
+                            "task_id": str(verification_task["task"].task_id),
+                            "claimed_by": str(verification_task["participant"].participant_id),
+                            "system_agent_id": str(request.target_system_agent_id),
+                            "tool_generation_approval_verification": True,
+                        },
+                        visibility="agents_only",
+                        timestamp=now,
+                        correlation_id=verification_task["task"].correlation_id,
+                        causation_id=verification_task["task"].causation_id,
+                    ),
+                    await self._build_thread_event(
+                        conn,
+                        request.workspace_id,
+                        request.thread_id,
+                        "run.started",
+                        actor=actor,
+                        target=TargetRef(type="run", id=verification_task["run"].run_id),
+                        payload=verification_task["run"].model_dump(mode="json"),
+                        visibility="agents_only",
+                        timestamp=now,
+                        correlation_id=verification_task["run"].correlation_id,
+                        causation_id=verification_task["task"].task_id,
+                    ),
+                    await self._build_thread_event(
+                        conn,
+                        request.workspace_id,
+                        request.thread_id,
+                        "tool_call.created",
+                        actor=actor,
+                        target=TargetRef(type="tool_call", id=verification_task["tool_call"].tool_call_id),
+                        payload=verification_task["tool_call"].model_dump(mode="json"),
+                        visibility="agents_only",
+                        timestamp=now,
+                        correlation_id=verification_task["run"].correlation_id,
+                        causation_id=verification_task["task"].task_id,
+                    ),
+                ]
+                for event in verification_events:
+                    await self._repository.record_event(conn, event)
+                    events.append(event)
+                approval_started_event = await self._build_thread_event(
                     conn,
-                    request=published_request,
-                    revision=approved_revision,
-                    tool=tool,
-                    actor_id=payload.actor.participant_id,
+                    request.workspace_id,
+                    request.thread_id,
+                    "tool_generation_revision.approval_started",
+                    actor=self._actor_from_input(payload.actor),
+                    target=TargetRef(type="tool_generation_revision", id=verifying_revision.revision_id),
+                    visibility="workspace",
+                    payload={
+                        "request_id": str(verifying_request.request_id),
+                        "revision_id": str(verifying_revision.revision_id),
+                        "requested_scope": verifying_request.requested_scope,
+                        "immutable_ref": immutable_ref,
+                    },
                     timestamp=now,
                 )
+                await self._repository.record_event(conn, approval_started_event)
+                events.append(approval_started_event)
                 status_message, message_event = await self._create_tool_generation_status_message(
                     conn,
-                    request=published_request,
-                    revision=approved_revision,
-                    status="published",
-                    content=self._tool_generation_published_message(tool, approved_revision),
+                    request=verifying_request,
+                    revision=verifying_revision,
+                    status="verifying_registry_pull",
+                    content=self._tool_generation_verifying_message(
+                        request=verifying_request,
+                        revision=verifying_revision,
+                        immutable_ref=immutable_ref,
+                    ),
                     timestamp=now,
                 )
                 if message_event is not None:
+                    await self._repository.record_event(conn, message_event)
                     events.append(message_event)
         if status_message is not None:
             await self._persist_workspace_communication_messages([status_message])
         detail = await self._tool_generation_request_detail(request.request_id)
         return ToolGenerationRequestCommandResult(
             detail=detail,
-            revision=approved_revision,
+            revision=verifying_revision,
             message=status_message,
             events=events,
         )
@@ -3545,6 +3642,23 @@ class CollaborationKernel:
             async with conn.transaction():
                 await self._repository.upsert_tool_generation_revision(conn, rejected_revision)
                 await self._repository.upsert_tool_generation_request(conn, rejected_request)
+                rejected_event = await self._build_thread_event(
+                    conn,
+                    request.workspace_id,
+                    request.thread_id,
+                    "tool_generation_revision.rejected",
+                    actor=self._actor_from_input(payload.actor),
+                    target=TargetRef(type="tool_generation_revision", id=rejected_revision.revision_id),
+                    visibility="workspace",
+                    payload={
+                        "request_id": str(rejected_request.request_id),
+                        "revision_id": str(rejected_revision.revision_id),
+                        "reason": payload.reason,
+                    },
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, rejected_event)
+                events.append(rejected_event)
                 status_message, message_event = await self._create_tool_generation_status_message(
                     conn,
                     request=rejected_request,
@@ -3554,6 +3668,7 @@ class CollaborationKernel:
                     timestamp=now,
                 )
                 if message_event is not None:
+                    await self._repository.record_event(conn, message_event)
                     events.append(message_event)
         if status_message is not None:
             await self._persist_workspace_communication_messages([status_message])
@@ -4766,6 +4881,209 @@ class CollaborationKernel:
         revisions = await self._repository.list_tool_generation_revisions(request_id)
         return ToolGenerationRequestDetail(request=request, revisions=revisions)
 
+    def _validate_tool_generation_revision_submission(
+        self,
+        revision: ToolGenerationRevision,
+        *,
+        status: str,
+    ) -> None:
+        if status != "pending_approval":
+            return
+        manifest = self._normalize_generated_tool_manifest(revision.manifest)
+        if manifest.execution.backend_kind != "docker":
+            return
+        if not revision.image_ref or not revision.image_digest:
+            raise ValueError(
+                "Pending-approval Docker revisions require both image_ref and image_digest"
+            )
+        if not is_registry_backed_image_ref(revision.image_ref):
+            raise ValueError(
+                "Pending-approval Docker revisions require an OCI registry-backed image_ref"
+            )
+        if not is_digest(revision.image_digest):
+            raise ValueError(
+                "Pending-approval Docker revisions require an image_digest in sha256 form"
+            )
+
+    def _require_generated_tool_immutable_ref(
+        self,
+        revision: ToolGenerationRevision,
+    ) -> str:
+        manifest = self._normalize_generated_tool_manifest(revision.manifest)
+        if manifest.execution.backend_kind != "docker":
+            raise ValueError("Only generated Docker tools require registry pull verification")
+        immutable_ref = digest_pinned_image_ref(revision.image_ref, revision.image_digest)
+        if immutable_ref is None:
+            raise ValueError(
+                "Generated Docker tools can be published only from OCI registry images with a recorded sha256 digest"
+            )
+        if not is_digest_pinned_image_ref(immutable_ref):
+            raise ValueError(
+                "Generated Docker tools must publish with an immutable digest-pinned OCI image ref"
+            )
+        return immutable_ref
+
+    @staticmethod
+    def _tool_generation_metadata_with_update(
+        existing: dict[str, object],
+        **updates: object,
+    ) -> dict[str, object]:
+        metadata = dict(existing)
+        for key, value in updates.items():
+            if value is None:
+                metadata.pop(key, None)
+            else:
+                metadata[key] = value
+        return metadata
+
+    async def _build_tool_generation_verification_task(
+        self,
+        *,
+        request: ToolGenerationRequest,
+        revision: ToolGenerationRevision,
+        approver_id: UUID,
+        review_reason: str | None,
+        immutable_ref: str,
+        timestamp: datetime,
+    ) -> dict[str, object]:
+        participant = await self._repository.fetch_agent_participant(
+            request.workspace_id,
+            request.target_system_agent_id,
+        )
+        if participant is None:
+            raise KeyError(
+                f"System agent {request.target_system_agent_id} is not attached to workspace {request.workspace_id}"
+            )
+        tool = await self._repository.fetch_agent_internal_tool_by_name(
+            request.target_system_agent_id,
+            _TOOL_GENERATION_REGISTRY_VERIFY_TOOL,
+        )
+        if tool is None:
+            raise KeyError(
+                f"Internal tool {_TOOL_GENERATION_REGISTRY_VERIFY_TOOL!r} is not bound to system agent {request.target_system_agent_id}"
+            )
+        task = Task(
+            task_id=uuid4(),
+            workspace_id=request.workspace_id,
+            thread_id=request.thread_id,
+            title=f"Verify registry pull for generated tool {revision.manifest.name}",
+            description=f"Verify worker-side pullability for {immutable_ref}.",
+            status="claimed",
+            requested_by=request.requester_participant_id,
+            claimed_by=participant.participant_id,
+            visibility="agents_only",
+            correlation_id=uuid4(),
+            causation_id=request.request_id,
+            created_at=timestamp,
+            updated_at=timestamp,
+            metadata={
+                "target_system_agent_id": str(request.target_system_agent_id),
+                "target_participant_id": str(participant.participant_id),
+                "routing_reason": "tool_generation_registry_pull_verification",
+                "response_visibility": "agents_only",
+                "tool_generation_request_id": str(request.request_id),
+                "tool_generation_revision_id": str(revision.revision_id),
+                "tool_generation_approval_verification": True,
+                "tool_generation_approval_actor_id": str(approver_id),
+                "tool_generation_approval_reason": review_reason,
+                "tool_generation_approval_immutable_ref": immutable_ref,
+            },
+        )
+        run = Run(
+            run_id=uuid4(),
+            workspace_id=request.workspace_id,
+            thread_id=request.thread_id,
+            task_id=task.task_id,
+            participant_id=participant.participant_id,
+            status="started",
+            correlation_id=task.correlation_id,
+            causation_id=task.task_id,
+            created_at=timestamp,
+            updated_at=timestamp,
+            metadata={
+                "system_agent_id": str(request.target_system_agent_id),
+                "participant_id": str(participant.participant_id),
+                "tool_generation_approval_verification": True,
+            },
+        )
+        step = RunStep(
+            step_id=uuid4(),
+            run_id=run.run_id,
+            task_id=task.task_id,
+            workspace_id=request.workspace_id,
+            thread_id=request.thread_id,
+            system_agent_id=request.target_system_agent_id,
+            step_index=0,
+            status="waiting_tools",
+            output={
+                "tool_calls_requested": [
+                    {
+                        "tool_name": tool.name,
+                        "arguments": {
+                            "immutable_ref": immutable_ref,
+                            "image_ref": revision.image_ref,
+                            "image_digest": revision.image_digest,
+                        },
+                        "summary": f"Verify that workers can docker pull {immutable_ref}.",
+                    }
+                ]
+            },
+            submitted_at=timestamp,
+            started_at=timestamp,
+            created_at=timestamp,
+            updated_at=timestamp,
+            metadata={
+                "participant_id": str(participant.participant_id),
+                "tool_generation_approval_verification": True,
+            },
+        )
+        draft = AgentToolCallDraft(
+            tool_name=tool.name,
+            arguments={
+                "immutable_ref": immutable_ref,
+                "image_ref": revision.image_ref,
+                "image_digest": revision.image_digest,
+            },
+            summary=f"Verify worker-side docker pull for {immutable_ref}.",
+            metadata={
+                "tool_generation_request_id": str(request.request_id),
+                "tool_generation_revision_id": str(revision.revision_id),
+                "tool_generation_approval_verification": True,
+                "tool_generation_approval_actor_id": str(approver_id),
+                "tool_generation_approval_reason": review_reason,
+                "tool_generation_approval_immutable_ref": immutable_ref,
+            },
+        )
+        tool_call = ToolCall(
+            tool_call_id=uuid4(),
+            run_id=run.run_id,
+            run_step_id=step.step_id,
+            task_id=task.task_id,
+            workspace_id=request.workspace_id,
+            thread_id=request.thread_id,
+            system_agent_id=request.target_system_agent_id,
+            tool_id=tool.tool_id,
+            tool_name=tool.name,
+            status="created",
+            arguments=draft.arguments,
+            execution_spec=self._build_tool_execution_spec(
+                tool=tool,
+                draft=draft,
+                workspace_id=request.workspace_id,
+            ).model_dump(mode="json"),
+            submitted_at=timestamp,
+            created_at=timestamp,
+            updated_at=timestamp,
+            metadata=draft.metadata,
+        )
+        return {
+            "task": task,
+            "run": run,
+            "step": step,
+            "tool_call": tool_call,
+            "participant": participant,
+        }
+
     @staticmethod
     def _is_tool_generation_agent(agent: AgentDefinition) -> bool:
         return bool(agent.metadata.get("tool_generation_agent")) or bool(
@@ -4929,6 +5247,243 @@ class CollaborationKernel:
         )
         return message, event
 
+    async def _publish_verified_tool_generation_revision_in_transaction(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        request: ToolGenerationRequest,
+        revision: ToolGenerationRevision,
+        approver_id: UUID,
+        timestamp: datetime,
+    ) -> tuple[SystemToolDefinition, ToolGenerationRequest, ToolGenerationRevision]:
+        manifest = self._normalize_generated_tool_manifest(revision.manifest)
+        immutable_ref = self._require_generated_tool_immutable_ref(revision)
+        execution = manifest.execution.model_copy(update={"handler_ref": immutable_ref})
+        tool_scope = request.requested_scope
+        tool = SystemToolDefinition(
+            tool_id=uuid4(),
+            scope=tool_scope,
+            organization_id=(request.organization_id if tool_scope == "organization" else None),
+            name=manifest.name,
+            description=manifest.description,
+            parameter_contract=manifest.parameter_contract,
+            input_schema=manifest.input_schema,
+            execution=execution,
+            created_by=approver_id,
+            created_at=timestamp,
+            updated_by=approver_id,
+            updated_at=timestamp,
+            metadata={
+                **manifest.metadata,
+                "generated": True,
+                "tool_generation_request_id": str(request.request_id),
+                "tool_generation_revision_id": str(revision.revision_id),
+                "tool_generation_requested_scope": tool_scope,
+                **({"image_ref": revision.image_ref} if revision.image_ref is not None else {}),
+                **(
+                    {"image_digest": revision.image_digest}
+                    if revision.image_digest is not None
+                    else {}
+                ),
+                "immutable_image_ref": immutable_ref,
+            },
+        )
+        approved_revision = revision.model_copy(
+            update={
+                "status": "approved",
+                "updated_at": timestamp,
+                "metadata": self._tool_generation_metadata_with_update(
+                    revision.metadata,
+                    approval_verification_error=None,
+                    approval_verification_completed_at=timestamp.isoformat(),
+                    approval_verification_immutable_ref=immutable_ref,
+                ),
+            }
+        )
+        published_request = request.model_copy(
+            update={
+                "status": "published",
+                "target_tool_name": manifest.name,
+                "summary": manifest.description,
+                "final_tool_id": tool.tool_id,
+                "latest_revision_id": revision.revision_id,
+                "approved_by": approver_id,
+                "approved_at": timestamp,
+                "published_at": timestamp,
+                "rejected_by": None,
+                "rejected_at": None,
+                "updated_at": timestamp,
+                "metadata": self._tool_generation_metadata_with_update(
+                    request.metadata,
+                    approval_verification_error=None,
+                    approval_verification_completed_at=timestamp.isoformat(),
+                    approval_verification_immutable_ref=immutable_ref,
+                ),
+            }
+        )
+        await self._repository.upsert_system_tool(conn, tool)
+        await self._repository.upsert_tool_generation_revision(conn, approved_revision)
+        await self._repository.upsert_tool_generation_request(conn, published_request)
+        await self._link_generated_tool_assets(
+            conn,
+            request=published_request,
+            revision=approved_revision,
+            tool=tool,
+            actor_id=approver_id,
+            timestamp=timestamp,
+        )
+        return tool, published_request, approved_revision
+
+    async def _handle_tool_generation_verification_completion(
+        self,
+        *,
+        tool_call: ToolCall,
+        run: Run,
+        task: Task,
+        status: str,
+        result: ToolCallResult,
+        error: str | None,
+    ) -> tuple[list[EventEnvelope], list[TimelineMessage]]:
+        request_id = self._metadata_uuid(tool_call.metadata, "tool_generation_request_id")
+        revision_id = self._metadata_uuid(tool_call.metadata, "tool_generation_revision_id")
+        approver_id = self._metadata_uuid(tool_call.metadata, "tool_generation_approval_actor_id")
+        if request_id is None or revision_id is None:
+            return [], []
+        request = await self._repository.fetch_tool_generation_request(request_id)
+        revision = await self._repository.fetch_tool_generation_revision(revision_id)
+        if request is None or revision is None:
+            return [], []
+        rendered_messages: list[TimelineMessage] = []
+        events: list[EventEnvelope] = []
+        now = self._now()
+        effective_approver_id = approver_id or request.requester_participant_id
+        verification_error = error or result.error or "Worker-side registry pull verification failed"
+        if request.status == "verifying_registry_pull" and revision.status == "verifying_registry_pull":
+            async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+                async with conn.transaction():
+                    if status == "completed":
+                        tool, published_request, approved_revision = (
+                            await self._publish_verified_tool_generation_revision_in_transaction(
+                                conn,
+                                request=request,
+                                revision=revision,
+                                approver_id=effective_approver_id,
+                                timestamp=now,
+                            )
+                        )
+                        published_event = await self._build_thread_event(
+                            conn,
+                            request.workspace_id,
+                            request.thread_id,
+                            "tool_generation_revision.published",
+                            actor=ActorRef(type="user", id=effective_approver_id),
+                            target=TargetRef(
+                                type="tool_generation_revision",
+                                id=approved_revision.revision_id,
+                            ),
+                            visibility="workspace",
+                            payload={
+                                "request_id": str(published_request.request_id),
+                                "revision_id": str(approved_revision.revision_id),
+                                "tool_id": str(tool.tool_id),
+                                "scope": tool.scope,
+                                "immutable_ref": tool.execution.handler_ref,
+                            },
+                            timestamp=now,
+                        )
+                        await self._repository.record_event(conn, published_event)
+                        events.append(published_event)
+                        status_message, message_event = await self._create_tool_generation_status_message(
+                            conn,
+                            request=published_request,
+                            revision=approved_revision,
+                            status="published",
+                            content=self._tool_generation_published_message(
+                                tool,
+                                approved_revision,
+                            ),
+                            timestamp=now,
+                        )
+                    else:
+                        pending_request = request.model_copy(
+                            update={
+                                "status": "pending_approval",
+                                "updated_at": now,
+                                "metadata": self._tool_generation_metadata_with_update(
+                                    request.metadata,
+                                    approval_verification_error=verification_error,
+                                    approval_verification_failed_at=now.isoformat(),
+                                ),
+                            }
+                        )
+                        pending_revision = revision.model_copy(
+                            update={
+                                "status": "pending_approval",
+                                "updated_at": now,
+                                "metadata": self._tool_generation_metadata_with_update(
+                                    revision.metadata,
+                                    approval_verification_error=verification_error,
+                                    approval_verification_failed_at=now.isoformat(),
+                                ),
+                            }
+                        )
+                        await self._repository.upsert_tool_generation_request(conn, pending_request)
+                        await self._repository.upsert_tool_generation_revision(conn, pending_revision)
+                        verification_failed_event = await self._build_thread_event(
+                            conn,
+                            request.workspace_id,
+                            request.thread_id,
+                            "tool_generation_revision.verification_failed",
+                            actor=ActorRef(type="user", id=effective_approver_id),
+                            target=TargetRef(
+                                type="tool_generation_revision",
+                                id=pending_revision.revision_id,
+                            ),
+                            visibility="workspace",
+                            payload={
+                                "request_id": str(pending_request.request_id),
+                                "revision_id": str(pending_revision.revision_id),
+                                "error": verification_error,
+                            },
+                            timestamp=now,
+                        )
+                        await self._repository.record_event(conn, verification_failed_event)
+                        events.append(verification_failed_event)
+                        status_message, message_event = await self._create_tool_generation_status_message(
+                            conn,
+                            request=pending_request,
+                            revision=pending_revision,
+                            status="pending_approval",
+                            content=self._tool_generation_verification_failed_message(
+                                verification_error
+                            ),
+                            timestamp=now,
+                        )
+                    if status_message is not None:
+                        rendered_messages.append(status_message)
+                    if message_event is not None:
+                        await self._repository.record_event(conn, message_event)
+                        events.append(message_event)
+        if status == "completed":
+            run_completion = await self.complete_run(
+                run.run_id,
+                tool_call.system_agent_id,
+                AgentRunResult(
+                    stop_reason="completed",
+                    summary="Completed registry pull verification for a generated tool revision.",
+                    metadata={"tool_generation_approval_verification": True},
+                ),
+            )
+        else:
+            run_completion = await self.fail_run(
+                run.run_id,
+                tool_call.system_agent_id,
+                verification_error,
+                stop_reason="tool_failure",
+            )
+        events.extend(run_completion.events)
+        return events, rendered_messages
+
     @staticmethod
     def _tool_generation_pending_approval_message(
         request: ToolGenerationRequest,
@@ -4948,6 +5503,24 @@ class CollaborationKernel:
         return "\n".join(lines)
 
     @staticmethod
+    def _tool_generation_verifying_message(
+        request: ToolGenerationRequest,
+        revision: ToolGenerationRevision,
+        *,
+        immutable_ref: str,
+    ) -> str:
+        lines = [
+            f"Approval started for generated tool `{revision.manifest.name}`.",
+            f"Requested catalog scope: `{request.requested_scope}`.",
+            f"Status: verifying worker-side registry pull for `{immutable_ref}`.",
+        ]
+        if revision.image_ref:
+            lines.append(f"Pushed image ref: `{revision.image_ref}`")
+        if revision.image_digest:
+            lines.append(f"Resolved digest: `{revision.image_digest}`")
+        return "\n".join(lines)
+
+    @staticmethod
     def _tool_generation_published_message(
         tool: SystemToolDefinition,
         revision: ToolGenerationRevision,
@@ -4961,6 +5534,8 @@ class CollaborationKernel:
             f"Tool `{tool.name}` was approved and added to {catalog_label}.",
             "It is not attached to any workspace automatically. Workspace admins or supervisors can attach it when needed.",
         ]
+        if tool.execution.handler_ref:
+            lines.append(f"Published image: `{tool.execution.handler_ref}`")
         if revision.image_digest:
             lines.append(f"Published image digest: `{revision.image_digest}`")
         return "\n".join(lines)
@@ -4970,6 +5545,13 @@ class CollaborationKernel:
         if reason and reason.strip():
             return f"Tool-generation revision was rejected for this request.\nReason: {reason.strip()}"
         return "Tool-generation revision was rejected for this request."
+
+    @staticmethod
+    def _tool_generation_verification_failed_message(reason: str) -> str:
+        return (
+            "Worker-side registry pull verification failed, so the request returned to pending approval.\n"
+            f"Reason: {reason}"
+        )
 
     @staticmethod
     def _metadata_uuid(metadata: dict[str, object], key: str) -> UUID | None:
@@ -5779,10 +6361,16 @@ class CollaborationKernel:
             }
         )
         next_step: RunStep | None = None
+        completion_event: EventEnvelope | None = None
+        verification_events: list[EventEnvelope] = []
+        verification_messages: list[TimelineMessage] = []
+        is_tool_generation_verification = bool(
+            tool_call.metadata.get("tool_generation_approval_verification")
+        )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 await self._repository.upsert_tool_call(conn, updated_tool_call)
-                event = await self._build_thread_event(
+                completion_event = await self._build_thread_event(
                     conn,
                     task.workspace_id,
                     task.thread_id,
@@ -5795,7 +6383,7 @@ class CollaborationKernel:
                     correlation_id=run.correlation_id,
                     causation_id=task.task_id,
                 )
-                await self._repository.record_event(conn, event)
+                await self._repository.record_event(conn, completion_event)
                 remaining = await conn.fetchval(
                     """
                     SELECT COUNT(*)
@@ -5828,28 +6416,42 @@ class CollaborationKernel:
                         }
                     )
                     await self._repository.upsert_run_step(conn, step)
-                    next_step = RunStep(
-                        step_id=uuid4(),
-                        run_id=step.run_id,
-                        task_id=step.task_id,
-                        workspace_id=step.workspace_id,
-                        thread_id=step.thread_id,
-                        system_agent_id=step.system_agent_id,
-                        step_index=step.step_index + 1,
-                        status="created",
-                        submitted_at=now,
-                        created_at=now,
-                        updated_at=now,
-                        metadata=step.metadata,
-                    )
-                    await self._repository.upsert_run_step(conn, next_step)
+                    if not is_tool_generation_verification:
+                        next_step = RunStep(
+                            step_id=uuid4(),
+                            run_id=step.run_id,
+                            task_id=step.task_id,
+                            workspace_id=step.workspace_id,
+                            thread_id=step.thread_id,
+                            system_agent_id=step.system_agent_id,
+                            step_index=step.step_index + 1,
+                            status="created",
+                            submitted_at=now,
+                            created_at=now,
+                            updated_at=now,
+                            metadata=step.metadata,
+                        )
+                        await self._repository.upsert_run_step(conn, next_step)
+        if is_tool_generation_verification:
+            verification_events, verification_messages = (
+                await self._handle_tool_generation_verification_completion(
+                    tool_call=updated_tool_call,
+                    run=run,
+                    task=task,
+                    status=status,
+                    result=result,
+                    error=error,
+                )
+            )
+        if verification_messages:
+            await self._persist_workspace_communication_messages(verification_messages)
 
         return ToolCallCommandResult(
             tool_call=updated_tool_call,
             step=next_step or step,
             run=run,
             task=task,
-            events=[event],
+            events=([completion_event] if completion_event is not None else []) + verification_events,
         )
 
     def _build_tool_execution_spec(

@@ -214,6 +214,7 @@ async def test_repository_migrations_seed_tinker_agent_with_internal_tools():
             "tinker_generated_repo_write",
             "tinker_generated_tool_build",
             "tinker_generated_tool_registry_push",
+            "tinker_generated_tool_registry_pull_verify",
             "tinker_generated_tool_smoke_test",
             "tinker_generated_tool_asset_publish",
             "tinker_tool_request_status_update",

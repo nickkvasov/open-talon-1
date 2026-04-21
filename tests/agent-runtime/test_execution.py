@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 import sys
@@ -36,6 +37,7 @@ from open_talon_contracts.models import (
 
 from agent_runtime.execution.docker import DockerExecutionBackend
 from agent_runtime.execution.local_process import LocalProcessExecutionBackend
+from agent_runtime.tinker_tools import main as tinker_tools_main
 
 
 async def _collect_local_result(tmp_path: Path):
@@ -193,3 +195,88 @@ def test_execution_models_accept_legacy_workspace_ref_field():
     assert "workspace_ref" not in spec.model_dump(mode="json")
     assert draft.execution_workspace is not None
     assert draft.execution_workspace.path == "/tmp/workspace"
+
+
+def test_tinker_verify_registry_pull_helper_pulls_immutable_ref(monkeypatch, tmp_path):
+    request_path = tmp_path / "request.json"
+    output_dir = tmp_path / "output"
+    request_path.write_text(
+        json.dumps({"inline_payload": {"immutable_ref": "registry.example/repo_stats@sha256:abcd"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPEN_TALON_REQUEST_PATH", str(request_path))
+    monkeypatch.setenv("OPEN_TALON_OUTPUT_DIR", str(output_dir))
+
+    calls: list[list[str]] = []
+
+    class _CompletedProcess:
+        def __init__(self, *, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+            self.stdout = stdout
+            self.stderr = stderr
+            self.returncode = returncode
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        if command[:2] == ["docker", "pull"]:
+            return _CompletedProcess(stdout="pulled\n")
+        if command[:3] == ["docker", "image", "inspect"]:
+            return _CompletedProcess(stdout='["registry.example/repo_stats@sha256:abcd"]\n')
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr("agent_runtime.tinker_tools.subprocess.run", fake_run)
+
+    assert tinker_tools_main(["verify-registry-pull"]) == 0
+    result = json.loads((output_dir / "result.json").read_text(encoding="utf-8"))
+
+    assert calls[0] == ["docker", "pull", "registry.example/repo_stats@sha256:abcd"]
+    assert result["status"] == "completed"
+    assert result["output_payload"]["immutable_ref"] == "registry.example/repo_stats@sha256:abcd"
+
+
+def test_tinker_push_helper_logs_into_registry_from_secret_config(monkeypatch, tmp_path):
+    request_path = tmp_path / "request.json"
+    output_dir = tmp_path / "output"
+    request_path.write_text(
+        json.dumps({"inline_payload": {"image_ref": "registry.example/repo_stats:test"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPEN_TALON_REQUEST_PATH", str(request_path))
+    monkeypatch.setenv("OPEN_TALON_OUTPUT_DIR", str(output_dir))
+    monkeypatch.setenv(
+        "OPEN_TALON_OCI_REGISTRY_PASSWORD_SECRET_CONFIG",
+        json.dumps({"env": "REGISTRY_PASSWORD"}),
+    )
+    monkeypatch.setenv("OPEN_TALON_OCI_REGISTRY_URL", "registry.example")
+    monkeypatch.setenv("OPEN_TALON_OCI_REGISTRY_USERNAME", "forgejo")
+    monkeypatch.setenv("REGISTRY_PASSWORD", "secret-token")
+
+    commands: list[list[str]] = []
+    login_calls: list[tuple[str | None, str | None, str]] = []
+
+    class _CompletedProcess:
+        def __init__(self, *, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+            self.stdout = stdout
+            self.stderr = stderr
+            self.returncode = returncode
+
+    async def fake_docker_login(config, *, password: str):
+        login_calls.append((config.base_url, config.username, password))
+
+    def fake_run(command, **kwargs):
+        commands.append(list(command))
+        if command[:2] == ["docker", "push"]:
+            return _CompletedProcess(stdout="pushed\n")
+        if command[:3] == ["docker", "image", "inspect"]:
+            return _CompletedProcess(stdout='["registry.example/repo_stats@sha256:abcd"]\n')
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr("agent_runtime.tinker_tools.docker_login", fake_docker_login)
+    monkeypatch.setattr("agent_runtime.tinker_tools.subprocess.run", fake_run)
+
+    assert tinker_tools_main(["push-image"]) == 0
+    result = json.loads((output_dir / "result.json").read_text(encoding="utf-8"))
+
+    assert login_calls == [("registry.example", "forgejo", "secret-token")]
+    assert commands[0] == ["docker", "push", "registry.example/repo_stats:test"]
+    assert result["status"] == "completed"
+    assert result["output_payload"]["image_digest"] == "sha256:abcd"

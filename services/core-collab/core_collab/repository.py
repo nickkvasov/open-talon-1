@@ -2271,6 +2271,7 @@ class CollaborationRepository:
                    created_by, created_at, updated_by, updated_at, metadata
             FROM system_tools
             WHERE scope = $1
+              AND COALESCE((metadata->>'internal_only')::boolean, FALSE) = FALSE
               AND (
                     ($2::uuid IS NULL AND organization_id IS NULL)
                  OR organization_id = $2

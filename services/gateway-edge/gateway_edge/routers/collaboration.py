@@ -2465,7 +2465,7 @@ async def create_tool_generation_revision(
 @router.post(
     "/tool-generation/revisions/{revision_id}/approve",
     response_model=ToolGenerationRequestDetail,
-    summary="Approve a tool-generation revision and publish it to the system catalog",
+    summary="Approve a tool-generation revision and start worker-side registry verification",
 )
 async def approve_tool_generation_revision(
     request: Request,

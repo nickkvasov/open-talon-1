@@ -67,6 +67,7 @@ class RuntimeWorkerSettings:
     forgejo_registry_username: str | None
     forgejo_registry_password_secret_config: dict[str, object]
     forgejo_registry_validate_on_startup: bool
+    oci_registry_repository_prefix: str | None = None
     communication_log_dir: str | None = None
 
     @classmethod
@@ -108,7 +109,7 @@ class RuntimeWorkerSettings:
             enable_kafka_wakeups=_get_bool("ENABLE_KAFKA_WAKEUPS", True),
             execution_root=os.getenv("OPEN_TALON_EXECUTION_ROOT", "/tmp/open-talon-executions"),
             default_workspace_path=os.getenv("OPEN_TALON_DEFAULT_WORKSPACE_PATH"),
-            forgejo_registry_url=os.getenv("OPEN_TALON_FORGEJO_REGISTRY_URL", "127.0.0.1:3001"),
+            forgejo_registry_url=os.getenv("OPEN_TALON_FORGEJO_REGISTRY_URL", "localhost:3001"),
             forgejo_registry_username=os.getenv("OPEN_TALON_FORGEJO_REGISTRY_USERNAME", "forgejo"),
             forgejo_registry_password_secret_config=_get_json_dict(
                 "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD_SECRET_CONFIG",
@@ -117,6 +118,10 @@ class RuntimeWorkerSettings:
             forgejo_registry_validate_on_startup=_get_bool(
                 "OPEN_TALON_FORGEJO_REGISTRY_VALIDATE_ON_STARTUP",
                 True,
+            ),
+            oci_registry_repository_prefix=os.getenv(
+                "OPEN_TALON_OCI_REGISTRY_REPOSITORY_PREFIX",
+                "forgejo/generated-tools",
             ),
             communication_log_dir=os.getenv(
                 "OPEN_TALON_COMMUNICATION_LOG_DIR",

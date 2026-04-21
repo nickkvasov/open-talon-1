@@ -3725,13 +3725,216 @@ async def test_build_agent_execution_context_includes_internal_tools_and_tool_ge
 
 
 @pytest.mark.asyncio
-async def test_approve_tool_generation_revision_publishes_global_tool_without_workspace_attachment():
+async def test_create_tool_generation_revision_rejects_pending_approval_without_digest():
+    repository = FakeRepository()
+    seeded = _seed_tinker_workspace(repository)
+    kernel = CollaborationKernel(repository)
+    now = seeded["now"]
+    request_id = uuid4()
+
+    repository._tool_generation_requests[request_id] = ToolGenerationRequest(
+        request_id=request_id,
+        organization_id=seeded["organization_id"],
+        workspace_id=seeded["workspace_id"],
+        thread_id=seeded["thread_id"],
+        requester_participant_id=seeded["user_id"],
+        target_system_agent_id=seeded["tinker_agent_id"],
+        status="drafting",
+        created_at=now,
+        updated_at=now,
+    )
+
+    with pytest.raises(ValueError, match="image_ref and image_digest"):
+        await kernel.create_tool_generation_revision(
+            request_id,
+            CreateToolGenerationRevisionRequest(
+                actor=ParticipantInput(
+                    participant_id=seeded["tinker_participant_id"],
+                    participant_type="agent",
+                    display_name="Tinker",
+                ),
+                manifest=GeneratedToolManifest(
+                    name="repo_stats",
+                    description="Builds repository summaries.",
+                    build_context_path="/tmp/generated-tools/repo_stats",
+                    execution=ToolExecutionBinding(
+                        backend_kind="docker",
+                        handler_ref="repo_stats:latest",
+                    ),
+                    network_access="none",
+                    workspace_access="none",
+                ),
+                image_ref="registry.example/repo_stats:latest",
+                image_digest=None,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_and_reject_tool_generation_revision_records_audit_events():
+    repository = FakeRepository()
+    seeded = _seed_tinker_workspace(repository)
+    kernel = CollaborationKernel(repository)
+    now = seeded["now"]
+    request_id = uuid4()
+
+    repository._tool_generation_requests[request_id] = ToolGenerationRequest(
+        request_id=request_id,
+        organization_id=seeded["organization_id"],
+        workspace_id=seeded["workspace_id"],
+        thread_id=seeded["thread_id"],
+        requester_participant_id=seeded["user_id"],
+        target_system_agent_id=seeded["tinker_agent_id"],
+        status="submitted",
+        target_tool_name="repo_stats",
+        summary="Build a repository statistics tool.",
+        created_at=now,
+        updated_at=now,
+    )
+
+    create_result = await kernel.create_tool_generation_revision(
+        request_id,
+        CreateToolGenerationRevisionRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["tinker_participant_id"],
+                participant_type="agent",
+                display_name="Tinker",
+            ),
+            status="pending_approval",
+            manifest=GeneratedToolManifest(
+                name="repo_stats",
+                description="Builds repository summaries.",
+                build_context_path="/tmp/generated-tools/repo_stats",
+                execution=ToolExecutionBinding(
+                    backend_kind="docker",
+                    handler_ref="registry.example/repo_stats:latest",
+                    execution_profile={"network": "none", "workspace_access": "none"},
+                ),
+                network_access="none",
+                workspace_access="none",
+            ),
+            validation_report=GeneratedToolValidationReport(summary="Smoke tests passed."),
+            image_ref="registry.example/repo_stats:latest",
+            image_digest="sha256:abcd",
+        ),
+    )
+
+    assert create_result.revision is not None
+    assert {
+        event.event_type for event in repository.recorded_events
+    } >= {
+        "tool_generation_revision.created",
+        "tool_generation_request.pending_approval",
+        "message.created",
+    }
+
+    reject_result = await kernel.reject_tool_generation_revision(
+        create_result.revision.revision_id,
+        ReviewToolGenerationRevisionRequest(
+            actor=ParticipantInput(
+                participant_id=seeded["user_id"],
+                participant_type="user",
+                display_name="Admin",
+            ),
+            reason="Needs a narrower scope.",
+        ),
+    )
+
+    assert reject_result.detail is not None
+    assert reject_result.detail.request.status == "rejected"
+    assert {
+        event.event_type for event in repository.recorded_events
+    } >= {
+        "tool_generation_revision.rejected",
+        "message.created",
+    }
+
+
+@pytest.mark.asyncio
+async def test_approve_tool_generation_revision_rejects_local_image_refs():
     repository = FakeRepository()
     seeded = _seed_tinker_workspace(repository)
     kernel = CollaborationKernel(repository)
     now = seeded["now"]
     request_id = uuid4()
     revision_id = uuid4()
+    verification_tool_id = uuid4()
+
+    repository._tool_generation_requests[request_id] = ToolGenerationRequest(
+        request_id=request_id,
+        organization_id=seeded["organization_id"],
+        workspace_id=seeded["workspace_id"],
+        thread_id=seeded["thread_id"],
+        requester_participant_id=seeded["user_id"],
+        target_system_agent_id=seeded["tinker_agent_id"],
+        status="pending_approval",
+        target_tool_name="repo_stats",
+        latest_revision_id=revision_id,
+        created_at=now,
+        updated_at=now,
+    )
+    repository._tool_generation_revisions[revision_id] = ToolGenerationRevision(
+        revision_id=revision_id,
+        request_id=request_id,
+        revision_number=1,
+        status="pending_approval",
+        manifest=GeneratedToolManifest(
+            name="repo_stats",
+            description="Builds repository summaries.",
+            build_context_path="/tmp/generated-tools/repo_stats",
+            execution=ToolExecutionBinding(
+                backend_kind="docker",
+                handler_ref="repo_stats:latest",
+            ),
+            network_access="none",
+            workspace_access="none",
+        ),
+        image_ref="open-talon-test/repo_stats:latest",
+        image_digest="sha256:abcd",
+        created_by=seeded["tinker_participant_id"],
+        created_at=now,
+        updated_at=now,
+    )
+    repository._agent_internal_tools[seeded["tinker_agent_id"]] = [
+        AgentInternalToolBinding(
+            system_agent_id=seeded["tinker_agent_id"],
+            tool_id=verification_tool_id,
+            name="tinker_generated_tool_registry_pull_verify",
+            description="Verifies worker-side OCI pulls.",
+            execution=ToolExecutionBinding(
+                backend_kind="local_process",
+                handler_ref="python",
+                execution_profile={"network": "full", "workspace_access": "none"},
+                trust_level="trusted",
+            ),
+            attached_by=seeded["user_id"],
+            attached_at=now,
+            updated_at=now,
+        )
+    ]
+
+    with pytest.raises(ValueError, match="OCI registry images"):
+        await kernel.approve_tool_generation_revision(
+            revision_id,
+            ReviewToolGenerationRevisionRequest(
+                actor=ParticipantInput(
+                    participant_id=uuid4(),
+                    participant_type="user",
+                    display_name="Admin",
+                )
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_approve_tool_generation_revision_starts_registry_pull_verification():
+    repository = FakeRepository()
+    seeded = _seed_tinker_workspace(repository)
+    kernel = CollaborationKernel(repository)
+    now = seeded["now"]
+    request_id = uuid4()
+    revision_id = uuid4()
+    verification_tool_id = uuid4()
 
     repository._tool_generation_requests[request_id] = ToolGenerationRequest(
         request_id=request_id,
@@ -3771,6 +3974,24 @@ async def test_approve_tool_generation_revision_publishes_global_tool_without_wo
         created_at=now,
         updated_at=now,
     )
+    repository._agent_internal_tools[seeded["tinker_agent_id"]] = [
+        AgentInternalToolBinding(
+            system_agent_id=seeded["tinker_agent_id"],
+            tool_id=verification_tool_id,
+            name="tinker_generated_tool_registry_pull_verify",
+            description="Verifies worker-side OCI pulls.",
+            execution=ToolExecutionBinding(
+                backend_kind="local_process",
+                handler_ref="python",
+                execution_profile={"network": "full", "workspace_access": "none"},
+                trust_level="trusted",
+            ),
+            attached_by=seeded["user_id"],
+            attached_at=now,
+            updated_at=now,
+            metadata={"internal_only": True},
+        )
+    ]
 
     result = await kernel.approve_tool_generation_revision(
         revision_id,
@@ -3784,28 +4005,41 @@ async def test_approve_tool_generation_revision_publishes_global_tool_without_wo
     )
 
     assert result.detail is not None
-    assert result.detail.request.status == "published"
-    assert result.detail.request.final_tool_id is not None
+    assert result.detail.request.status == "verifying_registry_pull"
+    assert result.detail.request.final_tool_id is None
     assert repository._workspace_tools.get(seeded["workspace_id"]) in (None, [])
-
-    published_tool = repository._system_tools[result.detail.request.final_tool_id]
-    assert published_tool.scope == "global"
-    assert published_tool.name == "repo_stats"
-    assert published_tool.execution.handler_ref == "registry.example/repo_stats:latest"
+    pending_tool_calls = [
+        tool_call
+        for tool_calls in repository._tool_calls.values()
+        for tool_call in tool_calls
+        if tool_call.tool_name == "tinker_generated_tool_registry_pull_verify"
+    ]
+    assert len(pending_tool_calls) == 1
+    assert pending_tool_calls[0].arguments["immutable_ref"] == "registry.example/repo_stats@sha256:abcd"
     assert any(
-        message.metadata.get("tool_generation_status") == "published"
+        message.metadata.get("tool_generation_status") == "verifying_registry_pull"
         for message in repository._messages[seeded["thread_id"]]
     )
+    assert {
+        event.event_type for event in repository.recorded_events
+    } >= {
+        "task.claimed",
+        "run.started",
+        "tool_call.created",
+        "tool_generation_revision.approval_started",
+        "message.created",
+    }
 
 
 @pytest.mark.asyncio
-async def test_approve_tool_generation_revision_can_publish_organization_scoped_tool():
+async def test_tool_generation_registry_pull_verification_completion_publishes_organization_scoped_tool():
     repository = FakeRepository()
     seeded = _seed_tinker_workspace(repository)
     kernel = CollaborationKernel(repository)
     now = seeded["now"]
     request_id = uuid4()
     revision_id = uuid4()
+    verification_tool_id = uuid4()
 
     repository._tool_generation_requests[request_id] = ToolGenerationRequest(
         request_id=request_id,
@@ -3846,8 +4080,26 @@ async def test_approve_tool_generation_revision_can_publish_organization_scoped_
         created_at=now,
         updated_at=now,
     )
+    repository._agent_internal_tools[seeded["tinker_agent_id"]] = [
+        AgentInternalToolBinding(
+            system_agent_id=seeded["tinker_agent_id"],
+            tool_id=verification_tool_id,
+            name="tinker_generated_tool_registry_pull_verify",
+            description="Verifies worker-side OCI pulls.",
+            execution=ToolExecutionBinding(
+                backend_kind="local_process",
+                handler_ref="python",
+                execution_profile={"network": "full", "workspace_access": "none"},
+                trust_level="trusted",
+            ),
+            attached_by=seeded["user_id"],
+            attached_at=now,
+            updated_at=now,
+            metadata={"internal_only": True},
+        )
+    ]
 
-    result = await kernel.approve_tool_generation_revision(
+    approval = await kernel.approve_tool_generation_revision(
         revision_id,
         ReviewToolGenerationRevisionRequest(
             actor=ParticipantInput(
@@ -3857,11 +4109,39 @@ async def test_approve_tool_generation_revision_can_publish_organization_scoped_
             )
         ),
     )
+    assert approval.detail is not None
+    verification_tool_call = next(
+        tool_call
+        for tool_calls in repository._tool_calls.values()
+        for tool_call in tool_calls
+        if tool_call.tool_name == "tinker_generated_tool_registry_pull_verify"
+    )
+    claimed = await kernel.claim_next_tool_call(
+        worker_id="tool-worker",
+        lease_ttl_seconds=30,
+        max_parallel_calls_per_run=1,
+        max_concurrent_calls_per_tool=1,
+    )
+    assert claimed.tool_call is not None
+    assert claimed.tool_call.tool_call_id == verification_tool_call.tool_call_id
+    await kernel.update_tool_call_execution_handle(
+        verification_tool_call.tool_call_id,
+        "tool-worker",
+        "verification-handle",
+    )
+    await kernel.complete_tool_call(
+        verification_tool_call.tool_call_id,
+        "tool-worker",
+        result=ToolCallResult(
+            output_payload={"immutable_ref": "registry.example/repo_stats@sha256:abcd"},
+        ),
+    )
+    result = await kernel.get_tool_generation_request(request_id)
 
-    assert result.detail is not None
-    published_tool = repository._system_tools[result.detail.request.final_tool_id]
+    published_tool = repository._system_tools[result.request.final_tool_id]
     assert published_tool.scope == "organization"
     assert published_tool.organization_id == seeded["organization_id"]
+    assert published_tool.execution.handler_ref == "registry.example/repo_stats@sha256:abcd"
     assert repository._workspace_tools.get(seeded["workspace_id"]) in (None, [])
     assert any(
         message.content.startswith(
@@ -3869,3 +4149,125 @@ async def test_approve_tool_generation_revision_can_publish_organization_scoped_
         )
         for message in repository._messages[seeded["thread_id"]]
     )
+    assert {
+        event.event_type for event in repository.recorded_events
+    } >= {
+        "tool_generation_revision.approval_started",
+        "tool_generation_revision.published",
+        "message.created",
+    }
+
+
+@pytest.mark.asyncio
+async def test_tool_generation_registry_pull_verification_failure_returns_request_to_pending_approval():
+    repository = FakeRepository()
+    seeded = _seed_tinker_workspace(repository)
+    kernel = CollaborationKernel(repository)
+    now = seeded["now"]
+    request_id = uuid4()
+    revision_id = uuid4()
+    verification_tool_id = uuid4()
+
+    repository._tool_generation_requests[request_id] = ToolGenerationRequest(
+        request_id=request_id,
+        organization_id=seeded["organization_id"],
+        workspace_id=seeded["workspace_id"],
+        thread_id=seeded["thread_id"],
+        requester_participant_id=seeded["user_id"],
+        target_system_agent_id=seeded["tinker_agent_id"],
+        status="pending_approval",
+        target_tool_name="repo_stats",
+        summary="Build a repository statistics tool.",
+        latest_revision_id=revision_id,
+        created_at=now,
+        updated_at=now,
+    )
+    repository._tool_generation_revisions[revision_id] = ToolGenerationRevision(
+        revision_id=revision_id,
+        request_id=request_id,
+        revision_number=1,
+        status="pending_approval",
+        manifest=GeneratedToolManifest(
+            name="repo_stats",
+            description="Builds repository summaries.",
+            build_context_path="/tmp/generated-tools/repo_stats",
+            execution=ToolExecutionBinding(
+                backend_kind="docker",
+                handler_ref="registry.example/repo_stats:latest",
+                execution_profile={"network": "none", "workspace_access": "none"},
+            ),
+            network_access="none",
+            workspace_access="none",
+        ),
+        validation_report=GeneratedToolValidationReport(summary="Smoke tests passed."),
+        image_ref="registry.example/repo_stats:latest",
+        image_digest="sha256:abcd",
+        created_by=seeded["tinker_participant_id"],
+        created_at=now,
+        updated_at=now,
+    )
+    repository._agent_internal_tools[seeded["tinker_agent_id"]] = [
+        AgentInternalToolBinding(
+            system_agent_id=seeded["tinker_agent_id"],
+            tool_id=verification_tool_id,
+            name="tinker_generated_tool_registry_pull_verify",
+            description="Verifies worker-side OCI pulls.",
+            execution=ToolExecutionBinding(
+                backend_kind="local_process",
+                handler_ref="python",
+                execution_profile={"network": "full", "workspace_access": "none"},
+                trust_level="trusted",
+            ),
+            attached_by=seeded["user_id"],
+            attached_at=now,
+            updated_at=now,
+            metadata={"internal_only": True},
+        )
+    ]
+
+    await kernel.approve_tool_generation_revision(
+        revision_id,
+        ReviewToolGenerationRevisionRequest(
+            actor=ParticipantInput(
+                participant_id=uuid4(),
+                participant_type="user",
+                display_name="Admin",
+            )
+        ),
+    )
+    claimed = await kernel.claim_next_tool_call(
+        worker_id="tool-worker",
+        lease_ttl_seconds=30,
+        max_parallel_calls_per_run=1,
+        max_concurrent_calls_per_tool=1,
+    )
+    assert claimed.tool_call is not None
+    await kernel.update_tool_call_execution_handle(
+        claimed.tool_call.tool_call_id,
+        "tool-worker",
+        "verification-handle",
+    )
+    await kernel.fail_tool_call(
+        claimed.tool_call.tool_call_id,
+        "tool-worker",
+        "docker pull failed: unauthorized",
+    )
+
+    detail = await kernel.get_tool_generation_request(request_id)
+    assert detail.request.status == "pending_approval"
+    assert detail.revisions[0].status == "pending_approval"
+    assert (
+        detail.request.metadata["approval_verification_error"]
+        == "docker pull failed: unauthorized"
+    )
+    assert any(
+        "registry pull verification failed" in message.content.lower()
+        for message in repository._messages[seeded["thread_id"]]
+    )
+    assert {
+        event.event_type for event in repository.recorded_events
+    } >= {
+        "tool_generation_revision.approval_started",
+        "tool_generation_revision.verification_failed",
+        "message.created",
+    }

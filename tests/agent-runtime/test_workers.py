@@ -200,7 +200,7 @@ def _tool_call_with_workspace_ref() -> ToolCall:
 def _generated_fibonacci_tool_call() -> ToolCall:
     spec = ExecutionSpec(
         invocation_id=uuid4(),
-        handler_ref="registry.example/fibonacci-calculator:latest",
+        handler_ref="registry.example/fibonacci-calculator@sha256:fibonacci55",
         inline_payload={"n": 10},
         limits={"timeout_seconds": 30},
         metadata={"backend_kind": "docker"},
@@ -295,7 +295,7 @@ def test_tool_worker_executes_generated_fibonacci_tool_call_with_docker_backend(
     asyncio.run(worker._process_tool_call(_generated_fibonacci_tool_call()))
 
     assert backend.submit_calls == 1
-    assert backend.submitted_specs[0].handler_ref == "registry.example/fibonacci-calculator:latest"
+    assert backend.submitted_specs[0].handler_ref == "registry.example/fibonacci-calculator@sha256:fibonacci55"
     assert backend.submitted_specs[0].metadata["backend_kind"] == "docker"
     assert kernel.updated_handle == "docker-handle-1"
     assert kernel.completed is not None

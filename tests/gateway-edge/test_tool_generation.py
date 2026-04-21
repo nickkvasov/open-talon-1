@@ -178,7 +178,7 @@ async def test_non_member_thread_tool_generation_reads_return_404(
     assert response.status_code == 404
 
 
-async def test_approve_tool_generation_revision_adds_catalog_tool_only(
+async def test_approve_tool_generation_revision_returns_verification_in_progress(
     client,
     mock_collaboration_service,
     monkeypatch,
@@ -202,12 +202,14 @@ async def test_approve_tool_generation_revision_adds_catalog_tool_only(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["request"]["status"] == "published"
-    assert len(mock_collaboration_service.system_tools) == 1
+    assert body["request"]["status"] == "verifying_registry_pull"
+    assert body["revisions"][0]["status"] == "verifying_registry_pull"
+    assert body["request"]["metadata"]["approval_verification_immutable_ref"] == "registry.example/repo_stats@sha256:abcd"
+    assert len(mock_collaboration_service.system_tools) == 0
     assert mock_collaboration_service.workspace_tools.get(str(detail.request.workspace_id), {}) == {}
 
 
-async def test_approve_tool_generation_revision_can_publish_organization_catalog_tool(
+async def test_approve_tool_generation_revision_keeps_organization_tool_unpublished_until_verification_finishes(
     client,
     mock_collaboration_service,
     monkeypatch,
@@ -228,9 +230,10 @@ async def test_approve_tool_generation_revision_can_publish_organization_catalog
     )
 
     assert response.status_code == 200
-    created_tool = next(iter(mock_collaboration_service.system_tools.values()))
-    assert created_tool.scope == "organization"
-    assert created_tool.organization_id == detail.request.organization_id
+    body = response.json()
+    assert body["request"]["status"] == "verifying_registry_pull"
+    assert body["request"]["requested_scope"] == "organization"
+    assert mock_collaboration_service.system_tools == {}
 
 
 async def test_admin_can_attach_tinker_and_start_fibonacci_tool_request(

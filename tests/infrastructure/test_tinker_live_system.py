@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+import hvac
 import psycopg
 import pytest
 
@@ -24,6 +25,15 @@ _ROOT_DIR = Path(__file__).resolve().parents[2]
 _GATEWAY_URL = "http://127.0.0.1:8000"
 _OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 _OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
+_FORGEJO_URL = "http://127.0.0.1:3001"
+_FORGEJO_REGISTRY_URL = "localhost:3001"
+_FORGEJO_USERNAME = "forgejo"
+_FORGEJO_PASSWORD = "forgejo123"
+_FORGEJO_UID = os.getenv("FORGEJO_UID", "1000")
+_FORGEJO_GID = os.getenv("FORGEJO_GID", "1000")
+_OPENBAO_URL = "http://127.0.0.1:8200"
+_OPENBAO_KV_MOUNT = "secret"
+_OPENBAO_ROOT_TOKEN = os.getenv("BAO_ROOT_TOKEN", "root")
 _SEEDED_TINKER_AGENT_ID = "44444444-4444-4444-4444-444444444444"
 _EXECUTOR_MODEL = "gemma4:latest"
 
@@ -114,6 +124,22 @@ def _wait_for_ollama_service() -> None:
     )
 
 
+def _wait_for_forgejo_service() -> None:
+    def _healthy() -> bool:
+        try:
+            response = httpx.get(_FORGEJO_URL, timeout=10.0, follow_redirects=False)
+        except Exception:
+            return False
+        return response.status_code in {200, 302}
+
+    _wait_for(
+        "Forgejo service",
+        _healthy,
+        timeout_seconds=120.0,
+        interval_seconds=2.0,
+    )
+
+
 def _available_ollama_models() -> list[str]:
     response = httpx.get(_OLLAMA_TAGS_URL, timeout=10.0)
     response.raise_for_status()
@@ -124,6 +150,156 @@ def _available_ollama_models() -> list[str]:
         for item in models
         if isinstance(item, dict) and isinstance(item.get("name"), str)
     ]
+
+
+def _write_openbao_secret(*, path: str, value: str) -> None:
+    client = hvac.Client(url=_OPENBAO_URL, token=_OPENBAO_ROOT_TOKEN)
+    if not client.is_authenticated():
+        raise AssertionError("OpenBao root token is not authenticated")
+    client.secrets.kv.v2.create_or_update_secret(
+        path=path,
+        secret={"value": value},
+        mount_point=_OPENBAO_KV_MOUNT,
+    )
+
+
+def _delete_openbao_secret(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        client = hvac.Client(url=_OPENBAO_URL, token=_OPENBAO_ROOT_TOKEN)
+        if not client.is_authenticated():
+            return
+        client.secrets.kv.v2.delete_metadata_and_all_versions(
+            path=path,
+            mount_point=_OPENBAO_KV_MOUNT,
+        )
+    except Exception:
+        pass
+
+
+def _run_forgejo_admin_command(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "docker",
+            "exec",
+            "--user",
+            f"{_FORGEJO_UID}:{_FORGEJO_GID}",
+            "forgejo",
+            "forgejo",
+            *args,
+        ],
+        cwd=_ROOT_DIR,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _wait_for_forgejo_admin_user() -> None:
+    def _ready() -> bool:
+        listed = _run_forgejo_admin_command(
+            ["admin", "user", "list", "--config", "/data/gitea/conf/app.ini"]
+        )
+        if listed.returncode != 0:
+            return False
+        if _FORGEJO_USERNAME in listed.stdout:
+            return True
+        created = _run_forgejo_admin_command(
+            [
+                "admin",
+                "user",
+                "create",
+                "--config",
+                "/data/gitea/conf/app.ini",
+                "--admin",
+                "--username",
+                _FORGEJO_USERNAME,
+                "--password",
+                _FORGEJO_PASSWORD,
+                "--email",
+                "admin@local.dev",
+            ]
+        )
+        return created.returncode == 0
+
+    _wait_for(
+        "Forgejo admin user",
+        _ready,
+        timeout_seconds=120.0,
+        interval_seconds=2.0,
+    )
+
+
+def _create_forgejo_access_token(*, token_name: str) -> dict[str, Any]:
+    response = _run_forgejo_admin_command(
+        [
+            "admin",
+            "user",
+            "generate-access-token",
+            "--config",
+            "/data/gitea/conf/app.ini",
+            "--username",
+            _FORGEJO_USERNAME,
+            "--token-name",
+            token_name,
+            "--scopes",
+            "read:package,write:package",
+            "--raw",
+        ]
+    )
+    if response.returncode != 0:
+        raise AssertionError(
+            f"Forgejo token creation failed with {response.returncode}: {response.stderr or response.stdout}"
+        )
+    token = response.stdout.strip().splitlines()[-1].strip()
+    if not token:
+        raise AssertionError(f"Forgejo token response missing token body: {response.stdout}")
+    return {
+        "token_id": None,
+        "token_name": token_name,
+        "token": token,
+    }
+
+
+def _delete_forgejo_access_token(
+    *,
+    token_id: int | None,
+    token_name: str | None,
+) -> None:
+    with httpx.Client(
+        base_url=_FORGEJO_URL,
+        auth=(_FORGEJO_USERNAME, _FORGEJO_PASSWORD),
+        timeout=30.0,
+    ) as client:
+        for token_key in (token_id, token_name):
+            if token_key in {None, ""}:
+                continue
+            response = client.delete(f"/api/v1/users/{_FORGEJO_USERNAME}/tokens/{token_key}")
+            if response.status_code in {204, 404}:
+                return
+
+
+def _delete_registry_manifest(
+    immutable_ref: str | None,
+    *,
+    registry_token: str | None,
+) -> None:
+    if not immutable_ref or "@sha256:" not in immutable_ref:
+        return
+    repository_with_host, digest = immutable_ref.split("@", 1)
+    if "/" not in repository_with_host:
+        return
+    _, repository = repository_with_host.split("/", 1)
+    response = httpx.delete(
+        f"{_FORGEJO_URL}/v2/{repository}/manifests/{digest}",
+        auth=(_FORGEJO_USERNAME, registry_token or _FORGEJO_PASSWORD),
+        timeout=30.0,
+    )
+    if response.status_code not in {202, 404}:
+        raise AssertionError(
+            f"Forgejo registry manifest delete failed with {response.status_code}: {response.text}"
+        )
 
 
 def _remove_docker_image(image_ref: str) -> None:
@@ -148,6 +324,21 @@ def _cleanup_test_organization(organization_id: str | None) -> None:
             cur.execute(
                 "DELETE FROM organizations WHERE organization_id = %s",
                 (organization_id,),
+            )
+
+
+def _cleanup_tool_generation_requests(request_ids: list[str]) -> None:
+    if not request_ids:
+        return
+    with psycopg.connect(_postgres_dsn(), autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM tool_generation_revisions WHERE request_id = ANY(%s)",
+                (request_ids,),
+            )
+            cur.execute(
+                "DELETE FROM tool_generation_requests WHERE request_id = ANY(%s)",
+                (request_ids,),
             )
 
 
@@ -231,7 +422,7 @@ class _HarnessState:
         )
         dockerfile = "\n".join(
             [
-                "FROM ollama/ollama:latest",
+                "FROM alpine:3.20",
                 "WORKDIR /app",
                 "COPY run.sh /app/run.sh",
                 "RUN chmod +x /app/run.sh",
@@ -344,6 +535,7 @@ class _HarnessState:
             "tinker_generated_repo_bootstrap",
             "tinker_generated_repo_write",
             "tinker_generated_tool_build",
+            "tinker_generated_tool_registry_push",
             "tinker_generated_tool_smoke_test",
         ):
             tool_result = self._tool_result(tool_results, tool_name)
@@ -356,6 +548,7 @@ class _HarnessState:
         bootstrap = self._tool_output(tool_results, "tinker_generated_repo_bootstrap")
         write_result = self._tool_output(tool_results, "tinker_generated_repo_write")
         build_result = self._tool_output(tool_results, "tinker_generated_tool_build")
+        push_result = self._tool_output(tool_results, "tinker_generated_tool_registry_push")
         smoke_result = self._tool_output(tool_results, "tinker_generated_tool_smoke_test")
 
         if bootstrap is None:
@@ -388,7 +581,7 @@ class _HarnessState:
             }
 
         if build_result is None:
-            image_ref = f"open-talon-test/fibonacci:{request_id}"
+            image_ref = f"localhost:3001/forgejo/generated-tools/fibonacci-calculator:{request_id}"
             with self._lock:
                 if image_ref not in self.built_images:
                     self.built_images.append(image_ref)
@@ -409,6 +602,21 @@ class _HarnessState:
                 ],
             }
 
+        if push_result is None:
+            return {
+                "stop_reason": "completed",
+                "summary": "Pushing generated Fibonacci tool image to the registry.",
+                "tool_calls": [
+                    {
+                        "tool_name": "tinker_generated_tool_registry_push",
+                        "arguments": {
+                            "image_ref": build_result["image_ref"],
+                        },
+                        "summary": "Push the generated Docker image into the OCI registry.",
+                    }
+                ],
+            }
+
         if smoke_result is None:
             return {
                 "stop_reason": "completed",
@@ -417,7 +625,7 @@ class _HarnessState:
                     {
                         "tool_name": "tinker_generated_tool_smoke_test",
                         "arguments": {
-                            "image_ref": build_result["image_ref"],
+                            "image_ref": push_result["image_ref"],
                             "network": "none",
                         },
                         "summary": "Run the generated image and verify its self-test output.",
@@ -429,8 +637,8 @@ class _HarnessState:
             self._create_revision(
                 request_id=request_id,
                 participant=participant,
-                image_ref=build_result["image_ref"],
-                image_digest=build_result.get("image_digest"),
+                image_ref=push_result["image_ref"],
+                image_digest=push_result.get("image_digest"),
             )
 
         return {
@@ -562,21 +770,36 @@ class _LiveSystem:
     temp_root: Path
     env: dict[str, str]
     executor_model: str
+    forgejo_registry_secret_path: str
+    forgejo_registry_token_id: int | None
+    forgejo_registry_token_name: str
+    forgejo_registry_token: str
 
 
 @pytest.fixture(scope="module")
 def live_open_talon_system(tmp_path_factory: pytest.TempPathFactory):
     temp_root = tmp_path_factory.mktemp("tinker-live-system")
+    registry_secret_path = f"open-talon/forgejo-registry/{uuid4().hex}"
     env = os.environ.copy()
     env.update(
         {
             "AUTH_MODE": "none",
             "ENABLE_KAFKA_WAKEUPS": "false",
-            "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD": os.getenv(
-                "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD",
-                "forgejo123",
+            "OPEN_TALON_FORGEJO_REGISTRY_URL": _FORGEJO_REGISTRY_URL,
+            "OPEN_TALON_FORGEJO_REGISTRY_USERNAME": _FORGEJO_USERNAME,
+            "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD_SECRET_CONFIG": json.dumps(
+                {
+                    "openbao": {
+                        "mount": _OPENBAO_KV_MOUNT,
+                        "path": registry_secret_path,
+                        "field": "value",
+                    }
+                }
             ),
             "OPEN_TALON_FORGEJO_REGISTRY_VALIDATE_ON_STARTUP": "false",
+            "OPEN_TALON_OCI_REGISTRY_REPOSITORY_PREFIX": "forgejo/generated-tools",
+            "OPEN_TALON_OPENBAO_ADDRESS": _OPENBAO_URL,
+            "BAO_ROOT_TOKEN": _OPENBAO_ROOT_TOKEN,
             "OPEN_TALON_EXECUTION_ROOT": str(temp_root / "executions"),
             "OPEN_TALON_TINKER_GENERATED_TOOLS_ROOT": str(temp_root / "generated-tools"),
             "OPEN_TALON_DEFAULT_WORKSPACE_PATH": str(_ROOT_DIR),
@@ -602,7 +825,16 @@ def live_open_talon_system(tmp_path_factory: pytest.TempPathFactory):
         check=True,
     )
     _wait_for_gateway()
+    _wait_for_forgejo_service()
+    _wait_for_forgejo_admin_user()
     _wait_for_ollama_service()
+    token_detail = _create_forgejo_access_token(
+        token_name=f"tinker-live-{uuid4().hex[:12]}"
+    )
+    _write_openbao_secret(
+        path=registry_secret_path,
+        value=token_detail["token"],
+    )
     available_models = _available_ollama_models()
     if _EXECUTOR_MODEL not in available_models:
         pytest.skip(
@@ -616,8 +848,23 @@ def live_open_talon_system(tmp_path_factory: pytest.TempPathFactory):
             temp_root=temp_root,
             env=env,
             executor_model=_EXECUTOR_MODEL,
+            forgejo_registry_secret_path=registry_secret_path,
+            forgejo_registry_token_id=(
+                int(token_detail["token_id"]) if token_detail["token_id"] is not None else None
+            ),
+            forgejo_registry_token_name=str(token_detail["token_name"]),
+            forgejo_registry_token=str(token_detail["token"]),
         )
     finally:
+        _delete_openbao_secret(registry_secret_path)
+        _delete_forgejo_access_token(
+            token_id=(
+                int(token_detail["token_id"]) if "token_detail" in locals() and token_detail.get("token_id") is not None else None
+            ),
+            token_name=(
+                str(token_detail["token_name"]) if "token_detail" in locals() and token_detail.get("token_name") else None
+            ),
+        )
         subprocess.run(
             ["./open-talon", "stop"],
             cwd=_ROOT_DIR,
@@ -655,6 +902,7 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
     workspace_actor: dict[str, Any] | None = None
     math_agent_id: str | None = None
     published_tool_id: str | None = None
+    published_handler_ref: str | None = None
 
     try:
         with httpx.Client(
@@ -790,9 +1038,26 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
                 f"/v1/tool-generation/revisions/{revision_id}/approve",
                 json_body={"actor": admin_actor},
             )
-            assert approval["request"]["status"] == "published"
+            assert approval["request"]["status"] == "verifying_registry_pull"
             assert approval["request"]["requested_scope"] == "organization"
-            published_tool_id = approval["request"]["final_tool_id"]
+
+            def _published_request_detail():
+                detail = _json_request(
+                    client,
+                    "GET",
+                    f"/v1/tool-generation/requests/{request_id}",
+                )
+                if detail["request"]["status"] == "published" and detail["request"]["final_tool_id"]:
+                    return detail
+                return None
+
+            published_detail = _wait_for(
+                "published generated tool after registry pull verification",
+                _published_request_detail,
+                timeout_seconds=240.0,
+                interval_seconds=2.0,
+            )
+            published_tool_id = published_detail["request"]["final_tool_id"]
             assert published_tool_id
 
             workspace_after_publish = _json_request(
@@ -812,6 +1077,8 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
             )
             assert fib_tool["scope"] == "organization"
             assert fib_tool["execution"]["backend_kind"] == "docker"
+            assert "@sha256:" in fib_tool["execution"]["handler_ref"]
+            published_handler_ref = str(fib_tool["execution"]["handler_ref"])
 
             attached_tool = _json_request(
                 client,
@@ -905,6 +1172,10 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
                 for entry in communication_log["entries"]
             )
             assert any(
+                entry["content"].startswith("Approval started for generated tool `fibonacci_calculator`.")
+                for entry in communication_log["entries"]
+            )
+            assert any(
                 "organization system tools catalog" in entry["content"]
                 for entry in communication_log["entries"]
             )
@@ -932,6 +1203,10 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
                     )
                 except Exception:
                     pass
+            try:
+                _cleanup_tool_generation_requests(list(state.request_ids))
+            except Exception:
+                pass
             if published_tool_id is not None:
                 try:
                     _json_request(
@@ -962,6 +1237,13 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
                     )
                 except Exception:
                     pass
+        try:
+            _delete_registry_manifest(
+                published_handler_ref,
+                registry_token=live_open_talon_system.forgejo_registry_token,
+            )
+        except Exception:
+            pass
         for image_ref in state.built_images:
             _remove_docker_image(image_ref)
         _cleanup_test_organization(organization_id)

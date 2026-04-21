@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -7,6 +8,14 @@ import shutil
 import subprocess
 import sys
 from typing import Any
+
+from open_talon_contracts.oci_registry import OciRegistryConfig, digest_pinned_image_ref
+from open_talon_contracts.secrets import (
+    build_default_secret_resolver,
+    secret_references_from_config,
+)
+
+from .oci_registry import docker_login
 
 
 def _request_payload() -> dict[str, Any]:
@@ -87,6 +96,73 @@ def _run(command: list[str], *, cwd: Path | None = None) -> tuple[int, str, str]
     return process.returncode, process.stdout, process.stderr
 
 
+def _registry_image_ref(*, request_id: str, tool_name: str) -> str:
+    config = _registry_config_from_env()
+    registry_url = str(config.base_url or "localhost:3001").strip()
+    repository_prefix = str(config.repository_prefix or "forgejo/generated-tools").strip("/")
+    slug = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in tool_name).strip("-")
+    slug = slug or "generated-tool"
+    return f"{registry_url}/{repository_prefix}/{slug}:{request_id}"
+
+
+def _registry_secret_config() -> dict[str, Any]:
+    raw = os.getenv("OPEN_TALON_OCI_REGISTRY_PASSWORD_SECRET_CONFIG")
+    if raw and raw.strip():
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    raw = os.getenv("OPEN_TALON_FORGEJO_REGISTRY_PASSWORD_SECRET_CONFIG")
+    if raw and raw.strip():
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    env_name = str(os.getenv("OPEN_TALON_OCI_REGISTRY_PASSWORD_ENV") or "").strip()
+    if env_name:
+        return {"env": env_name}
+    env_name = str(os.getenv("OPEN_TALON_FORGEJO_REGISTRY_PASSWORD_ENV") or "").strip()
+    return {"env": env_name or "OPEN_TALON_FORGEJO_REGISTRY_PASSWORD"}
+
+
+def _registry_config_from_env() -> OciRegistryConfig:
+    return OciRegistryConfig(
+        base_url=str(
+            os.getenv("OPEN_TALON_OCI_REGISTRY_URL")
+            or os.getenv("OPEN_TALON_FORGEJO_REGISTRY_URL")
+            or "localhost:3001"
+        ).strip()
+        or None,
+        username=str(
+            os.getenv("OPEN_TALON_OCI_REGISTRY_USERNAME")
+            or os.getenv("OPEN_TALON_FORGEJO_REGISTRY_USERNAME")
+            or "forgejo"
+        ).strip()
+        or None,
+        password_secret_config=_registry_secret_config(),
+        repository_prefix=str(
+            os.getenv("OPEN_TALON_OCI_REGISTRY_REPOSITORY_PREFIX") or "forgejo/generated-tools"
+        ).strip("/")
+        or None,
+        validate_on_startup=True,
+    )
+
+
+def _ensure_registry_login_from_secret_config() -> None:
+    config = _registry_config_from_env()
+    if not config.base_url or not config.username:
+        return
+    resolver = build_default_secret_resolver()
+    password = asyncio.run(
+        resolver.resolve(
+            secret_references_from_config(config.password_secret_config),
+            label="OCI registry password",
+            required=False,
+        )
+    )
+    if not password:
+        return
+    asyncio.run(docker_login(config, password=password))
+
+
 def bootstrap_worktree() -> None:
     payload = _request_payload()
     request_id = str(payload.get("request_id") or "default").strip()
@@ -124,7 +200,11 @@ def write_files() -> None:
 def build_image() -> None:
     payload = _request_payload()
     worktree = Path(str(payload.get("worktree_path") or _generated_tools_root()))
+    request_id = str(payload.get("request_id") or "default").strip()
+    tool_name = str(payload.get("tool_name") or payload.get("name") or "generated-tool").strip()
     image_ref = str(payload.get("image_ref") or "").strip()
+    if not image_ref:
+        image_ref = _registry_image_ref(request_id=request_id, tool_name=tool_name)
     if not image_ref:
         raise ValueError("image_ref is required")
     dockerfile = str(payload.get("dockerfile") or "Dockerfile").strip()
@@ -162,6 +242,7 @@ def push_image() -> None:
     image_ref = str(payload.get("image_ref") or "").strip()
     if not image_ref:
         raise ValueError("image_ref is required")
+    _ensure_registry_login_from_secret_config()
     code, _, _ = _run(["docker", "push", image_ref])
     if code != 0:
         raise RuntimeError(f"docker push failed with exit code {code}")
@@ -204,6 +285,38 @@ def smoke_test() -> None:
         output_payload={
             "image_ref": image_ref,
             "stdout": stdout.strip(),
+        }
+    )
+
+
+def verify_registry_pull() -> None:
+    payload = _request_payload()
+    immutable_ref = str(payload.get("immutable_ref") or "").strip()
+    if not immutable_ref:
+        immutable_ref = (
+            digest_pinned_image_ref(
+                str(payload.get("image_ref") or "").strip(),
+                str(payload.get("image_digest") or "").strip(),
+            )
+            or ""
+        )
+    if not immutable_ref:
+        raise ValueError("immutable_ref or image_ref + image_digest is required")
+    _ensure_registry_login_from_secret_config()
+    code, stdout, stderr = _run(["docker", "pull", immutable_ref])
+    if code != 0:
+        raise RuntimeError(f"docker pull failed with exit code {code}: {stderr.strip()}")
+    inspect_code, inspect_stdout, _ = _run(
+        ["docker", "image", "inspect", immutable_ref, "--format", "{{json .RepoDigests}}"]
+    )
+    repo_digests: list[str] = []
+    if inspect_code == 0 and inspect_stdout.strip():
+        repo_digests = json.loads(inspect_stdout.strip())
+    _write_result(
+        output_payload={
+            "immutable_ref": immutable_ref,
+            "stdout": stdout.strip(),
+            "repo_digests": repo_digests,
         }
     )
 
@@ -251,6 +364,7 @@ _ACTIONS = {
     "build-image": build_image,
     "push-image": push_image,
     "smoke-test": smoke_test,
+    "verify-registry-pull": verify_registry_pull,
     "publish-assets": publish_assets,
     "update-request-status": update_request_status,
 }
