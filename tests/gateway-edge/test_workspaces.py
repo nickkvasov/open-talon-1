@@ -582,11 +582,12 @@ async def test_global_system_definition_routes_require_admin_role_in_oidc_mode(
         repo_resp,
         list_repos_resp,
         publish_resp,
-        link_resp,
-        activate_resp,
     ):
         assert response.status_code == 403
-        assert response.json()["detail"] == "Admin access required"
+        assert "required" in response.json()["detail"]
+
+    assert link_resp.status_code == 404
+    assert activate_resp.status_code == 404
 
 
 async def test_global_system_definition_routes_allow_admin_role_in_oidc_mode(
@@ -872,9 +873,9 @@ async def test_workspace_management_routes_require_workspace_admin_or_supervisor
     )
 
     assert member_tool_attach.status_code == 403
-    assert member_tool_attach.json()["detail"] == "Workspace admin or supervisor role required"
+    assert member_tool_attach.json()["detail"] == "Workspace permission 'workspace.tools.write' required"
     assert member_repo_create.status_code == 403
-    assert member_repo_create.json()["detail"] == "Workspace admin or supervisor role required"
+    assert member_repo_create.json()["detail"] == "Workspace permission 'workspace.repositories.write' required"
     assert owner_tool_attach.status_code == 200
 
 
@@ -1156,9 +1157,9 @@ async def test_memory_provider_management_requires_admin_role_in_oidc_mode(
     )
 
     assert create_resp.status_code == 403
-    assert create_resp.json()["detail"] == "Admin access required"
+    assert create_resp.json()["detail"] == "Permission 'provider.memory.write' required"
     assert list_resp.status_code == 403
-    assert list_resp.json()["detail"] == "Admin access required"
+    assert list_resp.json()["detail"] == "Permission 'provider.memory.read' required"
 
 
 async def test_validate_memory_provider_requires_admin_role_in_oidc_mode(
@@ -1193,7 +1194,7 @@ async def test_validate_memory_provider_requires_admin_role_in_oidc_mode(
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Admin access required"
+    assert response.json()["detail"] == "Permission 'provider.memory.validate' required"
 
 
 async def test_memory_provider_health_check_requires_admin_role_in_oidc_mode(
@@ -1234,7 +1235,7 @@ async def test_memory_provider_health_check_requires_admin_role_in_oidc_mode(
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Admin access required"
+    assert response.json()["detail"] == "Permission 'provider.memory.validate' required"
 
 
 async def test_llm_provider_management_requires_admin_role_in_oidc_mode(client, actor_payload, monkeypatch):
@@ -1269,9 +1270,9 @@ async def test_llm_provider_management_requires_admin_role_in_oidc_mode(client, 
     )
 
     assert create_resp.status_code == 403
-    assert create_resp.json()["detail"] == "Admin access required"
+    assert create_resp.json()["detail"] == "Permission 'provider.llm.write' required"
     assert list_resp.status_code == 403
-    assert list_resp.json()["detail"] == "Admin access required"
+    assert list_resp.json()["detail"] == "Permission 'provider.llm.read' required"
 
 
 async def test_llm_provider_management_allows_admin_role_in_oidc_mode(client, actor_payload, monkeypatch):
@@ -1581,7 +1582,7 @@ async def test_validate_llm_provider_requires_admin_role_in_oidc_mode(client, ac
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Admin access required"
+    assert response.json()["detail"] == "Permission 'provider.llm.validate' required"
 
 
 async def test_llm_provider_health_check_requires_admin_role_in_oidc_mode(client, actor_payload, monkeypatch):
@@ -1618,7 +1619,7 @@ async def test_llm_provider_health_check_requires_admin_role_in_oidc_mode(client
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Admin access required"
+    assert response.json()["detail"] == "Permission 'provider.llm.validate' required"
 
 
 async def test_list_llm_engines_includes_managed_llm_providers(client, actor_payload, monkeypatch):
@@ -2027,7 +2028,7 @@ async def test_update_workspace_requires_workspace_admin_or_supervisor_in_oidc_m
     )
 
     assert update_resp.status_code == 403
-    assert update_resp.json()["detail"] == "Workspace admin or supervisor role required"
+    assert update_resp.json()["detail"] == "Workspace permission 'workspace.roles.write' required"
 
 
 async def test_create_workspace_tool_exposes_it_in_workspace_detail(client, actor_payload):

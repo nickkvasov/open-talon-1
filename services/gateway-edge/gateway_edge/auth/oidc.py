@@ -10,6 +10,7 @@ import httpx
 
 from gateway_edge.config import settings
 from gateway_edge.models import AuthContext
+from gateway_edge.iam.provider_interfaces import IdentityProvider, ValidatedToken
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +130,16 @@ def _claims_match_expected_client(claims: dict[str, Any]) -> bool:
     return isinstance(azp_claim, str) and azp_claim in expected
 
 
-async def validate_oidc_token(token: str) -> AuthContext | None:
-    try:
+def _machine_client_id(claims: dict[str, Any]) -> str | None:
+    for key in ("azp", "client_id", "clientId"):
+        value = claims.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+class OidcIdentityProvider(IdentityProvider):
+    async def validate_token(self, token: str) -> ValidatedToken | None:
         config = await _oidc_configuration()
         key = _select_key(token, await _jwks())
         claims = jwt.decode(
@@ -140,23 +149,76 @@ async def validate_oidc_token(token: str) -> AuthContext | None:
             issuer=settings.oidc_issuer_url.rstrip("/"),
             options={"verify_aud": False},
         )
-        if not _claims_match_expected_client(claims):
-            raise ValueError("OIDC token client does not match expected audience or azp")
+        principal_type = "human" if _claims_match_expected_client(claims) else "agent"
+        client_id = _machine_client_id(claims)
+        if principal_type == "agent" and client_id is None:
+            raise ValueError("OIDC token does not identify a supported client")
         display_name = (
             claims.get("name")
             or claims.get("preferred_username")
             or claims.get("email")
+            or client_id
             or claims.get("sub")
         )
-        return AuthContext(
-            kind="oidc",
+        roles = _extract_roles(claims)
+        return ValidatedToken(
+            provider_key=settings.identity_provider_key,
             issuer=config.get("issuer", settings.oidc_issuer_url.rstrip("/")),
+            principal_type=principal_type,
             subject=str(claims["sub"]),
+            client_id=client_id,
+            display_name=str(display_name) if display_name is not None else None,
             email=claims.get("email"),
-            display_name=str(display_name),
-            roles=_extract_roles(claims),
+            roles=roles,
+            platform_admin=settings.oidc_admin_role in roles,
             claims=claims,
         )
+
+    def resolve_human_identity(self, validated: ValidatedToken) -> AuthContext:
+        return AuthContext(
+            kind="oidc",
+            principal_type="human",
+            issuer=validated.issuer,
+            subject=validated.subject,
+            email=validated.email,
+            display_name=validated.display_name,
+            roles=validated.roles,
+            platform_admin=validated.platform_admin,
+            provider_key=validated.provider_key,
+            claims=validated.claims,
+        )
+
+    def resolve_machine_identity(self, validated: ValidatedToken) -> AuthContext:
+        return AuthContext(
+            kind="oidc",
+            principal_type="agent",
+            issuer=validated.issuer,
+            subject=validated.subject,
+            client_id=validated.client_id,
+            display_name=validated.display_name,
+            roles=validated.roles,
+            platform_admin=validated.platform_admin,
+            provider_key=validated.provider_key,
+            claims=validated.claims,
+        )
+
+    async def issuer_metadata(self) -> dict[str, Any]:
+        return await _oidc_configuration()
+
+
+def build_identity_provider() -> IdentityProvider:
+    return OidcIdentityProvider()
+
+
+async def validate_oidc_token(token: str) -> AuthContext | None:
+    try:
+        provider = build_identity_provider()
+        validated = await provider.validate_token(token)
+        if validated is None:
+            return None
+        if validated.principal_type == "human":
+            return provider.resolve_human_identity(validated)
+        return provider.resolve_machine_identity(validated)
     except Exception as exc:  # pragma: no cover - covered by route tests through monkeypatching
         logger.debug("OIDC token validation failed: %s", exc)
         return None

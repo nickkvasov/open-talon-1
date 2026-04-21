@@ -19,11 +19,14 @@ from open_talon_contracts.models import (  # noqa: E402
     AgentArtifactDraft,
     AgentConfiguration,
     AgentDefinition,
+    AgentIdentity,
+    AgentIdentityProvisioningResult,
     AgentEndpoint,
     AgentExecutionContext,
     AgentInternalToolBinding,
     AgentInteractionContract,
     AgentRunResult,
+    AgentRoleBinding,
     CompletionRule,
     AgentToolCallDraft,
     AgentResponseContract,
@@ -42,6 +45,8 @@ from open_talon_contracts.models import (  # noqa: E402
     AuditExportRequest,
     AuditExportResult,
     Artifact,
+    BindAgentRoleRequest,
+    BindHumanRoleRequest,
     CreateGitRepositoryRequest,
     CreateAgentParticipantRequest,
     CreateInteractionAnswerRequest,
@@ -51,6 +56,8 @@ from open_talon_contracts.models import (  # noqa: E402
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
     CreateOrganizationRequest,
+    CreateAgentIdentityRequest,
+    CreateIamRoleRequest,
     CreateSystemAgentRequest,
     ConfirmWorkspaceMemoryRequest,
     CreateMemoryEntryRequest,
@@ -83,6 +90,9 @@ from open_talon_contracts.models import (  # noqa: E402
     GeneratedToolValidationCheck,
     GeneratedToolValidationReport,
     HealthResponse,
+    HumanRoleBinding,
+    IamPermission,
+    IamRoleDefinition,
     LinkAssetRequest,
     Membership,
     MemoryEntry,
@@ -109,6 +119,7 @@ from open_talon_contracts.models import (  # noqa: E402
     ParticipantProfile,
     PresenceState,
     PublishAssetFromGitRequest,
+    PrincipalContext,
     ResolvedAssetBinding,
     ResultSink,
     RoleDefinition,
@@ -142,7 +153,10 @@ from open_talon_contracts.models import (  # noqa: E402
     UpdateMemoryEntryRequest,
     UpdateOrganizationRequest,
     ReviewToolGenerationRevisionRequest,
+    RotateAgentIdentitySecretRequest,
     UpdateWorkspaceToolRequest,
+    UpdateAgentIdentityStatusRequest,
+    UpdateIamRoleRequest,
     Workspace,
     WorkspaceAsset,
     WorkspaceAssetVersion,
@@ -220,17 +234,24 @@ class KafkaChatResponse(BaseModel):
 
 class AuthContext(BaseModel):
     kind: Literal["oidc", "api_key"]
+    principal_type: Literal["human", "agent", "api_key"] = "human"
     user_id: UUID | None = None
+    agent_identity_id: UUID | None = None
+    system_agent_id: UUID | None = None
     issuer: str | None = None
     subject: str | None = None
+    client_id: str | None = None
+    provider_key: str | None = None
     email: str | None = None
     display_name: str | None = None
     roles: list[str] = Field(default_factory=list)
+    platform_admin: bool = False
     claims: dict[str, Any] = Field(default_factory=dict)
 
 
 class MeResponse(BaseModel):
     user_id: UUID
+    principal_type: Literal["human"] = "human"
     issuer: str
     subject: str
     email: str | None = None

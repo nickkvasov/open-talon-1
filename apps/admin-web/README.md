@@ -1,6 +1,6 @@
 # Open Talon Admin Web
 
-This app includes a Playwright browser suite that signs in through Keycloak, validates the main admin surfaces, and exercises a few real management flows against the local gateway.
+This app includes a Playwright browser suite that signs in through the default local Keycloak OIDC provider, validates the main admin surfaces, and exercises a few real management flows against the local gateway. Authorization decisions are still enforced by Open Talon IAM on the backend.
 
 ## Prerequisites
 
@@ -60,6 +60,8 @@ Override them if needed:
 ADMIN_WEB_E2E_USERNAME=admin2 ADMIN_WEB_E2E_PASSWORD=admin223 npm run test:e2e
 ```
 
+The local Keycloak `admin` role is still the bootstrap path for platform-admin access in development. Steady-state global and organization authorization is modeled in Open Talon IAM.
+
 ## Runtime Config
 
 The built app now reads browser runtime config from `public/runtime-config.json`, so one artifact can be promoted across environments without rebuilding. Defaults are aligned to the repo's local stack:
@@ -111,6 +113,11 @@ For a deployed environment, replace the generated `runtime-config.json` with val
 - swarm resource agent create/delete flow
 - swarm resource tool create/delete flow
 - provider tab switching, scope switching, and memory provider create/delete flow
+
+Current scope note:
+
+- the browser app uses OIDC login, but dedicated IAM role-management and machine-identity management screens are not part of this slice yet
+- use the documented `/v1/iam/...` APIs directly for human-role, agent-role, and machine-identity administration
 
 ## Notes
 

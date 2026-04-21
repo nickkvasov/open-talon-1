@@ -25,15 +25,22 @@ from workspace_memory import (
     build_default_secret_resolver,
     build_provider_index,
 )
+from open_talon_contracts.iam import (
+    DEFAULT_WORKSPACE_ROLE_PERMISSIONS,
+    ORGANIZATION_ROLE_BASE_PERMISSIONS,
+    WORKSPACE_PERMISSION_NAMES,
+)
 
 from .contracts import (
     ActorRef,
     AgentArtifactDraft,
     AgentConfiguration,
     AgentDefinition,
+    AgentIdentity,
     AgentExecutionContext,
     AgentInternalToolBinding,
     AgentRunResult,
+    AgentRoleBinding,
     CompletionRule,
     AgentToolCallDraft,
     AgentTaskRouting,
@@ -46,8 +53,12 @@ from .contracts import (
     Artifact,
     AssetLink,
     ActivateAssetVersionRequest,
+    BindAgentRoleRequest,
+    BindHumanRoleRequest,
     CreateAgentParticipantRequest,
+    CreateAgentIdentityRequest,
     CreateGitRepositoryRequest,
+    CreateIamRoleRequest,
     CreateInteractionAnswerRequest,
     CreateInteractionQuestionRequest,
     CreateInteractionRequest,
@@ -90,6 +101,7 @@ from .contracts import (
     MemorySearchHit,
     MemorySearchResponse,
     LlmProviderDefinition,
+    IamRoleDefinition,
     Organization,
     OrganizationMembership,
     ParticipantSelector,
@@ -115,11 +127,14 @@ from .contracts import (
     WorkspaceCommunicationLogPage,
     Run,
     ReviewToolGenerationRevisionRequest,
+    RotateAgentIdentitySecretRequest,
     StopReason,
     ToolCall,
     ToolCallResult,
     UpdateSystemAgentRequest,
+    UpdateAgentIdentityStatusRequest,
     UpdateInteractionRequestRequest,
+    UpdateIamRoleRequest,
     LinkAssetRequest,
     UpdateLlmProviderRequest,
     UpdateMemoryProviderRequest,
@@ -144,8 +159,10 @@ from .contracts import (
 from .repository import CollaborationRepository, UserRecord
 from .results import (
     AgentDefinitionCommandResult,
+    AgentIdentityCommandResult,
     CommandResult,
     GitRepositoryCommandResult,
+    IamRoleCommandResult,
     InteractionRequestCommandResult,
     LeaseReconciliationResult,
     LlmProviderCommandResult,
@@ -316,7 +333,11 @@ class CollaborationKernel:
             raise KeyError(f"Organization {organization_id} not found")
         actor_user_id = self._actor_user_id(payload.actor)
         if actor_user_id is not None and not allow_platform_admin:
-            await self._require_organization_admin(organization_id, actor_user_id)
+            await self._require_organization_permission(
+                organization_id,
+                actor_user_id,
+                "organization.members.write",
+            )
         updated = organization.model_copy(
             update={
                 "slug": payload.slug or organization.slug,
@@ -358,7 +379,11 @@ class CollaborationKernel:
             raise KeyError(f"Organization {organization_id} not found")
         actor_user_id = self._actor_user_id(payload.actor)
         if actor_user_id is not None and not allow_platform_admin:
-            await self._require_organization_admin(organization_id, actor_user_id)
+            await self._require_organization_permission(
+                organization_id,
+                actor_user_id,
+                "organization.members.write",
+            )
         user = await self._repository.fetch_user(payload.user_id)
         if user is None:
             raise KeyError(f"User {payload.user_id} not found")
@@ -388,7 +413,11 @@ class CollaborationKernel:
             raise KeyError(f"Organization {organization_id} not found")
         actor_user_id = self._actor_user_id(payload.actor)
         if actor_user_id is not None and not allow_platform_admin:
-            await self._require_organization_admin(organization_id, actor_user_id)
+            await self._require_organization_permission(
+                organization_id,
+                actor_user_id,
+                "organization.members.write",
+            )
         membership = await self._repository.fetch_organization_membership(
             organization_id,
             user_id,
@@ -426,6 +455,238 @@ class CollaborationKernel:
             "user_id": str(user_id),
         }
 
+    async def list_iam_role_definitions(
+        self,
+        *,
+        subject_kind: str,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+    ) -> list[IamRoleDefinition]:
+        return await self._repository.list_iam_role_definitions(
+            subject_kind=subject_kind,
+            scope=scope,
+            organization_id=organization_id,
+        )
+
+    async def get_iam_role_definition(self, role_id: UUID) -> IamRoleDefinition | None:
+        return await self._repository.fetch_iam_role_definition(role_id)
+
+    async def create_iam_role_definition(
+        self,
+        payload: CreateIamRoleRequest,
+        *,
+        subject_kind: str,
+        scope: str,
+        organization_id: UUID | None = None,
+    ) -> IamRoleCommandResult:
+        self._validate_registry_scope(scope=scope, organization_id=organization_id)
+        now = self._now()
+        role = IamRoleDefinition(
+            role_id=uuid4(),
+            scope=scope,
+            subject_kind=subject_kind,
+            organization_id=organization_id,
+            name=payload.name,
+            description=payload.description,
+            permissions=list(dict.fromkeys(payload.permissions)),
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_iam_role_definition(conn, role)
+        return IamRoleCommandResult(role=role)
+
+    async def update_iam_role_definition(
+        self,
+        role_id: UUID,
+        payload: UpdateIamRoleRequest,
+    ) -> IamRoleCommandResult:
+        existing = await self._repository.fetch_iam_role_definition(role_id)
+        if existing is None:
+            raise KeyError(f"IAM role {role_id} not found")
+        updated = existing.model_copy(
+            update={
+                "name": payload.name or existing.name,
+                "description": (
+                    payload.description
+                    if payload.description is not None
+                    else existing.description
+                ),
+                "permissions": (
+                    list(dict.fromkeys(payload.permissions))
+                    if payload.permissions is not None
+                    else existing.permissions
+                ),
+                "updated_at": self._now(),
+                "metadata": (
+                    {**existing.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else existing.metadata
+                ),
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_iam_role_definition(conn, updated)
+        return IamRoleCommandResult(role=updated)
+
+    async def delete_iam_role_definition(self, role_id: UUID) -> dict[str, bool | str]:
+        existing = await self._repository.fetch_iam_role_definition(role_id)
+        if existing is None:
+            raise KeyError(f"IAM role {role_id} not found")
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                deleted = await self._repository.delete_iam_role_definition(conn, role_id=role_id)
+        if not deleted:
+            raise KeyError(f"IAM role {role_id} not found")
+        return {"deleted": True, "role_id": str(role_id)}
+
+    async def list_human_roles_for_user(
+        self,
+        *,
+        user_id: UUID,
+        organization_id: UUID | None = None,
+    ) -> list[IamRoleDefinition]:
+        return await self._repository.list_human_roles_for_user(
+            user_id=user_id,
+            organization_id=organization_id,
+        )
+
+    async def bind_human_role(
+        self,
+        user_id: UUID,
+        role_id: UUID,
+        payload: BindHumanRoleRequest,
+    ) -> dict[str, str]:
+        role = await self._repository.fetch_iam_role_definition(role_id)
+        if role is None or role.subject_kind != "human":
+            raise KeyError(f"Human IAM role {role_id} not found")
+        if await self._repository.fetch_user(user_id) is None:
+            raise KeyError(f"User {user_id} not found")
+        if role.organization_id is not None:
+            membership = await self._repository.fetch_organization_membership(
+                role.organization_id,
+                user_id,
+            )
+            if membership is None:
+                raise PermissionError(
+                    f"User {user_id} is not a member of organization {role.organization_id}"
+                )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.bind_human_role(
+                    conn,
+                    user_id=user_id,
+                    role_id=role_id,
+                    created_at=self._now(),
+                    metadata=payload.metadata,
+                )
+        return {"user_id": str(user_id), "role_id": str(role_id)}
+
+    async def unbind_human_role(
+        self,
+        user_id: UUID,
+        role_id: UUID,
+    ) -> dict[str, bool | str]:
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                deleted = await self._repository.unbind_human_role(
+                    conn,
+                    user_id=user_id,
+                    role_id=role_id,
+                )
+        if not deleted:
+            raise KeyError(f"Human role binding user={user_id} role={role_id} not found")
+        return {"deleted": True, "user_id": str(user_id), "role_id": str(role_id)}
+
+    async def list_agent_identities(
+        self,
+        *,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+    ) -> list[AgentIdentity]:
+        return await self._repository.list_agent_identities(
+            scope=scope,
+            organization_id=organization_id,
+        )
+
+    async def get_agent_identity(self, agent_identity_id: UUID) -> AgentIdentity | None:
+        return await self._repository.fetch_agent_identity(agent_identity_id)
+
+    async def store_agent_identity(
+        self,
+        identity: AgentIdentity,
+    ) -> AgentIdentityCommandResult:
+        system_agent = await self._repository.fetch_system_agent(identity.system_agent_id)
+        if system_agent is None:
+            raise KeyError(f"System agent {identity.system_agent_id} not found")
+        if system_agent.scope != identity.scope:
+            raise ValueError("Agent identity scope must match the backing system agent scope")
+        if system_agent.organization_id != identity.organization_id:
+            raise ValueError("Agent identity organization binding must match the backing system agent")
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_agent_identity(conn, identity)
+        return AgentIdentityCommandResult(identity=identity)
+
+    async def list_agent_roles_for_identity(
+        self,
+        *,
+        agent_identity_id: UUID,
+    ) -> list[IamRoleDefinition]:
+        return await self._repository.list_agent_roles_for_identity(
+            agent_identity_id=agent_identity_id
+        )
+
+    async def bind_agent_role(
+        self,
+        agent_identity_id: UUID,
+        role_id: UUID,
+        payload: BindAgentRoleRequest,
+    ) -> dict[str, str]:
+        identity = await self._repository.fetch_agent_identity(agent_identity_id)
+        if identity is None:
+            raise KeyError(f"Agent identity {agent_identity_id} not found")
+        role = await self._repository.fetch_iam_role_definition(role_id)
+        if role is None or role.subject_kind != "agent":
+            raise KeyError(f"Agent IAM role {role_id} not found")
+        if role.scope != identity.scope or role.organization_id != identity.organization_id:
+            raise PermissionError("Agent IAM role scope must match the agent identity scope")
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.bind_agent_role(
+                    conn,
+                    agent_identity_id=agent_identity_id,
+                    role_id=role_id,
+                    created_at=self._now(),
+                    metadata=payload.metadata,
+                )
+        return {"agent_identity_id": str(agent_identity_id), "role_id": str(role_id)}
+
+    async def unbind_agent_role(
+        self,
+        agent_identity_id: UUID,
+        role_id: UUID,
+    ) -> dict[str, bool | str]:
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                deleted = await self._repository.unbind_agent_role(
+                    conn,
+                    agent_identity_id=agent_identity_id,
+                    role_id=role_id,
+                )
+        if not deleted:
+            raise KeyError(
+                f"Agent role binding identity={agent_identity_id} role={role_id} not found"
+            )
+        return {
+            "deleted": True,
+            "agent_identity_id": str(agent_identity_id),
+            "role_id": str(role_id),
+        }
+
     async def create_workspace(
         self,
         payload: CreateWorkspaceRequest,
@@ -443,7 +704,11 @@ class CollaborationKernel:
             actor=payload.actor,
         )
         if actor_user_id is not None and not allow_platform_admin:
-            await self._require_organization_admin(organization.organization_id, actor_user_id)
+            await self._require_organization_permission(
+                organization.organization_id,
+                actor_user_id,
+                "workspace.list",
+            )
         workspace_id = uuid4()
         now = self._now()
         workspace = Workspace(
@@ -566,7 +831,11 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
-        await self._require_workspace_management_role(workspace_id, payload.actor)
+        await self._require_workspace_permission(
+            workspace_id,
+            payload.actor,
+            permission="workspace.roles.write",
+        )
         now = self._now()
         actor = self._actor_from_input(payload.actor)
         updated = workspace.model_copy(
@@ -1151,9 +1420,10 @@ class CollaborationKernel:
             workspace = await self._repository.fetch_workspace(workspace_id)
             if workspace is None:
                 raise KeyError(f"Workspace {workspace_id} not found")
-            await self._require_workspace_management_role(
+            await self._require_workspace_permission(
                 workspace_id,
                 payload.actor,
+                permission="workspace.repositories.write",
             )
         now = self._now()
         repository = GitRepository(
@@ -1224,9 +1494,10 @@ class CollaborationKernel:
             workspace = await self._repository.fetch_workspace(workspace_id)
             if workspace is None:
                 raise KeyError(f"Workspace {workspace_id} not found")
-            await self._require_workspace_management_role(
+            await self._require_workspace_permission(
                 workspace_id,
                 payload.actor,
+                permission="workspace.assets.publish",
             )
         repository = await self._repository.fetch_git_repository(payload.repository_id)
         if repository is None:
@@ -1699,7 +1970,11 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
-        await self._require_workspace_management_role(workspace_id, payload.actor)
+        await self._require_workspace_permission(
+            workspace_id,
+            payload.actor,
+            permission="workspace.roles.write",
+        )
         now = self._now()
         actor = self._actor_from_input(payload.actor)
         role_definition = RoleDefinition(
@@ -1753,7 +2028,11 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
-        await self._require_workspace_management_role(workspace_id, payload.actor)
+        await self._require_workspace_permission(
+            workspace_id,
+            payload.actor,
+            permission="workspace.roles.write",
+        )
         now = self._now()
         actor = self._actor_from_input(payload.actor)
 
@@ -1809,7 +2088,11 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
-        await self._require_workspace_management_role(workspace_id, payload.actor)
+        await self._require_workspace_permission(
+            workspace_id,
+            payload.actor,
+            permission="workspace.tools.write",
+        )
         system_tool = await self._repository.fetch_system_tool(payload.tool_id)
         if system_tool is None:
             raise KeyError(f"System tool {payload.tool_id} not found")
@@ -1875,7 +2158,11 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
-        await self._require_workspace_management_role(workspace_id, payload.actor)
+        await self._require_workspace_permission(
+            workspace_id,
+            payload.actor,
+            permission="workspace.tools.write",
+        )
         existing = await self._repository.fetch_workspace_tool(workspace_id, tool_id)
         if existing is None:
             raise KeyError(f"Workspace tool {tool_id} not attached to workspace {workspace_id}")
@@ -1927,7 +2214,11 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
-        await self._require_workspace_management_role(workspace_id, payload.actor)
+        await self._require_workspace_permission(
+            workspace_id,
+            payload.actor,
+            permission="workspace.tools.write",
+        )
         removed = await self._repository.fetch_workspace_tool(workspace_id, tool_id)
         if removed is None:
             raise KeyError(f"Workspace tool {tool_id} not attached to workspace {workspace_id}")
@@ -2040,6 +2331,11 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
+        await self._require_workspace_permission(
+            workspace_id,
+            payload.actor,
+            permission="workspace.agents.write",
+        )
         system_agent = await self._repository.fetch_system_agent(payload.agent_id)
         if system_agent is None:
             raise KeyError(f"System agent {payload.agent_id} not found")
@@ -2113,6 +2409,11 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
+        await self._require_workspace_permission(
+            workspace_id,
+            payload.actor,
+            permission="workspace.agents.write",
+        )
         existing = await self._repository.fetch_participant(workspace_id, participant_id)
         if existing is None:
             raise KeyError(f"Participant {participant_id} not found")
@@ -6801,9 +7102,26 @@ class CollaborationKernel:
         user_id: UUID,
     ) -> OrganizationMembership:
         membership = await self._require_organization_membership(organization_id, user_id)
-        if membership.role not in _ORGANIZATION_ADMIN_ROLES:
+        if membership.role not in _ORGANIZATION_ADMIN_ROLES and not await self._human_has_organization_permission(
+            organization_id,
+            user_id,
+            "organization.members.write",
+        ):
             raise PermissionError("Organization admin role required")
         return membership
+
+    async def _require_organization_permission(
+        self,
+        organization_id: UUID,
+        user_id: UUID,
+        permission: str,
+    ) -> OrganizationMembership:
+        membership = await self._require_organization_membership(organization_id, user_id)
+        if permission in ORGANIZATION_ROLE_BASE_PERMISSIONS.get(membership.role, ()):
+            return membership
+        if await self._human_has_organization_permission(organization_id, user_id, permission):
+            return membership
+        raise PermissionError(f"Organization permission {permission!r} required")
 
     async def _resolve_workspace_organization(
         self,
@@ -6842,6 +7160,19 @@ class CollaborationKernel:
         workspace_id: UUID,
         actor: ParticipantInput,
     ) -> ParticipantProfile:
+        return await self._require_workspace_permission(
+            workspace_id,
+            actor,
+            permission="workspace.tools.write",
+        )
+
+    async def _require_workspace_permission(
+        self,
+        workspace_id: UUID,
+        actor: ParticipantInput,
+        *,
+        permission: str,
+    ) -> ParticipantProfile:
         participant = await self._repository.fetch_participant(
             workspace_id,
             actor.participant_id,
@@ -6850,11 +7181,13 @@ class CollaborationKernel:
             raise PermissionError(
                 f"Workspace {workspace_id} requires an attached participant for this action"
             )
-        if _WORKSPACE_MANAGER_ROLES.intersection(participant.roles):
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        effective_permissions = self._workspace_permissions_for_participant(workspace, participant)
+        if permission in effective_permissions:
             return participant
-        raise PermissionError(
-            "Workspace admin or supervisor role required"
-        )
+        raise PermissionError(f"Workspace permission {permission!r} required")
 
     @staticmethod
     def _workspace_metadata_for_create(
@@ -6884,16 +7217,34 @@ class CollaborationKernel:
             role_map[name] = RoleDefinition(
                 name=name,
                 definition=definition,
+                permissions=list(DEFAULT_WORKSPACE_ROLE_PERMISSIONS.get(name, ())),
                 updated_by=updated_by,
                 updated_at=updated_at,
             ).model_dump(mode="json")
         if isinstance(raw, dict):
             for key, value in raw.items():
                 role_definition = RoleDefinition.model_validate(value)
+                if not role_definition.permissions and key in DEFAULT_WORKSPACE_ROLE_PERMISSIONS:
+                    role_definition = role_definition.model_copy(
+                        update={
+                            "permissions": list(DEFAULT_WORKSPACE_ROLE_PERMISSIONS[key]),
+                        }
+                    )
                 role_map[key] = role_definition.model_dump(mode="json")
         elif isinstance(raw, list):
             for value in raw:
                 role_definition = RoleDefinition.model_validate(value)
+                if (
+                    not role_definition.permissions
+                    and role_definition.name in DEFAULT_WORKSPACE_ROLE_PERMISSIONS
+                ):
+                    role_definition = role_definition.model_copy(
+                        update={
+                            "permissions": list(
+                                DEFAULT_WORKSPACE_ROLE_PERMISSIONS[role_definition.name]
+                            ),
+                        }
+                    )
                 role_map[role_definition.name] = role_definition.model_dump(mode="json")
         return role_map
 
@@ -6944,10 +7295,65 @@ class CollaborationKernel:
     def _role_definitions_from_workspace(workspace: Workspace) -> list[RoleDefinition]:
         raw = workspace.metadata.get("role_definitions", {})
         if isinstance(raw, dict):
-            return [RoleDefinition.model_validate(item) for item in raw.values()]
+            return [
+                CollaborationKernel._hydrate_workspace_role_definition(
+                    key,
+                    RoleDefinition.model_validate(item),
+                )
+                for key, item in raw.items()
+            ]
         if isinstance(raw, list):
-            return [RoleDefinition.model_validate(item) for item in raw]
+            return [
+                CollaborationKernel._hydrate_workspace_role_definition(
+                    role_definition.name,
+                    role_definition,
+                )
+                for role_definition in (
+                    RoleDefinition.model_validate(item) for item in raw
+                )
+            ]
         return []
+
+    @staticmethod
+    def _hydrate_workspace_role_definition(
+        name: str,
+        role_definition: RoleDefinition,
+    ) -> RoleDefinition:
+        if role_definition.permissions or name not in DEFAULT_WORKSPACE_ROLE_PERMISSIONS:
+            return role_definition
+        return role_definition.model_copy(
+            update={"permissions": list(DEFAULT_WORKSPACE_ROLE_PERMISSIONS[name])}
+        )
+
+    @staticmethod
+    def _workspace_permissions_for_participant(
+        workspace: Workspace,
+        participant: ParticipantProfile,
+    ) -> set[str]:
+        role_map = {
+            role_definition.name: role_definition
+            for role_definition in CollaborationKernel._role_definitions_from_workspace(workspace)
+        }
+        permissions: set[str] = set()
+        for role_name in participant.roles:
+            role_definition = role_map.get(role_name)
+            if role_definition is not None:
+                permissions.update(role_definition.permissions)
+        return permissions
+
+    async def _human_has_organization_permission(
+        self,
+        organization_id: UUID,
+        user_id: UUID,
+        permission: str,
+    ) -> bool:
+        if not hasattr(self._repository, "list_human_roles_for_user"):
+            return False
+        roles = await self._repository.list_human_roles_for_user(
+            user_id=user_id,
+            organization_id=organization_id,
+        )
+        return any(permission in role.permissions for role in roles)
 
     @staticmethod
     def _validate_registry_scope(*, scope: str, organization_id: UUID | None) -> None:

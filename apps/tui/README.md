@@ -14,6 +14,7 @@ The TUI can:
 - select an organization before listing or creating workspaces in `tui2` and `user-client`
 - create local agents and attach them to the current workspace
 - inspect system tools and attach or detach them from the current workspace
+- submit Tinker tool-generation requests from `tui2` and `user-client`
 
 ## Run It
 
@@ -45,8 +46,10 @@ python -m open_talon_tui.main \
   --thread-title General
 ```
 
-Human TUI users must authenticate through Keycloak. Local unsigned profiles, API-key auth, and OpenBao token auth are not supported for normal human TUI use.
+Human TUI users must authenticate through the configured OIDC provider. In local development that is Keycloak. Local unsigned profiles, API-key auth, OpenBao token auth, and machine client credentials are not supported for normal human TUI use.
 The TUI can still start signed out so you can run `/auth login` from inside the app before joining workspaces or sending messages.
+
+Machine principals use OIDC client credentials plus the `/v1/iam/agent-identities` APIs directly. The TUI surfaces are human-oriented and `/v1/me` is human-only.
 
 If you want reliable terminal mouse selection and terminal-native clickable links, use `tui2` instead of the full-screen Textual UI:
 
@@ -214,6 +217,7 @@ Useful commands in `tui2`:
 /thread list
 /thread create <title>
 /thread use <id|title>
+/tool request [--scope global|organization] <text>
 /links
 /open <number|last|url>
 /copy

@@ -10,7 +10,11 @@ router = APIRouter(prefix="/v1", tags=["auth"])
 @router.get("/me", response_model=MeResponse, summary="Get the authenticated user identity")
 async def get_me(request: Request) -> MeResponse:
     auth_context = getattr(request.state, "auth_context", None)
-    if not isinstance(auth_context, AuthContext) or auth_context.kind != "oidc":
+    if (
+        not isinstance(auth_context, AuthContext)
+        or auth_context.kind != "oidc"
+        or auth_context.principal_type != "human"
+    ):
         raise HTTPException(status_code=401, detail="OIDC authentication required")
     if auth_context.user_id is None or not auth_context.issuer or not auth_context.subject:
         raise HTTPException(status_code=401, detail="Authenticated user context is incomplete")

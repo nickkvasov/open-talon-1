@@ -140,6 +140,7 @@ class AuditService:
             actor_type=self._actor_type_from_auth(auth_context),
             actor_id=self._actor_id_from_auth(auth_context),
             user_id=self._user_id_from_auth(auth_context),
+            system_agent_id=self._system_agent_id_from_auth(auth_context),
             source_service="gateway-edge",
             source_component="http-middleware",
             action_category=action_category,
@@ -518,6 +519,8 @@ class AuditService:
     def _actor_type_from_auth(auth_context: object) -> str:
         if isinstance(auth_context, AuthContext):
             if auth_context.kind == "oidc":
+                if auth_context.principal_type == "agent":
+                    return "agent"
                 return "user"
             if auth_context.kind == "api_key":
                 return "api_key"
@@ -526,13 +529,29 @@ class AuditService:
     @staticmethod
     def _actor_id_from_auth(auth_context: object) -> UUID | None:
         if isinstance(auth_context, AuthContext) and auth_context.kind == "oidc":
+            if auth_context.principal_type == "agent":
+                return auth_context.system_agent_id or auth_context.agent_identity_id
             return auth_context.user_id
         return None
 
     @staticmethod
     def _user_id_from_auth(auth_context: object) -> UUID | None:
-        if isinstance(auth_context, AuthContext) and auth_context.kind == "oidc":
+        if (
+            isinstance(auth_context, AuthContext)
+            and auth_context.kind == "oidc"
+            and auth_context.principal_type == "human"
+        ):
             return auth_context.user_id
+        return None
+
+    @staticmethod
+    def _system_agent_id_from_auth(auth_context: object) -> UUID | None:
+        if (
+            isinstance(auth_context, AuthContext)
+            and auth_context.kind == "oidc"
+            and auth_context.principal_type == "agent"
+        ):
+            return auth_context.system_agent_id
         return None
 
     @staticmethod

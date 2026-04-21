@@ -107,10 +107,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
         token = auth_header[7:].strip()
         if not token:
             return None
-        auth_context = await validate_oidc_token(token)
-        if auth_context is None:
+        try:
+            auth_context = await validate_oidc_token(token)
+            if auth_context is None:
+                return None
+            return await sync_oidc_auth_context(auth_context)
+        except Exception:
+            logger.warning("OIDC authentication failed during token synchronization", exc_info=True)
             return None
-        return await sync_oidc_auth_context(auth_context)
 
     @staticmethod
     def _deny(detail: str) -> JSONResponse:

@@ -21,6 +21,7 @@ from .contracts import (
     ActorRef,
     AgentConfiguration,
     AgentDefinition,
+    AgentIdentity,
     AgentInternalToolBinding,
     AgentEndpoint,
     AgentHarness,
@@ -31,6 +32,7 @@ from .contracts import (
     AuditEventDraft,
     AuditEventPage,
     AssetLink,
+    AgentRoleBinding,
     EventEnvelope,
     GitRepository,
     GeneratedToolManifest,
@@ -40,6 +42,8 @@ from .contracts import (
     InteractionRequest,
     InteractionRequestDetail,
     InteractionRequestTarget,
+    HumanRoleBinding,
+    IamRoleDefinition,
     Membership,
     MemoryEntry,
     MemoryProviderDefinition,
@@ -963,6 +967,17 @@ class CollaborationRepository:
             user.updated_at,
         )
 
+    async def fetch_user(self, user_id: UUID) -> UserRecord | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT user_id, display_name, metadata, created_at, updated_at
+            FROM users
+            WHERE user_id = $1
+            """,
+            user_id,
+        )
+        return self._user_from_row(row) if row else None
+
     async def fetch_auth_identity(
         self,
         issuer: str,
@@ -1005,6 +1020,351 @@ class CollaborationRepository:
             identity.display_name,
             self._json_dumps(identity.metadata),
         )
+
+    async def list_iam_role_definitions(
+        self,
+        *,
+        subject_kind: str,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+    ) -> list[IamRoleDefinition]:
+        rows = await self._pool.fetch(
+            """
+            SELECT role_id, scope, subject_kind, organization_id, name, description,
+                   permissions, created_at, updated_at, metadata
+            FROM iam_role_definitions
+            WHERE subject_kind = $1
+              AND ($2::text IS NULL OR scope = $2)
+              AND (
+                    $2::text IS NULL
+                    OR ($2 = 'global' AND organization_id IS NULL)
+                    OR ($2 = 'organization' AND organization_id = $3)
+                  )
+            ORDER BY scope ASC, name ASC
+            """,
+            subject_kind,
+            scope,
+            organization_id,
+        )
+        return [self._iam_role_definition_from_row(row) for row in rows]
+
+    async def fetch_iam_role_definition(self, role_id: UUID) -> IamRoleDefinition | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT role_id, scope, subject_kind, organization_id, name, description,
+                   permissions, created_at, updated_at, metadata
+            FROM iam_role_definitions
+            WHERE role_id = $1
+            """,
+            role_id,
+        )
+        return self._iam_role_definition_from_row(row) if row else None
+
+    async def upsert_iam_role_definition(
+        self,
+        conn: asyncpg.Connection,
+        role: IamRoleDefinition,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO iam_role_definitions (
+                role_id, scope, subject_kind, organization_id, name, description,
+                permissions, created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (role_id) DO UPDATE
+                SET scope = EXCLUDED.scope,
+                    subject_kind = EXCLUDED.subject_kind,
+                    organization_id = EXCLUDED.organization_id,
+                    name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    permissions = EXCLUDED.permissions,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = iam_role_definitions.metadata || EXCLUDED.metadata
+            """,
+            role.role_id,
+            role.scope,
+            role.subject_kind,
+            role.organization_id,
+            role.name,
+            role.description,
+            self._json_dumps(role.permissions),
+            role.created_at,
+            role.updated_at,
+            self._json_dumps(role.metadata),
+        )
+
+    async def delete_iam_role_definition(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        role_id: UUID,
+    ) -> bool:
+        result = await conn.execute(
+            """
+            DELETE FROM iam_role_definitions
+            WHERE role_id = $1
+            """,
+            role_id,
+        )
+        return result.endswith("1")
+
+    async def list_human_role_bindings(
+        self,
+        *,
+        user_id: UUID,
+    ) -> list[HumanRoleBinding]:
+        rows = await self._pool.fetch(
+            """
+            SELECT user_id, role_id, created_at, metadata
+            FROM human_role_bindings
+            WHERE user_id = $1
+            ORDER BY created_at ASC, role_id ASC
+            """,
+            user_id,
+        )
+        return [self._human_role_binding_from_row(row) for row in rows]
+
+    async def list_human_roles_for_user(
+        self,
+        *,
+        user_id: UUID,
+        organization_id: UUID | None = None,
+    ) -> list[IamRoleDefinition]:
+        rows = await self._pool.fetch(
+            """
+            SELECT role.role_id, role.scope, role.subject_kind, role.organization_id, role.name,
+                   role.description, role.permissions, role.created_at, role.updated_at, role.metadata
+            FROM human_role_bindings AS binding
+            JOIN iam_role_definitions AS role ON role.role_id = binding.role_id
+            WHERE binding.user_id = $1
+              AND role.subject_kind = 'human'
+              AND (role.scope = 'global' OR role.organization_id = $2)
+            ORDER BY role.scope ASC, role.name ASC
+            """,
+            user_id,
+            organization_id,
+        )
+        return [self._iam_role_definition_from_row(row) for row in rows]
+
+    async def bind_human_role(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        user_id: UUID,
+        role_id: UUID,
+        created_at,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO human_role_bindings (user_id, role_id, created_at, metadata)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id, role_id) DO UPDATE
+                SET metadata = human_role_bindings.metadata || EXCLUDED.metadata
+            """,
+            user_id,
+            role_id,
+            created_at,
+            self._json_dumps(metadata or {}),
+        )
+
+    async def unbind_human_role(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        user_id: UUID,
+        role_id: UUID,
+    ) -> bool:
+        result = await conn.execute(
+            """
+            DELETE FROM human_role_bindings
+            WHERE user_id = $1
+              AND role_id = $2
+            """,
+            user_id,
+            role_id,
+        )
+        return result.endswith("1")
+
+    async def list_agent_identities(
+        self,
+        *,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+    ) -> list[AgentIdentity]:
+        rows = await self._pool.fetch(
+            """
+            SELECT agent_identity_id, system_agent_id, scope, organization_id, provider_key, issuer,
+                   external_subject, client_id, status, secret_ref, last_authenticated_at,
+                   created_at, updated_at, metadata
+            FROM agent_identities
+            WHERE ($1::text IS NULL OR scope = $1)
+              AND (
+                    $1::text IS NULL
+                    OR ($1 = 'global' AND organization_id IS NULL)
+                    OR ($1 = 'organization' AND organization_id = $2)
+                  )
+            ORDER BY created_at ASC, agent_identity_id ASC
+            """,
+            scope,
+            organization_id,
+        )
+        return [self._agent_identity_from_row(row) for row in rows]
+
+    async def fetch_agent_identity(self, agent_identity_id: UUID) -> AgentIdentity | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT agent_identity_id, system_agent_id, scope, organization_id, provider_key, issuer,
+                   external_subject, client_id, status, secret_ref, last_authenticated_at,
+                   created_at, updated_at, metadata
+            FROM agent_identities
+            WHERE agent_identity_id = $1
+            """,
+            agent_identity_id,
+        )
+        return self._agent_identity_from_row(row) if row else None
+
+    async def fetch_agent_identity_by_client(
+        self,
+        *,
+        provider_key: str,
+        issuer: str,
+        client_id: str,
+    ) -> AgentIdentity | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT agent_identity_id, system_agent_id, scope, organization_id, provider_key, issuer,
+                   external_subject, client_id, status, secret_ref, last_authenticated_at,
+                   created_at, updated_at, metadata
+            FROM agent_identities
+            WHERE provider_key = $1
+              AND issuer = $2
+              AND client_id = $3
+            """,
+            provider_key,
+            issuer,
+            client_id,
+        )
+        return self._agent_identity_from_row(row) if row else None
+
+    async def upsert_agent_identity(
+        self,
+        conn: asyncpg.Connection,
+        identity: AgentIdentity,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO agent_identities (
+                agent_identity_id, system_agent_id, scope, organization_id, provider_key,
+                issuer, external_subject, client_id, status, secret_ref, last_authenticated_at,
+                created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (agent_identity_id) DO UPDATE
+                SET system_agent_id = EXCLUDED.system_agent_id,
+                    scope = EXCLUDED.scope,
+                    organization_id = EXCLUDED.organization_id,
+                    provider_key = EXCLUDED.provider_key,
+                    issuer = EXCLUDED.issuer,
+                    external_subject = EXCLUDED.external_subject,
+                    client_id = EXCLUDED.client_id,
+                    status = EXCLUDED.status,
+                    secret_ref = EXCLUDED.secret_ref,
+                    last_authenticated_at = EXCLUDED.last_authenticated_at,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = agent_identities.metadata || EXCLUDED.metadata
+            """,
+            identity.agent_identity_id,
+            identity.system_agent_id,
+            identity.scope,
+            identity.organization_id,
+            identity.provider_key,
+            identity.issuer,
+            identity.external_subject,
+            identity.client_id,
+            identity.status,
+            self._json_dumps(identity.secret_ref),
+            identity.last_authenticated_at,
+            identity.created_at,
+            identity.updated_at,
+            self._json_dumps(identity.metadata),
+        )
+
+    async def list_agent_role_bindings(
+        self,
+        *,
+        agent_identity_id: UUID,
+    ) -> list[AgentRoleBinding]:
+        rows = await self._pool.fetch(
+            """
+            SELECT agent_identity_id, role_id, created_at, metadata
+            FROM agent_role_bindings
+            WHERE agent_identity_id = $1
+            ORDER BY created_at ASC, role_id ASC
+            """,
+            agent_identity_id,
+        )
+        return [self._agent_role_binding_from_row(row) for row in rows]
+
+    async def list_agent_roles_for_identity(
+        self,
+        *,
+        agent_identity_id: UUID,
+    ) -> list[IamRoleDefinition]:
+        rows = await self._pool.fetch(
+            """
+            SELECT role.role_id, role.scope, role.subject_kind, role.organization_id, role.name,
+                   role.description, role.permissions, role.created_at, role.updated_at, role.metadata
+            FROM agent_role_bindings AS binding
+            JOIN iam_role_definitions AS role ON role.role_id = binding.role_id
+            WHERE binding.agent_identity_id = $1
+              AND role.subject_kind = 'agent'
+            ORDER BY role.scope ASC, role.name ASC
+            """,
+            agent_identity_id,
+        )
+        return [self._iam_role_definition_from_row(row) for row in rows]
+
+    async def bind_agent_role(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        agent_identity_id: UUID,
+        role_id: UUID,
+        created_at,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO agent_role_bindings (agent_identity_id, role_id, created_at, metadata)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (agent_identity_id, role_id) DO UPDATE
+                SET metadata = agent_role_bindings.metadata || EXCLUDED.metadata
+            """,
+            agent_identity_id,
+            role_id,
+            created_at,
+            self._json_dumps(metadata or {}),
+        )
+
+    async def unbind_agent_role(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        agent_identity_id: UUID,
+        role_id: UUID,
+    ) -> bool:
+        result = await conn.execute(
+            """
+            DELETE FROM agent_role_bindings
+            WHERE agent_identity_id = $1
+              AND role_id = $2
+            """,
+            agent_identity_id,
+            role_id,
+        )
+        return result.endswith("1")
 
     async def upsert_system_agent(
         self, conn: asyncpg.Connection, agent: AgentDefinition
@@ -4340,6 +4700,16 @@ class CollaborationRepository:
         )
 
     @staticmethod
+    def _user_from_row(row: asyncpg.Record) -> UserRecord:
+        return UserRecord(
+            user_id=row["user_id"],
+            display_name=row["display_name"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
     def _organization_membership_from_row(
         row: asyncpg.Record,
     ) -> OrganizationMembership:
@@ -4443,6 +4813,60 @@ class CollaborationRepository:
             subject=row["subject"],
             email=row["email"],
             display_name=row["display_name"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _iam_role_definition_from_row(row: asyncpg.Record) -> IamRoleDefinition:
+        return IamRoleDefinition(
+            role_id=row["role_id"],
+            scope=row["scope"],
+            subject_kind=row["subject_kind"],
+            organization_id=row["organization_id"],
+            name=row["name"],
+            description=row["description"],
+            permissions=list(
+                CollaborationRepository._json_value(row["permissions"], default=[])
+            ),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _human_role_binding_from_row(row: asyncpg.Record) -> HumanRoleBinding:
+        return HumanRoleBinding(
+            user_id=row["user_id"],
+            role_id=row["role_id"],
+            created_at=row["created_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _agent_identity_from_row(row: asyncpg.Record) -> AgentIdentity:
+        return AgentIdentity(
+            agent_identity_id=row["agent_identity_id"],
+            system_agent_id=row["system_agent_id"],
+            scope=row["scope"],
+            organization_id=row["organization_id"],
+            provider_key=row["provider_key"],
+            issuer=row["issuer"],
+            external_subject=row["external_subject"],
+            client_id=row["client_id"],
+            status=row["status"],
+            secret_ref=CollaborationRepository._json_value(row["secret_ref"], default={}),
+            last_authenticated_at=row["last_authenticated_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _agent_role_binding_from_row(row: asyncpg.Record) -> AgentRoleBinding:
+        return AgentRoleBinding(
+            agent_identity_id=row["agent_identity_id"],
+            role_id=row["role_id"],
+            created_at=row["created_at"],
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),
         )
 

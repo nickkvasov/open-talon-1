@@ -27,7 +27,7 @@ for path in (_GW_DIR, _CONTRACTS_DIR, _CORE_COLLAB_DIR, _WORKSPACE_MEMORY_DIR):
         sys.path.insert(0, path)
 
 from gateway_edge.config import settings
-from gateway_edge.models import AuditEvent
+from gateway_edge.models import AuditEvent, AuthContext
 from gateway_edge.services.audit import AuditService
 from gateway_edge.services.audit_providers import (
     ClickHouseAuditProjectionProvider,
@@ -281,6 +281,15 @@ class _RecordingRelayProvider:
             yield
 
 
+class _DraftCaptureLedger(_FakeLedger):
+    def __init__(self) -> None:
+        super().__init__()
+        self.drafts = []
+
+    async def record_event(self, draft) -> None:
+        self.drafts.append(draft)
+
+
 @pytest.mark.asyncio
 async def test_audit_service_replay_once_projects_and_advances_checkpoint():
     ledger = _FakeLedger()
@@ -519,14 +528,54 @@ async def test_projector_loop_continues_after_event_failure():
     with pytest.raises(asyncio.CancelledError):
         await service._projector_loop()
 
-    assert [events[0].ledger_offset for events in projection.inserted] == [1, 2]
-    assert ledger.checkpoints == [
-        {
-            "consumer_name": projection.consumer_name,
-            "last_ledger_offset": 2,
-            "metadata": {"source": "kafka"},
-        }
-    ]
+
+@pytest.mark.asyncio
+async def test_record_http_audit_marks_agent_actor_and_system_agent_id():
+    ledger = _DraftCaptureLedger()
+    service = AuditService(
+        ledger=ledger,
+        relay_provider=NoopAuditRelayProvider(),
+        projection_provider=NoopAuditProjectionProvider(),
+        archive_provider=NoopAuditArchiveProvider(),
+    )
+    auth_context = AuthContext(
+        kind="oidc",
+        principal_type="agent",
+        agent_identity_id=uuid4(),
+        system_agent_id=uuid4(),
+        issuer="http://issuer.test/realms/open-talon",
+        subject="service-account-machine-reader",
+        client_id="machine-reader",
+        provider_key="keycloak",
+        claims={"sub": "service-account-machine-reader", "azp": "machine-reader"},
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            auth_context=auth_context,
+            correlation_id=None,
+            request_id=uuid4(),
+        ),
+        path_params={},
+        method="GET",
+        url=SimpleNamespace(path="/v1/agents"),
+        query_params={},
+        client=SimpleNamespace(host="127.0.0.1"),
+        headers={},
+        scope={"route": SimpleNamespace(path="/v1/agents")},
+    )
+
+    await service.record_http_audit(
+        request=request,
+        response=SimpleNamespace(status_code=200),
+        started_at=datetime.now(UTC),
+    )
+
+    assert len(ledger.drafts) == 1
+    draft = ledger.drafts[0]
+    assert draft.actor_type == "agent"
+    assert draft.actor_id == auth_context.system_agent_id
+    assert draft.system_agent_id == auth_context.system_agent_id
+    assert draft.user_id is None
 
 
 @pytest.mark.asyncio

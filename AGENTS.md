@@ -32,26 +32,35 @@ Primary local flow:
 - Do not reintroduce monolithic in-code DDL strings.
 - Postgres is the source of truth for execution state; Kafka is the wake-up and fanout bus.
 - Do not move agent loop execution back into `gateway-edge`.
+- Principal IAM is provider-neutral: the external OIDC provider handles authentication, and Open Talon owns authorization.
 - The tenant hierarchy is `platform > organization > workspace`.
-- Organization membership and org roles live in Postgres, not in Keycloak claims.
+- Keycloak is the default local OIDC provider and first machine-identity provisioning adapter, not the source of truth for authorization.
+- Organization membership and org roles live in Postgres, not in external IdP claims.
 - `participants` is a workspace-scoped attachment/state table.
 - Human identity lives in `users`.
 - External identity mappings live in `auth_identities`.
 - Agent identity/configuration lives in `system_agents`.
+- Machine principal linkage lives in `agent_identities`.
+- Global and organization IAM role definitions live in `iam_role_definitions` with separate human and agent bindings.
 - `participants.user_id` and `participants.system_agent_id` are the normalized references.
 - Keep `users.user_id` distinct from `participants.participant_id` for human users.
 - Do not duplicate agent profile/config data back into `participants`.
 - Keep workspace-local state on `participants`: status, visibility scope, roles, capabilities, timestamps, and metadata.
+- Workspace `role_definitions.permissions` is the canonical workspace authorization layer for both human and agent participants.
+- Humans and agents share the same permission names, but not the same global or organization role bindings.
 - Keep execution-side workspace materialization separate from collaboration `Workspace` models. Use `ExecutionWorkspaceRef` for executor payloads.
 - Authenticated human identity should be derived in `gateway-edge` from OIDC auth context, not trusted from client-provided actor fields.
+- Authenticated machine identity should be derived in `gateway-edge` from OIDC client credentials and `agent_identities`, not from client-provided actor fields.
 - Require organization membership before resolving workspace actors for authenticated humans.
 - Keep OIDC workspace reads membership-scoped. Non-members should get `404` for workspace-scoped reads rather than `403`.
 - Keep OIDC organization reads membership-scoped. Non-members should get `404` for organization-scoped reads rather than `403`.
-- Global system-definition, global publish, and provider-management routes are admin-only for OIDC users unless the request is coming through an existing operator/system-auth path.
-- Organization CRUD and organization-scoped management routes require org `owner` or `admin`, unless the caller is a platform admin.
-- Workspace role-definition changes, workspace tool management, workspace Git repository creation, and workspace asset publishing require workspace `admin` or `supervisor`.
+- `/v1/me` is human-only; machine principals should use the IAM and collaboration APIs directly.
+- Global system-definition, global publish, provider-management, and IAM-management routes require the matching global IAM permission unless the request is coming through an existing operator/system-auth path or bootstrap platform-admin access.
+- Organization CRUD and organization-scoped management routes require the relevant organization permission from baseline membership roles or explicit IAM role bindings, unless the caller is a platform admin.
+- Workspace role-definition changes, workspace participant-management, workspace tool management, workspace Git repository creation, and workspace asset publishing require the matching workspace permission on the caller's participant role definition.
 - Organization-scoped agents, tools, providers, repositories, and assets must stay inside the same organization as the consuming workspace.
 - Tinker-generated tools may publish to `global` or `organization` scope, but approval publishes into the system catalog only.
+- Tinker revision approval requires `tool_generation.review` plus `tool_catalog.write` in the target publication scope.
 - Tinker-generated tools must not be auto-attached to a workspace as part of approval; manual workspace attachment is a separate action.
 - Tinker authoring/build helpers are agent-internal tools and must not be exposed through `workspace_tools` or the normal workspace catalog.
 - Treat `collab_event_log` and `audit_event_ledger` as separate concerns: collaboration fanout vs. compliance/investigation.
@@ -97,7 +106,7 @@ source .venv/bin/activate
   - database: `app_db`
   - user: `admin`
   - password: `password`
-- Default local Keycloak:
+- Default local Keycloak adapter:
   - base URL: `http://127.0.0.1:8081`
   - realm: `open-talon`
   - TUI client: `open-talon-tui`
@@ -184,6 +193,8 @@ If a change touches layered memory, memory providers, Mem0, or graph-memory supp
 If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 
 - run relevant `gateway-edge` auth tests
+- run `tests/gateway-edge/test_iam.py`
+- run `tests/gateway-edge/test_identity_sync.py`
 - run `tests/tui`
 - verify docs and env defaults stay aligned with the actual login flow
 
@@ -198,10 +209,11 @@ If a change touches workspace authz, global admin routes, or workspace membershi
 
 - run relevant `tests/gateway-edge/test_workspaces.py`
 - run relevant `tests/gateway-edge/test_admin.py`
+- run relevant `tests/gateway-edge/test_iam.py`
 - run relevant organization route and org-membership tests when tenant boundaries changed
 - make sure non-member workspace reads still return `404`
 - make sure non-member organization reads still return `404`
-- make sure global OIDC reads/writes still require `admin`
+- make sure global control-plane OIDC reads/writes still require the intended IAM permission or platform-admin bootstrap access
 
 If a change touches audit logging, audit APIs, event relays, or runtime failure reporting:
 
@@ -225,6 +237,7 @@ If a change touches Tinker, tool generation, generated-tool approval, or interna
 
 - inspect `packages/contracts`, `services/core-collab`, `services/gateway-edge`, `services/agent-runtime`, `apps/admin-web`, and `apps/tui` together
 - preserve the rule that approval publishes only to the system catalog, not to `workspace_tools`
+- preserve the rule that approval requires `tool_generation.review` and `tool_catalog.write` in the publication scope
 - verify global and organization-scoped publication paths separately when scope behavior changes
 - keep Tinker-only helper tools private to Tinker
 - run `tests/core-collab/test_agent_contracts.py`

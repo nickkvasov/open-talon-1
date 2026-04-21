@@ -22,7 +22,7 @@ Business-case tests should stay focused on realistic workflow behavior across mu
 
 They are higher-level than the `tests/core-collab` suite, but they still run in-process with the fake repository unless a scenario explicitly needs infrastructure.
 
-## Current Case
+## Current Cases
 
 ### Role-Based Daily Coordination
 
@@ -60,6 +60,21 @@ The case then verifies:
 - targeted follow-up task routing
 - workspace communication-log ordering
 
+### Tinker Tool Generation
+
+Implemented in [test_tinker_tool_generation.py](/Users/nikolay.kvasov/Development/open-talon-1/tests/business-cases/test_tinker_tool_generation.py:1).
+
+This scenario validates the business flow around generated tools without requiring the live infrastructure stack:
+
+- workspace and thread creation
+- attaching seeded-style `Tinker` internal helper tools
+- drafting and approving an organization-scoped Fibonacci tool
+- publishing into the organization system catalog without auto-attaching to the workspace
+- manually attaching the published tool to the workspace
+- having a second agent call the generated tool and answer back into the thread
+
+This test runs in-process with the fake repository. The companion live-stack path is [tests/infrastructure/test_tinker_live_system.py](/Users/nikolay.kvasov/Development/open-talon-1/tests/infrastructure/test_tinker_live_system.py:877), which exercises the real runtime, Docker-backed generated tool path, and local Ollama model.
+
 ## Running The Suite
 
 From the repository root:
@@ -75,10 +90,16 @@ Run only business-case-marked tests:
 pytest -m business_case -q
 ```
 
-Run only the current pilot:
+Run only the daily coordination pilot:
 
 ```bash
 pytest tests/business-cases/test_daily_coordination.py -q
+```
+
+Run only the Tinker business case:
+
+```bash
+pytest tests/business-cases/test_tinker_tool_generation.py -q
 ```
 
 ## Communication Logs

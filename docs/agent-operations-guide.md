@@ -7,11 +7,12 @@ This is not the same thing as repository contribution guidance in `AGENTS.md`.
 Use this guide when an agent needs to:
 
 - act as one or more human test users
+- authenticate as a machine principal through OIDC client credentials
 - drive workspaces, threads, requests, and answers through the HTTP APIs
 - validate role-based routing and resumable collaboration
 - inspect collaboration logs and runtime outcomes
 
-For the full system and API reference, use [system-api-reference.md](./system-api-reference.md).
+For the full system and API reference, use [system-api-reference.md](./system-api-reference.md). For the principal IAM model and `/v1/iam/...` endpoints, use [iam.md](./iam.md).
 
 ## Core Operating Rules
 
@@ -94,6 +95,19 @@ Good for:
 - role assumption
 - answering tracked requests
 - inspecting communication logs
+
+### Direct HTTP With Machine Credentials
+
+Use direct HTTP calls when an automation client should act as a machine principal instead of simulating a human profile.
+
+Machine principals:
+
+- are provisioned through `/v1/iam/agent-identities`
+- authenticate with OIDC client credentials issued by the configured provider
+- resolve to `principal_type="agent"` inside the gateway
+- do not use `/v1/me`, which is human-only
+- gain organization and global permissions from agent IAM role bindings
+- gain workspace-management permissions only after the linked agent is attached to a workspace and its participant role carries workspace permissions
 
 ### `tui2`
 

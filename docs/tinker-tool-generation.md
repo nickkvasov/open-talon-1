@@ -8,16 +8,16 @@ This document describes the current Tinker workflow for generating agent-usable 
 - `Tinker` must be attached to a workspace before users in that workspace can ask it to create a tool.
 - A request may target either the `global` system catalog or the current `organization` catalog.
 - Tinker’s authoring helpers are private internal tools. They are not exposed through `workspace_tools` and are not visible to other agents.
-- Generated tools are published into the matching system catalog only after platform-admin approval.
+- Generated tools are published into the matching system catalog only after approval by a principal that has `tool_generation.review` and `tool_catalog.write` in the target scope.
 - Published tools are never auto-attached to any workspace.
-- Workspace `admin` or `supervisor` users attach a published tool later through the normal workspace-tool flow.
+- Workspace participants with `workspace.tools.write` attach a published tool later through the normal workspace-tool flow.
 
 ## User Flow
 
 1. Attach `Tinker` to a workspace.
 2. Ask Tinker for a tool in a workspace thread.
 3. Wait for Tinker to draft, build, validate, and submit a revision.
-4. Review and approve the revision as a platform admin.
+4. Review and approve the revision as a principal that has `tool_generation.review` and scoped `tool_catalog.write`.
 5. Attach the published tool to a workspace if you want agents there to use it.
 
 In `tui2`:
@@ -78,6 +78,12 @@ POST /v1/tool-generation/revisions/{revision_id}/approve
 POST /v1/tool-generation/revisions/{revision_id}/reject
 ```
 
+Approval checks:
+
+- `approve` requires `tool_generation.review`
+- `approve` also requires `tool_catalog.write` in the publication scope
+- `reject` requires `tool_generation.review`
+
 Attach the published tool later:
 
 ```text
@@ -93,6 +99,19 @@ The admin web includes a dedicated `Tool Generation` page for:
 - approving or rejecting a selected revision
 
 Approval still only publishes into the system catalog. Workspace attachment remains a separate workspace-management action.
+
+## Tests
+
+The repository carries two complementary Tinker scenarios:
+
+- [tests/business-cases/test_tinker_tool_generation.py](/Users/nikolay.kvasov/Development/open-talon-1/tests/business-cases/test_tinker_tool_generation.py): in-process business case using the kernel and fake repository
+- [tests/infrastructure/test_tinker_live_system.py](/Users/nikolay.kvasov/Development/open-talon-1/tests/infrastructure/test_tinker_live_system.py): real stack, real runtime, real generated-tool path
+
+Run the business-case scenario with:
+
+```bash
+./.venv/bin/python -m pytest tests/business-cases/test_tinker_tool_generation.py -q
+```
 
 ## Real System Test
 
@@ -113,6 +132,8 @@ Run it with:
 ```bash
 ./.venv/bin/python -m pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s
 ```
+
+`pytest.ini` excludes `integration` by default, so the `-m integration` selector is required.
 
 Prerequisites:
 

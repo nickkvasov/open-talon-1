@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     oidc_client_id_web: str = "open-talon-web"
     oidc_cache_ttl_seconds: int = 300
     oidc_admin_role: str = "admin"
+    identity_provider_key: str = "keycloak"
+    identity_provider_kind: Literal["oidc"] = "oidc"
+    keycloak_base_url: str = "http://127.0.0.1:8081"
+    keycloak_realm: str = "open-talon"
+    keycloak_admin_client_id: str = "admin-cli"
+    keycloak_admin_username: str = "admin"
+    keycloak_admin_password: str = "admin"
 
     # ── Postgres ─────────────────────────────────────────────────────────────
     postgres_host: str = "localhost"
@@ -121,6 +128,8 @@ class Settings(BaseSettings):
     openbao_address: str = "http://localhost:8200"
     # Root / admin token used by the gateway itself (for API-key management)
     openbao_admin_token: str = "root"
+    openbao_kv_mount: str = "secret"
+    agent_identity_secret_prefix: str = "open-talon/agent-identities"
 
     # ── Asset publishing / MinIO ─────────────────────────────────────────────
     asset_storage_endpoint: str = "http://127.0.0.1:9090"

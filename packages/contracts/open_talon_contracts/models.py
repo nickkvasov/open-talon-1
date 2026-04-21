@@ -47,6 +47,10 @@ AuditActorType = Literal["user", "agent", "system", "api_key", "unknown"]
 AuditOutcome = Literal["success", "failure", "denied", "error"]
 AuditPayloadMode = Literal["metadata_only"]
 OrganizationRole = Literal["owner", "admin", "member"]
+IamScope = Literal["global", "organization"]
+IamSubjectKind = Literal["human", "agent"]
+AgentIdentityStatus = Literal["active", "disabled"]
+PrincipalType = Literal["human", "agent", "api_key"]
 ToolGenerationRequestStatus = Literal[
     "submitted",
     "clarification_needed",
@@ -349,8 +353,80 @@ class ParticipantProfile(BaseModel):
 class RoleDefinition(BaseModel):
     name: str
     definition: str
+    permissions: list[str] = Field(default_factory=list)
     updated_by: UUID
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+class IamPermission(BaseModel):
+    name: str
+    scope_type: Literal["identity", "workspace"]
+    description: str
+
+
+class IamRoleDefinition(BaseModel):
+    role_id: UUID
+    scope: IamScope
+    subject_kind: IamSubjectKind
+    organization_id: UUID | None = None
+    name: str
+    description: str | None = None
+    permissions: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class HumanRoleBinding(BaseModel):
+    user_id: UUID
+    role_id: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentIdentity(BaseModel):
+    agent_identity_id: UUID
+    system_agent_id: UUID
+    scope: IamScope
+    organization_id: UUID | None = None
+    provider_key: str
+    issuer: str
+    external_subject: str | None = None
+    client_id: str
+    status: AgentIdentityStatus = "active"
+    secret_ref: dict[str, Any] = Field(default_factory=dict)
+    last_authenticated_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentRoleBinding(BaseModel):
+    agent_identity_id: UUID
+    role_id: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentIdentityProvisioningResult(BaseModel):
+    identity: AgentIdentity
+    client_secret: str
+    issuer: str
+    token_endpoint: str
+
+
+class PrincipalContext(BaseModel):
+    principal_type: PrincipalType
+    auth_method: Literal["oidc", "api_key"]
+    user_id: UUID | None = None
+    agent_identity_id: UUID | None = None
+    system_agent_id: UUID | None = None
+    issuer: str | None = None
+    subject: str | None = None
+    client_id: str | None = None
+    provider_key: str | None = None
+    platform_admin: bool = False
+    claims: dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolParameterDefinition(BaseModel):
@@ -1241,6 +1317,7 @@ class UpsertRoleDefinitionRequest(BaseModel):
     actor: ParticipantInput
     name: str
     definition: str
+    permissions: list[str] = Field(default_factory=list)
 
 
 class DeleteRoleDefinitionRequest(BaseModel):
@@ -1364,6 +1441,49 @@ class UpdateAgentParticipantRequest(BaseModel):
     status: ParticipantStatus | None = None
     visibility_scope: Visibility | None = None
     metadata: dict[str, Any] | None = None
+
+
+class CreateIamRoleRequest(BaseModel):
+    actor: ParticipantInput
+    name: str
+    description: str | None = None
+    permissions: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateIamRoleRequest(BaseModel):
+    actor: ParticipantInput
+    name: str | None = None
+    description: str | None = None
+    permissions: list[str] | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class BindHumanRoleRequest(BaseModel):
+    actor: ParticipantInput
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateAgentIdentityRequest(BaseModel):
+    actor: ParticipantInput
+    system_agent_id: UUID
+    client_id: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateAgentIdentityStatusRequest(BaseModel):
+    actor: ParticipantInput
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RotateAgentIdentitySecretRequest(BaseModel):
+    actor: ParticipantInput
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class BindAgentRoleRequest(BaseModel):
+    actor: ParticipantInput
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class CreateSystemAgentRequest(BaseModel):

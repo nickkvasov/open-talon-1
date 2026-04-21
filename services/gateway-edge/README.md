@@ -7,6 +7,7 @@ It exposes:
 - health and readiness endpoints
 - chat APIs with request/response and streaming flows
 - collaboration APIs for workspaces, threads, timelines, and presence
+- provider-neutral principal IAM APIs for human roles, agent roles, and machine identities
 - admin APIs for API key management
 - the local web UI entrypoint
 
@@ -32,7 +33,7 @@ PYTHONPATH="packages/contracts:services/core-collab:services/gateway-edge:servic
   uvicorn gateway_edge.main:app --host 0.0.0.0 --port 8000
 ```
 
-The service expects local Postgres, Kafka, Valkey, OpenBao, Keycloak, and Ollama endpoints to be available. For the standard dev setup, use `./open-talon start`.
+The service expects local Postgres, Kafka, Valkey, OpenBao, an OIDC provider, and Ollama endpoints to be available. In local development the default OIDC provider is Keycloak. For the standard dev setup, use `./open-talon start`.
 
 ## Tests
 
@@ -43,6 +44,10 @@ source .venv/bin/activate
 
 # unit tests
 pytest tests/gateway-edge -q
+
+# principal IAM and auth resolution
+pytest tests/gateway-edge/test_iam.py -q
+pytest tests/gateway-edge/test_identity_sync.py -q
 
 # infrastructure integration
 pytest -m integration tests/infrastructure/test_infrastructure.py -v -s

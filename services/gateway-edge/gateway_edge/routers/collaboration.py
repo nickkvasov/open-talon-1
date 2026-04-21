@@ -14,6 +14,7 @@ from gateway_edge.auth.oidc import validate_oidc_token
 from gateway_edge.auth.openbao import validate_openbao_token
 from gateway_edge.authz import has_admin_access, require_admin_access
 from gateway_edge.config import settings
+from gateway_edge.iam.authorization import authorization_engine
 from gateway_edge.models import (
     ActivateAssetVersionRequest,
     AuthContext,
@@ -138,72 +139,115 @@ def _request_auth_context(request: Request) -> AuthContext | None:
     return auth_context if isinstance(auth_context, AuthContext) else None
 
 
-def _user_auth_context(request: Request) -> AuthContext | None:
+def _oidc_auth_context(request: Request) -> AuthContext | None:
     auth_context = _request_auth_context(request)
     if auth_context is None or auth_context.kind != "oidc":
         return None
     return auth_context
 
 
-async def _require_workspace_audit_access(request: Request, workspace_id: UUID) -> None:
-    if has_admin_access(request):
-        return
-    auth_context = _user_auth_context(request)
+def _user_auth_context(request: Request) -> AuthContext | None:
+    auth_context = _oidc_auth_context(request)
+    if auth_context is None or auth_context.principal_type != "human":
+        return None
+    return auth_context
+
+
+def _principal_actor(
+    request: Request,
+    actor: ParticipantInput,
+) -> ParticipantInput:
+    auth_context = _oidc_auth_context(request)
     if auth_context is None:
-        raise HTTPException(status_code=403, detail="Audit access requires admin privileges")
-    actor = await collab_svc.collaboration_service.resolve_authenticated_user_actor(
-        workspace_id=workspace_id,
-        auth_context=auth_context,
-        auto_create=False,
-    )
-    workspace = await collab_svc.collaboration_service.get_workspace(workspace_id)
-    participant = next(
-        (
-            item
-            for item in workspace.participants
-            if item.participant_id == actor.participant_id
-        ),
-        None,
-    )
-    if participant is None or not {"admin", "supervisor"}.intersection(participant.roles):
-        raise HTTPException(
-            status_code=403,
-            detail="Audit access requires workspace admin or supervisor role",
+        return actor
+    if auth_context.principal_type == "human":
+        if auth_context.user_id is None or not auth_context.display_name:
+            return actor
+        return actor.model_copy(
+            update={
+                "participant_id": auth_context.user_id,
+                "participant_type": "user",
+                "user_id": auth_context.user_id,
+                "display_name": auth_context.display_name,
+            }
         )
+    participant_id = auth_context.system_agent_id or auth_context.agent_identity_id
+    if participant_id is None:
+        return actor
+    return actor.model_copy(
+        update={
+            "participant_id": participant_id,
+            "participant_type": "agent",
+            "user_id": None,
+            "display_name": (
+                auth_context.display_name
+                or auth_context.client_id
+                or auth_context.subject
+                or actor.display_name
+            ),
+        }
+    )
+
+
+async def _require_identity_permission(
+    request: Request,
+    *,
+    permission: str,
+    organization_id: UUID | None = None,
+) -> None:
+    await authorization_engine.authorize(
+        "collaboration.identity",
+        {
+            "auth_context": _request_auth_context(request),
+            "permission_type": "identity",
+            "permission": permission,
+            "organization_id": organization_id,
+        },
+    )
+
+
+async def _require_workspace_permission(
+    request: Request,
+    workspace_id: UUID,
+    *,
+    permission: str,
+) -> ParticipantInput | None:
+    resolution = await authorization_engine.authorize(
+        "collaboration.workspace",
+        {
+            "auth_context": _request_auth_context(request),
+            "permission_type": "workspace",
+            "permission": permission,
+            "workspace_id": workspace_id,
+        },
+    )
+    return resolution.workspace_participant
+
+
+async def _require_workspace_audit_access(request: Request, workspace_id: UUID) -> None:
+    await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.audit.read",
+    )
 
 
 def _resolved_create_workspace_actor(
     request: Request,
     actor: ParticipantInput,
 ) -> ParticipantInput:
-    auth_context = _user_auth_context(request)
-    if auth_context is None or auth_context.user_id is None or not auth_context.display_name:
-        return actor
-    return actor.model_copy(
-        update={
-            "participant_id": uuid4(),
-            "participant_type": "user",
-            "user_id": auth_context.user_id,
-            "display_name": auth_context.display_name,
-        }
-    )
+    auth_context = _oidc_auth_context(request)
+    resolved = _principal_actor(request, actor)
+    if auth_context is not None and auth_context.principal_type == "human":
+        return resolved.model_copy(update={"participant_id": uuid4()})
+    return resolved
 
 
 def _resolve_global_actor(
     request: Request,
     actor: ParticipantInput,
 ) -> ParticipantInput:
-    auth_context = _user_auth_context(request)
-    if auth_context is None or auth_context.user_id is None or not auth_context.display_name:
-        return actor
-    return actor.model_copy(
-        update={
-            "participant_id": auth_context.user_id,
-            "participant_type": "user",
-            "user_id": auth_context.user_id,
-            "display_name": auth_context.display_name,
-        }
-    )
+    return _principal_actor(request, actor)
 
 
 async def _resolve_workspace_actor(
@@ -213,9 +257,14 @@ async def _resolve_workspace_actor(
     workspace_id: UUID,
     auto_create: bool = True,
 ) -> ParticipantInput:
-    auth_context = _user_auth_context(request)
+    auth_context = _oidc_auth_context(request)
     if auth_context is None:
         return actor
+    if auth_context.principal_type == "agent":
+        return await collab_svc.collaboration_service.resolve_authenticated_agent_actor(
+            workspace_id=workspace_id,
+            auth_context=auth_context,
+        )
     try:
         return await collab_svc.collaboration_service.resolve_authenticated_user_actor(
             workspace_id=workspace_id,
@@ -235,9 +284,15 @@ async def _resolve_thread_actor(
     thread_id: UUID,
     auto_create: bool = True,
 ) -> ParticipantInput:
-    auth_context = _user_auth_context(request)
+    auth_context = _oidc_auth_context(request)
     if auth_context is None:
         return actor
+    if auth_context.principal_type == "agent":
+        thread = await collab_svc.collaboration_service.get_thread(thread_id)
+        return await collab_svc.collaboration_service.resolve_authenticated_agent_actor(
+            workspace_id=thread.thread.workspace_id,
+            auth_context=auth_context,
+        )
     return await collab_svc.collaboration_service.resolve_authenticated_thread_actor(
         thread_id=thread_id,
         auth_context=auth_context,
@@ -338,11 +393,18 @@ async def _require_organization_membership(
     request: Request,
     organization_id: UUID,
 ) -> OrganizationMembership | None:
-    if has_admin_access(request):
+    auth_context = _oidc_auth_context(request)
+    if auth_context is None or auth_context.kind == "api_key":
+        return None
+    if auth_context.principal_type == "agent":
+        await _require_identity_permission(
+            request,
+            permission="organization.read",
+            organization_id=organization_id,
+        )
         return None
     membership = await _organization_membership_for_user(request, organization_id)
-    auth_context = _user_auth_context(request)
-    if auth_context is not None and membership is None:
+    if membership is None:
         raise _organization_not_found(organization_id)
     return membership
 
@@ -351,24 +413,27 @@ async def _require_organization_admin(
     request: Request,
     organization_id: UUID,
 ) -> OrganizationMembership | None:
-    membership = await _require_organization_membership(request, organization_id)
-    if membership is None:
-        return None
-    if membership.role in {"owner", "admin"}:
-        return membership
-    raise HTTPException(status_code=403, detail="Organization admin role required")
+    await _require_identity_permission(
+        request,
+        permission="organization.members.write",
+        organization_id=organization_id,
+    )
+    return await _organization_membership_for_user(request, organization_id)
 
 
 async def _require_workspace_membership(
     request: Request,
     workspace_id: UUID,
 ) -> ParticipantInput | None:
-    if has_admin_access(request):
-        return None
-    auth_context = _user_auth_context(request)
+    auth_context = _oidc_auth_context(request)
     if auth_context is None:
         return None
     try:
+        if auth_context.principal_type == "agent":
+            return await collab_svc.collaboration_service.resolve_authenticated_agent_actor(
+                workspace_id=workspace_id,
+                auth_context=auth_context,
+            )
         return await collab_svc.collaboration_service.resolve_authenticated_user_actor(
             workspace_id=workspace_id,
             auth_context=auth_context,
@@ -382,12 +447,16 @@ async def _require_thread_membership(
     request: Request,
     thread_id: UUID,
 ) -> ParticipantInput | None:
-    if has_admin_access(request):
-        return None
-    auth_context = _user_auth_context(request)
+    auth_context = _oidc_auth_context(request)
     if auth_context is None:
         return None
     try:
+        if auth_context.principal_type == "agent":
+            thread = await collab_svc.collaboration_service.get_thread(thread_id)
+            return await collab_svc.collaboration_service.resolve_authenticated_agent_actor(
+                workspace_id=thread.thread.workspace_id,
+                auth_context=auth_context,
+            )
         return await collab_svc.collaboration_service.resolve_authenticated_thread_actor(
             thread_id=thread_id,
             auth_context=auth_context,
@@ -415,28 +484,21 @@ async def _require_workspace_admin_or_supervisor(
     request: Request,
     workspace_id: UUID,
 ) -> ParticipantInput | None:
-    if has_admin_access(request):
-        return None
-    actor = await _require_workspace_membership(request, workspace_id)
-    if actor is None:
-        return None
-    workspace = await collab_svc.collaboration_service.get_workspace(workspace_id)
-    participant = next(
-        (
-            item
-            for item in workspace.participants
-            if item.participant_id == actor.participant_id
-        ),
-        None,
+    return await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.tools.write",
     )
-    if participant is None:
-        raise _workspace_not_found(workspace_id)
-    if {"admin", "supervisor"}.intersection(participant.roles):
-        return actor
-    raise HTTPException(
-        status_code=403,
-        detail="Workspace admin or supervisor role required",
-    )
+
+
+async def _tool_generation_request_for_revision(
+    revision_id: UUID,
+) -> ToolGenerationRequestDetail:
+    details = await collab_svc.collaboration_service.list_tool_generation_requests()
+    for detail in details:
+        if any(revision.revision_id == revision_id for revision in detail.revisions):
+            return detail
+    raise KeyError(f"Tool generation revision {revision_id} not found")
 
 
 @router.post(
@@ -464,8 +526,22 @@ async def create_organization(
     summary="List organizations",
 )
 async def list_organizations(request: Request) -> list[Organization]:
-    auth_context = _user_auth_context(request)
-    user_id = None if has_admin_access(request) else (auth_context.user_id if auth_context else None)
+    auth_context = _oidc_auth_context(request)
+    if auth_context is not None and auth_context.principal_type == "agent":
+        try:
+            await _require_identity_permission(request, permission="organization.read")
+        except HTTPException:
+            identity = None
+            if auth_context.agent_identity_id is not None:
+                identity = await collab_svc.collaboration_service.get_agent_identity(
+                    auth_context.agent_identity_id
+                )
+            if identity is None or identity.organization_id is None:
+                raise
+            return [await collab_svc.collaboration_service.get_organization(identity.organization_id)]
+        return await collab_svc.collaboration_service.list_organizations()
+    user_context = auth_context if auth_context is not None and auth_context.principal_type == "human" else None
+    user_id = None if has_admin_access(request) else (user_context.user_id if user_context else None)
     try:
         return await collab_svc.collaboration_service.list_organizations(user_id=user_id)
     except Exception as exc:
@@ -479,7 +555,11 @@ async def list_organizations(request: Request) -> list[Organization]:
 )
 async def get_organization(request: Request, organization_id: UUID) -> Organization:
     try:
-        await _require_organization_membership(request, organization_id)
+        await _require_identity_permission(
+            request,
+            permission="organization.read",
+            organization_id=organization_id,
+        )
         return await collab_svc.collaboration_service.get_organization(organization_id)
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -519,7 +599,11 @@ async def list_organization_memberships(
     organization_id: UUID,
 ) -> list[OrganizationMembership]:
     try:
-        await _require_organization_membership(request, organization_id)
+        await _require_identity_permission(
+            request,
+            permission="organization.members.read",
+            organization_id=organization_id,
+        )
         return await collab_svc.collaboration_service.list_organization_memberships(
             organization_id
         )
@@ -580,7 +664,11 @@ async def remove_organization_member(
 @router.post("/workspaces", response_model=WorkspaceDetail, summary="Create a workspace")
 async def create_workspace(request: Request, payload: CreateWorkspaceRequest) -> WorkspaceDetail:
     if payload.organization_id is not None:
-        await _require_organization_admin(request, payload.organization_id)
+        await _require_identity_permission(
+            request,
+            permission="workspace.list",
+            organization_id=payload.organization_id,
+        )
     payload = payload.model_copy(
         update={"actor": _resolved_create_workspace_actor(request, payload.actor)}
     )
@@ -605,10 +693,34 @@ async def list_workspaces(
     organization_id: UUID | None = Query(default=None),
 ) -> list[Workspace]:
     logger.debug("HTTP list_workspaces organization_id=%s", organization_id)
-    auth_context = _user_auth_context(request)
-    if organization_id is not None and auth_context is not None and not has_admin_access(request):
-        await _require_organization_membership(request, organization_id)
-    user_id = None if has_admin_access(request) else (auth_context.user_id if auth_context is not None else None)
+    auth_context = _oidc_auth_context(request)
+    if auth_context is not None and organization_id is not None:
+        await _require_identity_permission(
+            request,
+            permission="workspace.list",
+            organization_id=organization_id,
+        )
+    if auth_context is not None and auth_context.principal_type == "agent":
+        effective_organization_id = organization_id
+        if effective_organization_id is None and auth_context.agent_identity_id is not None:
+            identity = await collab_svc.collaboration_service.get_agent_identity(
+                auth_context.agent_identity_id
+            )
+            effective_organization_id = identity.organization_id if identity is not None else None
+            if effective_organization_id is not None:
+                await _require_identity_permission(
+                    request,
+                    permission="workspace.list",
+                    organization_id=effective_organization_id,
+                )
+            else:
+                await _require_identity_permission(request, permission="workspace.list")
+        return await collab_svc.collaboration_service.list_workspaces(
+            user_id=None,
+            organization_id=effective_organization_id,
+        )
+    user_context = auth_context if auth_context is not None and auth_context.principal_type == "human" else None
+    user_id = None if has_admin_access(request) else (user_context.user_id if user_context is not None else None)
     return await collab_svc.collaboration_service.list_workspaces(
         user_id=user_id,
         organization_id=organization_id,
@@ -625,7 +737,11 @@ async def create_organization_workspace(
     organization_id: UUID,
     payload: CreateWorkspaceRequest,
 ) -> WorkspaceDetail:
-    await _require_organization_admin(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="workspace.list",
+        organization_id=organization_id,
+    )
     payload = payload.model_copy(
         update={
             "organization_id": organization_id,
@@ -650,7 +766,11 @@ async def list_organization_workspaces(
     request: Request,
     organization_id: UUID,
 ) -> list[Workspace]:
-    await _require_organization_membership(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="workspace.list",
+        organization_id=organization_id,
+    )
     auth_context = _user_auth_context(request)
     user_id = None if has_admin_access(request) else (auth_context.user_id if auth_context else None)
     try:
@@ -671,7 +791,11 @@ async def organization_runtime_overview(
     request: Request,
     organization_id: UUID,
 ) -> RuntimeOverviewResponse:
-    await _require_organization_membership(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="organization.runtime.read",
+        organization_id=organization_id,
+    )
     try:
         return RuntimeOverviewResponse.model_validate(
             await collab_svc.collaboration_service.get_runtime_overview(
@@ -692,6 +816,11 @@ async def delete_workspace(
     workspace_id: UUID,
     payload: DeleteWorkspaceRequest = Body(...),
 ) -> dict[str, bool | str]:
+    await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.roles.write",
+    )
     payload = payload.model_copy(
         update={
             "actor": await _resolve_workspace_actor(
@@ -723,7 +852,11 @@ async def update_workspace(
     workspace_id: UUID,
     payload: UpdateWorkspaceRequest,
 ) -> WorkspaceDetail:
-    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
+    actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.roles.write",
+    )
     payload = payload.model_copy(
         update={
             "actor": actor
@@ -826,6 +959,11 @@ async def delete_participant(
     participant_id: UUID,
     payload: DeleteParticipantRequest = Body(...),
 ) -> dict[str, bool | str]:
+    await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.agents.write",
+    )
     payload = payload.model_copy(
         update={
             "actor": await _resolve_workspace_actor(
@@ -898,7 +1036,7 @@ async def create_system_agent(
     request: Request,
     payload: CreateSystemAgentRequest,
 ) -> AgentDefinition:
-    require_admin_access(request)
+    await _require_identity_permission(request, permission="agent_catalog.write")
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP create_system_agent actor=%s display_name=%r endpoint_kind=%s",
@@ -922,7 +1060,11 @@ async def create_organization_system_agent(
     organization_id: UUID,
     payload: CreateSystemAgentRequest,
 ) -> AgentDefinition:
-    await _require_organization_admin(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="agent_catalog.write",
+        organization_id=organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
     try:
         return await collab_svc.collaboration_service.create_system_agent(
@@ -953,7 +1095,7 @@ async def create_llm_provider(
     request: Request,
     payload: CreateLlmProviderRequest,
 ) -> LlmProviderDefinition:
-    require_admin_access(request)
+    await _require_identity_permission(request, permission="provider.llm.write")
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP create_llm_provider actor=%s engine_id=%r provider=%s",
@@ -977,7 +1119,11 @@ async def create_organization_llm_provider(
     organization_id: UUID,
     payload: CreateLlmProviderRequest,
 ) -> LlmProviderDefinition:
-    await _require_organization_admin(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="provider.llm.write",
+        organization_id=organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
     try:
         return await collab_svc.collaboration_service.create_llm_provider(
@@ -998,7 +1144,7 @@ async def validate_llm_provider(
     request: Request,
     payload: CreateLlmProviderRequest,
 ) -> LlmProviderHealthReport:
-    require_admin_access(request)
+    await _require_identity_permission(request, permission="provider.llm.validate")
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP validate_llm_provider actor=%s engine_id=%r provider=%s",
@@ -1039,7 +1185,7 @@ async def validate_llm_provider(
     summary="List system-level LLM provider definitions",
 )
 async def list_llm_providers(request: Request) -> list[LlmProviderDefinition]:
-    require_admin_access(request)
+    await _require_identity_permission(request, permission="provider.llm.read")
     logger.debug("HTTP list_llm_providers")
     try:
         return await collab_svc.collaboration_service.list_llm_providers()
@@ -1056,7 +1202,11 @@ async def list_organization_llm_providers(
     request: Request,
     organization_id: UUID,
 ) -> list[LlmProviderDefinition]:
-    await _require_organization_membership(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="provider.llm.read",
+        organization_id=organization_id,
+    )
     try:
         return await collab_svc.collaboration_service.list_llm_providers(
             scope="organization",
@@ -1076,7 +1226,12 @@ async def update_llm_provider(
     provider_id: UUID,
     payload: UpdateLlmProviderRequest,
 ) -> LlmProviderDefinition:
-    require_admin_access(request)
+    provider = await collab_svc.collaboration_service.get_llm_provider(provider_id)
+    await _require_identity_permission(
+        request,
+        permission="provider.llm.write",
+        organization_id=provider.organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP update_llm_provider provider_id=%s actor=%s",
@@ -1102,7 +1257,12 @@ async def delete_llm_provider(
     provider_id: UUID,
     payload: DeleteLlmProviderRequest = Body(...),
 ) -> dict[str, bool | str]:
-    require_admin_access(request)
+    provider = await collab_svc.collaboration_service.get_llm_provider(provider_id)
+    await _require_identity_permission(
+        request,
+        permission="provider.llm.write",
+        organization_id=provider.organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP delete_llm_provider provider_id=%s actor=%s",
@@ -1127,10 +1287,14 @@ async def health_check_llm_provider(
     request: Request,
     provider_id: UUID,
 ) -> LlmProviderHealthReport:
-    require_admin_access(request)
+    provider = await collab_svc.collaboration_service.get_llm_provider(provider_id)
+    await _require_identity_permission(
+        request,
+        permission="provider.llm.validate",
+        organization_id=provider.organization_id,
+    )
     logger.debug("HTTP health_check_llm_provider provider_id=%s", provider_id)
     try:
-        provider = await collab_svc.collaboration_service.get_llm_provider(provider_id)
         return await check_llm_provider_health(provider)
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -1145,7 +1309,7 @@ async def create_memory_provider(
     request: Request,
     payload: CreateMemoryProviderRequest,
 ) -> MemoryProviderDefinition:
-    require_admin_access(request)
+    await _require_identity_permission(request, permission="provider.memory.write")
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP create_memory_provider actor=%s provider_key=%r provider=%s",
@@ -1169,7 +1333,11 @@ async def create_organization_memory_provider(
     organization_id: UUID,
     payload: CreateMemoryProviderRequest,
 ) -> MemoryProviderDefinition:
-    await _require_organization_admin(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="provider.memory.write",
+        organization_id=organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
     try:
         return await collab_svc.collaboration_service.create_memory_provider(
@@ -1190,7 +1358,7 @@ async def validate_memory_provider(
     request: Request,
     payload: CreateMemoryProviderRequest,
 ) -> MemoryProviderHealthReport:
-    require_admin_access(request)
+    await _require_identity_permission(request, permission="provider.memory.validate")
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP validate_memory_provider actor=%s provider_key=%r provider=%s",
@@ -1226,7 +1394,7 @@ async def validate_memory_provider(
     summary="List system-level memory provider definitions",
 )
 async def list_memory_providers(request: Request) -> list[MemoryProviderDefinition]:
-    require_admin_access(request)
+    await _require_identity_permission(request, permission="provider.memory.read")
     logger.debug("HTTP list_memory_providers")
     try:
         return await collab_svc.collaboration_service.list_memory_providers()
@@ -1243,7 +1411,11 @@ async def list_organization_memory_providers(
     request: Request,
     organization_id: UUID,
 ) -> list[MemoryProviderDefinition]:
-    await _require_organization_membership(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="provider.memory.read",
+        organization_id=organization_id,
+    )
     try:
         return await collab_svc.collaboration_service.list_memory_providers(
             scope="organization",
@@ -1263,7 +1435,12 @@ async def update_memory_provider(
     provider_id: UUID,
     payload: UpdateMemoryProviderRequest,
 ) -> MemoryProviderDefinition:
-    require_admin_access(request)
+    provider = await collab_svc.collaboration_service.get_memory_provider(provider_id)
+    await _require_identity_permission(
+        request,
+        permission="provider.memory.write",
+        organization_id=provider.organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP update_memory_provider provider_id=%s actor=%s",
@@ -1289,7 +1466,12 @@ async def delete_memory_provider(
     provider_id: UUID,
     payload: DeleteMemoryProviderRequest = Body(...),
 ) -> dict[str, bool | str]:
-    require_admin_access(request)
+    provider = await collab_svc.collaboration_service.get_memory_provider(provider_id)
+    await _require_identity_permission(
+        request,
+        permission="provider.memory.write",
+        organization_id=provider.organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP delete_memory_provider provider_id=%s actor=%s",
@@ -1314,10 +1496,14 @@ async def health_check_memory_provider(
     request: Request,
     provider_id: UUID,
 ) -> MemoryProviderHealthReport:
-    require_admin_access(request)
+    provider = await collab_svc.collaboration_service.get_memory_provider(provider_id)
+    await _require_identity_permission(
+        request,
+        permission="provider.memory.validate",
+        organization_id=provider.organization_id,
+    )
     logger.debug("HTTP health_check_memory_provider provider_id=%s", provider_id)
     try:
-        provider = await collab_svc.collaboration_service.get_memory_provider(provider_id)
         return await check_memory_provider_health(provider)
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -1329,7 +1515,7 @@ async def health_check_memory_provider(
     summary="List system-level agent definitions",
 )
 async def list_system_agents(request: Request) -> list[AgentDefinition]:
-    require_admin_access(request)
+    await _require_identity_permission(request, permission="agent_catalog.read")
     logger.debug("HTTP list_system_agents")
     try:
         return await collab_svc.collaboration_service.list_system_agents()
@@ -1346,7 +1532,11 @@ async def list_organization_system_agents(
     request: Request,
     organization_id: UUID,
 ) -> list[AgentDefinition]:
-    await _require_organization_membership(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="agent_catalog.read",
+        organization_id=organization_id,
+    )
     try:
         return await collab_svc.collaboration_service.list_system_agents(
             scope="organization",
@@ -1365,7 +1555,7 @@ async def create_system_tool(
     request: Request,
     payload: CreateSystemToolRequest,
 ) -> SystemToolDefinition:
-    require_admin_access(request)
+    await _require_identity_permission(request, permission="tool_catalog.write")
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP create_system_tool actor=%s name=%r",
@@ -1388,7 +1578,11 @@ async def create_organization_system_tool(
     organization_id: UUID,
     payload: CreateSystemToolRequest,
 ) -> SystemToolDefinition:
-    await _require_organization_admin(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="tool_catalog.write",
+        organization_id=organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
     try:
         return await collab_svc.collaboration_service.create_system_tool(
@@ -1406,7 +1600,7 @@ async def create_organization_system_tool(
     summary="List system-wide tool definitions",
 )
 async def list_system_tools(request: Request) -> list[SystemToolDefinition]:
-    require_admin_access(request)
+    await _require_identity_permission(request, permission="tool_catalog.read")
     logger.debug("HTTP list_system_tools")
     try:
         return await collab_svc.collaboration_service.list_system_tools()
@@ -1423,7 +1617,11 @@ async def list_organization_system_tools(
     request: Request,
     organization_id: UUID,
 ) -> list[SystemToolDefinition]:
-    await _require_organization_membership(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="tool_catalog.read",
+        organization_id=organization_id,
+    )
     try:
         return await collab_svc.collaboration_service.list_system_tools(
             scope="organization",
@@ -1443,7 +1641,14 @@ async def update_system_tool(
     tool_id: UUID,
     payload: UpdateSystemToolRequest,
 ) -> SystemToolDefinition:
-    require_admin_access(request)
+    tool = await collab_svc.collaboration_service.get_system_tool(tool_id)
+    if tool is None:
+        raise _http_error(KeyError(f"System tool {tool_id} not found"))
+    await _require_identity_permission(
+        request,
+        permission="tool_catalog.write",
+        organization_id=tool.organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP update_system_tool tool_id=%s actor=%s",
@@ -1469,7 +1674,14 @@ async def update_system_agent(
     agent_id: UUID,
     payload: UpdateSystemAgentRequest,
 ) -> AgentDefinition:
-    require_admin_access(request)
+    agent = await collab_svc.collaboration_service.get_system_agent(agent_id)
+    if agent is None:
+        raise _http_error(KeyError(f"System agent {agent_id} not found"))
+    await _require_identity_permission(
+        request,
+        permission="agent_catalog.write",
+        organization_id=agent.organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP update_system_agent agent_id=%s actor=%s",
@@ -1495,7 +1707,14 @@ async def delete_system_agent(
     agent_id: UUID,
     payload: DeleteSystemAgentRequest = Body(...),
 ) -> dict[str, bool | str]:
-    require_admin_access(request)
+    agent = await collab_svc.collaboration_service.get_system_agent(agent_id)
+    if agent is None:
+        raise _http_error(KeyError(f"System agent {agent_id} not found"))
+    await _require_identity_permission(
+        request,
+        permission="agent_catalog.write",
+        organization_id=agent.organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP delete_system_agent agent_id=%s actor=%s",
@@ -1518,7 +1737,14 @@ async def delete_system_tool(
     tool_id: UUID,
     payload: DeleteSystemToolRequest = Body(...),
 ) -> dict[str, bool | str]:
-    require_admin_access(request)
+    tool = await collab_svc.collaboration_service.get_system_tool(tool_id)
+    if tool is None:
+        raise _http_error(KeyError(f"System tool {tool_id} not found"))
+    await _require_identity_permission(
+        request,
+        permission="tool_catalog.write",
+        organization_id=tool.organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP delete_system_tool tool_id=%s actor=%s",
@@ -1540,7 +1766,7 @@ async def create_global_git_repository(
     request: Request,
     payload: CreateGitRepositoryRequest,
 ) -> GitRepository:
-    require_admin_access(request)
+    await _require_identity_permission(request, permission="git_registry.write")
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP create_global_git_repository actor=%s name=%r local_path=%s",
@@ -1565,7 +1791,7 @@ async def create_global_git_repository(
     summary="List globally registered Git repositories",
 )
 async def list_global_git_repositories(request: Request) -> list[GitRepository]:
-    require_admin_access(request)
+    await _require_identity_permission(request, permission="git_registry.read")
     logger.debug("HTTP list_global_git_repositories")
     try:
         return await collab_svc.collaboration_service.list_git_repositories(
@@ -1586,7 +1812,11 @@ async def create_organization_git_repository(
     organization_id: UUID,
     payload: CreateGitRepositoryRequest,
 ) -> GitRepository:
-    await _require_organization_admin(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="git_registry.write",
+        organization_id=organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
     try:
         return await collab_svc.collaboration_service.create_git_repository(
@@ -1608,7 +1838,11 @@ async def list_organization_git_repositories(
     request: Request,
     organization_id: UUID,
 ) -> list[GitRepository]:
-    await _require_organization_membership(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="git_registry.read",
+        organization_id=organization_id,
+    )
     try:
         return await collab_svc.collaboration_service.list_git_repositories(
             scope="organization",
@@ -1628,7 +1862,7 @@ async def publish_global_asset_from_git(
     request: Request,
     payload: PublishAssetFromGitRequest,
 ) -> WorkspaceAssetVersion:
-    require_admin_access(request)
+    await _require_identity_permission(request, permission="asset_catalog.publish")
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP publish_global_asset_from_git actor=%s repository_id=%s logical_name=%r path=%s",
@@ -1658,7 +1892,11 @@ async def publish_organization_asset_from_git(
     organization_id: UUID,
     payload: PublishAssetFromGitRequest,
 ) -> WorkspaceAssetVersion:
-    await _require_organization_admin(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="asset_catalog.publish",
+        organization_id=organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
     try:
         return await collab_svc.collaboration_service.publish_asset_from_git(
@@ -1680,7 +1918,11 @@ async def list_organization_assets(
     request: Request,
     organization_id: UUID,
 ) -> list[WorkspaceAsset]:
-    await _require_organization_membership(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="asset_catalog.read",
+        organization_id=organization_id,
+    )
     try:
         return await collab_svc.collaboration_service.list_workspace_assets(
             scope="organization",
@@ -1709,9 +1951,15 @@ async def list_assets(
     )
     try:
         if organization_id is not None and workspace_id is None:
-            await _require_organization_membership(request, organization_id)
+            await _require_identity_permission(
+                request,
+                permission="asset_catalog.read",
+                organization_id=organization_id,
+            )
         if workspace_id is not None:
             await _require_workspace_membership(request, workspace_id)
+        if organization_id is None and workspace_id is None:
+            await _require_identity_permission(request, permission="asset_catalog.read")
         return await collab_svc.collaboration_service.list_workspace_assets(
             scope=scope,
             organization_id=organization_id,
@@ -1745,7 +1993,12 @@ async def link_asset_version(
     asset_id: UUID,
     payload: LinkAssetRequest,
 ) -> AssetLink:
-    require_admin_access(request)
+    asset = await _require_asset_workspace_membership(request, asset_id)
+    await _require_identity_permission(
+        request,
+        permission="asset_catalog.link",
+        organization_id=asset.organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP link_asset_version asset_id=%s target_type=%s target_id=%s purpose=%s actor=%s",
@@ -1771,7 +2024,12 @@ async def activate_asset_version(
     asset_id: UUID,
     payload: ActivateAssetVersionRequest,
 ) -> AssetLink:
-    require_admin_access(request)
+    asset = await _require_asset_workspace_membership(request, asset_id)
+    await _require_identity_permission(
+        request,
+        permission="asset_catalog.activate",
+        organization_id=asset.organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP activate_asset_version asset_id=%s target_type=%s target_id=%s purpose=%s actor=%s",
@@ -1862,6 +2120,11 @@ async def create_agent_participant(
     workspace_id: UUID,
     payload: CreateAgentParticipantRequest,
 ) -> ParticipantProfile:
+    await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.agents.write",
+    )
     payload = payload.model_copy(
         update={
             "actor": await _resolve_workspace_actor(
@@ -1897,6 +2160,11 @@ async def update_agent_participant(
     participant_id: UUID,
     payload: UpdateAgentParticipantRequest,
 ) -> ParticipantProfile:
+    await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.agents.write",
+    )
     payload = payload.model_copy(
         update={
             "actor": await _resolve_workspace_actor(
@@ -1934,7 +2202,11 @@ async def upsert_role_definition(
     role_name: str,
     payload: UpsertRoleDefinitionRequest,
 ) -> RoleDefinition:
-    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
+    actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.roles.write",
+    )
     payload = payload.model_copy(
         update={
             "name": role_name,
@@ -1973,7 +2245,11 @@ async def delete_role_definition(
     role_name: str,
     payload: DeleteRoleDefinitionRequest = Body(...),
 ) -> dict[str, bool | str]:
-    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
+    actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.roles.write",
+    )
     payload = payload.model_copy(
         update={
             "actor": actor
@@ -2028,7 +2304,11 @@ async def create_workspace_git_repository(
     workspace_id: UUID,
     payload: CreateGitRepositoryRequest,
 ) -> GitRepository:
-    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
+    actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.repositories.write",
+    )
     payload = payload.model_copy(
         update={
             "actor": actor
@@ -2087,7 +2367,11 @@ async def publish_workspace_asset_from_git(
     workspace_id: UUID,
     payload: PublishAssetFromGitRequest,
 ) -> WorkspaceAssetVersion:
-    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
+    actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.assets.publish",
+    )
     payload = payload.model_copy(
         update={
             "actor": actor
@@ -2128,7 +2412,11 @@ async def attach_workspace_tool(
     tool_id: UUID,
     payload: _AttachWorkspaceToolBody,
 ) -> WorkspaceTool:
-    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
+    actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.tools.write",
+    )
     payload = AttachWorkspaceToolRequest(
         tool_id=tool_id,
         enabled=payload.enabled,
@@ -2168,7 +2456,11 @@ async def update_workspace_tool(
     tool_id: UUID,
     payload: UpdateWorkspaceToolRequest,
 ) -> WorkspaceTool:
-    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
+    actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.tools.write",
+    )
     payload = payload.model_copy(
         update={
             "actor": actor
@@ -2207,7 +2499,11 @@ async def delete_workspace_tool(
     tool_id: UUID,
     payload: DeleteWorkspaceToolRequest = Body(...),
 ) -> dict[str, bool | str]:
-    actor = await _require_workspace_admin_or_supervisor(request, workspace_id)
+    actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.tools.write",
+    )
     payload = payload.model_copy(
         update={
             "actor": actor
@@ -2285,7 +2581,11 @@ async def list_workspace_communication_log(
         offset,
     )
     try:
-        await _require_workspace_admin_or_supervisor(request, workspace_id)
+        await _require_workspace_permission(
+            request,
+            workspace_id,
+            permission="workspace.audit.read",
+        )
         return await collab_svc.collaboration_service.list_workspace_communication_log(
             workspace_id,
             thread_id=thread_id,
@@ -2380,7 +2680,15 @@ async def list_tool_generation_requests(
     workspace_id: UUID | None = Query(default=None),
     status: str | None = Query(default=None),
 ) -> list[ToolGenerationRequestDetail]:
-    require_admin_access(request)
+    derived_organization_id = organization_id
+    if derived_organization_id is None and workspace_id is not None:
+        workspace = await collab_svc.collaboration_service.get_workspace(workspace_id)
+        derived_organization_id = workspace.workspace.organization_id
+    await _require_identity_permission(
+        request,
+        permission="tool_generation.read",
+        organization_id=derived_organization_id,
+    )
     logger.debug(
         "HTTP list_tool_generation_requests organization_id=%s workspace_id=%s status=%s",
         organization_id,
@@ -2426,7 +2734,13 @@ async def get_tool_generation_request(
 ) -> ToolGenerationRequestDetail:
     try:
         detail = await collab_svc.collaboration_service.get_tool_generation_request(request_id)
-        if not has_admin_access(request):
+        try:
+            await _require_identity_permission(
+                request,
+                permission="tool_generation.read",
+                organization_id=detail.request.organization_id,
+            )
+        except HTTPException:
             await _require_thread_membership(request, detail.request.thread_id)
         return detail
     except Exception as exc:
@@ -2472,7 +2786,20 @@ async def approve_tool_generation_revision(
     revision_id: UUID,
     payload: ReviewToolGenerationRevisionRequest,
 ) -> ToolGenerationRequestDetail:
-    require_admin_access(request)
+    detail = await _tool_generation_request_for_revision(revision_id)
+    await _require_identity_permission(
+        request,
+        permission="tool_generation.review",
+        organization_id=detail.request.organization_id,
+    )
+    if detail.request.requested_scope == "organization":
+        await _require_identity_permission(
+            request,
+            permission="tool_catalog.write",
+            organization_id=detail.request.organization_id,
+        )
+    else:
+        await _require_identity_permission(request, permission="tool_catalog.write")
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     try:
         return await collab_svc.collaboration_service.approve_tool_generation_revision(
@@ -2493,7 +2820,12 @@ async def reject_tool_generation_revision(
     revision_id: UUID,
     payload: ReviewToolGenerationRevisionRequest,
 ) -> ToolGenerationRequestDetail:
-    require_admin_access(request)
+    detail = await _tool_generation_request_for_revision(revision_id)
+    await _require_identity_permission(
+        request,
+        permission="tool_generation.review",
+        organization_id=detail.request.organization_id,
+    )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     try:
         return await collab_svc.collaboration_service.reject_tool_generation_revision(
@@ -2971,9 +3303,13 @@ async def list_audit_events(
         if workspace_id is not None:
             await _require_workspace_audit_access(request, workspace_id)
         elif organization_id is not None:
-            await _require_organization_admin(request, organization_id)
+            await _require_identity_permission(
+                request,
+                permission="audit.read",
+                organization_id=organization_id,
+            )
         else:
-            require_admin_access(request)
+            await _require_identity_permission(request, permission="audit.read")
         return await audit_service.list_audit_events(
             AuditExportRequest(
                 organization_id=organization_id,
@@ -3017,7 +3353,11 @@ async def list_organization_audit_events(
     occurred_before: datetime | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=1000),
 ) -> AuditEventPage:
-    await _require_organization_admin(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="audit.read",
+        organization_id=organization_id,
+    )
     try:
         return await audit_service.list_audit_events(
             AuditExportRequest(
@@ -3053,9 +3393,13 @@ async def get_audit_event(request: Request, audit_event_id: UUID):
         if event.workspace_id is not None:
             await _require_workspace_audit_access(request, event.workspace_id)
         elif event.organization_id is not None:
-            await _require_organization_admin(request, event.organization_id)
+            await _require_identity_permission(
+                request,
+                permission="audit.read",
+                organization_id=event.organization_id,
+            )
         else:
-            require_admin_access(request)
+            await _require_identity_permission(request, permission="audit.read")
         return event
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -3069,17 +3413,19 @@ async def get_audit_event(request: Request, audit_event_id: UUID):
 async def verify_audit_chain(request: Request, chain_partition: str):
     try:
         if chain_partition.startswith("workspace:"):
-            await _require_workspace_audit_access(
+            await _require_workspace_permission(
                 request,
                 UUID(chain_partition.split(":", 1)[1]),
+                permission="workspace.audit.verify",
             )
         elif chain_partition.startswith("organization:"):
-            await _require_organization_admin(
+            await _require_identity_permission(
                 request,
-                UUID(chain_partition.split(":", 1)[1]),
+                permission="audit.verify",
+                organization_id=UUID(chain_partition.split(":", 1)[1]),
             )
         else:
-            require_admin_access(request)
+            await _require_identity_permission(request, permission="audit.verify")
         return await audit_service.verify_audit_chain(chain_partition)
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -3093,11 +3439,19 @@ async def verify_audit_chain(request: Request, chain_partition: str):
 async def export_audit_events(request: Request, payload: AuditExportRequest = Body(...)):
     try:
         if payload.workspace_id is not None:
-            await _require_workspace_audit_access(request, payload.workspace_id)
+            await _require_workspace_permission(
+                request,
+                payload.workspace_id,
+                permission="workspace.audit.export",
+            )
         elif payload.organization_id is not None:
-            await _require_organization_admin(request, payload.organization_id)
+            await _require_identity_permission(
+                request,
+                permission="audit.export",
+                organization_id=payload.organization_id,
+            )
         else:
-            require_admin_access(request)
+            await _require_identity_permission(request, permission="audit.export")
         return await audit_service.export_audit_events(payload)
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -3113,7 +3467,11 @@ async def export_organization_audit_events(
     organization_id: UUID,
     payload: AuditExportRequest = Body(...),
 ) -> AuditExportResult:
-    await _require_organization_admin(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="audit.export",
+        organization_id=organization_id,
+    )
     try:
         return await audit_service.export_audit_events(
             payload.model_copy(update={"organization_id": organization_id, "workspace_id": None})

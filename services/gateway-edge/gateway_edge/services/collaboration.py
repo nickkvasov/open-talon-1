@@ -25,12 +25,18 @@ from gateway_edge.models import (
     ActivateAssetVersionRequest,
     AssumeParticipantRoleRequest,
     AgentDefinition,
+    AgentIdentity,
+    AgentIdentityProvisioningResult,
     AttachWorkspaceToolRequest,
     AssetLink,
+    BindAgentRoleRequest,
+    BindHumanRoleRequest,
     CreateGitRepositoryRequest,
     CreateAgentParticipantRequest,
+    CreateAgentIdentityRequest,
     CreateInteractionAnswerRequest,
     CreateInteractionRequestsRequest,
+    CreateIamRoleRequest,
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
     CreateOrganizationRequest,
@@ -64,6 +70,8 @@ from gateway_edge.models import (
     OrganizationMembership,
     ParticipantInput,
     ParticipantProfile,
+    IamPermission,
+    IamRoleDefinition,
     RoleDefinition,
     PublishAssetFromGitRequest,
     ResolvedAssetBinding,
@@ -74,7 +82,10 @@ from gateway_edge.models import (
     TimelinePage,
     ToolGenerationRequestDetail,
     WorkspaceCommunicationLogPage,
+    RotateAgentIdentitySecretRequest,
     UpdateInteractionRequestRequest,
+    UpdateAgentIdentityStatusRequest,
+    UpdateIamRoleRequest,
     UpdateWorkspaceRequest,
     UpdateSystemAgentRequest,
     UpsertRoleDefinitionRequest,
@@ -260,6 +271,31 @@ class CollaborationService:
             auto_create=auto_create,
         )
 
+    async def resolve_authenticated_agent_actor(
+        self,
+        *,
+        workspace_id: UUID,
+        auth_context: AuthContext,
+    ) -> ParticipantInput:
+        if auth_context.system_agent_id is None:
+            raise ValueError("Authenticated machine context is incomplete")
+        participant = await self._require_kernel()._repository.fetch_agent_participant(  # noqa: SLF001
+            workspace_id,
+            auth_context.system_agent_id,
+        )
+        if participant is None:
+            raise KeyError(
+                f"System agent {auth_context.system_agent_id} is not attached to workspace {workspace_id}"
+            )
+        return ParticipantInput(
+            participant_id=participant.participant_id,
+            participant_type="agent",
+            display_name=participant.display_name,
+            roles=participant.roles,
+            capabilities=participant.capabilities,
+            visibility_scope=participant.visibility_scope,
+        )
+
     async def list_workspaces(
         self,
         *,
@@ -348,6 +384,9 @@ class CollaborationService:
         )
         assert result.agent is not None
         return result.agent
+
+    async def get_system_agent(self, agent_id: UUID) -> AgentDefinition | None:
+        return await self._require_kernel()._repository.fetch_system_agent(agent_id)  # noqa: SLF001
 
     async def create_llm_provider(
         self,
@@ -445,6 +484,9 @@ class CollaborationService:
         assert result.tool is not None
         return result.tool
 
+    async def get_system_tool(self, tool_id: UUID) -> SystemToolDefinition | None:
+        return await self._require_kernel()._repository.fetch_system_tool(tool_id)  # noqa: SLF001
+
     async def list_system_tools(
         self,
         *,
@@ -521,6 +563,9 @@ class CollaborationService:
         )
         assert result.repository is not None
         return result.repository
+
+    async def get_git_repository(self, repo_id: UUID) -> GitRepository | None:
+        return await self._require_kernel().get_git_repository(repo_id)
 
     async def list_git_repositories(
         self,
@@ -605,6 +650,120 @@ class CollaborationService:
 
     async def get_workspace_asset(self, asset_id: UUID) -> WorkspaceAsset | None:
         return await self._require_kernel().get_workspace_asset(asset_id)
+
+    async def list_iam_role_definitions(
+        self,
+        *,
+        subject_kind: str,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+    ) -> list[IamRoleDefinition]:
+        return await self._require_kernel().list_iam_role_definitions(
+            subject_kind=subject_kind,
+            scope=scope,
+            organization_id=organization_id,
+        )
+
+    async def get_iam_role_definition(self, role_id: UUID) -> IamRoleDefinition | None:
+        return await self._require_kernel().get_iam_role_definition(role_id)
+
+    async def create_iam_role_definition(
+        self,
+        payload: CreateIamRoleRequest,
+        *,
+        subject_kind: str,
+        scope: str,
+        organization_id: UUID | None = None,
+    ) -> IamRoleDefinition:
+        result = await self._require_kernel().create_iam_role_definition(
+            payload,
+            subject_kind=subject_kind,
+            scope=scope,
+            organization_id=organization_id,
+        )
+        assert result.role is not None
+        return result.role
+
+    async def update_iam_role_definition(
+        self,
+        role_id: UUID,
+        payload: UpdateIamRoleRequest,
+    ) -> IamRoleDefinition:
+        result = await self._require_kernel().update_iam_role_definition(role_id, payload)
+        assert result.role is not None
+        return result.role
+
+    async def delete_iam_role_definition(self, role_id: UUID) -> dict[str, bool | str]:
+        return await self._require_kernel().delete_iam_role_definition(role_id)
+
+    async def list_human_roles_for_user(
+        self,
+        *,
+        user_id: UUID,
+        organization_id: UUID | None = None,
+    ) -> list[IamRoleDefinition]:
+        return await self._require_kernel().list_human_roles_for_user(
+            user_id=user_id,
+            organization_id=organization_id,
+        )
+
+    async def bind_human_role(
+        self,
+        user_id: UUID,
+        role_id: UUID,
+        payload: BindHumanRoleRequest,
+    ) -> dict[str, str]:
+        return await self._require_kernel().bind_human_role(user_id, role_id, payload)
+
+    async def unbind_human_role(
+        self,
+        user_id: UUID,
+        role_id: UUID,
+    ) -> dict[str, bool | str]:
+        return await self._require_kernel().unbind_human_role(user_id, role_id)
+
+    async def list_agent_identities(
+        self,
+        *,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+    ) -> list[AgentIdentity]:
+        return await self._require_kernel().list_agent_identities(
+            scope=scope,
+            organization_id=organization_id,
+        )
+
+    async def get_agent_identity(self, agent_identity_id: UUID) -> AgentIdentity | None:
+        return await self._require_kernel().get_agent_identity(agent_identity_id)
+
+    async def store_agent_identity(self, identity: AgentIdentity) -> AgentIdentity:
+        result = await self._require_kernel().store_agent_identity(identity)
+        assert result.identity is not None
+        return result.identity
+
+    async def list_agent_roles_for_identity(
+        self,
+        *,
+        agent_identity_id: UUID,
+    ) -> list[IamRoleDefinition]:
+        return await self._require_kernel().list_agent_roles_for_identity(
+            agent_identity_id=agent_identity_id
+        )
+
+    async def bind_agent_role(
+        self,
+        agent_identity_id: UUID,
+        role_id: UUID,
+        payload: BindAgentRoleRequest,
+    ) -> dict[str, str]:
+        return await self._require_kernel().bind_agent_role(agent_identity_id, role_id, payload)
+
+    async def unbind_agent_role(
+        self,
+        agent_identity_id: UUID,
+        role_id: UUID,
+    ) -> dict[str, bool | str]:
+        return await self._require_kernel().unbind_agent_role(agent_identity_id, role_id)
 
     async def get_workspace_asset_version(
         self,

@@ -31,6 +31,7 @@ from open_talon_contracts.agent_contracts import (
     build_default_interaction_contract,
     interaction_contract_is_empty,
 )
+from open_talon_contracts.iam import DEFAULT_WORKSPACE_ROLE_PERMISSIONS
 
 
 @asynccontextmanager
@@ -83,6 +84,10 @@ class MockCollaborationService:
         self.asset_versions = {}
         self.asset_links = {}
         self.tool_generation_requests = {}
+        self.iam_roles = {}
+        self.human_role_bindings = {}
+        self.agent_identities = {}
+        self.agent_role_bindings = {}
 
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
@@ -98,18 +103,21 @@ class MockCollaborationService:
             "admin": RoleDefinition(
                 name="admin",
                 definition="Manages the workspace, participants, tools, and provider configuration.",
+                permissions=DEFAULT_WORKSPACE_ROLE_PERMISSIONS["admin"],
                 updated_by=payload.actor.participant_id,
                 updated_at=now,
             ),
             "supervisor": RoleDefinition(
                 name="supervisor",
                 definition="Coordinates delivery, reviews work, and guides workspace members without full administrative control.",
+                permissions=DEFAULT_WORKSPACE_ROLE_PERMISSIONS["supervisor"],
                 updated_by=payload.actor.participant_id,
                 updated_at=now,
             ),
             "user": RoleDefinition(
                 name="user",
                 definition="Collaborates in the workspace, participates in threads, and uses attached tools.",
+                permissions=DEFAULT_WORKSPACE_ROLE_PERMISSIONS["user"],
                 updated_by=payload.actor.participant_id,
                 updated_at=now,
             ),
@@ -286,6 +294,31 @@ class MockCollaborationService:
             display_name=auth_context.display_name or "user",
         )
 
+    async def resolve_authenticated_agent_actor(
+        self,
+        *,
+        workspace_id: UUID,
+        auth_context,
+    ):
+        participants = self.participants.get(str(workspace_id), {})
+        for participant in participants.values():
+            if (
+                participant.participant_type == "agent"
+                and participant.system_agent_id == auth_context.system_agent_id
+            ):
+                from gateway_edge.models import ParticipantInput
+
+                return ParticipantInput(
+                    participant_id=participant.participant_id,
+                    participant_type="agent",
+                    display_name=participant.display_name,
+                    description=participant.description,
+                    roles=participant.roles,
+                    capabilities=participant.capabilities,
+                    visibility_scope=participant.visibility_scope,
+                )
+        raise KeyError(f"Authenticated agent {auth_context.system_agent_id} not found")
+
     async def resolve_authenticated_thread_actor(
         self,
         *,
@@ -443,6 +476,9 @@ class MockCollaborationService:
             if agent.scope == scope and agent.organization_id == organization_id
         ]
 
+    async def get_system_agent(self, agent_id: UUID):
+        return self.system_agents.get(str(agent_id))
+
     def _system_agents_referencing_engine(self, engine_id: str):
         referenced = []
         for agent in self.system_agents.values():
@@ -538,6 +574,9 @@ class MockCollaborationService:
             for tool in self.system_tools.values()
             if tool.scope == scope and tool.organization_id == organization_id
         ]
+
+    async def get_system_tool(self, tool_id: UUID):
+        return self.system_tools.get(str(tool_id))
 
     async def update_system_tool(self, tool_id: UUID, payload):
         tool = self.system_tools.get(str(tool_id))
@@ -652,6 +691,9 @@ class MockCollaborationService:
             and repo.organization_id == organization_id
         ]
 
+    async def get_git_repository(self, repo_id: UUID):
+        return self.git_repositories.get(str(repo_id))
+
     async def publish_asset_from_git(
         self,
         *,
@@ -738,6 +780,158 @@ class MockCollaborationService:
 
     async def get_workspace_asset(self, asset_id: UUID):
         return self.assets.get(str(asset_id))
+
+    async def list_iam_role_definitions(
+        self,
+        *,
+        subject_kind: str,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+    ):
+        return [
+            role
+            for role in self.iam_roles.values()
+            if role.subject_kind == subject_kind
+            and (scope is None or role.scope == scope)
+            and (organization_id is None or role.organization_id == organization_id)
+        ]
+
+    async def get_iam_role_definition(self, role_id: UUID):
+        return self.iam_roles.get(str(role_id))
+
+    async def create_iam_role_definition(
+        self,
+        payload,
+        *,
+        subject_kind: str,
+        scope: str,
+        organization_id: UUID | None = None,
+    ):
+        from gateway_edge.models import IamRoleDefinition
+
+        role = IamRoleDefinition(
+            role_id=uuid4(),
+            scope=scope,
+            subject_kind=subject_kind,
+            organization_id=organization_id,
+            name=payload.name,
+            description=payload.description,
+            permissions=list(payload.permissions),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            metadata=payload.metadata,
+        )
+        self.iam_roles[str(role.role_id)] = role
+        return role
+
+    async def update_iam_role_definition(self, role_id: UUID, payload):
+        role = self.iam_roles.get(str(role_id))
+        if role is None:
+            raise KeyError(f"IAM role {role_id} not found")
+        updated = role.model_copy(
+            update={
+                "name": payload.name or role.name,
+                "description": (
+                    payload.description
+                    if payload.description is not None
+                    else role.description
+                ),
+                "permissions": payload.permissions if payload.permissions is not None else role.permissions,
+                "updated_at": datetime.now(timezone.utc),
+                "metadata": (
+                    {**role.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else role.metadata
+                ),
+            }
+        )
+        self.iam_roles[str(role_id)] = updated
+        return updated
+
+    async def delete_iam_role_definition(self, role_id: UUID):
+        if str(role_id) not in self.iam_roles:
+            raise KeyError(f"IAM role {role_id} not found")
+        self.iam_roles.pop(str(role_id), None)
+        return {"deleted": True, "role_id": str(role_id)}
+
+    async def list_human_roles_for_user(self, *, user_id: UUID, organization_id: UUID | None = None):
+        role_ids = self.human_role_bindings.get(str(user_id), set())
+        roles = [
+            self.iam_roles[role_id]
+            for role_id in role_ids
+            if role_id in self.iam_roles
+        ]
+        if organization_id is None:
+            return [role for role in roles if role.scope == "global"]
+        return [
+            role
+            for role in roles
+            if role.scope == "global" or role.organization_id == organization_id
+        ]
+
+    async def bind_human_role(self, user_id: UUID, role_id: UUID, payload):
+        _ = payload
+        if str(role_id) not in self.iam_roles:
+            raise KeyError(f"IAM role {role_id} not found")
+        self.human_role_bindings.setdefault(str(user_id), set()).add(str(role_id))
+        return {"user_id": str(user_id), "role_id": str(role_id)}
+
+    async def unbind_human_role(self, user_id: UUID, role_id: UUID):
+        bindings = self.human_role_bindings.setdefault(str(user_id), set())
+        if str(role_id) not in bindings:
+            raise KeyError(f"Human role binding user={user_id} role={role_id} not found")
+        bindings.remove(str(role_id))
+        return {"deleted": True, "user_id": str(user_id), "role_id": str(role_id)}
+
+    async def list_agent_identities(
+        self,
+        *,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+    ):
+        return [
+            identity
+            for identity in self.agent_identities.values()
+            if (scope is None or identity.scope == scope)
+            and (organization_id is None or identity.organization_id == organization_id)
+        ]
+
+    async def get_agent_identity(self, agent_identity_id: UUID):
+        return self.agent_identities.get(str(agent_identity_id))
+
+    async def store_agent_identity(self, identity):
+        self.agent_identities[str(identity.agent_identity_id)] = identity
+        return identity
+
+    async def list_agent_roles_for_identity(self, *, agent_identity_id: UUID):
+        role_ids = self.agent_role_bindings.get(str(agent_identity_id), set())
+        return [
+            self.iam_roles[role_id]
+            for role_id in role_ids
+            if role_id in self.iam_roles
+        ]
+
+    async def bind_agent_role(self, agent_identity_id: UUID, role_id: UUID, payload):
+        _ = payload
+        if str(agent_identity_id) not in self.agent_identities:
+            raise KeyError(f"Agent identity {agent_identity_id} not found")
+        if str(role_id) not in self.iam_roles:
+            raise KeyError(f"IAM role {role_id} not found")
+        self.agent_role_bindings.setdefault(str(agent_identity_id), set()).add(str(role_id))
+        return {"agent_identity_id": str(agent_identity_id), "role_id": str(role_id)}
+
+    async def unbind_agent_role(self, agent_identity_id: UUID, role_id: UUID):
+        bindings = self.agent_role_bindings.setdefault(str(agent_identity_id), set())
+        if str(role_id) not in bindings:
+            raise KeyError(
+                f"Agent role binding identity={agent_identity_id} role={role_id} not found"
+            )
+        bindings.remove(str(role_id))
+        return {
+            "deleted": True,
+            "agent_identity_id": str(agent_identity_id),
+            "role_id": str(role_id),
+        }
 
     async def get_workspace_asset_version(self, asset_version_id: UUID):
         for versions in self.asset_versions.values():
@@ -973,6 +1167,7 @@ class MockCollaborationService:
         role_definition = RoleDefinition(
             name=payload.name,
             definition=payload.definition,
+            permissions=list(payload.permissions),
             updated_by=payload.actor.participant_id,
             updated_at=datetime.now(timezone.utc),
         )
@@ -2242,6 +2437,48 @@ class MockAuditService:
         )
 
 
+class _FakeMachineProvisioner:
+    async def create_machine_identity(self, *, client_id: str, display_name: str, description=None, metadata=None):
+        _ = display_name
+        _ = description
+        _ = metadata
+        from gateway_edge.iam.provider_interfaces import ProvisionedMachineIdentity
+
+        return ProvisionedMachineIdentity(
+            client_id=client_id,
+            client_secret=f"secret-{client_id}",
+            issuer="http://issuer.test/realms/open-talon",
+            token_endpoint="http://issuer.test/realms/open-talon/protocol/openid-connect/token",
+            external_subject=f"service-account-{client_id}",
+        )
+
+    async def rotate_machine_secret(self, *, client_id: str):
+        from gateway_edge.iam.provider_interfaces import ProvisionedMachineIdentity
+
+        return ProvisionedMachineIdentity(
+            client_id=client_id,
+            client_secret=f"rotated-{client_id}",
+            issuer="http://issuer.test/realms/open-talon",
+            token_endpoint="http://issuer.test/realms/open-talon/protocol/openid-connect/token",
+            external_subject=f"service-account-{client_id}",
+        )
+
+    async def enable_machine_identity(self, *, client_id: str) -> None:
+        _ = client_id
+
+    async def disable_machine_identity(self, *, client_id: str) -> None:
+        _ = client_id
+
+    async def token_endpoint(self) -> str:
+        return "http://issuer.test/realms/open-talon/protocol/openid-connect/token"
+
+
+class _FakeSecretStore:
+    async def store_secret(self, *, path: str, values: dict[str, object]):
+        _ = values
+        return {"openbao": {"mount": "secret", "path": path, "field": "client_secret"}}
+
+
 @pytest.fixture
 def mock_collaboration_service():
     return MockCollaborationService()
@@ -2256,9 +2493,12 @@ def mock_audit_service():
 def patched(monkeypatch, mock_collaboration_service, mock_audit_service):
     monkeypatch.setattr("gateway_edge.services.collaboration.collaboration_service", mock_collaboration_service)
     monkeypatch.setattr("gateway_edge.routers.collaboration.collab_svc.collaboration_service", mock_collaboration_service)
+    monkeypatch.setattr("gateway_edge.services.iam.collaboration_service", mock_collaboration_service)
     monkeypatch.setattr("gateway_edge.services.audit.audit_service", mock_audit_service)
     monkeypatch.setattr("gateway_edge.audit_middleware.audit_service", mock_audit_service)
     monkeypatch.setattr("gateway_edge.routers.collaboration.audit_service", mock_audit_service)
+    monkeypatch.setattr("gateway_edge.services.iam.build_machine_identity_provisioner", lambda: _FakeMachineProvisioner())
+    monkeypatch.setattr("gateway_edge.services.iam.build_secret_store", lambda: _FakeSecretStore())
     monkeypatch.setattr("gateway_edge.db.postgres.setup_postgres", AsyncMock())
     monkeypatch.setattr("gateway_edge.db.postgres.teardown_postgres", AsyncMock())
     monkeypatch.setattr("gateway_edge.services.session.setup_valkey", AsyncMock())

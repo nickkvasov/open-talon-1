@@ -4,7 +4,10 @@ from dataclasses import dataclass, field
 
 from .contracts import (
     AgentDefinition,
+    AgentIdentity,
+    AgentIdentityProvisioningResult,
     AgentExecutionContext,
+    IamRoleDefinition,
     Artifact,
     AssetLink,
     EventEnvelope,
@@ -109,6 +112,17 @@ class AgentDefinitionCommandResult(CommandResult):
 
 
 @dataclass
+class IamRoleCommandResult(CommandResult):
+    role: IamRoleDefinition | None = None
+
+
+@dataclass
+class AgentIdentityCommandResult(CommandResult):
+    identity: AgentIdentity | None = None
+    provisioning: AgentIdentityProvisioningResult | None = None
+
+
+@dataclass
 class LlmProviderCommandResult(CommandResult):
     provider: LlmProviderDefinition | None = None
 
@@ -177,8 +191,10 @@ class LeaseReconciliationResult(CommandResult):
 
 __all__ = [
     "AgentDefinitionCommandResult",
+    "AgentIdentityCommandResult",
     "CommandResult",
     "GitRepositoryCommandResult",
+    "IamRoleCommandResult",
     "InteractionRequestCommandResult",
     "LeaseReconciliationResult",
     "LlmProviderCommandResult",

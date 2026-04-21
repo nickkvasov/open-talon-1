@@ -22,6 +22,7 @@ This reference is written for two audiences:
 ## Documentation Map
 
 - [system-quickstart.md](./system-quickstart.md): fastest path to a running local stack
+- [iam.md](./iam.md): principal IAM model, permission catalog, and IAM API surface
 - [agent-operations-guide.md](./agent-operations-guide.md): practical usage guide for software development agents and scripted clients
 - [db-migrations.md](./db-migrations.md): schema and migration workflow
 - [collaboration-system-design.md](./collaboration-system-design.md): design background and planned evolution
@@ -97,16 +98,20 @@ Open Talon separates identity from workspace presence.
 - Humans are identified globally by `users.user_id`
 - External identity mappings live in `auth_identities`
 - Agents are identified globally by `system_agents.agent_id`
+- OIDC machine-credential linkage lives in `agent_identities`
+- Global and organization IAM roles live in `iam_role_definitions` with separate human and agent bindings
 
 ### Organization Membership
 
 - Organizations are identified by `organizations.organization_id`
 - Human org membership and org roles live in `organization_memberships`
-- Keycloak remains the identity provider, but it is not the source of truth for org membership
+- Organization membership roles provide the baseline human permission bundle
+- The external OIDC provider is not the source of truth for org membership or authorization
 
 ### Workspace Presence
 
 - `participants.participant_id` identifies the workspace-local materialization of a user or agent
+- workspace `role_definitions` carry the explicit workspace-management permissions evaluated by the authorization engine
 - participant state includes:
   - status
   - visibility scope
@@ -125,18 +130,20 @@ Open Talon separates identity from workspace presence.
 - `oidc`
 - `any`
 
-Current local development defaults are Keycloak/OIDC for humans and admin/API-key flows for operator automation.
+Current local development defaults are OIDC for humans and machine principals, with Keycloak as the default provider adapter and API keys still supported for operator automation.
 
 ### Important Auth Rules
 
 - authenticated human identity is derived server-side from the bearer token
+- authenticated machine identity is derived server-side from the OIDC client token and mapped through `agent_identities`
 - do not treat `participant_id` as a global human identifier
 - organization membership is resolved from Postgres, not bearer-token claims
 - non-member organization-scoped reads return `404`, not `403`
 - non-member workspace-scoped reads return `404`, not `403`
-- global system-definition and provider-management APIs are admin-only under OIDC
-- organization-scoped management flows require org `owner` or `admin`
-- workspace role/tool/publish flows require workspace `admin` or `supervisor`
+- global system-definition, provider-management, and IAM-management APIs require matching global IAM permissions or platform-admin bootstrap access
+- organization-scoped management flows require the relevant organization permissions, whether granted by membership baseline roles or explicit human or agent IAM role bindings
+- workspace role, agent, tool, repository, and asset-management flows require the matching workspace permission on the caller's participant role
+- out-of-scope reads return `404`; in-scope requests without the required permission return `403`
 
 ### Auth And Session APIs
 
@@ -144,7 +151,40 @@ Current local development defaults are Keycloak/OIDC for humans and admin/API-ke
 | --- | --- | --- | --- |
 | `GET` | `/health` | Liveness check | No auth |
 | `GET` | `/ready` | Readiness check | No auth |
-| `GET` | `/v1/me` | Resolved OIDC identity | Requires OIDC |
+| `GET` | `/v1/me` | Resolved OIDC human identity | Requires OIDC human principal |
+
+### Principal IAM APIs
+
+Open Talon uses one permission catalog for both humans and agents:
+
+- identity permissions protect global and organization control-plane APIs
+- workspace permissions protect workspace management APIs through participant role definitions
+- local Keycloak `admin` remains a bootstrap path, but steady-state authorization is intended to come from Open Talon IAM roles and workspace permissions
+
+Representative IAM routes:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/v1/iam/permissions` | list the shared permission catalog |
+| `GET` | `/v1/iam/human-roles` | list global human IAM roles |
+| `POST` | `/v1/iam/human-roles` | create global human IAM role |
+| `GET` | `/v1/iam/agent-roles` | list global agent IAM roles |
+| `POST` | `/v1/iam/agent-roles` | create global agent IAM role |
+| `GET` | `/v1/iam/users/{user_id}/roles` | list direct human IAM role bindings |
+| `POST` | `/v1/iam/users/{user_id}/roles/{role_id}` | bind a human IAM role |
+| `GET` | `/v1/iam/agent-identities` | list machine identities |
+| `POST` | `/v1/iam/agent-identities` | provision machine identity and return one-time secret |
+| `POST` | `/v1/iam/agent-identities/{agent_identity_id}/rotate-secret` | rotate machine identity secret |
+| `POST` | `/v1/iam/agent-identities/{agent_identity_id}/disable` | disable machine identity |
+| `POST` | `/v1/iam/agent-identities/{agent_identity_id}/enable` | re-enable machine identity |
+| `GET` | `/v1/organizations/{organization_id}/iam/human-roles` | list org-scoped human IAM roles |
+| `POST` | `/v1/organizations/{organization_id}/iam/human-roles` | create org-scoped human IAM role |
+| `GET` | `/v1/organizations/{organization_id}/iam/agent-roles` | list org-scoped agent IAM roles |
+| `POST` | `/v1/organizations/{organization_id}/iam/agent-roles` | create org-scoped agent IAM role |
+| `GET` | `/v1/organizations/{organization_id}/iam/agent-identities` | list org-scoped machine identities |
+| `POST` | `/v1/organizations/{organization_id}/iam/agent-identities` | provision org-scoped machine identity |
+
+For the complete permission list and current behavior, use [iam.md](./iam.md).
 
 ## Collaboration Domain Model
 

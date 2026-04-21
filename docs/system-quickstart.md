@@ -1,10 +1,11 @@
 # Open Talon System Quickstart
 
-This is the fastest path to get the full local Open Talon system running with the current Keycloak-based auth flow.
+This is the fastest path to get the full local Open Talon system running with the current provider-neutral principal IAM model and the default local Keycloak-backed OIDC flow.
 
 For full current-state reference material, use:
 
 - [system-api-reference.md](./system-api-reference.md)
+- [iam.md](./iam.md)
 - [agent-operations-guide.md](./agent-operations-guide.md)
 
 ## Prerequisites
@@ -32,7 +33,7 @@ Launch the local infrastructure and the supported Python processes:
 ./open-talon start
 ```
 
-The launcher now waits for both the gateway readiness endpoint and the Keycloak OIDC discovery document before it exits successfully, so browser and terminal auth flows should be ready when the command returns.
+The launcher now waits for both the gateway readiness endpoint and the configured OIDC discovery document before it exits successfully. In local development that means the Keycloak browser, device-flow, and machine-credential auth surfaces should be ready when the command returns.
 
 This starts:
 
@@ -108,7 +109,8 @@ That keeps Postgres as the canonical memory store and adds the optional local `m
 - API docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - Audit events API: [http://127.0.0.1:8000/v1/audit/events](http://127.0.0.1:8000/v1/audit/events)
 - Audit export API: [http://127.0.0.1:8000/v1/audit/events/export](http://127.0.0.1:8000/v1/audit/events/export)
-- Runtime overview API (admin only): [http://127.0.0.1:8000/v1/admin/runtime/overview](http://127.0.0.1:8000/v1/admin/runtime/overview)
+- IAM permission catalog: [http://127.0.0.1:8000/v1/iam/permissions](http://127.0.0.1:8000/v1/iam/permissions)
+- Runtime overview API (permission-protected): [http://127.0.0.1:8000/v1/admin/runtime/overview](http://127.0.0.1:8000/v1/admin/runtime/overview)
 - Keycloak: [http://127.0.0.1:8081](http://127.0.0.1:8081)
 - Open Talon realm issuer: [http://127.0.0.1:8081/realms/open-talon](http://127.0.0.1:8081/realms/open-talon)
 - OpenID config: [http://127.0.0.1:8081/realms/open-talon/.well-known/openid-configuration](http://127.0.0.1:8081/realms/open-talon/.well-known/openid-configuration)
@@ -133,7 +135,7 @@ That keeps Postgres as the canonical memory store and adds the optional local `m
 
 ## 4. Start The Admin Web
 
-The browser admin app is optional, but it is the easiest way to exercise the OIDC browser flow and the admin-only management surfaces.
+The browser admin app is optional, but it is the easiest way to exercise the OIDC browser flow and the permission-protected management surfaces.
 
 From the repo root:
 
@@ -212,16 +214,20 @@ Relevant runtime-guardrail defaults from [`infrastructure/.env.example`](/Users/
 
 `0` disables the cap. Workspace-specific overrides can be set in workspace metadata using either `limits.daily_token_cap` or top-level `daily_token_cap`.
 
-## 6. Keycloak Local Auth Model
+## 6. Local OIDC And Principal IAM Model
 
 - The imported `open-talon` realm is configured for local HTTP development with `sslRequired=none`.
 - The local startup flow also runs a `keycloak-init` step that sets `sslRequired=none` for both `master` and `open-talon`.
-- Keycloak is the primary end-user auth system for local Open Talon development.
+- Keycloak is the default local OIDC provider and the first machine-identity provisioning adapter, but Open Talon owns authorization and audit.
 - The TUI uses the `open-talon-tui` public client and authenticates with OIDC device flow.
 - The admin web uses the `open-talon-web` public client with authorization code + PKCE.
 - Human identity is global in `users` and `auth_identities`.
+- Machine identity linkage is stored in `agent_identities` and points back to `system_agents`.
+- Global and organization IAM roles live in `iam_role_definitions` with separate human and agent bindings.
 - Organization membership and org roles are stored in `organization_memberships`.
-- Workspace-local membership and roles are stored in `participants`.
+- Workspace-local membership is stored in `participants`.
+- Workspace role definitions now carry explicit workspace-management permissions.
+- `GET /v1/me` is human-only. Machine principals use the IAM and collaboration APIs directly.
 
 Local multi-tenant defaults:
 
@@ -231,11 +237,15 @@ Local multi-tenant defaults:
 
 Current local hardening defaults:
 
-- global system-definition, global publish, provider-management, and runtime-overview APIs require the Keycloak `admin` role when using OIDC
+- the local Keycloak `admin` role still acts as bootstrap platform-admin access, but steady-state authorization comes from Open Talon IAM permissions
+- global system-definition, global publish, provider-management, IAM-management, and runtime-overview APIs require the matching global IAM permission or bootstrap platform-admin access
+- organization CRUD, organization membership changes, and organization-scoped IAM management require organization permissions from membership baseline roles or explicit role bindings
 - `GET /v1/workspaces` only returns workspaces where the authenticated human already has a participant
 - non-members should receive `404` for workspace, thread, memory, and workspace-scoped asset reads
-- workspace `admin` or `supervisor` is required for workspace role-definition changes, workspace tool management, workspace Git repository creation, and workspace asset publishing
+- workspace role-definition changes, workspace agent management, workspace tool management, workspace Git repository creation, and workspace asset publishing require the matching workspace permission on the caller's participant role definition
 - risky tools must be created as `trust_level="trusted"` if they use `workspace_access=read_write`, `network=full`, or `local_process`
+
+For the detailed permission catalog and `/v1/iam/...` API surface, see [iam.md](./iam.md).
 
 ## 6A. Collaboration Domain Model
 
@@ -482,7 +492,7 @@ Typical local flow:
 2. Select an organization and workspace.
 3. Attach `Tinker` to that workspace.
 4. Open a thread and ask Tinker for a tool.
-5. Approve the generated revision in the admin web `Tool Generation` page.
+5. Approve the generated revision as a principal that has both `tool_generation.review` and `tool_catalog.write` in the target publication scope.
 6. Manually attach the published tool to the workspace.
 7. Ask another attached agent to use the tool.
 
@@ -498,7 +508,8 @@ Current publication rules:
 - `global` requests publish to the global system catalog
 - `organization` requests publish to the current organization catalog
 - approval never auto-attaches the tool to a workspace
-- workspace `admin` or `supervisor` users attach it later with `PUT /v1/workspaces/{workspace_id}/tools/{tool_id}`
+- approval requires `tool_generation.review` and `tool_catalog.write`
+- workspace participants with `workspace.tools.write` attach it later with `PUT /v1/workspaces/{workspace_id}/tools/{tool_id}`
 
 Useful routes:
 
@@ -555,7 +566,7 @@ pytest tests/business-cases/test_tinker_tool_generation.py -q
 pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s
 ```
 
-The live Tinker system test expects `gemma4:latest` to be available in the local Ollama instance.
+The live Tinker system test is marked `integration`, so it is excluded from the default `pytest -q` run by `pytest.ini`. It expects `gemma4:latest` to be available in the local Ollama instance.
 
 If you changed schema, auth, routing, or participant identity behavior, run:
 
@@ -824,4 +835,4 @@ Expected healthy signal from the helper logs:
 - Human identity is global in `users` and `auth_identities`.
 - Workspace-local presence and roles live in `participants`.
 - Do not treat `participant_id` as a global user identity.
-- OpenBao remains in the stack, but Keycloak is the primary end-user auth system.
+- OpenBao remains in the stack for secrets, while the default local OIDC provider is Keycloak and authorization is owned by Open Talon.

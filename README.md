@@ -8,6 +8,7 @@ For coding-agent-specific project guidance, see [`AGENTS.md`](/Users/nikolay.kva
 
 - [docs/system-quickstart.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/system-quickstart.md): fastest path to a running local stack
 - [docs/system-api-reference.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/system-api-reference.md): current system and API reference for engineers and client builders
+- [docs/iam.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/iam.md): provider-neutral principal IAM model, permission catalog, and IAM APIs
 - [docs/agent-operations-guide.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/agent-operations-guide.md): operating guide for software development agents and scripted test users
 - [docs/tinker-tool-generation.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/tinker-tool-generation.md): Tinker request, approval, catalog, and live-test workflow
 - [docs/db-migrations.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/db-migrations.md): migration workflow and schema rules
@@ -44,22 +45,33 @@ Open Talon now separates:
 
 - `users`: stable human identity records
 - `auth_identities`: external IdP mappings for authenticated humans
+- `system_agents`: platform-global or organization-scoped agent definitions
+- `agent_identities`, `iam_role_definitions`, `human_role_bindings`, and `agent_role_bindings`: principal IAM state for machine identities and global or organization role bindings
 - `organizations` and `organization_memberships`: organization tenancy, membership, and org roles stored in Postgres
 - `participants`: workspace-local materializations of a human or agent inside a workspace
 
-Human authentication is handled through **Keycloak** over OIDC. `gateway-edge` validates bearer tokens, maps `(issuer, subject)` to a local `users.user_id`, and then resolves or creates the caller's workspace participant server-side.
+Authentication is handled through an external OIDC provider. Local development uses **Keycloak** as the default provider and first machine-identity provisioning adapter, but the runtime contracts are provider-neutral. `gateway-edge` validates bearer tokens, maps human `(issuer, subject)` pairs to `users.user_id`, maps machine `(provider_key, issuer, client_id)` tuples to `agent_identities`, and resolves workspace actors server-side.
 
 Important implications:
 
 - client apps should not treat `participant_id` as a global human identity
 - authenticated human requests may still include an `actor` object for compatibility, but the gateway derives the effective human actor from the bearer token
+- machine principals authenticate with client credentials issued by the configured OIDC provider and are linked back to `system_agents` through `agent_identities`
 - organization membership and org roles live in Postgres, not in Keycloak claims
+- humans and agents share one permission catalog, but global and organization IAM roles are stored separately for each subject kind
+- human org membership provides the baseline permission bundle for `owner`, `admin`, and `member`; extra human IAM roles can extend those permissions
+- workspace role definitions now carry explicit workspace-management permissions for both human and agent participants
 - OIDC workspace listing and workspace-scoped reads are membership-scoped; non-members should see `404` for workspace, thread, memory, and workspace-scoped asset reads
 - organization-scoped reads are also membership-scoped; non-members should see `404` there as well
-- global system-definition, global publish, and provider-management routes are admin-only for OIDC users; API-key and other system-admin operator flows keep their existing semantics
+- out-of-scope reads return `404`; in-scope requests without the required permission return `403`
+- global system-definition, global publish, IAM management, and provider-management routes require matching global IAM permissions or platform-admin bootstrap access
+- `/v1/me` is intentionally human-only; machine principals use the IAM and collaboration APIs directly
 - OpenBao remains part of the local stack for secrets and other internal uses, not as the primary end-user login system
+- OpenBao stores provisioned machine secrets and returns them only during create or rotate flows
 - the local Keycloak dev setup is intended to allow HTTP during development; `keycloak-init` normalizes `sslRequired=none` for both `master` and `open-talon`, and you can re-apply that with `docker compose up -d keycloak keycloak-init`
-- browser-based admin flows use the `open-talon-web` public Keycloak client with authorization code + PKCE; terminal flows use `open-talon-tui` with device flow
+- browser-based admin flows use the `open-talon-web` public client with authorization code + PKCE; terminal flows use `open-talon-tui` with device flow; machine principals use client credentials against the configured provider
+
+For the detailed permission catalog and IAM API surface, see [docs/iam.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/iam.md).
 
 ## Collaboration Model
 
@@ -170,9 +182,10 @@ See [apps/admin-web/README.md](/Users/nikolay.kvasov/Development/open-talon-1/ap
 
 The current defaults are aimed at a single medium-sized internal company deployment.
 
-- global reads and writes for system agents, system tools, global Git repositories, global asset publish/link/activate flows, and provider management are admin-only for OIDC users
-- organization CRUD and organization membership changes require org `owner` or `admin`, unless the caller is a platform admin
-- workspace role-definition changes, workspace tool attach/update/delete, workspace Git repository creation, and workspace asset publishing require workspace `admin` or `supervisor`
+- global reads and writes for system agents, system tools, global Git repositories, global asset publish/link/activate flows, provider management, and global IAM management require the matching global IAM permission or platform-admin bootstrap access
+- organization CRUD, organization membership changes, and organization-scoped IAM management require the relevant organization permissions, which are granted by org membership baseline roles or explicit IAM role bindings
+- workspace role-definition changes, workspace agent attachment/update/removal, workspace tool attach/update/delete, workspace Git repository creation, and workspace asset publishing require the matching workspace permission on the caller's participant role definition
+- Tinker approval requires both `tool_generation.review` and `tool_catalog.write` in the requested publication scope
 - human workspace access depends on organization membership first, then workspace participation
 - workspace catalogs resolve as the union of platform-global resources and same-organization resources
 - `GET /v1/workspaces` only returns workspaces where the authenticated human already has a participant record
@@ -257,9 +270,9 @@ Generated tools now follow the same model through `Tinker`:
 
 - `Tinker` is a seeded system agent that must be attached to a workspace before users can ask it for new tools
 - a request can target `global` or `organization` scope
-- approval publishes the generated tool into the matching system catalog only
+- approval publishes the generated tool into the matching system catalog only and requires `tool_generation.review` plus scoped `tool_catalog.write`
 - generated tools are never auto-attached to workspaces
-- workspace `admin` or `supervisor` users attach the published tool later with `PUT /v1/workspaces/{workspace_id}/tools/{tool_id}`
+- workspace participants with `workspace.tools.write` attach the published tool later with `PUT /v1/workspaces/{workspace_id}/tools/{tool_id}`
 
 Each system tool includes:
 
@@ -452,7 +465,7 @@ That provider can then be exposed by registering it in `build_provider_index(...
 - **PostgreSQL**: Deployed via `pgvector/pgvector:pg16` directly supporting native `JSONB` properties alongside algorithmic embeddings operations for Vector Similarity Searching natively in the engine.
 - **Kafka**: Deployed using `apache/kafka:3.8.0` utilizing `KRaft` mode (omitting Zookeeper), configured natively on mapped loops using high level partition assignments.
 - **OpenBao**: Open-source fork of Hashicorp Vault running in local development for secrets-oriented workflows, backed by a persistent local file store under `infrastructure/data/openbao`.
-- **Keycloak**: Local identity provider for registration, login, OIDC token issuance, and device/browser flows.
+- **Keycloak**: Default local OIDC provider and the first machine-identity provisioning adapter used in development. Open Talon remains the source of truth for authorization.
 - **Valkey**: Drop-in compatible Redis equivalent caching infrastructure configured to handle immediate TTL caching.
 - **Langfuse**: Self-hosted LLM observability stack that can be used as one runtime observability backend for traces, prompts, and evaluations.
 - **HyperDX**: Optional OTLP-compatible observability sink/UI for local investigations and runtime telemetry experiments.
@@ -463,7 +476,7 @@ That provider can then be exposed by registering it in `build_provider_index(...
 
 `./open-talon start` brings up the full local infrastructure stack and then starts the supported local processes for:
 
-It now waits for both the gateway readiness endpoint and Keycloak OIDC discovery before returning success, so the browser and device-flow auth clients should already have their dependencies online when the command exits.
+It now waits for both the gateway readiness endpoint and the configured OIDC discovery document before returning success. In local development, that means Keycloak browser, device-flow, and machine-credential auth should already have their dependencies online when the command exits.
 
 - `gateway-edge`
 - `agent-task-worker`
@@ -484,7 +497,7 @@ Local services:
 - `clickhouse`: Langfuse analytics store and the default local audit projection provider
 - `minio`: object storage for Langfuse, published assets, and the default local audit archive provider
 - `openbao`: local secret store and token-validation backend
-- `keycloak`: local identity provider for user registration, browser login, and device login
+- `keycloak`: local default OIDC provider for browser login, device login, and machine credentials
 - `valkey`: session store, API-key cache, and short-lived gateway state
 - `langfuse-web`: Langfuse UI and API surface
 - `langfuse-worker`: Langfuse background processing
@@ -770,7 +783,7 @@ In the current auth model, the TUI is a **multi-profile** client:
 - each local profile lives under `~/.open-talon/profiles/<profile>/`
 - `tui2` and `user-client` also persist the selected `organization_id` in that profile state
 - each profile stores separate workspace/thread state and bearer tokens
-- human login is designed around Keycloak device flow
+- human login uses the local Keycloak device flow by default
 - two users on the same device should use different TUI profiles rather than sharing one local participant identity
 
 For terminal-first usage, prefer `tui2`:
@@ -899,7 +912,7 @@ Infra defaults are defined in `infrastructure/.env.example`, including:
 
 ## Pytest Orchestration
 
-Automations operate sequentially leveraging `pytest` through explicit Python networking wrappers. Calling testing natively maps background parallel assertions executing directly toward HTTP/TCP components actively checking if they are locally alive. You do not need to manually launch anything; `pytest` implicitly binds `./infrastructure/docker-compose.yaml` using Python `subprocess`.
+`pytest.ini` excludes `integration` tests by default, so the maintained suite and the live infrastructure suite are two explicit commands. The Tinker coverage is split between an in-process business-case scenario and a real live integration path.
 
 ```bash
 # Enable the repository virtual environment
@@ -917,12 +930,16 @@ pytest tests/business-cases -q
 # Infrastructure integration tests
 pytest -m integration tests/infrastructure/test_infrastructure.py -v -s
 
-# Live Tinker tool-generation system test
+# Live Tinker business-case scenario (in-process, fake repository)
+pytest tests/business-cases/test_tinker_tool_generation.py -q
+
+# Live Tinker tool-generation system test (real stack, real runtime, real generated tool path)
 pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s
 
 # Full test coverage: default suite plus integration suite
 pytest -q
 pytest -m integration tests/infrastructure/test_infrastructure.py -v -s
+pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s
 ```
 
 ## AI Model Initialization Note

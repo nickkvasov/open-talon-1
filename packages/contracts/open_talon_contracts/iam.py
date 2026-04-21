@@ -1,0 +1,110 @@
+from __future__ import annotations
+
+IDENTITY_PERMISSION_DESCRIPTIONS: dict[str, str] = {
+    "organization.read": "Read organization metadata that is already in scope for the principal.",
+    "organization.members.read": "Read organization membership records.",
+    "organization.members.write": "Add, update, or remove organization members.",
+    "workspace.list": "List workspaces that belong to an authorized organization.",
+    "workspace.read": "Read workspace metadata outside workspace-local participant flows.",
+    "organization.runtime.read": "Read organization runtime status and overview data.",
+    "agent_catalog.read": "Read system and organization agent catalog definitions.",
+    "agent_catalog.write": "Create, update, or delete system and organization agent catalog definitions.",
+    "tool_catalog.read": "Read system and organization tool catalog definitions.",
+    "tool_catalog.write": "Create, update, or delete system and organization tool catalog definitions.",
+    "provider.llm.read": "Read stored LLM provider definitions.",
+    "provider.llm.write": "Create, update, or delete LLM provider definitions.",
+    "provider.llm.validate": "Run validation and health checks for LLM provider definitions.",
+    "provider.memory.read": "Read stored memory provider definitions.",
+    "provider.memory.write": "Create, update, or delete memory provider definitions.",
+    "provider.memory.validate": "Run validation and health checks for memory provider definitions.",
+    "git_registry.read": "Read registered Git repositories outside workspace-local flows.",
+    "git_registry.write": "Create, update, or delete registered Git repositories outside workspace-local flows.",
+    "asset_catalog.read": "Read published assets and links outside workspace-local flows.",
+    "asset_catalog.publish": "Publish assets into the system or organization catalog.",
+    "asset_catalog.link": "Create or update asset links for catalog targets.",
+    "asset_catalog.activate": "Activate a specific published asset version for a target.",
+    "tool_generation.read": "Read tool-generation requests through control-plane APIs.",
+    "tool_generation.review": "Approve or reject tool-generation revisions.",
+    "audit.read": "Read audit events for authorized scopes.",
+    "audit.export": "Export audit events for authorized scopes.",
+    "audit.verify": "Verify audit chain integrity for authorized scopes.",
+}
+
+WORKSPACE_PERMISSION_DESCRIPTIONS: dict[str, str] = {
+    "workspace.roles.write": "Create, update, or delete workspace role definitions.",
+    "workspace.agents.write": "Attach, update, or remove workspace agent participants.",
+    "workspace.tools.write": "Attach, update, or detach workspace tool bindings.",
+    "workspace.repositories.write": "Create or update workspace Git repositories.",
+    "workspace.assets.publish": "Publish workspace-scoped assets from Git.",
+    "workspace.assets.link": "Create or activate workspace-scoped asset links.",
+    "workspace.audit.read": "Read workspace audit events.",
+    "workspace.audit.export": "Export workspace audit events.",
+    "workspace.audit.verify": "Verify workspace audit chains.",
+}
+
+IDENTITY_PERMISSION_NAMES: tuple[str, ...] = tuple(IDENTITY_PERMISSION_DESCRIPTIONS.keys())
+WORKSPACE_PERMISSION_NAMES: tuple[str, ...] = tuple(WORKSPACE_PERMISSION_DESCRIPTIONS.keys())
+
+DEFAULT_WORKSPACE_ROLE_PERMISSIONS: dict[str, tuple[str, ...]] = {
+    "admin": WORKSPACE_PERMISSION_NAMES,
+    "supervisor": WORKSPACE_PERMISSION_NAMES,
+    "user": (),
+}
+
+ORGANIZATION_ROLE_BASE_PERMISSIONS: dict[str, tuple[str, ...]] = {
+    "owner": IDENTITY_PERMISSION_NAMES,
+    "admin": (
+        "organization.read",
+        "organization.members.read",
+        "organization.members.write",
+        "workspace.list",
+        "workspace.read",
+        "organization.runtime.read",
+        "agent_catalog.read",
+        "agent_catalog.write",
+        "tool_catalog.read",
+        "tool_catalog.write",
+        "provider.llm.read",
+        "provider.llm.write",
+        "provider.llm.validate",
+        "provider.memory.read",
+        "provider.memory.write",
+        "provider.memory.validate",
+        "git_registry.read",
+        "git_registry.write",
+        "asset_catalog.read",
+        "asset_catalog.publish",
+        "asset_catalog.link",
+        "asset_catalog.activate",
+        "tool_generation.read",
+        "tool_generation.review",
+        "audit.read",
+        "audit.export",
+        "audit.verify",
+    ),
+    "member": (
+        "organization.read",
+        "organization.members.read",
+        "workspace.list",
+        "workspace.read",
+        "organization.runtime.read",
+        "agent_catalog.read",
+        "tool_catalog.read",
+        "provider.llm.read",
+        "provider.memory.read",
+        "git_registry.read",
+        "asset_catalog.read",
+        "tool_generation.read",
+        "audit.read",
+    ),
+}
+
+
+__all__ = [
+    "DEFAULT_WORKSPACE_ROLE_PERMISSIONS",
+    "IDENTITY_PERMISSION_DESCRIPTIONS",
+    "IDENTITY_PERMISSION_NAMES",
+    "ORGANIZATION_ROLE_BASE_PERMISSIONS",
+    "WORKSPACE_PERMISSION_DESCRIPTIONS",
+    "WORKSPACE_PERMISSION_NAMES",
+]

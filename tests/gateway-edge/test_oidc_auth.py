@@ -43,6 +43,39 @@ async def test_oidc_mode_returns_me_identity(client, monkeypatch):
     assert response.json()["display_name"] == "Nikolay"
 
 
+async def test_me_rejects_machine_principal(client, monkeypatch):
+    auth_context = AuthContext(
+        kind="oidc",
+        principal_type="agent",
+        agent_identity_id=uuid4(),
+        system_agent_id=uuid4(),
+        issuer="http://issuer.test/realms/open-talon",
+        subject="service-account-machine-reader",
+        client_id="machine-reader",
+        display_name="Machine Reader",
+        claims={"sub": "service-account-machine-reader", "azp": "machine-reader"},
+    )
+    monkeypatch.setattr(settings, "auth_mode", "oidc")
+
+    async def _validate(token: str):
+        assert token == "machine-token"
+        return auth_context
+
+    async def _sync(context):
+        return context
+
+    monkeypatch.setattr("gateway_edge.auth.middleware.validate_oidc_token", _validate)
+    monkeypatch.setattr("gateway_edge.auth.middleware.sync_oidc_auth_context", _sync)
+
+    response = await client.get(
+        "/v1/me",
+        headers={"Authorization": "Bearer machine-token"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "OIDC authentication required"
+
+
 async def test_oidc_create_workspace_ignores_forged_actor_identity(client, monkeypatch):
     auth_context = _oidc_context()
     forged_actor = {

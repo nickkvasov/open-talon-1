@@ -1654,7 +1654,7 @@ async def test_kernel_workspace_management_requires_admin_or_supervisor_role():
         updated_at=datetime.now(timezone.utc),
     )
 
-    with pytest.raises(PermissionError, match="Workspace admin or supervisor role required"):
+    with pytest.raises(PermissionError, match="Workspace permission 'workspace.roles.write' required"):
         await kernel.upsert_role_definition(
             workspace_id,
             UpsertRoleDefinitionRequest(
@@ -1669,7 +1669,7 @@ async def test_kernel_workspace_management_requires_admin_or_supervisor_role():
             ),
         )
 
-    with pytest.raises(PermissionError, match="Workspace admin or supervisor role required"):
+    with pytest.raises(PermissionError, match="Workspace permission 'workspace.repositories.write' required"):
         await kernel.create_git_repository(
             scope="workspace",
             workspace_id=workspace_id,

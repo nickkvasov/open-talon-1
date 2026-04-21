@@ -1,6 +1,6 @@
 # agent-runtime
 
-Reusable runtime helpers for task-claiming Open Talon agents that emit `task.*` and `run.*` collaboration events.
+Reusable runtime helpers for task-claiming Open Talon agents that emit `task.*` and `run.*` collaboration events, execute isolated tool calls, and drive the live generated-tool path used by Tinker.
 
 ## Langfuse
 
@@ -19,3 +19,13 @@ LANGFUSE_BASE_URL=http://127.0.0.1:3000
 ```
 
 If the keys are not set, runtime execution stays unchanged and tracing is skipped.
+
+## Live Tinker Path
+
+The real end-to-end generated-tool path is exercised by:
+
+```bash
+pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s
+```
+
+That scenario starts the local stack, lets Tinker author and publish a generated tool, and verifies that another agent can execute the published tool through the normal runtime and tool-worker pipeline.

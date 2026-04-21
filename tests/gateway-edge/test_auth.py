@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from gateway_edge.config import settings
+from gateway_edge.models import AuthContext
 
 # ── AUTH_MODE = none ──────────────────────────────────────────────────────────
 
@@ -152,6 +153,35 @@ async def test_unauthorized_response_keeps_cors_headers(client, monkeypatch):
     )
     assert resp.status_code == 401
     assert resp.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+
+
+async def test_oidc_mode_rejects_when_identity_sync_fails(client, monkeypatch):
+    monkeypatch.setattr(settings, "auth_mode", "oidc")
+
+    async def _validate(token: str):
+        assert token == "machine-token"
+        return AuthContext(
+            kind="oidc",
+            principal_type="agent",
+            issuer="http://issuer.test/realms/open-talon",
+            subject="service-account-disabled-agent",
+            client_id="disabled-agent",
+            provider_key="keycloak",
+            claims={"sub": "service-account-disabled-agent", "azp": "disabled-agent"},
+        )
+
+    async def _sync(context):
+        raise ValueError("Machine identity is disabled")
+
+    monkeypatch.setattr("gateway_edge.auth.middleware.validate_oidc_token", _validate)
+    monkeypatch.setattr("gateway_edge.auth.middleware.sync_oidc_auth_context", _sync)
+
+    resp = await client.get(
+        "/v1/agents",
+        headers={"Authorization": "Bearer machine-token"},
+    )
+
+    assert resp.status_code == 401
 
 
 # ── Skip paths are always public ──────────────────────────────────────────────
