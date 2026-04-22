@@ -1,10 +1,16 @@
 # Open Talon TUI
 
-The TUI is a terminal client for Open Talon that talks to `gateway-edge` over REST and WebSocket.
+This package provides Open Talon's terminal clients, all of which talk to `gateway-edge` over REST and WebSocket.
+
+The main surfaces are:
+
+- `tui2`: recommended scrollback-first human terminal client
+- `user-client`: line-oriented client for scripted and multi-user testing
+- `tui`: legacy full-screen Textual client
 
 ## What It Does
 
-The TUI can:
+These clients can:
 
 - create or reuse a workspace
 - create or reuse a thread
@@ -18,23 +24,33 @@ The TUI can:
 
 ## Run It
 
-From the repository root:
+For most human terminal use, start with `tui2` from the repository root:
 
 ```bash
 source .venv/bin/activate
-python -m open_talon_tui.main
+./open-talon tui2 --profile nikolay
 ```
 
-For the local dev stack, the TUI defaults to the local Keycloak realm:
+For scripted or multi-user end-to-end testing, start with `user-client`:
+
+```bash
+source .venv/bin/activate
+./open-talon user-client --profile user1
+```
+
+If you specifically want the older full-screen client, it is still available:
+
+```bash
+source .venv/bin/activate
+./open-talon tui --profile nikolay
+```
+
+For the local dev stack, the terminal clients default to the local Keycloak realm:
 
 - issuer: `http://127.0.0.1:8081/realms/open-talon`
 - client id: `open-talon-tui`
 
-So this is enough for most local usage:
-
-```bash
-./open-talon tui --profile nikolay
-```
+Explicit full-screen `tui` invocation:
 
 ```bash
 python -m open_talon_tui.main \
@@ -46,8 +62,8 @@ python -m open_talon_tui.main \
   --thread-title General
 ```
 
-Human TUI users must authenticate through the configured OIDC provider. In local development that is Keycloak. Local unsigned profiles, API-key auth, OpenBao token auth, and machine client credentials are not supported for normal human TUI use.
-The TUI can still start signed out so you can run `/auth login` from inside the app before joining workspaces or sending messages.
+Human terminal users authenticate through the configured OIDC provider. In local development that is Keycloak. Local unsigned profiles, API-key auth, OpenBao token auth, and machine client credentials are not supported for normal human use.
+The full-screen `tui` can still start signed out so you can run `/auth login` from inside the app before joining workspaces or sending messages.
 
 Machine principals use OIDC client credentials plus the `/v1/iam/agent-identities` APIs directly. The TUI surfaces are human-oriented and `/v1/me` is human-only.
 
@@ -59,21 +75,9 @@ Terminology:
 
 The TUI `/role ...` commands work with collaboration roles, not IAM roles.
 
-If you want reliable terminal mouse selection and terminal-native clickable links, use `tui2` instead of the full-screen Textual UI:
-
-```bash
-./open-talon tui2 --profile nikolay
-```
-
 `tui2` is a scrollback-first client. It prints plain timeline lines into the normal terminal, so you can select text with the mouse the same way you would in any shell scrollback. URLs are printed as raw URLs and also emitted as terminal hyperlinks when supported by the terminal emulator.
 
 `tui2` and `user-client` are the preferred clients for multi-organization setups. They track `organization_id`, expose explicit `organization` commands, and default workspace listing to the selected organization.
-
-If you want one user-facing client instance per human profile for software-agent-driven end-to-end testing, use `user-client`:
-
-```bash
-./open-talon user-client --profile user1
-```
 
 `user-client` is a line-oriented REPL with stable commands and optional JSON output. It is designed for scenarios where several software development agents need to act as different human users at the same time without sharing local state.
 

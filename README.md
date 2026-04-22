@@ -12,7 +12,7 @@ For coding-agent-specific project guidance, see [`AGENTS.md`](./AGENTS.md).
 - [docs/agent-operations-guide.md](./docs/agent-operations-guide.md): operating guide for software development agents and scripted test users
 - [docs/tinker-tool-generation.md](./docs/tinker-tool-generation.md): Tinker request, approval, catalog, and live-test workflow
 - [docs/db-migrations.md](./docs/db-migrations.md): migration workflow and schema rules
-- [docs/collaboration-system-design.md](./docs/collaboration-system-design.md): design context and architecture notes
+- [docs/collaboration-system-design.md](./docs/collaboration-system-design.md): historical design background from before the current collaboration implementation
 - [docs/research-comparison.md](./docs/research-comparison.md): external ecosystem comparison for multi-agent research and enterprise platforms
 - [AGENTS.md](./AGENTS.md): repository contribution rules for coding agents
 
@@ -24,6 +24,8 @@ At a high level:
 
 - `services/gateway-edge` is the main entrypoint for clients and developer tools
 - `apps/admin-web` provides the browser-based admin console for organizations, workspace policy edits, provider management, swarm resource management, runtime overview, and API key operations
+- `apps/web` is the gateway-mounted browser session-chat UI for the legacy `/v1/chat` surface
+  - it is kept for session-chat compatibility and lightweight local demos, not as the primary collaboration browser client
 - `apps/tui` provides a terminal UI that talks to the gateway
   - `tui2` is the recommended scrollback-first terminal client for reliable mouse copy/select and terminal-native link handling
 - `services/core-collab` manages shared collaboration concepts like workspaces, threads, participants, presence, and timelines across both humans and agents
@@ -51,6 +53,7 @@ The typical flow is:
 | `services/generated-tools-builder` | Tinker build/publish helper | Packages generated tools for the OCI-style registry flow used during tool approval. |
 | `services/presence-directory` | reusable thread-presence primitives | Provides Valkey-backed websocket presence tracking used by `gateway-edge`. |
 | `apps/admin-web` | operator browser console | Manages organizations, workspaces, providers, swarm resources, runtime overview, API keys, and tool-generation review. |
+| `apps/web` | gateway-mounted browser session-chat UI | Compatibility browser client for the session-chat routes mounted at `/` by `gateway-edge` when the static app is present. |
 | `apps/tui` | human and scripted terminal clients | `tui2` is the preferred human client; `user-client` is the preferred scriptable client for multi-user tests. |
 | `packages/contracts` | shared contracts | Defines the Pydantic models and shared telemetry or registry contracts consumed across services. |
 | `infrastructure` | local runtime dependencies | Defines Docker-backed Postgres, Kafka, Valkey, Keycloak, OpenBao, Langfuse, ClickHouse, MinIO, Forgejo, Ollama, and optional Memgraph. |

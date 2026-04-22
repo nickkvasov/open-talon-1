@@ -104,8 +104,8 @@ Approval still only publishes into the system catalog. Workspace attachment rema
 
 The repository carries two complementary Tinker scenarios:
 
-- [tests/business-cases/test_tinker_tool_generation.py](/Users/nikolay.kvasov/Development/open-talon-1/tests/business-cases/test_tinker_tool_generation.py): in-process business case using the kernel and fake repository
-- [tests/infrastructure/test_tinker_live_system.py](/Users/nikolay.kvasov/Development/open-talon-1/tests/infrastructure/test_tinker_live_system.py): real stack, real runtime, real generated-tool path
+- [tests/business-cases/test_tinker_tool_generation.py](../tests/business-cases/test_tinker_tool_generation.py): in-process business case using the kernel and fake repository
+- [tests/infrastructure/test_tinker_live_system.py](../tests/infrastructure/test_tinker_live_system.py): real stack, real runtime, real generated-tool path
 
 Run the business-case scenario with:
 
@@ -149,8 +149,8 @@ curl http://127.0.0.1:11434/api/tags
 
 ## Related Files
 
-- [README.md](/Users/nikolay.kvasov/Development/open-talon-1/README.md)
-- [docs/system-quickstart.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/system-quickstart.md)
-- [apps/admin-web/src/pages/ToolGenerationRequests.jsx](/Users/nikolay.kvasov/Development/open-talon-1/apps/admin-web/src/pages/ToolGenerationRequests.jsx)
-- [tests/business-cases/test_tinker_tool_generation.py](/Users/nikolay.kvasov/Development/open-talon-1/tests/business-cases/test_tinker_tool_generation.py)
-- [tests/infrastructure/test_tinker_live_system.py](/Users/nikolay.kvasov/Development/open-talon-1/tests/infrastructure/test_tinker_live_system.py)
+- [README.md](../README.md)
+- [docs/system-quickstart.md](./system-quickstart.md)
+- [apps/admin-web/src/pages/ToolGenerationRequests.jsx](../apps/admin-web/src/pages/ToolGenerationRequests.jsx)
+- [tests/business-cases/test_tinker_tool_generation.py](../tests/business-cases/test_tinker_tool_generation.py)
+- [tests/infrastructure/test_tinker_live_system.py](../tests/infrastructure/test_tinker_live_system.py)

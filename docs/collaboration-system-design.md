@@ -1,8 +1,18 @@
-# Open Talon Peer Collaboration Design
+# Historical Open Talon Collaboration Design Notes
 
-## Goal
+This document preserves the design notes that informed Open Talon's collaboration architecture.
 
-Extend the current single-user request/response chat flow into a collaboration system where:
+Open Talon today is already a multi-user, multi-agent collaboration system. For the current implementation, use:
+
+- [README.md](../README.md)
+- [system-api-reference.md](./system-api-reference.md)
+- [system-quickstart.md](./system-quickstart.md)
+
+The sections below are historical design material. They are not the source of truth for the current implementation, API surface, or runtime behavior.
+
+## Original Goal
+
+Extend the earlier single-user request/response chat flow into a collaboration system where:
 
 - multiple workspaces can exist with different participants
 - multiple users can participate in the same shared thread
@@ -13,9 +23,9 @@ Extend the current single-user request/response chat flow into a collaboration s
 - clients can observe the same shared timeline in near real time
 - the system remains auditable, replayable, and safe to evolve
 
-## Why The Current Design Is Not Enough
+## Original Motivation
 
-The current gateway is optimized for a single request mapped to a single agent response:
+At the time these notes were written, the gateway was optimized for a single request mapped to a single agent response:
 
 - one `KafkaChatRequest`
 - one `correlation_id`
@@ -30,7 +40,7 @@ That model breaks down when:
 - some events are public and some are private/internal
 - collaboration state must survive reconnects and be replayable
 
-The collaboration design should therefore move from `request -> response` to `shared event log + materialized collaboration state`.
+The design proposal therefore argued for moving from `request -> response` to `shared event log + materialized collaboration state`.
 
 ## Core Requirements
 
@@ -672,7 +682,7 @@ This preserves peer behavior while preventing chaos.
 
 ## Schema Additions
 
-The current `session_id` should no longer be the primary collaboration boundary.
+In this proposal, `session_id` was treated as a client/UI concern rather than the primary collaboration boundary.
 
 ### Recommended replacements
 
@@ -749,7 +759,7 @@ Add a separate workspace memory projection instead of overloading message histor
 - canonical event log is append-only
 - all moderation and access changes are events
 
-## Incremental Rollout Plan
+## Historical Rollout Plan
 
 ## Phase 1: Introduce collaboration identities
 
@@ -791,11 +801,11 @@ Add a separate workspace memory projection instead of overloading message histor
 - policy-based turn selection
 - summarization and thread compaction
 
-## Migration Strategy From Today
+## Historical Migration Strategy
 
 The safest path is an adapter-based migration.
 
-### Keep current compatibility
+### Keep then-current compatibility
 
 - current `POST /v1/chat` becomes:
   - create workspace if needed
@@ -808,7 +818,7 @@ The safest path is an adapter-based migration.
 
 This lets the current UI continue working while the underlying collaboration model becomes richer.
 
-## Practical Recommendation
+## Historical Recommendation
 
 If we want the fastest path that will still scale into true collaboration:
 

@@ -10,7 +10,7 @@ Use it when you need to understand:
 - which HTTP APIs exist today
 - which APIs are intended for humans, browser clients, terminal clients, and software development agents
 
-This is a reference for the implemented system. For local startup steps, use [system-quickstart.md](./system-quickstart.md). For repository coding guidance, use [../AGENTS.md](../AGENTS.md). For design context, use [collaboration-system-design.md](./collaboration-system-design.md).
+This is a reference for the implemented system. For local startup steps, use [system-quickstart.md](./system-quickstart.md). For repository coding guidance, use [../AGENTS.md](../AGENTS.md). For historical design background, use [collaboration-system-design.md](./collaboration-system-design.md).
 
 ## Audience
 
@@ -25,7 +25,7 @@ This reference is written for two audiences:
 - [iam.md](./iam.md): principal IAM model, permission catalog, and IAM API surface
 - [agent-operations-guide.md](./agent-operations-guide.md): practical usage guide for software development agents and scripted clients
 - [db-migrations.md](./db-migrations.md): schema and migration workflow
-- [collaboration-system-design.md](./collaboration-system-design.md): design background and architecture notes
+- [collaboration-system-design.md](./collaboration-system-design.md): historical design background and archived architecture notes
 - [research-comparison.md](./research-comparison.md): external ecosystem comparison for multi-agent research and enterprise platforms
 - [../AGENTS.md](../AGENTS.md): repository coding rules for contributors and coding agents
 
@@ -50,6 +50,8 @@ The main runtime components are:
   - shared Pydantic contracts used across services and clients
 - `apps/admin-web`
   - browser admin console for operators
+- `apps/web`
+  - gateway-mounted browser session-chat UI for the compatibility chat surface
 - `apps/tui`
   - terminal clients for humans and software-driven test users
 - `infrastructure`
@@ -64,6 +66,7 @@ The repository also includes helper packages that matter when you are documentin
 | `services/workspace-memory` | memory-provider abstraction shared by gateway, core-collab, and runtime | active library, not a standalone service |
 | `services/generated-tools-builder` | OCI packaging and publish helpers for generated tools | active helper library used by Tinker flows |
 | `services/presence-directory` | Valkey-backed websocket presence state | active library used by `gateway-edge` |
+| `apps/web` | browser client for the legacy session-chat routes | static app mounted by `gateway-edge` at `/` when the directory is present |
 
 ## Current Configuration Surface
 

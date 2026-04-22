@@ -9,7 +9,7 @@ It exposes:
 - collaboration APIs for workspaces, threads, timelines, and presence
 - provider-neutral principal IAM APIs for human roles, agent roles, and machine identities
 - admin APIs for API key management
-- the local web UI entrypoint
+- a gateway-mounted browser session-chat UI at `/` when `apps/web` is present
 
 ## Local Development
 
@@ -18,10 +18,18 @@ Use the repository-root virtualenv and launcher from the repo root:
 ```bash
 ./scripts/bootstrap-python.sh
 ./open-talon start
-./open-talon tui
+./open-talon tui2 --profile admin
 ```
 
 The launcher starts the full local infrastructure stack plus this service as a local `uvicorn` process on `http://127.0.0.1:8000`.
+
+For scripted or multi-user testing, prefer:
+
+```bash
+./open-talon user-client --profile user1
+```
+
+The gateway also serves the compatibility browser session-chat UI from `apps/web` at `http://127.0.0.1:8000/` when that static app directory is present. The main browser operator surface remains `apps/admin-web`.
 
 ## Direct Run
 
@@ -37,7 +45,7 @@ The service expects local Postgres, Kafka, Valkey, OpenBao, an OIDC provider, an
 
 ## Tests
 
-Gateway unit and integration coverage lives under [`tests/gateway-edge`](/Users/nikolay.kvasov/Development/open-talon-1/tests/gateway-edge).
+Gateway unit and integration coverage lives under [`tests/gateway-edge`](../../tests/gateway-edge).
 
 ```bash
 source .venv/bin/activate
@@ -55,7 +63,7 @@ pytest -m integration tests/infrastructure/test_infrastructure.py -v -s
 
 ## Key Files
 
-- [`gateway_edge/main.py`](/Users/nikolay.kvasov/Development/open-talon-1/services/gateway-edge/gateway_edge/main.py)
-- [`gateway_edge/config.py`](/Users/nikolay.kvasov/Development/open-talon-1/services/gateway-edge/gateway_edge/config.py)
-- [`gateway_edge/routers`](/Users/nikolay.kvasov/Development/open-talon-1/services/gateway-edge/gateway_edge/routers)
-- [`gateway_edge/services`](/Users/nikolay.kvasov/Development/open-talon-1/services/gateway-edge/gateway_edge/services)
+- [`gateway_edge/main.py`](./gateway_edge/main.py)
+- [`gateway_edge/config.py`](./gateway_edge/config.py)
+- [`gateway_edge/routers`](./gateway_edge/routers)
+- [`gateway_edge/services`](./gateway_edge/services)

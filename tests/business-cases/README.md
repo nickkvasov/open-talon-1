@@ -26,7 +26,7 @@ They are higher-level than the `tests/core-collab` suite, but they still run in-
 
 ### Role-Based Daily Coordination
 
-Implemented in [test_daily_coordination.py](/Users/nikolay.kvasov/Development/open-talon-1/tests/business-cases/test_daily_coordination.py:1).
+Implemented in [test_daily_coordination.py](./test_daily_coordination.py).
 
 This pilot validates a simple delivery-team coordination loop:
 
@@ -62,7 +62,7 @@ The case then verifies:
 
 ### Tinker Tool Generation
 
-Implemented in [test_tinker_tool_generation.py](/Users/nikolay.kvasov/Development/open-talon-1/tests/business-cases/test_tinker_tool_generation.py:1).
+Implemented in [test_tinker_tool_generation.py](./test_tinker_tool_generation.py).
 
 This scenario validates the business flow around generated tools without requiring the live infrastructure stack:
 
@@ -73,7 +73,7 @@ This scenario validates the business flow around generated tools without requiri
 - manually attaching the published tool to the workspace
 - having a second agent call the generated tool and answer back into the thread
 
-This test runs in-process with the fake repository. The companion live-stack path is [tests/infrastructure/test_tinker_live_system.py](/Users/nikolay.kvasov/Development/open-talon-1/tests/infrastructure/test_tinker_live_system.py:877), which exercises the real runtime, Docker-backed generated tool path, and local Ollama model.
+This test runs in-process with the fake repository. The companion live-stack path is [tests/infrastructure/test_tinker_live_system.py](../infrastructure/test_tinker_live_system.py), which exercises the real runtime, Docker-backed generated tool path, and local Ollama model.
 
 ## Running The Suite
 
@@ -106,7 +106,7 @@ pytest tests/business-cases/test_tinker_tool_generation.py -q
 
 Each business-case test run now writes persistent workspace communication-log artifacts under:
 
-- [tests/business-cases/logs](/Users/nikolay.kvasov/Development/open-talon-1/tests/business-cases/logs/README.md)
+- [tests/business-cases/logs](./logs/README.md)
 
 The layout is organized for browsing by scenario, then by test, then by individual run:
 
@@ -148,9 +148,9 @@ Recommended structure:
 
 Use business-case tests for scenarios where the value comes from interaction between subsystems. Keep lower-level matching, persistence, or contract edge cases in:
 
-- [tests/core-collab](/Users/nikolay.kvasov/Development/open-talon-1/tests/core-collab)
-- [tests/gateway-edge](/Users/nikolay.kvasov/Development/open-talon-1/tests/gateway-edge)
-- [tests/tui](/Users/nikolay.kvasov/Development/open-talon-1/tests/tui)
+- [tests/core-collab](../core-collab)
+- [tests/gateway-edge](../gateway-edge)
+- [tests/tui](../tui)
 
 Prefer deterministic scenarios:
 

@@ -1,16 +1,16 @@
 # Database Migrations
 
-Open Talon tracks database changes as `dbmate`-style SQL files in [`db/migrations`](/Users/nikolay.kvasov/Development/open-talon-1/db/migrations).
+Open Talon tracks database changes as `dbmate`-style SQL files in [`db/migrations`](../db/migrations).
 
 ## Source Of Truth
 
 - Migration files are the source of truth for schema evolution.
-- The application startup path applies pending migrations through the Python runner in [`services/core-collab/core_collab/migrations.py`](/Users/nikolay.kvasov/Development/open-talon-1/services/core-collab/core_collab/migrations.py).
-- The preferred developer CLI is [`scripts/dbmate.sh`](/Users/nikolay.kvasov/Development/open-talon-1/scripts/dbmate.sh).
+- The application startup path applies pending migrations through the Python runner in [`services/core-collab/core_collab/migrations.py`](../services/core-collab/core_collab/migrations.py).
+- The preferred developer CLI is [`scripts/dbmate.sh`](../scripts/dbmate.sh).
 
 ## Environment
 
-Default local values live in [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example):
+Default local values live in [`infrastructure/.env.example`](../infrastructure/.env.example):
 
 - `DATABASE_URL`
 - `DBMATE_MIGRATIONS_DIR`
