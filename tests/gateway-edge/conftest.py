@@ -2432,6 +2432,22 @@ class MockAuditService:
         )
 
 
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    async def get(self, key: str):
+        return self.values.get(key)
+
+    async def set(self, key: str, value: str, ex: int | None = None):
+        _ = ex
+        self.values[key] = value
+        return True
+
+    async def delete(self, key: str):
+        return int(self.values.pop(key, None) is not None)
+
+
 class _FakeMachineProvisioner:
     async def create_machine_identity(self, *, client_id: str, display_name: str, description=None, metadata=None):
         _ = display_name
@@ -2486,9 +2502,12 @@ def mock_audit_service():
 
 @pytest.fixture
 def patched(monkeypatch, mock_collaboration_service, mock_audit_service):
+    fake_redis = _FakeRedis()
     monkeypatch.setattr("gateway_edge.services.collaboration.collaboration_service", mock_collaboration_service)
     monkeypatch.setattr("gateway_edge.routers.collaboration.collab_svc.collaboration_service", mock_collaboration_service)
     monkeypatch.setattr("gateway_edge.services.iam.collaboration_service", mock_collaboration_service)
+    monkeypatch.setattr("gateway_edge.mcp_api.collab_svc.collaboration_service", mock_collaboration_service)
+    monkeypatch.setattr("gateway_edge.mcp_api.get_redis", AsyncMock(return_value=fake_redis))
     monkeypatch.setattr("gateway_edge.services.audit.audit_service", mock_audit_service)
     monkeypatch.setattr("gateway_edge.audit_middleware.audit_service", mock_audit_service)
     monkeypatch.setattr("gateway_edge.routers.collaboration.audit_service", mock_audit_service)

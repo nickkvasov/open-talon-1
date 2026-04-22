@@ -7,7 +7,7 @@ This is not the same thing as repository contribution guidance in `AGENTS.md`.
 Use this guide when an agent needs to:
 
 - act as one or more human test users
-- authenticate as a machine principal through OIDC client credentials
+- authenticate as an agent identity through OIDC client credentials
 - drive workspaces, threads, requests, and answers through the HTTP APIs
 - validate participant business-role routing and resumable collaboration
 - inspect collaboration logs and runtime outcomes
@@ -106,11 +106,11 @@ Good for:
 - answering tracked requests
 - inspecting communication logs
 
-### Direct HTTP With Machine Credentials
+### Direct HTTP With Agent Credentials
 
-Use direct HTTP calls when an automation client should act as a machine principal instead of simulating a human profile.
+Use direct HTTP calls when an automation client should act through an agent identity instead of simulating a human profile.
 
-Machine principals:
+Agent identities:
 
 - are provisioned through `/v1/iam/agent-identities`
 - authenticate with OIDC client credentials issued by the configured provider
@@ -280,12 +280,12 @@ For human operators:
 2. `GET /v1/organizations`
    - confirm which organizations are visible to that human
 
-For machine principals:
+For agent identities:
 
 1. Inspect the provisioned `agent_identity`
    - confirm the expected `client_id`, `scope`, and status
 2. Acquire a fresh OIDC access token with client credentials
-   - confirm the token still resolves to the intended machine principal
+   - confirm the token still resolves to the intended agent identity
 
 For both paths:
 

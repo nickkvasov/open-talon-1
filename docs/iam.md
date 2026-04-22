@@ -2,7 +2,7 @@
 
 Open Talon now treats IAM as a provider-neutral principal system:
 
-- An external OIDC identity provider authenticates humans and machine principals.
+- An external OIDC identity provider authenticates humans and agent principals.
 - Open Talon owns authorization, tenant scoping, role bindings, and audit.
 - Humans and agents share one permission catalog.
 - Workspace-scoped permissions are still IAM permissions.
@@ -29,11 +29,13 @@ Keycloak is the first concrete provisioning adapter, but the runtime contracts a
 - `MachineIdentityProvisioner`
 - `AuthorizationEngine`
 
-Open Talon does not mint or broker JWTs. Human users authenticate through normal OIDC browser or device flows. Machine principals authenticate through OIDC client credentials and are mapped back into Open Talon through `agent_identities`.
+Open Talon does not mint or broker JWTs. Human users authenticate through normal OIDC browser or device flows. Agent principals authenticate through OIDC client credentials and are mapped back into Open Talon through `agent_identities`.
 
-`GET /v1/me` is intentionally human-only. Machine principals use the IAM and collaboration APIs directly.
+`GET /v1/me` is intentionally human-only. Agent identities use the IAM and collaboration APIs directly.
 
 In local development, the launcher still defaults to `AUTH_MODE=any`. OIDC is the intended principal-IAM path, but API key and OpenBao auth remain accepted locally unless you narrow that setting.
+
+The gateway also exposes an MCP adapter at `/v1/mcp` for OIDC-authenticated software clients. That MCP surface reuses the same `agent_identities`, IAM role bindings, and workspace participant attachment rules described here. It does not define a second permission catalog, and it does not expose Open Talon `system_tools`, `workspace_tools`, Tinker-generated tools, or `agent-runtime` execution backends as MCP-imported tools.
 
 ## Persistence
 
@@ -114,6 +116,8 @@ Agent permissions come from:
 - explicit global or organization agent IAM role bindings
 - the same workspace-scoped IAM permissions as human principals, evaluated only after the linked agent is attached as a workspace participant
 
+The MCP adapter uses those same agent permissions. It filters visible MCP operations by the current session scope and then rechecks the underlying IAM permission on every call.
+
 ## Role layers
 
 Open Talon has several distinct role-like concepts:
@@ -169,11 +173,11 @@ Identity-specific follow-up routes such as role binding, rotate, disable, and en
 
 Current IAM management route guards:
 
-- list roles, list bindings, and list machine identities require `organization.members.read`
+- list roles, list bindings, and list agent identities require `organization.members.read`
 - create, update, delete, bind, unbind, provision, rotate-secret, enable, and disable operations require `organization.members.write`
 - those permissions are evaluated globally on `/v1/iam/...` routes and within the target organization on `/v1/organizations/{organization_id}/iam/...` routes
 
-## Machine identity provisioning
+## Agent identity provisioning
 
 Provisioning an agent identity returns:
 
@@ -185,13 +189,13 @@ Provisioning an agent identity returns:
 
 Secrets are stored through the configured secret store and only returned during create or rotate flows.
 
-Local development currently stores machine secrets in OpenBao and uses Keycloak as the first concrete provisioning adapter.
+Local development currently stores agent-identity secrets in OpenBao and uses Keycloak as the first concrete provisioning adapter.
 
-## Machine principal walkthrough
+## Agent identity walkthrough
 
-One concrete machine-principal flow looks like this:
+One concrete agent-identity flow looks like this:
 
-1. Create an agent IAM role with the permissions the machine needs.
+1. Create an agent IAM role with the permissions the agent identity needs.
 2. Provision an `agent_identity` for an existing `system_agent`.
 3. Exchange the returned `client_id` and `client_secret` for an OIDC access token at the provider `token_endpoint`.
 4. Call the protected Open Talon API with `Authorization: Bearer <token>`.
@@ -209,7 +213,7 @@ curl -X POST http://127.0.0.1:8000/v1/iam/agent-roles \
   }'
 ```
 
-Example machine-identity provisioning:
+Example agent-identity provisioning:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/iam/agent-identities \
@@ -229,7 +233,7 @@ The response returns:
 - `issuer`
 - `token_endpoint`
 
-Bind the IAM role to that machine identity:
+Bind the IAM role to that agent identity:
 
 ```bash
 curl -X POST \
@@ -237,7 +241,7 @@ curl -X POST \
   -H "Authorization: Bearer <human-admin-token>"
 ```
 
-Exchange the machine credentials for a token directly with the OIDC provider:
+Exchange the agent identity client credentials for a token directly with the OIDC provider:
 
 ```bash
 curl -X POST "http://127.0.0.1:8081/realms/open-talon/protocol/openid-connect/token" \
@@ -250,11 +254,11 @@ curl -X POST "http://127.0.0.1:8081/realms/open-talon/protocol/openid-connect/to
 Then use the returned token against Open Talon:
 
 ```bash
-curl -H "Authorization: Bearer <machine-token>" \
+curl -H "Authorization: Bearer <agent-token>" \
   http://127.0.0.1:8000/v1/iam/agent-identities
 ```
 
-For an organization-scoped machine identity, use the `/v1/organizations/{organization_id}/iam/...` variants instead.
+For an organization-scoped agent identity, use the `/v1/organizations/{organization_id}/iam/...` variants instead.
 
 ## Authorization outcomes
 

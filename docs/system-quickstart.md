@@ -2,7 +2,7 @@
 
 This is the fastest path to get the full local Open Talon system running with the current provider-neutral principal IAM model and the default local Keycloak-backed OIDC flow.
 
-The default launcher setting is `AUTH_MODE=any`, so the local gateway accepts OIDC, API key, or OpenBao auth unless you override that env var. The steps below use the OIDC path because that is the intended human and machine-principal flow.
+The default launcher setting is `AUTH_MODE=any`, so the local gateway accepts OIDC, API key, or OpenBao auth unless you override that env var. The steps below use the OIDC path because that is the intended flow for human users and agent identities.
 
 For full current-state reference material, use:
 
@@ -232,17 +232,17 @@ Relevant runtime-guardrail defaults from [`infrastructure/.env.example`](../infr
 
 - The imported `open-talon` realm is configured for local HTTP development with `sslRequired=none`.
 - The local startup flow also runs a `keycloak-init` step that sets `sslRequired=none` for both `master` and `open-talon`.
-- Keycloak is the default local OIDC provider and the first machine-identity provisioning adapter, but Open Talon owns authorization and audit.
+- Keycloak is the default local OIDC provider and the first agent-identity provisioning adapter, but Open Talon owns authorization and audit.
 - The default launcher setting remains `AUTH_MODE=any`. Narrow it to `oidc` locally if you want to validate only the OIDC path.
 - The TUI uses the `open-talon-tui` public client and authenticates with OIDC device flow.
 - The admin web uses the `open-talon-web` public client with authorization code + PKCE.
 - Human identity is global in `users` and `auth_identities`.
-- Machine identity linkage is stored in `agent_identities` and points back to `system_agents`.
+- Agent identity linkage is stored in `agent_identities` and points back to `system_agents`.
 - Global and organization IAM roles live in `iam_role_definitions` with separate human and agent bindings.
 - Organization membership and human membership roles are stored in `organization_memberships`.
 - Workspace-local membership is stored in `participants`.
 - Workspace access and workspace-management routes are enforced by IAM permissions together with participant attachment.
-- `GET /v1/me` is human-only. Machine principals use the IAM and collaboration APIs directly.
+- `GET /v1/me` is human-only. Agent identities use the IAM and collaboration APIs directly.
 
 Role terminology:
 

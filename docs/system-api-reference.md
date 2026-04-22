@@ -181,12 +181,12 @@ Open Talon separates identity from workspace presence.
 - `oidc`
 - `any`
 
-Current local development defaults use `AUTH_MODE=any`, with Keycloak as the default OIDC provider adapter. That means OIDC is the intended human and machine-principal path, and API keys plus OpenBao auth are accepted locally unless you narrow the auth mode.
+Current local development defaults use `AUTH_MODE=any`, with Keycloak as the default OIDC provider adapter. That means OIDC is the intended path for human users and agent identities, and API keys plus OpenBao auth are accepted locally unless you narrow the auth mode.
 
 ### Important Auth Rules
 
 - authenticated human identity is derived server-side from the bearer token
-- authenticated machine identity is derived server-side from the OIDC client token and mapped through `agent_identities`
+- authenticated agent identity is derived server-side from the OIDC client token and mapped through `agent_identities`
 - do not treat `participant_id` as a global human identifier
 - organization membership is resolved from Postgres, not bearer-token claims
 - non-member organization-scoped reads return `404`, not `403`
@@ -203,6 +203,36 @@ Current local development defaults use `AUTH_MODE=any`, with Keycloak as the def
 | `GET` | `/health` | Liveness check | No auth |
 | `GET` | `/ready` | Readiness check | No auth |
 | `GET` | `/v1/me` | Resolved OIDC human identity | Requires OIDC human principal |
+
+### MCP System API Adapter
+
+`gateway-edge` also mounts an MCP server for OIDC-authenticated software clients.
+
+Current MCP behavior:
+
+- the endpoint is `GET|POST /v1/mcp`
+- OAuth protected-resource metadata is published at `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/v1/mcp`
+- `/v1/mcp` is always OIDC-only, even when the main gateway auth mode is `any`
+- MCP sessions keep an active scope of `global`, `organization:<id>`, or `workspace:<id>`
+- the visible MCP operation set is filtered from the caller's existing IAM permissions plus workspace participant attachment where the underlying API already requires it
+- MCP exposes system API operations only; it does not expose `system_tools`, `workspace_tools`, Tinker-generated tools, or `agent-runtime` execution backends as imported MCP tools
+
+Representative MCP bootstrap operations:
+
+- `session.get_identity`
+- `session.get_permissions`
+- `session.list_scopes`
+- `session.set_scope`
+
+Representative MCP system API operations:
+
+- `organizations.list`
+- `organizations.members.list`
+- `workspaces.list`
+- `threads.list`
+- `threads.messages.create`
+- `memory.workspace.list`
+- `iam.agent_identities.list`
 
 ### Principal IAM APIs
 
@@ -223,23 +253,24 @@ Representative IAM routes:
 | `POST` | `/v1/iam/agent-roles` | create global agent IAM role |
 | `GET` | `/v1/iam/users/{user_id}/roles` | list direct human IAM role bindings |
 | `POST` | `/v1/iam/users/{user_id}/roles/{role_id}` | bind a human IAM role |
-| `GET` | `/v1/iam/agent-identities` | list machine identities |
-| `POST` | `/v1/iam/agent-identities` | provision machine identity and return one-time secret |
-| `POST` | `/v1/iam/agent-identities/{agent_identity_id}/rotate-secret` | rotate machine identity secret |
-| `POST` | `/v1/iam/agent-identities/{agent_identity_id}/disable` | disable machine identity |
-| `POST` | `/v1/iam/agent-identities/{agent_identity_id}/enable` | re-enable machine identity |
+| `GET` | `/v1/iam/agent-identities` | list agent identities |
+| `POST` | `/v1/iam/agent-identities` | provision agent identity and return one-time secret |
+| `POST` | `/v1/iam/agent-identities/{agent_identity_id}/rotate-secret` | rotate agent-identity secret |
+| `POST` | `/v1/iam/agent-identities/{agent_identity_id}/disable` | disable agent identity |
+| `POST` | `/v1/iam/agent-identities/{agent_identity_id}/enable` | re-enable agent identity |
 | `GET` | `/v1/organizations/{organization_id}/iam/human-roles` | list org-scoped human IAM roles |
 | `POST` | `/v1/organizations/{organization_id}/iam/human-roles` | create org-scoped human IAM role |
 | `GET` | `/v1/organizations/{organization_id}/iam/agent-roles` | list org-scoped agent IAM roles |
 | `POST` | `/v1/organizations/{organization_id}/iam/agent-roles` | create org-scoped agent IAM role |
-| `GET` | `/v1/organizations/{organization_id}/iam/agent-identities` | list org-scoped machine identities |
-| `POST` | `/v1/organizations/{organization_id}/iam/agent-identities` | provision org-scoped machine identity |
+| `GET` | `/v1/organizations/{organization_id}/iam/agent-identities` | list org-scoped agent identities |
+| `POST` | `/v1/organizations/{organization_id}/iam/agent-identities` | provision org-scoped agent identity |
 
 Current IAM route guards:
 
-- role and machine-identity listing routes require `organization.members.read`
+- role and agent-identity listing routes require `organization.members.read`
 - role, binding, provisioning, rotate, enable, and disable routes require `organization.members.write`
 - the same permission names are evaluated globally or inside the target organization scope depending on the route
+- the MCP adapter reuses those same permission checks and does not introduce a second authorization system
 
 For the complete permission list and current behavior, use [iam.md](./iam.md).
 

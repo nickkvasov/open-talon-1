@@ -7,7 +7,8 @@ It exposes:
 - health and readiness endpoints
 - chat APIs with request/response and streaming flows
 - collaboration APIs for workspaces, threads, timelines, and presence
-- provider-neutral principal IAM APIs for human roles, agent roles, and machine identities
+- provider-neutral principal IAM APIs for human roles, agent roles, and agent identities
+- an MCP server at `/v1/mcp` that exposes permission-scoped Open Talon system API operations
 - admin APIs for API key management
 - a gateway-mounted browser session-chat UI at `/` when `apps/web` is present
 
@@ -30,6 +31,18 @@ For scripted or multi-user testing, prefer:
 ```
 
 The gateway also serves the compatibility browser session-chat UI from `apps/web` at `http://127.0.0.1:8000/` when that static app directory is present. The main browser operator surface remains `apps/admin-web`.
+
+## MCP System API Adapter
+
+`gateway-edge` now mounts an MCP endpoint at `/v1/mcp`.
+
+Current behavior:
+
+- it exposes Open Talon system API operations through MCP `tools/list` and `tools/call`
+- it does not expose `system_tools`, `workspace_tools`, Tinker-generated tools, or agent-runtime tool execution as MCP callables
+- it requires OIDC bearer authentication even when the main gateway auth mode allows API keys or OpenBao
+- it publishes OAuth protected-resource metadata at `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/v1/mcp`
+- it keeps MCP session scope separately as `global`, `organization:<id>`, or `workspace:<id>` and filters visible operations accordingly
 
 ## Direct Run
 

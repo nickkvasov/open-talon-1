@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 import httpx
 
@@ -61,7 +62,9 @@ class KeycloakMachineIdentityProvisioner(MachineIdentityProvisioner):
             "standardFlowEnabled": False,
             "directAccessGrantsEnabled": False,
             "attributes": {
-                "open_talon_metadata": (metadata or {}),
+                # Keycloak client attributes are string-valued; encode Open Talon
+                # metadata once here so the admin API accepts the client payload.
+                "open_talon_metadata": json.dumps(metadata or {}, sort_keys=True),
             },
         }
         async with httpx.AsyncClient(timeout=self._timeout_seconds, trust_env=False) as client:

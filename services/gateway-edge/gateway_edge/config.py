@@ -34,7 +34,11 @@ class Settings(BaseSettings):
     # any      = accept if any of the above passes
     auth_mode: Literal["none", "api_key", "openbao", "oidc", "any"] = "none"
     # Paths always allowed without auth
-    auth_skip_paths: str = "/health,/ready,/docs,/openapi.json,/favicon.ico"
+    auth_skip_paths: str = (
+        "/health,/ready,/docs,/openapi.json,/favicon.ico,"
+        "/.well-known/oauth-protected-resource,"
+        "/.well-known/oauth-protected-resource/v1/mcp"
+    )
     oidc_issuer_url: str = "http://127.0.0.1:8081/realms/open-talon"
     oidc_audience: str = "open-talon-tui"
     oidc_client_id_tui: str = "open-talon-tui"
@@ -75,6 +79,12 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = 86_400  # 24 h
     valkey_startup_timeout_seconds: float = 30.0
     valkey_startup_retry_interval_seconds: float = 1.0
+
+    # ── MCP ──────────────────────────────────────────────────────────────────
+    mcp_enabled: bool = True
+    mcp_session_ttl_seconds: int = 3_600
+    # Falls back to cors_origins when left empty.
+    mcp_allowed_origins: str = ""
 
     @property
     def valkey_url(self) -> str:

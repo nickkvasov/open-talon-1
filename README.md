@@ -82,7 +82,7 @@ Open Talon separates:
 - `users`: stable human identity records
 - `auth_identities`: external IdP mappings for authenticated humans
 - `system_agents`: platform-global or organization-scoped agent definitions
-- `agent_identities`, `iam_role_definitions`, `human_role_bindings`, and `agent_role_bindings`: principal IAM state for machine identities and global or organization role bindings
+- `agent_identities`, `iam_role_definitions`, `human_role_bindings`, and `agent_role_bindings`: principal IAM state for agent identities and global or organization role bindings
 - `organizations` and `organization_memberships`: organization tenancy, membership, and membership roles stored in Postgres
 - `participants`: workspace-local materializations of a human or agent inside a workspace
 
@@ -96,13 +96,14 @@ Role terminology in this repository:
 
 Collaboration roles are not IAM roles. They are workspace-local collaboration and discovery labels that humans or agents can assume inside a workspace.
 
-Authentication is handled through an external OIDC provider. Local development uses **Keycloak** as the default provider and first machine-identity provisioning adapter, but the runtime contracts are provider-neutral. The default local launcher setting is `AUTH_MODE=any`, so the running gateway accepts OIDC, API key, or OpenBao auth unless you narrow that setting explicitly. `gateway-edge` validates bearer tokens, maps human `(issuer, subject)` pairs to `users.user_id`, maps machine `(provider_key, issuer, client_id)` tuples to `agent_identities`, and resolves workspace actors server-side.
+Authentication is handled through an external OIDC provider. Local development uses **Keycloak** as the default provider and first agent-identity provisioning adapter, but the runtime contracts are provider-neutral. The default local launcher setting is `AUTH_MODE=any`, so the running gateway accepts OIDC, API key, or OpenBao auth unless you narrow that setting explicitly. `gateway-edge` validates bearer tokens, maps human `(issuer, subject)` pairs to `users.user_id`, maps OIDC client `(provider_key, issuer, client_id)` tuples to `agent_identities`, and resolves workspace actors server-side.
 
 Important implications:
 
 - client apps should not treat `participant_id` as a global human identity
 - authenticated human requests may include an `actor` object for compatibility, but the gateway derives the effective human actor from the bearer token
-- machine principals authenticate with client credentials issued by the configured OIDC provider and are linked back to `system_agents` through `agent_identities`
+- agent identities authenticate with client credentials issued by the configured OIDC provider and are linked back to `system_agents` through `agent_identities`
+- the gateway-mounted MCP server at `/v1/mcp` is OIDC-only and exposes permission-scoped system API operations, not Open Talon catalog/runtime tools
 - organization membership and membership roles live in Postgres, not in Keycloak claims
 - humans and agents share one permission catalog, but global and organization IAM roles are stored separately for each subject kind
 - human org membership provides the baseline permission bundle for `owner`, `admin`, and `member`; extra human IAM roles can extend those permissions
@@ -111,11 +112,11 @@ Important implications:
 - organization-scoped reads are also membership-scoped; non-members should see `404` there as well
 - out-of-scope reads return `404`; in-scope requests without the required permission return `403`
 - global system-definition, global publish, IAM management, and provider-management routes require matching global IAM permissions or platform-admin bootstrap access
-- `/v1/me` is intentionally human-only; machine principals use the IAM and collaboration APIs directly
+- `/v1/me` is intentionally human-only; agent identities use the IAM and collaboration APIs directly
 - OpenBao remains part of the local stack for secrets and other internal uses, not as the primary end-user login system
-- OpenBao stores provisioned machine secrets and returns them only during create or rotate flows
+- OpenBao stores provisioned agent-identity secrets and returns them only during create or rotate flows
 - the local Keycloak dev setup is intended to allow HTTP during development; `keycloak-init` normalizes `sslRequired=none` for both `master` and `open-talon`, and you can re-apply that with `docker compose up -d keycloak keycloak-init`
-- browser-based admin flows use the `open-talon-web` public client with authorization code + PKCE; terminal flows use `open-talon-tui` with device flow; machine principals use client credentials against the configured provider
+- browser-based admin flows use the `open-talon-web` public client with authorization code + PKCE; terminal flows use `open-talon-tui` with device flow; agent identities use client credentials against the configured provider
 
 For the detailed permission catalog and IAM API surface, see [docs/iam.md](./docs/iam.md).
 
@@ -511,7 +512,7 @@ That provider can then be exposed by registering it in `build_provider_index(...
 - **PostgreSQL**: Deployed via `pgvector/pgvector:pg16` directly supporting native `JSONB` properties alongside algorithmic embeddings operations for Vector Similarity Searching natively in the engine.
 - **Kafka**: Deployed using `apache/kafka:3.8.0` utilizing `KRaft` mode (omitting Zookeeper), configured natively on mapped loops using high level partition assignments.
 - **OpenBao**: Open-source fork of Hashicorp Vault running in local development for secrets-oriented workflows, backed by a persistent local file store under `infrastructure/data/openbao`.
-- **Keycloak**: Default local OIDC provider and the first machine-identity provisioning adapter used in development. Open Talon remains the source of truth for authorization.
+- **Keycloak**: Default local OIDC provider and the first agent-identity provisioning adapter used in development. Open Talon remains the source of truth for authorization.
 - **Valkey**: Drop-in compatible Redis equivalent caching infrastructure configured to handle immediate TTL caching.
 - **Langfuse**: Self-hosted LLM observability stack that can be used as one runtime observability backend for traces, prompts, and evaluations.
 - **HyperDX**: Optional OTLP-compatible observability sink/UI for local investigations and runtime telemetry experiments.

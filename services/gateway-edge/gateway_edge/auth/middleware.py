@@ -42,6 +42,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # Browser clients need unauthenticated CORS preflight requests to succeed.
         if request.method == "OPTIONS":
             return await call_next(request)
+        if self._is_mcp_request(request):
+            origin_error = self._deny_mcp_origin(request)
+            if origin_error is not None:
+                return origin_error
+            if auth_context := await self._check_oidc(request):
+                request.state.auth_context = auth_context
+                return await call_next(request)
+            return self._deny_mcp(request, "Invalid or missing OIDC Bearer token")
         # Always allow skipped paths
         if request.url.path in self._skip_paths:
             return await call_next(request)
@@ -79,6 +87,43 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return self._deny("Authentication required (api_key, oidc, or openbao)")
 
         return self._deny(f"Unknown auth mode: {mode}")
+
+    @staticmethod
+    def _is_mcp_request(request: Request) -> bool:
+        return request.url.path == "/v1/mcp"
+
+    @staticmethod
+    def _mcp_resource_metadata_url(request: Request) -> str:
+        return str(request.base_url).rstrip("/") + "/.well-known/oauth-protected-resource/v1/mcp"
+
+    def _deny_mcp_origin(self, request: Request) -> JSONResponse | None:
+        origin = request.headers.get("Origin")
+        if not origin:
+            return None
+        allowed = settings.mcp_allowed_origins.strip() or settings.cors_origins.strip()
+        if allowed == "*":
+            return None
+        allowed_origins = {
+            item.strip()
+            for item in allowed.split(",")
+            if item.strip() and item.strip() != "*"
+        }
+        if origin in allowed_origins:
+            return None
+        return JSONResponse(status_code=403, content={"detail": "MCP origin is not allowed"})
+
+    def _deny_mcp(self, request: Request, detail: str) -> JSONResponse:
+        logger.debug("MCP auth denied: %s", detail)
+        return JSONResponse(
+            status_code=401,
+            content={"detail": detail},
+            headers={
+                "WWW-Authenticate": (
+                    'Bearer realm="mcp", '
+                    f'resource_metadata="{self._mcp_resource_metadata_url(request)}"'
+                )
+            },
+        )
 
     @staticmethod
     async def _check_api_key(request: Request) -> AuthContext | None:

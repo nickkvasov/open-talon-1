@@ -130,6 +130,18 @@ class AuditService:
         action_category, action_name, outcome = self._http_action_details(status_code=status_code, error=error)
         route = request.scope.get("route")
         route_template = getattr(route, "path", request.url.path)
+        metadata = {
+            "method": request.method,
+            "path": request.url.path,
+            "route_template": route_template,
+            "status_code": status_code,
+            "query_keys": sorted(request.query_params.keys()),
+            "client_host": request.client.host if request.client else None,
+            "user_agent": request.headers.get("user-agent"),
+        }
+        extra_metadata = getattr(request.state, "audit_metadata", None)
+        if isinstance(extra_metadata, dict):
+            metadata.update(extra_metadata)
         draft = AuditEventDraft(
             occurred_at=started_at,
             recorded_at=datetime.now(UTC),
@@ -150,15 +162,7 @@ class AuditService:
             request_id=getattr(request.state, "request_id", None),
             error_class=error.__class__.__name__ if error is not None else None,
             error_message_redacted=self._redact_error(str(error)) if error is not None else None,
-            metadata={
-                "method": request.method,
-                "path": request.url.path,
-                "route_template": route_template,
-                "status_code": status_code,
-                "query_keys": sorted(request.query_params.keys()),
-                "client_host": request.client.host if request.client else None,
-                "user_agent": request.headers.get("user-agent"),
-            },
+            metadata=metadata,
             chain_partition=self._chain_partition(
                 organization_id=organization_id,
                 workspace_id=workspace_id,
