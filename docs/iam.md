@@ -35,7 +35,7 @@ Open Talon does not mint or broker JWTs. Human users authenticate through normal
 
 In local development, the launcher still defaults to `AUTH_MODE=any`. OIDC is the intended principal-IAM path, but API key and OpenBao auth remain accepted locally unless you narrow that setting.
 
-The gateway also exposes an MCP adapter at `/v1/mcp` for OIDC-authenticated software clients. That MCP surface reuses the same `agent_identities`, IAM role bindings, and workspace participant attachment rules described here. It does not define a second permission catalog, and it does not expose Open Talon `system_tools`, `workspace_tools`, Tinker-generated tools, or `agent-runtime` execution backends as MCP-imported tools.
+The gateway also exposes an MCP adapter at `/v1/mcp` for OIDC-authenticated software clients. That MCP surface reuses the same `agent_identities`, IAM role bindings, and workspace participant attachment rules described here. It does not define a second permission catalog, and it does not expose Open Talon `system_tools`, `workspace_tools`, Tinker-generated tools, or `agent-runtime` execution backends as MCP-imported tools. The current MCP slice also exposes read-only session resources for identity, permissions, and scope, and it emits `tools/list_changed` plus `resources/list_changed` notifications after scope changes.
 
 ## Persistence
 

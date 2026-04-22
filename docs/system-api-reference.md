@@ -210,28 +210,49 @@ Current local development defaults use `AUTH_MODE=any`, with Keycloak as the def
 
 Current MCP behavior:
 
+- the MCP router is mounted only when `MCP_ENABLED=true`; the checked-in default is enabled
 - the endpoint is `GET|POST /v1/mcp`
+- `POST /v1/mcp` with `initialize` creates a session and returns `Mcp-Session-Id` in the response headers
+- subsequent MCP `POST` calls and `GET /v1/mcp` notification streams require that `Mcp-Session-Id` header
+- `GET /v1/mcp` opens an SSE stream for an existing MCP session and carries list-change notifications
 - OAuth protected-resource metadata is published at `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/v1/mcp`
 - `/v1/mcp` is always OIDC-only, even when the main gateway auth mode is `any`
+- requests without an `Origin` header are allowed; when `Origin` is present it must match `MCP_ALLOWED_ORIGINS` or fall back to `CORS_ORIGINS`
+- MCP session state is stored in Valkey with `MCP_SESSION_TTL_SECONDS` controlling session expiry; the default is `3600`
 - MCP sessions keep an active scope of `global`, `organization:<id>`, or `workspace:<id>`
+- successful scope changes emit `notifications/tools/list_changed` and `notifications/resources/list_changed`
 - the visible MCP operation set is filtered from the caller's existing IAM permissions plus workspace participant attachment where the underlying API already requires it
+- successful operation calls return both a short text `content` summary and `structuredContent`; protocol/schema failures stay JSON-RPC errors
 - MCP exposes system API operations only; it does not expose `system_tools`, `workspace_tools`, Tinker-generated tools, or `agent-runtime` execution backends as imported MCP tools
 
-Representative MCP bootstrap operations:
+Current MCP session resources:
+
+- `ot://session/identity`
+- `ot://session/permissions`
+- `ot://session/scope`
+
+Current MCP bootstrap operations:
 
 - `session.get_identity`
 - `session.get_permissions`
 - `session.list_scopes`
 - `session.set_scope`
 
-Representative MCP system API operations:
+Current MCP system API operations:
 
 - `organizations.list`
+- `organizations.get`
 - `organizations.members.list`
 - `workspaces.list`
+- `workspaces.get`
+- `threads.create`
 - `threads.list`
+- `threads.get`
+- `threads.timeline.get`
 - `threads.messages.create`
 - `memory.workspace.list`
+- `memory.workspace.create`
+- `memory.thread.search`
 - `iam.agent_identities.list`
 
 ### Principal IAM APIs

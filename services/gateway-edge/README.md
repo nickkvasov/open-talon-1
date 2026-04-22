@@ -34,15 +34,26 @@ The gateway also serves the compatibility browser session-chat UI from `apps/web
 
 ## MCP System API Adapter
 
-`gateway-edge` now mounts an MCP endpoint at `/v1/mcp`.
+`gateway-edge` mounts an MCP endpoint at `/v1/mcp` when `MCP_ENABLED=true`.
 
 Current behavior:
 
 - it exposes Open Talon system API operations through MCP `tools/list` and `tools/call`
 - it does not expose `system_tools`, `workspace_tools`, Tinker-generated tools, or agent-runtime tool execution as MCP callables
 - it requires OIDC bearer authentication even when the main gateway auth mode allows API keys or OpenBao
+- `initialize` returns `Mcp-Session-Id`, and later `POST` calls plus the `GET /v1/mcp` SSE stream must send that header
 - it publishes OAuth protected-resource metadata at `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/v1/mcp`
+- it accepts requests without `Origin`; if `Origin` is present it must match `MCP_ALLOWED_ORIGINS` or fall back to `CORS_ORIGINS`
+- it stores MCP sessions in Valkey with `MCP_SESSION_TTL_SECONDS` controlling expiry
 - it keeps MCP session scope separately as `global`, `organization:<id>`, or `workspace:<id>` and filters visible operations accordingly
+- scope changes publish `notifications/tools/list_changed` and `notifications/resources/list_changed`
+- it exposes read-only session resources at `ot://session/identity`, `ot://session/permissions`, and `ot://session/scope`
+
+Relevant settings:
+
+- `MCP_ENABLED=true` mounts the MCP router; set it to `false` to disable the feature
+- `MCP_SESSION_TTL_SECONDS=3600` controls how long inactive MCP sessions stay valid
+- `MCP_ALLOWED_ORIGINS` overrides the MCP `Origin` allowlist; when empty it falls back to `CORS_ORIGINS`
 
 ## Direct Run
 
