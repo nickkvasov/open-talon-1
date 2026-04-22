@@ -29,6 +29,8 @@ Primary local flow:
 ## Design Principles
 
 - Document and implement the current system, not a planned future shape.
+- Always keep documentation current with the implemented system.
+- Always reflect the current status of the system in docs, examples, comments, and architecture notes.
 - Prefer durable state, explicit ownership, and recoverable workflows over in-memory convenience.
 - Keep tenancy, IAM, audit, and secret handling as first-class concerns rather than bolt-ons.
 - Keep humans and agents symmetric in collaboration surfaces, but distinct in identity, auth, and role binding.
@@ -40,6 +42,8 @@ Primary local flow:
 - Read the whole vertical slice before editing: contracts, routers, services, repository, migrations, tests, and docs.
 - Prefer small, additive, reviewable changes over broad rewrites.
 - Change schema, code, tests, and docs together when behavior changes.
+- Keep repository documentation, service READMEs, quickstarts, and architecture notes current as part of normal development work, not as a later cleanup step.
+- Cover implemented functionality with comprehensive tests, especially for business rules, cross-service behavior, persistence flows, and regression-prone paths.
 - Prefer explicit interfaces, repository methods, and typed contracts over implicit conventions.
 - Preserve a reproducible local-first developer path: `./open-talon start`, `.venv`, and checked-in defaults should keep working after the change.
 - Treat operational behavior as product behavior. Startup flow, retries, seeded data, env defaults, and admin surfaces all count as implementation, not just wiring.
@@ -188,6 +192,8 @@ Useful local endpoints and credentials:
 
 Before finishing meaningful code changes, run the most relevant tests.
 
+Meaningful functionality changes should include comprehensive automated coverage for the affected behavior, not just superficial smoke checks.
+
 Common commands:
 
 ```bash
@@ -273,6 +279,8 @@ If a change touches Tinker, tool generation, generated-tool approval, or interna
 
 - Preserve the normalized participant model.
 - Avoid hidden schema changes in app startup code.
+- Add comprehensive comments for non-obvious code paths so intent, invariants, cross-service coupling, and operational consequences are clear to the next reader.
+- Do not leave tricky control flow, auth decisions, retry logic, or persistence assumptions undocumented in code.
 - Keep the admin web deployable from a subpath; do not reintroduce root-only router, asset, or OIDC redirect assumptions.
 - Keep browser runtime config runtime-loadable; do not move admin-web environment selection back to build-time-only config.
 - Keep gateway routers thin; prefer logic in services/kernel/repository layers.
@@ -293,7 +301,9 @@ If a change touches Tinker, tool generation, generated-tool approval, or interna
 ## Documentation Maintenance
 
 - Keep [`README.md`](./README.md), [`docs/system-api-reference.md`](./docs/system-api-reference.md), [`docs/system-quickstart.md`](./docs/system-quickstart.md), and [`docs/iam.md`](./docs/iam.md) aligned with the implemented system.
+- Always keep documentation current as part of the same change that updates system behavior.
 - When changing routes, auth behavior, permissions, startup flow, ports, env vars, default credentials, seeded resources, or browser runtime config, update the relevant docs in the same change.
+- Always describe the current status of the system rather than planned or obsolete behavior unless a document is explicitly marked historical.
 - Do not describe placeholder packages or planned services as active runtime components.
 - Keep documentation focused on implemented behavior, current configuration, and the current API surface.
 - Prefer linking the exact source files that define behavior when prose could drift or become ambiguous.
