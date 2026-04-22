@@ -10,7 +10,7 @@ The TUI can:
 - create or reuse a thread
 - post messages into the current thread
 - run a scriptable per-user client for multi-user end-to-end testing
-- inspect participants, roles, threads, and workspaces
+- inspect participants, collaboration roles, threads, and workspaces
 - select an organization before listing or creating workspaces in `tui2` and `user-client`
 - create local agents and attach them to the current workspace
 - inspect system tools and attach or detach them from the current workspace
@@ -50,6 +50,14 @@ Human TUI users must authenticate through the configured OIDC provider. In local
 The TUI can still start signed out so you can run `/auth login` from inside the app before joining workspaces or sending messages.
 
 Machine principals use OIDC client credentials plus the `/v1/iam/agent-identities` APIs directly. The TUI surfaces are human-oriented and `/v1/me` is human-only.
+
+Terminology:
+
+- `IAM role` means a global or organization authorization role managed through `/v1/iam/...`
+- `collaboration role` means a workspace-local role a participant assumes through `/role use ...`
+- `capability` means a workspace-local advertised label used for routing and discovery
+
+The TUI `/role ...` commands work with collaboration roles, not IAM roles.
 
 If you want reliable terminal mouse selection and terminal-native clickable links, use `tui2` instead of the full-screen Textual UI:
 
@@ -180,6 +188,8 @@ These are the legacy full-screen `tui` workspace commands. The full-screen clien
 /role create <name> :: <definition>
 /role use <role> [:: <description> :: <cap1, cap2>]
 ```
+
+These commands manage workspace collaboration roles and their local definitions. They do not create or bind IAM roles.
 
 ## Notes
 

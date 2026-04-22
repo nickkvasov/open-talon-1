@@ -27,6 +27,7 @@ from open_talon_contracts.agent_contracts import (  # noqa: E402
     build_default_interaction_contract,
     interaction_contract_is_empty,
 )
+from open_talon_contracts.iam import WORKSPACE_PERMISSION_NAMES  # noqa: E402
 from open_talon_contracts.log_management import (  # noqa: E402
     RotationPolicy,
     append_jsonl_with_rotation,
@@ -972,6 +973,10 @@ def _actor() -> ParticipantInput:
     )
 
 
+def _workspace_manager_actor(actor: ParticipantInput) -> ParticipantInput:
+    return actor.model_copy(update={"iam_permissions": list(WORKSPACE_PERMISSION_NAMES)})
+
+
 @pytest.mark.asyncio
 async def test_kernel_participant_profile_preserves_distinct_user_id():
     repository = FakeRepository()
@@ -1500,6 +1505,7 @@ async def test_kernel_update_workspace_preserves_existing_harness_when_omitted()
     repository = FakeRepository()
     kernel = CollaborationKernel(repository)
     actor = _actor()
+    manager_actor = _workspace_manager_actor(actor)
     initial_harness = WorkspaceHarness(
         summary="Preserve workspace harness unless explicitly replaced.",
         methodology=WorkspaceMethodology(
@@ -1519,7 +1525,7 @@ async def test_kernel_update_workspace_preserves_existing_harness_when_omitted()
     updated = await kernel.update_workspace(
         created.workspace.workspace_id,
         UpdateWorkspaceRequest(
-            actor=actor,
+            actor=manager_actor,
             description="Updated description only.",
         ),
     )
@@ -1534,6 +1540,7 @@ async def test_kernel_update_workspace_clears_harness_when_explicit_null():
     repository = FakeRepository()
     kernel = CollaborationKernel(repository)
     actor = _actor()
+    manager_actor = _workspace_manager_actor(actor)
 
     created = await kernel.create_workspace(
         CreateWorkspaceRequest(
@@ -1552,7 +1559,7 @@ async def test_kernel_update_workspace_clears_harness_when_explicit_null():
     updated = await kernel.update_workspace(
         created.workspace.workspace_id,
         UpdateWorkspaceRequest(
-            actor=actor,
+            actor=manager_actor,
             harness=None,
         ),
     )

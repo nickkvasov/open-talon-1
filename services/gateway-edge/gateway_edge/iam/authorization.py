@@ -84,10 +84,22 @@ class AuthorizationEngine:
             )
 
         resolution = PermissionResolution(principal=principal)
+        effective_organization_id = organization_id
+        if workspace_id is not None:
+            try:
+                workspace_detail = await collab_svc.collaboration_service.get_workspace(workspace_id)
+            except KeyError as exc:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Workspace {workspace_id} not found",
+                ) from exc
+            resolution.workspace = workspace_detail.workspace
+            effective_organization_id = workspace_detail.workspace.organization_id
+
         if principal.principal_type == "human" and principal.user_id is not None:
-            if organization_id is not None:
+            if effective_organization_id is not None:
                 memberships = await collab_svc.collaboration_service.list_organization_memberships(
-                    organization_id
+                    effective_organization_id
                 )
                 membership = next(
                     (item for item in memberships if item.user_id == principal.user_id),
@@ -100,10 +112,8 @@ class AuthorizationEngine:
                     )
             human_roles = await collab_svc.collaboration_service.list_human_roles_for_user(
                 user_id=principal.user_id,
-                organization_id=organization_id,
+                organization_id=effective_organization_id,
             )
-            if organization_id is not None and human_roles:
-                resolution.organization_member = True
             resolution.identity_permissions.update(
                 role_permission
                 for role in human_roles
@@ -114,22 +124,28 @@ class AuthorizationEngine:
                 principal.agent_identity_id
             )
             if identity is not None:
-                if identity.scope == "global" or identity.organization_id == organization_id:
+                if identity.scope == "global" or identity.organization_id == effective_organization_id:
                     resolution.organization_member = (
-                        organization_id is None or identity.scope == "global" or identity.organization_id == organization_id
+                        effective_organization_id is None
+                        or identity.scope == "global"
+                        or identity.organization_id == effective_organization_id
                     )
                     resolution.identity_permissions.update(
                         role_permission
                         for role in await collab_svc.collaboration_service.list_agent_roles_for_identity(
                             agent_identity_id=identity.agent_identity_id
                         )
-                        if role.scope == "global" or role.organization_id == organization_id
+                        if role.scope == "global"
+                        or role.organization_id == effective_organization_id
                         for role_permission in role.permissions
                     )
 
+        if principal.platform_admin:
+            resolution.identity_permissions.update(IDENTITY_PERMISSION_DESCRIPTIONS)
+            resolution.workspace_permissions.update(WORKSPACE_PERMISSION_DESCRIPTIONS)
+
         if workspace_id is not None:
-            workspace = await collab_svc.collaboration_service.get_workspace(workspace_id)
-            resolution.workspace = workspace.workspace
+            assert resolution.workspace is not None
             if principal.principal_type == "human" and auth_context is not None:
                 try:
                     actor = await collab_svc.collaboration_service.resolve_authenticated_user_actor(
@@ -143,17 +159,13 @@ class AuthorizationEngine:
                     participant = next(
                         (
                             item
-                            for item in workspace.participants
+                            for item in workspace_detail.participants
                             if item.participant_id == actor.participant_id
                         ),
                         None,
                     )
                     resolution.workspace_participant = actor
                     resolution.workspace_profile = participant
-                    if participant is not None:
-                        resolution.workspace_permissions.update(
-                            self._workspace_permissions(workspace.role_definitions, participant)
-                        )
             elif principal.principal_type == "agent" and auth_context is not None:
                 try:
                     actor = await collab_svc.collaboration_service.resolve_authenticated_agent_actor(
@@ -166,17 +178,18 @@ class AuthorizationEngine:
                     participant = next(
                         (
                             item
-                            for item in workspace.participants
+                            for item in workspace_detail.participants
                             if item.participant_id == actor.participant_id
                         ),
                         None,
                     )
                     resolution.workspace_participant = actor
                     resolution.workspace_profile = participant
-                    if participant is not None:
-                        resolution.workspace_permissions.update(
-                            self._workspace_permissions(workspace.role_definitions, participant)
-                        )
+            resolution.workspace_permissions.update(
+                permission
+                for permission in resolution.identity_permissions
+                if permission in WORKSPACE_PERMISSION_DESCRIPTIONS
+            )
         return resolution
 
     async def authorize(self, action: str, resource_context: dict[str, Any]) -> PermissionResolution:
@@ -194,13 +207,9 @@ class AuthorizationEngine:
             if (
                 resolution.workspace_participant is None
                 and resolution.principal.principal_type != "api_key"
-                and not resolution.principal.platform_admin
             ):
                 raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
-            if (
-                permission not in resolution.workspace_permissions
-                and not resolution.principal.platform_admin
-            ):
+            if permission not in resolution.workspace_permissions:
                 raise HTTPException(status_code=403, detail=f"Workspace permission {permission!r} required")
             return resolution
 
@@ -211,19 +220,9 @@ class AuthorizationEngine:
             and not resolution.principal.platform_admin
         ):
             raise HTTPException(status_code=404, detail=f"Organization {organization_id} not found")
-        if permission not in resolution.identity_permissions and not resolution.principal.platform_admin:
+        if permission not in resolution.identity_permissions:
             raise HTTPException(status_code=403, detail=f"Permission {permission!r} required")
         return resolution
-
-    @staticmethod
-    def _workspace_permissions(role_definitions, participant: ParticipantProfile) -> set[str]:
-        role_map = {role.name: role for role in role_definitions}
-        permissions: set[str] = set()
-        for role_name in participant.roles:
-            role_definition = role_map.get(role_name)
-            if role_definition is not None:
-                permissions.update(role_definition.permissions)
-        return permissions
 
 
 authorization_engine = AuthorizationEngine()

@@ -221,7 +221,11 @@ async def _require_workspace_permission(
             "workspace_id": workspace_id,
         },
     )
-    return resolution.workspace_participant
+    if resolution.workspace_participant is None:
+        return None
+    return resolution.workspace_participant.model_copy(
+        update={"iam_permissions": sorted(resolution.workspace_permissions)}
+    )
 
 
 async def _require_workspace_audit_access(request: Request, workspace_id: UUID) -> None:
@@ -260,6 +264,12 @@ async def _resolve_workspace_actor(
     auth_context = _oidc_auth_context(request)
     if auth_context is None:
         return actor
+    workspace = await collab_svc.collaboration_service.get_workspace(workspace_id)
+    await _require_identity_permission(
+        request,
+        permission="workspace.read",
+        organization_id=workspace.workspace.organization_id,
+    )
     if auth_context.principal_type == "agent":
         return await collab_svc.collaboration_service.resolve_authenticated_agent_actor(
             workspace_id=workspace_id,
@@ -272,8 +282,6 @@ async def _resolve_workspace_actor(
             auto_create=auto_create,
         )
     except KeyError:
-        if has_admin_access(request) and not auto_create:
-            return _resolve_global_actor(request, actor)
         raise
 
 
@@ -287,8 +295,14 @@ async def _resolve_thread_actor(
     auth_context = _oidc_auth_context(request)
     if auth_context is None:
         return actor
+    thread = await collab_svc.collaboration_service.get_thread(thread_id)
+    workspace = await collab_svc.collaboration_service.get_workspace(thread.thread.workspace_id)
+    await _require_identity_permission(
+        request,
+        permission="workspace.read",
+        organization_id=workspace.workspace.organization_id,
+    )
     if auth_context.principal_type == "agent":
-        thread = await collab_svc.collaboration_service.get_thread(thread_id)
         return await collab_svc.collaboration_service.resolve_authenticated_agent_actor(
             workspace_id=thread.thread.workspace_id,
             auth_context=auth_context,
@@ -430,15 +444,23 @@ async def _require_workspace_membership(
         return None
     try:
         if auth_context.principal_type == "agent":
-            return await collab_svc.collaboration_service.resolve_authenticated_agent_actor(
+            actor = await collab_svc.collaboration_service.resolve_authenticated_agent_actor(
                 workspace_id=workspace_id,
                 auth_context=auth_context,
             )
-        return await collab_svc.collaboration_service.resolve_authenticated_user_actor(
-            workspace_id=workspace_id,
-            auth_context=auth_context,
-            auto_create=False,
+        else:
+            actor = await collab_svc.collaboration_service.resolve_authenticated_user_actor(
+                workspace_id=workspace_id,
+                auth_context=auth_context,
+                auto_create=False,
+            )
+        workspace = await collab_svc.collaboration_service.get_workspace(workspace_id)
+        await _require_identity_permission(
+            request,
+            permission="workspace.read",
+            organization_id=workspace.workspace.organization_id,
         )
+        return actor
     except KeyError as exc:
         raise _workspace_not_found(workspace_id) from exc
 
@@ -451,17 +473,25 @@ async def _require_thread_membership(
     if auth_context is None:
         return None
     try:
+        thread = await collab_svc.collaboration_service.get_thread(thread_id)
         if auth_context.principal_type == "agent":
-            thread = await collab_svc.collaboration_service.get_thread(thread_id)
-            return await collab_svc.collaboration_service.resolve_authenticated_agent_actor(
+            actor = await collab_svc.collaboration_service.resolve_authenticated_agent_actor(
                 workspace_id=thread.thread.workspace_id,
                 auth_context=auth_context,
             )
-        return await collab_svc.collaboration_service.resolve_authenticated_thread_actor(
-            thread_id=thread_id,
-            auth_context=auth_context,
-            auto_create=False,
+        else:
+            actor = await collab_svc.collaboration_service.resolve_authenticated_thread_actor(
+                thread_id=thread_id,
+                auth_context=auth_context,
+                auto_create=False,
+            )
+        workspace = await collab_svc.collaboration_service.get_workspace(thread.thread.workspace_id)
+        await _require_identity_permission(
+            request,
+            permission="workspace.read",
+            organization_id=workspace.workspace.organization_id,
         )
+        return actor
     except KeyError as exc:
         raise _thread_not_found(thread_id) from exc
 
@@ -816,14 +846,15 @@ async def delete_workspace(
     workspace_id: UUID,
     payload: DeleteWorkspaceRequest = Body(...),
 ) -> dict[str, bool | str]:
-    await _require_workspace_permission(
+    actor = await _require_workspace_permission(
         request,
         workspace_id,
         permission="workspace.roles.write",
     )
     payload = payload.model_copy(
         update={
-            "actor": await _resolve_workspace_actor(
+            "actor": actor
+            or await _resolve_workspace_actor(
                 request,
                 payload.actor,
                 workspace_id=workspace_id,
@@ -959,14 +990,15 @@ async def delete_participant(
     participant_id: UUID,
     payload: DeleteParticipantRequest = Body(...),
 ) -> dict[str, bool | str]:
-    await _require_workspace_permission(
+    actor = await _require_workspace_permission(
         request,
         workspace_id,
         permission="workspace.agents.write",
     )
     payload = payload.model_copy(
         update={
-            "actor": await _resolve_workspace_actor(
+            "actor": actor
+            or await _resolve_workspace_actor(
                 request,
                 payload.actor,
                 workspace_id=workspace_id,
@@ -993,7 +1025,7 @@ async def delete_participant(
 @router.patch(
     "/workspaces/{workspace_id}/participants/{participant_id}/role",
     response_model=ParticipantProfile,
-    summary="Assume a participant role in a workspace",
+    summary="Assume a collaboration role in a workspace",
 )
 async def assume_participant_role(
     request: Request,
@@ -2120,14 +2152,15 @@ async def create_agent_participant(
     workspace_id: UUID,
     payload: CreateAgentParticipantRequest,
 ) -> ParticipantProfile:
-    await _require_workspace_permission(
+    actor = await _require_workspace_permission(
         request,
         workspace_id,
         permission="workspace.agents.write",
     )
     payload = payload.model_copy(
         update={
-            "actor": await _resolve_workspace_actor(
+            "actor": actor
+            or await _resolve_workspace_actor(
                 request,
                 payload.actor,
                 workspace_id=workspace_id,
@@ -2160,14 +2193,15 @@ async def update_agent_participant(
     participant_id: UUID,
     payload: UpdateAgentParticipantRequest,
 ) -> ParticipantProfile:
-    await _require_workspace_permission(
+    actor = await _require_workspace_permission(
         request,
         workspace_id,
         permission="workspace.agents.write",
     )
     payload = payload.model_copy(
         update={
-            "actor": await _resolve_workspace_actor(
+            "actor": actor
+            or await _resolve_workspace_actor(
                 request,
                 payload.actor,
                 workspace_id=workspace_id,
@@ -2194,7 +2228,7 @@ async def update_agent_participant(
 @router.put(
     "/workspaces/{workspace_id}/roles/{role_name}",
     response_model=RoleDefinition,
-    summary="Create or update a named workspace role definition",
+    summary="Create or update a named collaboration-role definition",
 )
 async def upsert_role_definition(
     request: Request,
@@ -2237,7 +2271,7 @@ async def upsert_role_definition(
 @router.delete(
     "/workspaces/{workspace_id}/roles/{role_name}",
     response_model=dict,
-    summary="Delete a workspace role definition",
+    summary="Delete a collaboration-role definition",
 )
 async def delete_role_definition(
     request: Request,

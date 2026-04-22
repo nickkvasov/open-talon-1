@@ -30,6 +30,7 @@ from test_agent_contracts import (  # noqa: E402
     InteractionRequestDraft,
     ParticipantInput,
     UpsertRoleDefinitionRequest,
+    _workspace_manager_actor,
     _claim_single_pending_task,
 )
 
@@ -61,6 +62,7 @@ async def test_role_based_daily_coordination_pilot_flow(business_case_log_dir: P
         user_id=lead_user_id,
         display_name="Team Lead",
     )
+    lead_actor = _workspace_manager_actor(lead_actor)
 
     for role_name, definition in (
         ("team_lead", "Coordinates daily delivery."),

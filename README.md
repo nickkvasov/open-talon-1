@@ -47,20 +47,30 @@ Open Talon now separates:
 - `auth_identities`: external IdP mappings for authenticated humans
 - `system_agents`: platform-global or organization-scoped agent definitions
 - `agent_identities`, `iam_role_definitions`, `human_role_bindings`, and `agent_role_bindings`: principal IAM state for machine identities and global or organization role bindings
-- `organizations` and `organization_memberships`: organization tenancy, membership, and org roles stored in Postgres
+- `organizations` and `organization_memberships`: organization tenancy, membership, and membership roles stored in Postgres
 - `participants`: workspace-local materializations of a human or agent inside a workspace
 
-Authentication is handled through an external OIDC provider. Local development uses **Keycloak** as the default provider and first machine-identity provisioning adapter, but the runtime contracts are provider-neutral. `gateway-edge` validates bearer tokens, maps human `(issuer, subject)` pairs to `users.user_id`, maps machine `(provider_key, issuer, client_id)` tuples to `agent_identities`, and resolves workspace actors server-side.
+Role terminology in this repository:
+
+- `IAM role`: a global or organization authorization role stored in `iam_role_definitions` and bound through `human_role_bindings` or `agent_role_bindings`
+- `organization membership role`: the baseline human tenancy role in `organization_memberships.role`, such as `owner`, `admin`, or `member`
+- `collaboration role`: a workspace-local role label stored in `participants.roles` and used for collaboration routing such as `@role:frontend_engineer`
+- `capability`: a workspace-local advertised skill or routing label stored in `participants.capabilities` and used for selectors such as `@capability:qa_review`
+- `collaboration role definition`: a workspace-local role description stored in `workspace.metadata.role_definitions`; this is discovery metadata, not IAM
+
+Collaboration roles are not IAM roles. They are workspace-local collaboration and discovery labels that humans or agents can assume inside a workspace.
+
+Authentication is handled through an external OIDC provider. Local development uses **Keycloak** as the default provider and first machine-identity provisioning adapter, but the runtime contracts are provider-neutral. The default local launcher setting is still `AUTH_MODE=any`, so the running gateway accepts OIDC, API key, or OpenBao auth unless you narrow that setting explicitly. `gateway-edge` validates bearer tokens, maps human `(issuer, subject)` pairs to `users.user_id`, maps machine `(provider_key, issuer, client_id)` tuples to `agent_identities`, and resolves workspace actors server-side.
 
 Important implications:
 
 - client apps should not treat `participant_id` as a global human identity
 - authenticated human requests may still include an `actor` object for compatibility, but the gateway derives the effective human actor from the bearer token
 - machine principals authenticate with client credentials issued by the configured OIDC provider and are linked back to `system_agents` through `agent_identities`
-- organization membership and org roles live in Postgres, not in Keycloak claims
+- organization membership and membership roles live in Postgres, not in Keycloak claims
 - humans and agents share one permission catalog, but global and organization IAM roles are stored separately for each subject kind
 - human org membership provides the baseline permission bundle for `owner`, `admin`, and `member`; extra human IAM roles can extend those permissions
-- workspace role definitions now carry explicit workspace-management permissions for both human and agent participants
+- workspace access is enforced through IAM permissions together with participant attachment; collaboration-role definitions do not grant authorization
 - OIDC workspace listing and workspace-scoped reads are membership-scoped; non-members should see `404` for workspace, thread, memory, and workspace-scoped asset reads
 - organization-scoped reads are also membership-scoped; non-members should see `404` there as well
 - out-of-scope reads return `404`; in-scope requests without the required permission return `403`
@@ -80,8 +90,8 @@ Open Talon’s collaboration model is organization-aware and thread-native.
 Core entities:
 
 - `organization`: the tenant boundary above workspaces
-- `workspace`: the collaboration boundary inside an organization for participants, roles, attached tools, memory, and execution policy
-- `participant`: the workspace-local materialization of a human or system agent, including status, roles, capabilities, and visibility
+- `workspace`: the collaboration boundary inside an organization for participants, collaboration roles, attached tools, memory, and execution policy
+- `participant`: the workspace-local materialization of a human or system agent, including status, collaboration roles, capabilities, and visibility
 - `thread`: the shared collaboration stream inside a workspace
 - `timeline_message`: an ordered message in a thread, visible to users, agents, or both depending on `visibility`
 - `interaction_request`: a tracked question workflow attached to a thread
@@ -100,7 +110,7 @@ Important rules:
 Tracked interaction requests support:
 
 - one request containing one or more ordered questions
-- explicit participant targets plus selector-based routing with `@participant`, `@role:<name>`, and `@capability:<name>`
+- explicit participant targets plus selector-based routing with `@participant`, participant business-role selectors `@role:<name>`, and capability selectors `@capability:<name>`
 - aggregated answers from multiple participants
 - completion rules including `all_targets`, `minimum_answers`, `one_per_selector_bucket`, and `custom_targets`
 - agent resume only when the request becomes complete, not on every partial answer
@@ -114,7 +124,7 @@ The current thread-native request flow is:
 5. When the request is complete, `core-collab` creates a follow-up task targeted only to the original requesting agent.
 6. `agent-runtime` resumes that agent with the original request, targets, and accumulated answers in execution context.
 
-For workspace-level debugging, Open Talon now also exposes a communication log view backed by canonical `timeline_messages`. It aggregates thread messages, rendered interaction requests, and interaction answers across the workspace, and is intended for workspace `admin` or `supervisor` troubleshooting flows. Finalized communications are also appended to workspace JSONL files under `OPEN_TALON_COMMUNICATION_LOG_DIR` (default: `infrastructure/data/communication-logs/<workspace_id>.jsonl`) so end-to-end collaboration traces survive outside the database. These JSONL files now rotate automatically with `OPEN_TALON_COMMUNICATION_LOG_MAX_BYTES` and `OPEN_TALON_COMMUNICATION_LOG_BACKUP_COUNT`, and local `./open-talon start` service logs under `.run/` rotate with `OPEN_TALON_SERVICE_LOG_MAX_BYTES` and `OPEN_TALON_SERVICE_LOG_BACKUP_COUNT`.
+For workspace-level debugging, Open Talon now also exposes a communication log view backed by canonical `timeline_messages`. It aggregates thread messages, rendered interaction requests, and interaction answers across the workspace, and requires both participant attachment and the IAM permission `workspace.audit.read`. Finalized communications are also appended to workspace JSONL files under `OPEN_TALON_COMMUNICATION_LOG_DIR` (default: `infrastructure/data/communication-logs/<workspace_id>.jsonl`) so end-to-end collaboration traces survive outside the database. These JSONL files now rotate automatically with `OPEN_TALON_COMMUNICATION_LOG_MAX_BYTES` and `OPEN_TALON_COMMUNICATION_LOG_BACKUP_COUNT`, and local `./open-talon start` service logs under `.run/` rotate with `OPEN_TALON_SERVICE_LOG_MAX_BYTES` and `OPEN_TALON_SERVICE_LOG_BACKUP_COUNT`.
 
 Common collaboration endpoints:
 
@@ -183,8 +193,8 @@ See [apps/admin-web/README.md](/Users/nikolay.kvasov/Development/open-talon-1/ap
 The current defaults are aimed at a single medium-sized internal company deployment.
 
 - global reads and writes for system agents, system tools, global Git repositories, global asset publish/link/activate flows, provider management, and global IAM management require the matching global IAM permission or platform-admin bootstrap access
-- organization CRUD, organization membership changes, and organization-scoped IAM management require the relevant organization permissions, which are granted by org membership baseline roles or explicit IAM role bindings
-- workspace role-definition changes, workspace agent attachment/update/removal, workspace tool attach/update/delete, workspace Git repository creation, and workspace asset publishing require the matching workspace permission on the caller's participant role definition
+- organization CRUD, organization membership changes, and organization-scoped IAM management require the relevant organization permissions, which are granted by membership baseline roles or explicit IAM role bindings
+- workspace role-definition changes, workspace agent attachment/update/removal, workspace tool attach/update/delete, workspace Git repository creation, and workspace asset publishing require the matching workspace-scoped IAM permission together with participant attachment
 - Tinker approval requires both `tool_generation.review` and `tool_catalog.write` in the requested publication scope
 - human workspace access depends on organization membership first, then workspace participation
 - workspace catalogs resolve as the union of platform-global resources and same-organization resources
@@ -229,10 +239,10 @@ Audit APIs:
 
 Audit access model:
 
-- system `admin` can query, verify, and export globally
-- organization `owner` and `admin` can access organization audit within their organization scope
-- workspace `admin` and `supervisor` can access audit within their workspace scope
-- regular `user` cannot read audit data
+- global audit APIs require the identity permissions `audit.read`, `audit.verify`, and `audit.export`
+- organization audit APIs require the same identity permissions within the target organization scope
+- workspace audit APIs require the workspace permissions `workspace.audit.read`, `workspace.audit.verify`, and `workspace.audit.export`
+- workspace audit and workspace-management routes are enforced by IAM permissions plus participant attachment; collaboration roles such as `admin`, `supervisor`, and `user` are only workspace-local discovery labels
 
 Provider defaults are selected through env-backed settings:
 

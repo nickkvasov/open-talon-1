@@ -5,7 +5,7 @@ import httpx
 from uuid import UUID, uuid4
 
 from gateway_edge.config import settings
-from gateway_edge.models import AuthContext, ParticipantProfile
+from gateway_edge.models import AuthContext, IamRoleDefinition, ParticipantProfile
 
 
 def _oidc_context(*, roles: list[str]) -> AuthContext:
@@ -32,6 +32,33 @@ def _patch_oidc_tokens(monkeypatch, token_map: dict[str, AuthContext]) -> None:
 
     monkeypatch.setattr("gateway_edge.auth.middleware.validate_oidc_token", _validate)
     monkeypatch.setattr("gateway_edge.auth.middleware.sync_oidc_auth_context", _sync)
+
+
+def _grant_workspace_permissions(
+    mock_collaboration_service,
+    *,
+    user_id,
+    organization_id: UUID,
+    permissions: list[str],
+    name: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    role = IamRoleDefinition(
+        role_id=uuid4(),
+        scope="organization",
+        subject_kind="human",
+        organization_id=organization_id,
+        name=name,
+        description="Test-only workspace IAM role.",
+        permissions=permissions,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    mock_collaboration_service.iam_roles[str(role.role_id)] = role
+    mock_collaboration_service.human_role_bindings.setdefault(str(user_id), set()).add(
+        str(role.role_id)
+    )
 
 
 async def test_create_workspace_returns_workspace_and_participants(client, actor_payload):
@@ -261,7 +288,7 @@ async def test_list_workspaces_allows_platform_admin_to_see_all_visible_org_work
     assert [workspace["name"] for workspace in response.json()] == ["Admin Visible Workspace"]
 
 
-async def test_delete_workspace_allows_platform_admin_without_workspace_membership(
+async def test_delete_workspace_requires_workspace_membership_for_platform_admin(
     client,
     actor_payload,
     monkeypatch,
@@ -306,8 +333,7 @@ async def test_delete_workspace_allows_platform_admin_without_workspace_membersh
         json={"actor": actor_payload},
     )
 
-    assert delete_response.status_code == 200
-    assert delete_response.json()["deleted"] is True
+    assert delete_response.status_code == 404
 
 
 async def test_list_llm_engines_returns_registered_engines(client, actor_payload):
@@ -725,6 +751,14 @@ async def test_non_member_workspace_thread_memory_and_asset_reads_return_404(
     )
     assert workspace_resp.status_code == 200
     workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+    workspace_org_id = UUID(workspace_resp.json()["workspace"]["organization_id"])
+    _grant_workspace_permissions(
+        mock_collaboration_service,
+        user_id=owner_context.user_id,
+        organization_id=workspace_org_id,
+        permissions=["workspace.repositories.write", "workspace.assets.publish"],
+        name="workspace-publisher",
+    )
 
     thread_resp = await client.post(
         f"/v1/workspaces/{workspace_id}/threads",
@@ -825,6 +859,14 @@ async def test_workspace_management_routes_require_workspace_admin_or_supervisor
     assert workspace_resp.status_code == 200
     workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
     workspace_uuid = UUID(workspace_id)
+    workspace_org_id = UUID(workspace_resp.json()["workspace"]["organization_id"])
+    _grant_workspace_permissions(
+        mock_collaboration_service,
+        user_id=owner_context.user_id,
+        organization_id=workspace_org_id,
+        permissions=["workspace.tools.write"],
+        name="workspace-tool-manager",
+    )
 
     member_participant = ParticipantProfile(
         participant_id=uuid4(),
@@ -836,6 +878,16 @@ async def test_workspace_management_routes_require_workspace_admin_or_supervisor
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
+    mock_collaboration_service.organization_memberships.setdefault(
+        str(workspace_org_id), {}
+    )[str(member_context.user_id)] = {
+        "organization_id": workspace_org_id,
+        "user_id": member_context.user_id,
+        "role": "member",
+        "joined_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+        "metadata": {},
+    }
     mock_collaboration_service.participants.setdefault(str(workspace_id), {})[
         str(member_participant.participant_id)
     ] = member_participant
@@ -1986,6 +2038,7 @@ async def test_delete_named_role_definition_in_workspace(client, actor_payload):
 
 async def test_update_workspace_requires_workspace_admin_or_supervisor_in_oidc_mode(
     client,
+    mock_collaboration_service,
     actor_payload,
     monkeypatch,
 ):
@@ -2005,6 +2058,31 @@ async def test_update_workspace_requires_workspace_admin_or_supervisor_in_oidc_m
         json={"name": "Guarded Workspace", "actor": actor_payload},
     )
     workspace_id = workspace_resp.json()["workspace"]["workspace_id"]
+    workspace_uuid = UUID(workspace_id)
+    organization_id = UUID(workspace_resp.json()["workspace"]["organization_id"])
+    now = datetime.now(timezone.utc)
+    mock_collaboration_service.organization_memberships.setdefault(str(organization_id), {})[
+        str(member_context.user_id)
+    ] = {
+        "organization_id": organization_id,
+        "user_id": member_context.user_id,
+        "role": "member",
+        "joined_at": now,
+        "updated_at": now,
+        "metadata": {},
+    }
+    mock_collaboration_service.participants.setdefault(str(workspace_id), {})[
+        str(member_context.user_id)
+    ] = ParticipantProfile(
+        participant_id=member_context.user_id,
+        workspace_id=workspace_uuid,
+        participant_type="user",
+        user_id=member_context.user_id,
+        display_name=member_context.display_name or "Member",
+        roles=["user"],
+        created_at=now,
+        updated_at=now,
+    )
 
     member_role_resp = await client.patch(
         f"/v1/workspaces/{workspace_id}/participants/{member_context.user_id}/role",

@@ -9,10 +9,20 @@ Use this guide when an agent needs to:
 - act as one or more human test users
 - authenticate as a machine principal through OIDC client credentials
 - drive workspaces, threads, requests, and answers through the HTTP APIs
-- validate role-based routing and resumable collaboration
+- validate participant business-role routing and resumable collaboration
 - inspect collaboration logs and runtime outcomes
 
 For the full system and API reference, use [system-api-reference.md](./system-api-reference.md). For the principal IAM model and `/v1/iam/...` endpoints, use [iam.md](./iam.md).
+
+Terminology used in this guide:
+
+- `IAM role`: global or organization authorization role from `iam_role_definitions`
+- `organization membership role`: baseline human tenancy role from `organization_memberships.role`
+- `collaboration role`: workspace-local assumed role in `participants.roles`, used for collaboration routing such as `@role:frontend_engineer`
+- `capability`: workspace-local advertised label in `participants.capabilities`, used for routing such as `@capability:qa_review`
+- `collaboration role definition`: workspace-local role description used for collaboration discovery and UI help text
+
+Collaboration roles, capabilities, and collaboration-role definitions are not IAM roles.
 
 ## Core Operating Rules
 
@@ -39,7 +49,7 @@ This keeps:
 - auth state separate
 - selected organization separate
 - selected workspace/thread separate
-- role assumptions separate
+- participant business-role assumptions separate
 - request-answer attribution correct
 
 ### 2. Prefer Collaboration APIs Over Legacy Chat
@@ -92,7 +102,7 @@ Good for:
 
 - stdin/stdout automation
 - scripted multi-user test cases
-- role assumption
+- participant business-role assumption
 - answering tracked requests
 - inspecting communication logs
 
@@ -107,7 +117,7 @@ Machine principals:
 - resolve to `principal_type="agent"` inside the gateway
 - do not use `/v1/me`, which is human-only
 - gain organization and global permissions from agent IAM role bindings
-- gain workspace-management permissions only after the linked agent is attached to a workspace and its participant role carries workspace permissions
+- gain workspace-scoped permissions through agent IAM role bindings, and those permissions are enforced only after the linked agent is attached inside the target workspace
 
 ### `tui2`
 
@@ -131,9 +141,9 @@ Use one admin/org-admin-capable profile to select the target organization first,
 
 Create one thread for the scenario, then switch all relevant profiles to the same thread.
 
-### 4. Assign Or Assume Roles
+### 4. Assign Or Assume Participant Business Roles
 
-For role-based routing tests, make sure each human participant advertises the intended role through the participant-role flow.
+For collaboration-role routing tests, make sure each human participant advertises the intended collaboration role through the participant-role flow.
 
 Examples:
 
@@ -152,7 +162,7 @@ This is appropriate when:
 
 ### 6. Create Tracked Requests
 
-Prefer selectors over explicit user IDs when validating advertised role-based routing:
+Prefer selectors over explicit user IDs when validating advertised participant business-role routing:
 
 - `@role:frontend_engineer`
 - `@role:backend_engineer`
@@ -192,7 +202,7 @@ Check:
 | inspect one organization | `/v1/organizations/{organization_id}` |
 | create shared collaboration space | `/v1/workspaces` |
 | inspect workspace state | `/v1/workspaces/{workspace_id}` |
-| inspect participants and advertised roles | `/v1/workspaces/{workspace_id}/participants` |
+| inspect participants and advertised collaboration roles | `/v1/workspaces/{workspace_id}/participants` |
 | create a collaboration stream | `/v1/workspaces/{workspace_id}/threads` |
 | inspect thread messages | `/v1/threads/{thread_id}/timeline` |
 | post general thread activity | `/v1/threads/{thread_id}/messages` |
@@ -244,9 +254,9 @@ Use `CreateInteractionAnswerRequest` when:
 - the participant is answering a tracked request
 - you want to optionally bind the answer to a subset of question IDs
 
-## Role-Based Collaboration Guidance
+## Participant Business-Role Collaboration Guidance
 
-When validating role-based routing:
+When validating participant business-role routing:
 
 - define the role in the workspace if needed
 - ensure the participant advertises the role
@@ -261,33 +271,45 @@ Good selector examples:
 
 ## Debugging Checklist
 
-If the flow behaves unexpectedly, inspect in this order:
+If the flow behaves unexpectedly, inspect in this order.
+
+For human operators:
 
 1. `GET /v1/me`
    - confirm which authenticated human you are
 2. `GET /v1/organizations`
    - confirm which organizations are visible to that human
+
+For machine principals:
+
+1. Inspect the provisioned `agent_identity`
+   - confirm the expected `client_id`, `scope`, and status
+2. Acquire a fresh OIDC access token with client credentials
+   - confirm the token still resolves to the intended machine principal
+
+For both paths:
+
 3. `GET /v1/workspaces/{workspace_id}/participants`
-   - confirm advertised roles/capabilities and participant IDs
+   - confirm advertised collaboration roles, capabilities, and participant IDs
 4. `GET /v1/threads/{thread_id}/timeline`
    - confirm the messages were created
 5. `GET /v1/requests/{request_id}`
    - confirm targets, answers, and aggregate status
 6. `GET /v1/workspaces/{workspace_id}/communication-log`
-   - confirm workspace-wide communication ordering
+   - confirm workspace-wide communication ordering and that the caller has `workspace.audit.read`
 7. `OPEN_TALON_COMMUNICATION_LOG_DIR/<workspace_id>.jsonl`
    - confirm finalized messages were persisted to disk
 8. `GET /v1/admin/runtime/overview`
    - confirm runnable or failed work when an agent should have resumed
 9. `GET /v1/audit/events`
-   - inspect authorization or mutation history when needed
+   - inspect authorization or mutation history when needed, using the matching audit permissions for the target scope
 
 ## Common Mistakes
 
 - reusing one local profile for multiple humans
 - assuming `participant_id` is the human identity
 - forgetting to select the intended organization before creating or listing workspaces in `tui2` or `user-client`
-- testing role-based selection with explicit participant IDs
+- testing collaboration-role selection with explicit participant IDs
 - using `/v1/chat` for workflows that should use workspaces and threads
 - expecting the communication log to include every internal runtime transition
 - forgetting that non-member workspace reads intentionally return `404`
@@ -298,10 +320,10 @@ A good first end-to-end validation is:
 
 1. select one organization and create one workspace
 2. attach two agents
-3. create three human participants with advertised roles
+3. create three human participants with advertised collaboration roles
 4. create one shared thread
 5. post one kickoff message
-6. let an agent create a tracked request with role selectors
+6. let an agent create a tracked request with collaboration-role selectors
 7. answer from separate user profiles
 8. verify the requesting agent resumes only after the completion rule is satisfied
 9. inspect the communication log API and JSONL file
@@ -311,7 +333,7 @@ That scenario exercises:
 - auth
 - organization membership
 - participant materialization
-- role-based selection
+- participant business-role selection
 - tracked requests
 - answer aggregation
 - resumed execution

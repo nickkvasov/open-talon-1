@@ -104,21 +104,35 @@ Open Talon separates identity from workspace presence.
 ### Organization Membership
 
 - Organizations are identified by `organizations.organization_id`
-- Human org membership and org roles live in `organization_memberships`
+- Human org membership and membership roles live in `organization_memberships`
 - Organization membership roles provide the baseline human permission bundle
 - The external OIDC provider is not the source of truth for org membership or authorization
 
 ### Workspace Presence
 
 - `participants.participant_id` identifies the workspace-local materialization of a user or agent
-- workspace `role_definitions` carry the explicit workspace-management permissions evaluated by the authorization engine
+- workspace `role_definitions` describe collaboration roles only; they do not grant permissions
 - participant state includes:
   - status
   - visibility scope
-  - roles
+  - collaboration roles
   - capabilities
   - timestamps
   - metadata
+
+### Role Terminology
+
+- `IAM role`
+  Global or organization authorization role stored in `iam_role_definitions`.
+- `organization membership role`
+  Baseline human tenancy role stored in `organization_memberships.role`.
+- `collaboration role`
+  Workspace-local assumed role stored in `participants.roles` and used for routing with selectors such as `@role:frontend_engineer`.
+- `capability`
+  Workspace-local advertised label stored in `participants.capabilities` and used for selectors such as `@capability:qa_review`.
+- `collaboration role definition`
+  Workspace-local role description stored in `workspace.metadata.role_definitions`.
+  This is separate from IAM and separate from collaboration roles used for routing.
 
 ### Auth Modes
 
@@ -130,7 +144,7 @@ Open Talon separates identity from workspace presence.
 - `oidc`
 - `any`
 
-Current local development defaults are OIDC for humans and machine principals, with Keycloak as the default provider adapter and API keys still supported for operator automation.
+Current local development defaults use `AUTH_MODE=any`, with Keycloak as the default OIDC provider adapter. That means OIDC is the intended human and machine-principal path, but API keys and OpenBao auth are still accepted locally unless you narrow the auth mode.
 
 ### Important Auth Rules
 
@@ -142,7 +156,7 @@ Current local development defaults are OIDC for humans and machine principals, w
 - non-member workspace-scoped reads return `404`, not `403`
 - global system-definition, provider-management, and IAM-management APIs require matching global IAM permissions or platform-admin bootstrap access
 - organization-scoped management flows require the relevant organization permissions, whether granted by membership baseline roles or explicit human or agent IAM role bindings
-- workspace role, agent, tool, repository, and asset-management flows require the matching workspace permission on the caller's participant role
+- workspace role, agent, tool, repository, and asset-management flows require the matching workspace-scoped IAM permission together with participant attachment
 - out-of-scope reads return `404`; in-scope requests without the required permission return `403`
 
 ### Auth And Session APIs
@@ -158,8 +172,8 @@ Current local development defaults are OIDC for humans and machine principals, w
 Open Talon uses one permission catalog for both humans and agents:
 
 - identity permissions protect global and organization control-plane APIs
-- workspace permissions protect workspace management APIs through participant role definitions
-- local Keycloak `admin` remains a bootstrap path, but steady-state authorization is intended to come from Open Talon IAM roles and workspace permissions
+- workspace-scoped IAM permissions protect workspace management APIs, and the caller must also be attached as a workspace participant
+- local Keycloak `admin` remains a bootstrap path, but steady-state authorization is intended to come from Open Talon IAM roles
 
 Representative IAM routes:
 
@@ -183,6 +197,12 @@ Representative IAM routes:
 | `POST` | `/v1/organizations/{organization_id}/iam/agent-roles` | create org-scoped agent IAM role |
 | `GET` | `/v1/organizations/{organization_id}/iam/agent-identities` | list org-scoped machine identities |
 | `POST` | `/v1/organizations/{organization_id}/iam/agent-identities` | provision org-scoped machine identity |
+
+Current IAM route guards:
+
+- role and machine-identity listing routes require `organization.members.read`
+- role, binding, provisioning, rotate, enable, and disable routes require `organization.members.write`
+- the same permission names are evaluated globally or inside the target organization scope depending on the route
 
 For the complete permission list and current behavior, use [iam.md](./iam.md).
 
@@ -213,7 +233,7 @@ Tracked requests support:
 
 - one or more ordered questions
 - one or more explicit targets
-- role-based and capability-based selector routing
+- participant business-role and capability-based selector routing
 - answer aggregation across several participants
 - gated agent resume only when the completion rule is satisfied
 
@@ -397,7 +417,7 @@ The `chat` APIs are the older session/chat surface. New collaboration work shoul
 | `GET` | `/v1/workspaces/{workspace_id}/catalog/agents` | list agents visible to workspace |
 | `GET` | `/v1/workspaces/{workspace_id}/catalog/tools` | list tools visible to workspace |
 | `DELETE` | `/v1/workspaces/{workspace_id}/participants/{participant_id}` | remove participant |
-| `PATCH` | `/v1/workspaces/{workspace_id}/participants/{participant_id}/role` | assume participant role |
+| `PATCH` | `/v1/workspaces/{workspace_id}/participants/{participant_id}/role` | assume collaboration role |
 | `POST` | `/v1/workspaces/{workspace_id}/agents` | attach a system agent to a workspace |
 | `PATCH` | `/v1/workspaces/{workspace_id}/agents/{participant_id}` | update attached agent participant |
 | `PUT` | `/v1/workspaces/{workspace_id}/roles/{role_name}` | create/update role definition |
@@ -591,7 +611,7 @@ Use `create_task=true` when the message should wake eligible agents through the 
 - `timeout_at`
 - `metadata`
 
-Example using role selectors:
+Example using participant business-role selectors:
 
 ```json
 {
@@ -669,7 +689,7 @@ Recommended rules:
 - rely on server-derived actor identity for OIDC-authenticated humans
 - do not invent participant IDs as durable human identifiers
 - prefer tracked interaction requests when answers must be correlated back into an agent loop
-- prefer role selectors when validating advertised role-based routing
+- prefer participant business-role selectors when validating advertised participant business-role routing
 - use `GET /v1/workspaces/{workspace_id}/communication-log` and the JSONL workspace log files to debug who said what
 
 For operational details and an end-to-end agent playbook, use [agent-operations-guide.md](./agent-operations-guide.md).

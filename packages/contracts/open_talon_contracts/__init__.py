@@ -15,7 +15,6 @@ from .llm_engines import (
     runtime_preferences_from_definition,
 )
 from .iam import (
-    DEFAULT_WORKSPACE_ROLE_PERMISSIONS,
     IDENTITY_PERMISSION_DESCRIPTIONS,
     IDENTITY_PERMISSION_NAMES,
     ORGANIZATION_ROLE_BASE_PERMISSIONS,
@@ -383,7 +382,6 @@ __all__ = [
     "LlmEngineRegistry",
     "LlmEngineSelection",
     "LlmEngineSelectionPreferences",
-    "DEFAULT_WORKSPACE_ROLE_PERMISSIONS",
     "IDENTITY_PERMISSION_DESCRIPTIONS",
     "IDENTITY_PERMISSION_NAMES",
     "load_repo_local_env",

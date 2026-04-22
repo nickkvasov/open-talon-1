@@ -40,7 +40,7 @@ This pilot validates a simple delivery-team coordination loop:
   - `Standup Coordinator Agent`
   - `Risk Review Agent`
 
-The case intentionally uses advertised participant roles for targeting instead of named user selection:
+The case intentionally uses advertised collaboration roles for targeting instead of named user selection:
 
 - `@role:frontend_engineer`
 - `@role:backend_engineer`
@@ -54,7 +54,7 @@ The scenario covers three tracked collaborations:
 
 The case then verifies:
 
-- role-based target resolution
+- participant business-role target resolution
 - partial vs complete request state transitions
 - gated agent resume behavior
 - targeted follow-up task routing
@@ -138,7 +138,7 @@ Recommended structure:
 
 1. Create the workspace and participants.
 2. Attach any required agents.
-3. Assign participant roles/capabilities needed for routing.
+3. Assign collaboration roles and capabilities needed for routing.
 4. Create the thread.
 5. Post the initiating human or agent message.
 6. Drive the collaboration through requests, answers, and resumes.
@@ -154,7 +154,7 @@ Use business-case tests for scenarios where the value comes from interaction bet
 
 Prefer deterministic scenarios:
 
-- use explicit role assignments
+- use explicit participant business-role assignments
 - avoid ambiguous multi-match selector routing unless that is the point of the test
 - assert both intermediate and final collaboration state
 - include communication-log assertions when the workflow should be auditable

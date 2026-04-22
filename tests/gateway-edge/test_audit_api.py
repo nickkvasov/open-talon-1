@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 
 from gateway_edge.config import settings
-from gateway_edge.models import AuditEvent, AuthContext
+from gateway_edge.models import AuditEvent, AuthContext, IamRoleDefinition
 
 
 def _oidc_context(*, roles: list[str]) -> AuthContext:
@@ -58,6 +58,33 @@ def _audit_event(*, workspace_id=None) -> AuditEvent:
         chain_sequence=1,
         prev_hash="0" * 64,
         event_hash="1" * 64,
+    )
+
+
+def _grant_workspace_permissions(
+    mock_collaboration_service,
+    *,
+    user_id,
+    organization_id,
+    permissions: list[str],
+    name: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    role = IamRoleDefinition(
+        role_id=uuid4(),
+        scope="organization",
+        subject_kind="human",
+        organization_id=organization_id,
+        name=name,
+        description="Test-only workspace audit role.",
+        permissions=permissions,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    mock_collaboration_service.iam_roles[str(role.role_id)] = role
+    mock_collaboration_service.human_role_bindings.setdefault(str(user_id), set()).add(
+        str(role.role_id)
     )
 
 
@@ -136,7 +163,12 @@ async def test_global_audit_list_requires_admin(client, monkeypatch, mock_audit_
     assert response.status_code == 403
 
 
-async def test_workspace_admin_can_list_workspace_audit_events(client, monkeypatch, mock_audit_service):
+async def test_workspace_audit_read_requires_workspace_iam_permission(
+    client,
+    monkeypatch,
+    mock_audit_service,
+    mock_collaboration_service,
+):
     monkeypatch.setattr(settings, "auth_mode", "oidc")
     auth_context = _oidc_context(roles=["workspace-user"])
 
@@ -164,6 +196,14 @@ async def test_workspace_admin_can_list_workspace_audit_events(client, monkeypat
     )
     assert workspace_response.status_code == 200
     workspace_id = workspace_response.json()["workspace"]["workspace_id"]
+    organization_id = workspace_response.json()["workspace"]["organization_id"]
+    _grant_workspace_permissions(
+        mock_collaboration_service,
+        user_id=auth_context.user_id,
+        organization_id=organization_id,
+        permissions=["workspace.audit.read"],
+        name="workspace-audit-reader",
+    )
     mock_audit_service.events.append(_audit_event(workspace_id=workspace_response.json()["workspace"]["workspace_id"]))
 
     response = await client.get(

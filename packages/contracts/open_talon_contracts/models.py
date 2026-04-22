@@ -132,6 +132,7 @@ class ParticipantInput(BaseModel):
     description: str | None = None
     roles: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
+    iam_permissions: list[str] = Field(default_factory=list, exclude=True)
     visibility_scope: Visibility = "workspace"
 
 
@@ -353,7 +354,6 @@ class ParticipantProfile(BaseModel):
 class RoleDefinition(BaseModel):
     name: str
     definition: str
-    permissions: list[str] = Field(default_factory=list)
     updated_by: UUID
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -1312,12 +1312,10 @@ class AssumeParticipantRoleRequest(BaseModel):
     description: str | None = None
     capabilities: list[str] = Field(default_factory=list)
 
-
 class UpsertRoleDefinitionRequest(BaseModel):
     actor: ParticipantInput
     name: str
     definition: str
-    permissions: list[str] = Field(default_factory=list)
 
 
 class DeleteRoleDefinitionRequest(BaseModel):

@@ -26,9 +26,7 @@ from workspace_memory import (
     build_provider_index,
 )
 from open_talon_contracts.iam import (
-    DEFAULT_WORKSPACE_ROLE_PERMISSIONS,
     ORGANIZATION_ROLE_BASE_PERMISSIONS,
-    WORKSPACE_PERMISSION_NAMES,
 )
 
 from .contracts import (
@@ -194,7 +192,6 @@ _DEFAULT_WORKSPACE_ROLE_DEFINITIONS = {
     "user": "Collaborates in the workspace, participates in threads, and uses attached tools.",
 }
 
-_WORKSPACE_MANAGER_ROLES = {"admin", "supervisor"}
 _ORGANIZATION_ADMIN_ROLES = {"owner", "admin"}
 _MAX_RUN_STEP_ATTEMPTS = 3
 _MAX_TOOL_CALL_ATTEMPTS = 3
@@ -7184,7 +7181,7 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
-        effective_permissions = self._workspace_permissions_for_participant(workspace, participant)
+        effective_permissions = set(actor.iam_permissions)
         if permission in effective_permissions:
             return participant
         raise PermissionError(f"Workspace permission {permission!r} required")
@@ -7217,34 +7214,15 @@ class CollaborationKernel:
             role_map[name] = RoleDefinition(
                 name=name,
                 definition=definition,
-                permissions=list(DEFAULT_WORKSPACE_ROLE_PERMISSIONS.get(name, ())),
                 updated_by=updated_by,
                 updated_at=updated_at,
             ).model_dump(mode="json")
         if isinstance(raw, dict):
             for key, value in raw.items():
-                role_definition = RoleDefinition.model_validate(value)
-                if not role_definition.permissions and key in DEFAULT_WORKSPACE_ROLE_PERMISSIONS:
-                    role_definition = role_definition.model_copy(
-                        update={
-                            "permissions": list(DEFAULT_WORKSPACE_ROLE_PERMISSIONS[key]),
-                        }
-                    )
-                role_map[key] = role_definition.model_dump(mode="json")
+                role_map[key] = RoleDefinition.model_validate(value).model_dump(mode="json")
         elif isinstance(raw, list):
             for value in raw:
                 role_definition = RoleDefinition.model_validate(value)
-                if (
-                    not role_definition.permissions
-                    and role_definition.name in DEFAULT_WORKSPACE_ROLE_PERMISSIONS
-                ):
-                    role_definition = role_definition.model_copy(
-                        update={
-                            "permissions": list(
-                                DEFAULT_WORKSPACE_ROLE_PERMISSIONS[role_definition.name]
-                            ),
-                        }
-                    )
                 role_map[role_definition.name] = role_definition.model_dump(mode="json")
         return role_map
 
@@ -7295,51 +7273,10 @@ class CollaborationKernel:
     def _role_definitions_from_workspace(workspace: Workspace) -> list[RoleDefinition]:
         raw = workspace.metadata.get("role_definitions", {})
         if isinstance(raw, dict):
-            return [
-                CollaborationKernel._hydrate_workspace_role_definition(
-                    key,
-                    RoleDefinition.model_validate(item),
-                )
-                for key, item in raw.items()
-            ]
+            return [RoleDefinition.model_validate(item) for item in raw.values()]
         if isinstance(raw, list):
-            return [
-                CollaborationKernel._hydrate_workspace_role_definition(
-                    role_definition.name,
-                    role_definition,
-                )
-                for role_definition in (
-                    RoleDefinition.model_validate(item) for item in raw
-                )
-            ]
+            return [RoleDefinition.model_validate(item) for item in raw]
         return []
-
-    @staticmethod
-    def _hydrate_workspace_role_definition(
-        name: str,
-        role_definition: RoleDefinition,
-    ) -> RoleDefinition:
-        if role_definition.permissions or name not in DEFAULT_WORKSPACE_ROLE_PERMISSIONS:
-            return role_definition
-        return role_definition.model_copy(
-            update={"permissions": list(DEFAULT_WORKSPACE_ROLE_PERMISSIONS[name])}
-        )
-
-    @staticmethod
-    def _workspace_permissions_for_participant(
-        workspace: Workspace,
-        participant: ParticipantProfile,
-    ) -> set[str]:
-        role_map = {
-            role_definition.name: role_definition
-            for role_definition in CollaborationKernel._role_definitions_from_workspace(workspace)
-        }
-        permissions: set[str] = set()
-        for role_name in participant.roles:
-            role_definition = role_map.get(role_name)
-            if role_definition is not None:
-                permissions.update(role_definition.permissions)
-        return permissions
 
     async def _human_has_organization_permission(
         self,

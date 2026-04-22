@@ -59,6 +59,7 @@ from test_agent_contracts import (  # noqa: E402
     ReviewToolGenerationRevisionRequest,
     ToolCallResult,
     _claim_single_pending_task,
+    _workspace_manager_actor,
 )
 
 
@@ -137,6 +138,7 @@ async def test_tinker_can_publish_and_execute_fibonacci_tool(
         user_id=admin_user_id,
         display_name="Workspace Admin",
     )
+    admin_actor = _workspace_manager_actor(admin_actor)
 
     now = datetime.now(timezone.utc)
     tinker_created = await kernel.create_system_agent(

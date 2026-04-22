@@ -4757,10 +4757,7 @@ class CollaborationRepository:
             if participant_type == "agent"
             else row["description"]
         )
-        roles = (
-            [row["agent_role"]] if participant_type == "agent" and row["agent_role"] else
-            list(CollaborationRepository._json_value(row["roles"], default=[]))
-        )
+        roles = list(CollaborationRepository._json_value(row["roles"], default=[]))
         capabilities = (
             list(CollaborationRepository._json_value(row["agent_capabilities"], default=[]))
             if participant_type == "agent"

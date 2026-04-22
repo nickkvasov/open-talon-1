@@ -35,18 +35,23 @@ Primary local flow:
 - Principal IAM is provider-neutral: the external OIDC provider handles authentication, and Open Talon owns authorization.
 - The tenant hierarchy is `platform > organization > workspace`.
 - Keycloak is the default local OIDC provider and first machine-identity provisioning adapter, not the source of truth for authorization.
-- Organization membership and org roles live in Postgres, not in external IdP claims.
+- Organization membership and membership roles live in Postgres, not in external IdP claims.
 - `participants` is a workspace-scoped attachment/state table.
 - Human identity lives in `users`.
 - External identity mappings live in `auth_identities`.
 - Agent identity/configuration lives in `system_agents`.
 - Machine principal linkage lives in `agent_identities`.
 - Global and organization IAM role definitions live in `iam_role_definitions` with separate human and agent bindings.
+- Use `IAM role` only for `iam_role_definitions` and the direct bindings built on top of them.
+- Use `organization membership role` for `organization_memberships.role`.
+- Use `collaboration role` for workspace-local labels in `participants.roles` that humans and agents assume for routing and discovery.
+- Use `capability` for workspace-local labels in `participants.capabilities`.
+- Use `collaboration role definition` for entries in `workspace.metadata.role_definitions`.
 - `participants.user_id` and `participants.system_agent_id` are the normalized references.
 - Keep `users.user_id` distinct from `participants.participant_id` for human users.
 - Do not duplicate agent profile/config data back into `participants`.
-- Keep workspace-local state on `participants`: status, visibility scope, roles, capabilities, timestamps, and metadata.
-- Workspace `role_definitions.permissions` is the canonical workspace authorization layer for both human and agent participants.
+- Keep workspace-local state on `participants`: status, visibility scope, collaboration roles, capabilities, timestamps, and metadata.
+- Keep workspace `role_definitions` as collaboration-role metadata only. Do not use them as an authorization layer.
 - Humans and agents share the same permission names, but not the same global or organization role bindings.
 - Keep execution-side workspace materialization separate from collaboration `Workspace` models. Use `ExecutionWorkspaceRef` for executor payloads.
 - Authenticated human identity should be derived in `gateway-edge` from OIDC auth context, not trusted from client-provided actor fields.
@@ -57,7 +62,7 @@ Primary local flow:
 - `/v1/me` is human-only; machine principals should use the IAM and collaboration APIs directly.
 - Global system-definition, global publish, provider-management, and IAM-management routes require the matching global IAM permission unless the request is coming through an existing operator/system-auth path or bootstrap platform-admin access.
 - Organization CRUD and organization-scoped management routes require the relevant organization permission from baseline membership roles or explicit IAM role bindings, unless the caller is a platform admin.
-- Workspace role-definition changes, workspace participant-management, workspace tool management, workspace Git repository creation, and workspace asset publishing require the matching workspace permission on the caller's participant role definition.
+- Workspace role-definition changes, workspace participant-management, workspace tool management, workspace Git repository creation, and workspace asset publishing require the matching workspace-scoped IAM permission plus participant attachment.
 - Organization-scoped agents, tools, providers, repositories, and assets must stay inside the same organization as the consuming workspace.
 - Tinker-generated tools may publish to `global` or `organization` scope, but approval publishes into the system catalog only.
 - Tinker revision approval requires `tool_generation.review` plus `tool_catalog.write` in the target publication scope.

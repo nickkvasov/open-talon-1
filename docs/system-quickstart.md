@@ -2,6 +2,8 @@
 
 This is the fastest path to get the full local Open Talon system running with the current provider-neutral principal IAM model and the default local Keycloak-backed OIDC flow.
 
+The default launcher setting is still `AUTH_MODE=any`, so the local gateway accepts OIDC, API key, or OpenBao auth unless you override that env var. The steps below use the OIDC path because that is the intended human and machine-principal flow.
+
 For full current-state reference material, use:
 
 - [system-api-reference.md](./system-api-reference.md)
@@ -219,15 +221,26 @@ Relevant runtime-guardrail defaults from [`infrastructure/.env.example`](/Users/
 - The imported `open-talon` realm is configured for local HTTP development with `sslRequired=none`.
 - The local startup flow also runs a `keycloak-init` step that sets `sslRequired=none` for both `master` and `open-talon`.
 - Keycloak is the default local OIDC provider and the first machine-identity provisioning adapter, but Open Talon owns authorization and audit.
+- The default launcher setting remains `AUTH_MODE=any`. Narrow it to `oidc` locally if you want to validate only the OIDC path.
 - The TUI uses the `open-talon-tui` public client and authenticates with OIDC device flow.
 - The admin web uses the `open-talon-web` public client with authorization code + PKCE.
 - Human identity is global in `users` and `auth_identities`.
 - Machine identity linkage is stored in `agent_identities` and points back to `system_agents`.
 - Global and organization IAM roles live in `iam_role_definitions` with separate human and agent bindings.
-- Organization membership and org roles are stored in `organization_memberships`.
+- Organization membership and human membership roles are stored in `organization_memberships`.
 - Workspace-local membership is stored in `participants`.
-- Workspace role definitions now carry explicit workspace-management permissions.
+- Workspace access and workspace-management routes are enforced by IAM permissions together with participant attachment.
 - `GET /v1/me` is human-only. Machine principals use the IAM and collaboration APIs directly.
+
+Role terminology:
+
+- `IAM role`: global or organization authorization role from `iam_role_definitions`
+- `organization membership role`: baseline human tenancy role from `organization_memberships.role`
+- `collaboration role`: workspace-local assumed role in `participants.roles`, used for routing with `@role:<name>`
+- `capability`: workspace-local advertised label in `participants.capabilities`, used for routing with `@capability:<name>`
+- `collaboration role definition`: workspace-local role description in `workspace.metadata.role_definitions`
+
+Collaboration roles are not IAM roles. They are workspace-local collaboration and discovery labels.
 
 Local multi-tenant defaults:
 
@@ -239,10 +252,10 @@ Current local hardening defaults:
 
 - the local Keycloak `admin` role still acts as bootstrap platform-admin access, but steady-state authorization comes from Open Talon IAM permissions
 - global system-definition, global publish, provider-management, IAM-management, and runtime-overview APIs require the matching global IAM permission or bootstrap platform-admin access
-- organization CRUD, organization membership changes, and organization-scoped IAM management require organization permissions from membership baseline roles or explicit role bindings
+- organization CRUD, organization membership changes, and organization-scoped IAM management require organization permissions from membership baseline roles or explicit IAM role bindings
 - `GET /v1/workspaces` only returns workspaces where the authenticated human already has a participant
 - non-members should receive `404` for workspace, thread, memory, and workspace-scoped asset reads
-- workspace role-definition changes, workspace agent management, workspace tool management, workspace Git repository creation, and workspace asset publishing require the matching workspace permission on the caller's participant role definition
+- workspace role-definition changes, workspace agent management, workspace tool management, workspace Git repository creation, and workspace asset publishing require the matching workspace-scoped IAM permission together with participant attachment
 - risky tools must be created as `trust_level="trusted"` if they use `workspace_access=read_write`, `network=full`, or `local_process`
 
 For the detailed permission catalog and `/v1/iam/...` API surface, see [iam.md](./iam.md).
@@ -262,9 +275,9 @@ The running system uses the tenant hierarchy `platform > organization > workspac
 Identity and execution boundaries:
 
 - human identity is global in `users` and `auth_identities`
-- organization membership and org roles live in `organizations` and `organization_memberships`
+- organization membership and membership roles live in `organizations` and `organization_memberships`
 - agent identity/configuration is global in `system_agents`
-- workspace-local presence, roles, capabilities, and visibility live in `participants`
+- workspace-local presence, collaboration roles, capabilities, and visibility live in `participants`
 - Postgres is the source of truth for collaboration and execution state
 - Kafka is the fanout and worker wake-up bus, not the canonical store
 
@@ -284,7 +297,7 @@ Current thread-native request flow:
 5. When complete, `core-collab` creates a follow-up task only for the original requesting agent.
 6. `agent-runtime` resumes that agent with the request and accumulated answers in context.
 
-For workspace debugging, there is also a workspace communication-log view backed by canonical `timeline_messages`. It aggregates regular thread messages, rendered interaction requests, and interaction answers across the workspace. Finalized communication entries are also appended to workspace JSONL files under `OPEN_TALON_COMMUNICATION_LOG_DIR` so the collaboration trace can be inspected from disk. Those JSONL files rotate automatically using `OPEN_TALON_COMMUNICATION_LOG_MAX_BYTES` and `OPEN_TALON_COMMUNICATION_LOG_BACKUP_COUNT`. Local `./open-talon start` service logs under `.run/` also rotate automatically using `OPEN_TALON_SERVICE_LOG_MAX_BYTES` and `OPEN_TALON_SERVICE_LOG_BACKUP_COUNT`. The HTTP route is intended for workspace `admin` or `supervisor` users when using OIDC.
+For workspace debugging, there is also a workspace communication-log view backed by canonical `timeline_messages`. It aggregates regular thread messages, rendered interaction requests, and interaction answers across the workspace. Finalized communication entries are also appended to workspace JSONL files under `OPEN_TALON_COMMUNICATION_LOG_DIR` so the collaboration trace can be inspected from disk. Those JSONL files rotate automatically using `OPEN_TALON_COMMUNICATION_LOG_MAX_BYTES` and `OPEN_TALON_COMMUNICATION_LOG_BACKUP_COUNT`. Local `./open-talon start` service logs under `.run/` also rotate automatically using `OPEN_TALON_SERVICE_LOG_MAX_BYTES` and `OPEN_TALON_SERVICE_LOG_BACKUP_COUNT`. The HTTP route requires both participant attachment and the IAM permission `workspace.audit.read`.
 
 Relevant collaboration APIs:
 
@@ -488,7 +501,7 @@ Tinker is the seeded tool-generation agent. It must be attached to a workspace b
 
 Typical local flow:
 
-1. Sign in as a workspace `admin` or `supervisor`.
+1. Sign in as a workspace participant that can manage workspace attachments. In the seeded local setup that is typically `admin` or `supervisor`.
 2. Select an organization and workspace.
 3. Attach `Tinker` to that workspace.
 4. Open a thread and ask Tinker for a tool.
@@ -632,10 +645,10 @@ curl -X POST http://127.0.0.1:8000/v1/audit/events/export \
 
 Current access model:
 
-- system `admin` can query, verify, and export globally
-- organization `owner` and `admin` can query and export organization-scoped audit
-- workspace `admin` and `supervisor` can read workspace-scoped audit
-- regular `user` cannot read audit
+- global audit APIs require `audit.read`, `audit.verify`, and `audit.export`
+- organization audit APIs require the same identity permissions in the target organization scope
+- workspace audit APIs require `workspace.audit.read`, `workspace.audit.verify`, and `workspace.audit.export`
+- workspace audit and workspace-management routes are enforced by IAM permissions plus participant attachment; collaboration roles do not grant authorization
 
 Useful local checks:
 
@@ -833,6 +846,6 @@ Expected healthy signal from the helper logs:
 ## Notes
 
 - Human identity is global in `users` and `auth_identities`.
-- Workspace-local presence and roles live in `participants`.
+- Workspace-local presence, collaboration roles, and capabilities live in `participants`.
 - Do not treat `participant_id` as a global user identity.
 - OpenBao remains in the stack for secrets, while the default local OIDC provider is Keycloak and authorization is owned by Open Talon.

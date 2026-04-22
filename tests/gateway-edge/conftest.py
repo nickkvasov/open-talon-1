@@ -31,7 +31,6 @@ from open_talon_contracts.agent_contracts import (
     build_default_interaction_contract,
     interaction_contract_is_empty,
 )
-from open_talon_contracts.iam import DEFAULT_WORKSPACE_ROLE_PERMISSIONS
 
 
 @asynccontextmanager
@@ -103,21 +102,18 @@ class MockCollaborationService:
             "admin": RoleDefinition(
                 name="admin",
                 definition="Manages the workspace, participants, tools, and provider configuration.",
-                permissions=DEFAULT_WORKSPACE_ROLE_PERMISSIONS["admin"],
                 updated_by=payload.actor.participant_id,
                 updated_at=now,
             ),
             "supervisor": RoleDefinition(
                 name="supervisor",
                 definition="Coordinates delivery, reviews work, and guides workspace members without full administrative control.",
-                permissions=DEFAULT_WORKSPACE_ROLE_PERMISSIONS["supervisor"],
                 updated_by=payload.actor.participant_id,
                 updated_at=now,
             ),
             "user": RoleDefinition(
                 name="user",
                 definition="Collaborates in the workspace, participates in threads, and uses attached tools.",
-                permissions=DEFAULT_WORKSPACE_ROLE_PERMISSIONS["user"],
                 updated_by=payload.actor.participant_id,
                 updated_at=now,
             ),
@@ -1167,7 +1163,6 @@ class MockCollaborationService:
         role_definition = RoleDefinition(
             name=payload.name,
             definition=payload.definition,
-            permissions=list(payload.permissions),
             updated_by=payload.actor.participant_id,
             updated_at=datetime.now(timezone.utc),
         )

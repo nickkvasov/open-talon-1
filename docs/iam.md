@@ -5,8 +5,11 @@ Open Talon now treats IAM as a provider-neutral principal system:
 - An external OIDC identity provider authenticates humans and machine principals.
 - Open Talon owns authorization, tenant scoping, role bindings, and audit.
 - Humans and agents share one permission catalog.
-- Workspace-scoped management permissions live on workspace role definitions.
+- Workspace-scoped permissions are still IAM permissions.
+- Workspace access is enforced by IAM permission checks together with participant attachment.
 - Local development uses Keycloak as the default provider adapter, but the core runtime contracts and persistence are provider-neutral.
+
+This document is about IAM roles and IAM bindings. It does not define collaboration roles such as `frontend_engineer` or `team_lead`, and it does not define participant capabilities such as `qa_review` or `tool:fibonacci`. Collaboration-role definitions are also outside IAM.
 
 ## Authentication
 
@@ -30,6 +33,8 @@ Open Talon does not mint or broker JWTs. Human users authenticate through normal
 
 `GET /v1/me` is intentionally human-only. Machine principals use the IAM and collaboration APIs directly.
 
+In local development, the launcher still defaults to `AUTH_MODE=any`. OIDC is the intended principal-IAM path, but API key and OpenBao auth remain accepted locally unless you narrow that setting.
+
 ## Persistence
 
 Provider-neutral principal IAM state lives in:
@@ -43,8 +48,9 @@ Related ownership boundaries:
 
 - `users` and `auth_identities` remain the global human identity layer
 - `system_agents` remains the global or organization agent-definition layer
-- `organization_memberships` remains the tenancy and baseline human-role layer
-- `participants` and workspace `role_definitions` remain the workspace-local authority layer
+- `organization_memberships` remains the tenancy and baseline human membership-role layer
+- `participants` remain the workspace-local collaboration and presence layer
+- workspace `role_definitions` remain workspace-local collaboration-role metadata
 
 ## Authorization
 
@@ -79,7 +85,7 @@ Examples:
 - `audit.export`
 - `audit.verify`
 
-Workspace role definitions now carry explicit permissions.
+Workspace-scoped IAM permissions are enforced only after the caller is attached as a participant in the target workspace.
 
 Examples:
 
@@ -92,12 +98,6 @@ Examples:
 - `workspace.audit.read`
 - `workspace.audit.export`
 - `workspace.audit.verify`
-
-Default workspace roles are backfilled with permission bundles:
-
-- `admin`
-- `supervisor`
-- `user`
 
 ## Baseline human authorization
 
@@ -112,7 +112,29 @@ Extra human IAM role bindings can extend that baseline.
 Agent permissions come from:
 
 - explicit global or organization agent IAM role bindings
-- workspace participant permissions when the agent is attached to a workspace and its participant role carries workspace permissions
+- the same workspace-scoped IAM permissions as human principals, evaluated only after the linked agent is attached as a workspace participant
+
+## Role layers
+
+Open Talon has several distinct role-like concepts:
+
+- `IAM role`
+  Stored in `iam_role_definitions` and bound through `human_role_bindings` or `agent_role_bindings`.
+  These govern global and organization control-plane authorization.
+- `organization membership role`
+  Stored in `organization_memberships.role`.
+  This is the baseline human tenancy tier such as `owner`, `admin`, or `member`.
+- `collaboration role`
+  Stored in `participants.roles`.
+  This is a workspace-local label used for collaboration routing and participant presentation, such as `frontend_engineer` or `team_lead`.
+- `capability`
+  Stored in `participants.capabilities`.
+  This is a workspace-local advertised label used for routing and discovery, such as `qa_review` or `tool:fibonacci`.
+- `collaboration role definition`
+  Stored in `workspace.metadata.role_definitions`.
+  This is a workspace-local role description used for collaboration discovery and UI help text. It is not an IAM role and it does not grant permissions.
+
+Do not call collaboration roles, capabilities, or collaboration-role definitions "IAM roles". They are separate layers with different scope and storage.
 
 ## IAM APIs
 
@@ -145,6 +167,12 @@ Organization-scoped APIs:
 
 Identity-specific follow-up routes such as role binding, rotate, disable, and enable operate on `/v1/iam/agent-identities/{agent_identity_id}/...` after the identity has been resolved.
 
+Current IAM management route guards:
+
+- list roles, list bindings, and list machine identities require `organization.members.read`
+- create, update, delete, bind, unbind, provision, rotate-secret, enable, and disable operations require `organization.members.write`
+- those permissions are evaluated globally on `/v1/iam/...` routes and within the target organization on `/v1/organizations/{organization_id}/iam/...` routes
+
 ## Machine identity provisioning
 
 Provisioning an agent identity returns:
@@ -159,6 +187,75 @@ Secrets are stored through the configured secret store and only returned during 
 
 Local development currently stores machine secrets in OpenBao and uses Keycloak as the first concrete provisioning adapter.
 
+## Machine principal walkthrough
+
+One concrete machine-principal flow looks like this:
+
+1. Create an agent IAM role with the permissions the machine needs.
+2. Provision an `agent_identity` for an existing `system_agent`.
+3. Exchange the returned `client_id` and `client_secret` for an OIDC access token at the provider `token_endpoint`.
+4. Call the protected Open Talon API with `Authorization: Bearer <token>`.
+
+Example global role:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/iam/agent-roles \
+  -H "Authorization: Bearer <human-admin-token>" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "org-tool-publisher",
+    "description": "Publish and review generated tools",
+    "permissions": ["tool_generation.review", "tool_catalog.write"]
+  }'
+```
+
+Example machine-identity provisioning:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/iam/agent-identities \
+  -H "Authorization: Bearer <human-admin-token>" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "system_agent_id": "<system-agent-id>",
+    "scope": "global"
+  }'
+```
+
+The response returns:
+
+- `agent_identity_id`
+- `client_id`
+- `client_secret`
+- `issuer`
+- `token_endpoint`
+
+Bind the IAM role to that machine identity:
+
+```bash
+curl -X POST \
+  "http://127.0.0.1:8000/v1/iam/agent-identities/<agent-identity-id>/roles/<role-id>" \
+  -H "Authorization: Bearer <human-admin-token>"
+```
+
+Exchange the machine credentials for a token directly with the OIDC provider:
+
+```bash
+curl -X POST "http://127.0.0.1:8081/realms/open-talon/protocol/openid-connect/token" \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'grant_type=client_credentials' \
+  -d 'client_id=<client-id>' \
+  -d 'client_secret=<client-secret>'
+```
+
+Then use the returned token against Open Talon:
+
+```bash
+curl -H "Authorization: Bearer <machine-token>" \
+  http://127.0.0.1:8000/v1/iam/agent-identities
+```
+
+For an organization-scoped machine identity, use the `/v1/organizations/{organization_id}/iam/...` variants instead.
+
 ## Authorization outcomes
 
 Open Talon keeps tenant-aware authorization semantics:
@@ -166,7 +263,7 @@ Open Talon keeps tenant-aware authorization semantics:
 - out-of-scope organization and workspace reads return `404`
 - in-scope requests without the required permission return `403`
 - platform-admin bootstrap access still exists locally through the configured OIDC admin role
-- steady-state authorization is intended to come from Open Talon IAM role bindings and workspace role permissions
+- steady-state authorization is intended to come from Open Talon IAM role bindings together with workspace participant attachment
 
 ## Current UI scope
 
