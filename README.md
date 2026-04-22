@@ -2,18 +2,19 @@
 
 This repository contains the local infrastructure, Python services, and client apps for Open Talon. The canonical developer Python environment is the repository-root `.venv`.
 
-For coding-agent-specific project guidance, see [`AGENTS.md`](/Users/nikolay.kvasov/Development/open-talon-1/AGENTS.md).
+For coding-agent-specific project guidance, see [`AGENTS.md`](./AGENTS.md).
 
 ## Documentation Map
 
-- [docs/system-quickstart.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/system-quickstart.md): fastest path to a running local stack
-- [docs/system-api-reference.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/system-api-reference.md): current system and API reference for engineers and client builders
-- [docs/iam.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/iam.md): provider-neutral principal IAM model, permission catalog, and IAM APIs
-- [docs/agent-operations-guide.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/agent-operations-guide.md): operating guide for software development agents and scripted test users
-- [docs/tinker-tool-generation.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/tinker-tool-generation.md): Tinker request, approval, catalog, and live-test workflow
-- [docs/db-migrations.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/db-migrations.md): migration workflow and schema rules
-- [docs/collaboration-system-design.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/collaboration-system-design.md): design background and architecture evolution
-- [AGENTS.md](/Users/nikolay.kvasov/Development/open-talon-1/AGENTS.md): repository contribution rules for coding agents
+- [docs/system-quickstart.md](./docs/system-quickstart.md): fastest path to a running local stack
+- [docs/system-api-reference.md](./docs/system-api-reference.md): current system and API reference for engineers and client builders
+- [docs/iam.md](./docs/iam.md): provider-neutral principal IAM model, permission catalog, and IAM APIs
+- [docs/agent-operations-guide.md](./docs/agent-operations-guide.md): operating guide for software development agents and scripted test users
+- [docs/tinker-tool-generation.md](./docs/tinker-tool-generation.md): Tinker request, approval, catalog, and live-test workflow
+- [docs/db-migrations.md](./docs/db-migrations.md): migration workflow and schema rules
+- [docs/collaboration-system-design.md](./docs/collaboration-system-design.md): design context and architecture notes
+- [docs/research-comparison.md](./docs/research-comparison.md): external ecosystem comparison for multi-agent research and enterprise platforms
+- [AGENTS.md](./AGENTS.md): repository contribution rules for coding agents
 
 ## System Overview
 
@@ -39,9 +40,41 @@ The typical flow is:
 5. The gateway streams results back to clients over HTTP, SSE, or WebSocket.
 6. Runtime observability is exported through a provider layer so Langfuse, OTLP-compatible sinks such as HyperDX, or no-op mode can be selected without changing executor code.
 
+## Current Platform Inventory
+
+| Component | Role today | Notes |
+| --- | --- | --- |
+| `services/gateway-edge` | public control plane and collaboration API | Owns REST, SSE, WebSocket, auth, admin, IAM, audit, collaboration, and session chat routes. |
+| `services/core-collab` | canonical collaboration and execution kernel | Owns Postgres persistence for workspaces, threads, participants, requests, tasks, runs, tool calls, memory, assets, and audit writes. |
+| `services/agent-runtime` | stateless execution plane | Runs the `agent-task-worker`, `agent-loop-worker`, `tool-worker`, and `reconciler`. |
+| `services/workspace-memory` | shared memory-provider abstraction | Keeps Postgres canonical while letting Mem0 and optional Memgraph act as derived retrieval layers. |
+| `services/generated-tools-builder` | Tinker build/publish helper | Packages generated tools for the OCI-style registry flow used during tool approval. |
+| `services/presence-directory` | reusable thread-presence primitives | Provides Valkey-backed websocket presence tracking used by `gateway-edge`. |
+| `apps/admin-web` | operator browser console | Manages organizations, workspaces, providers, swarm resources, runtime overview, API keys, and tool-generation review. |
+| `apps/tui` | human and scripted terminal clients | `tui2` is the preferred human client; `user-client` is the preferred scriptable client for multi-user tests. |
+| `packages/contracts` | shared contracts | Defines the Pydantic models and shared telemetry or registry contracts consumed across services. |
+| `infrastructure` | local runtime dependencies | Defines Docker-backed Postgres, Kafka, Valkey, Keycloak, OpenBao, Langfuse, ClickHouse, MinIO, Forgejo, Ollama, and optional Memgraph. |
+
+## Current Configuration Surface
+
+The running system is configured from a small set of current sources:
+
+- [`infrastructure/.env.example`](./infrastructure/.env.example): checked-in local defaults for ports, bootstrap credentials, worker settings, audit provider selection, and local model requirements.
+- `infrastructure/.env`: local override file read by `./open-talon` and Docker Compose.
+- [`services/gateway-edge/gateway_edge/config.py`](./services/gateway-edge/gateway_edge/config.py): gateway-side code defaults when env vars are absent.
+- [`services/agent-runtime/agent_runtime/config.py`](./services/agent-runtime/agent_runtime/config.py): runtime worker defaults for leases, concurrency, OCI registry settings, and communication-log paths.
+- [`apps/admin-web/public/runtime-config.json`](./apps/admin-web/public/runtime-config.json): browser runtime config loaded at app start so the built SPA stays relocatable across environments.
+- `.run/openai.env`: optional ignored local secret file auto-loaded by the Python services for secret access, not for provider definitions.
+
+Auth-mode nuance:
+
+- if you import `gateway-edge` with no env at all, `auth_mode` defaults to `none`
+- the checked-in local launcher path and [`infrastructure/.env.example`](./infrastructure/.env.example) set `AUTH_MODE=any`
+- the documented local dev path is OIDC-first and also accepts API keys and OpenBao auth unless you narrow the mode explicitly
+
 ## Identity And Auth
 
-Open Talon now separates:
+Open Talon separates:
 
 - `users`: stable human identity records
 - `auth_identities`: external IdP mappings for authenticated humans
@@ -60,12 +93,12 @@ Role terminology in this repository:
 
 Collaboration roles are not IAM roles. They are workspace-local collaboration and discovery labels that humans or agents can assume inside a workspace.
 
-Authentication is handled through an external OIDC provider. Local development uses **Keycloak** as the default provider and first machine-identity provisioning adapter, but the runtime contracts are provider-neutral. The default local launcher setting is still `AUTH_MODE=any`, so the running gateway accepts OIDC, API key, or OpenBao auth unless you narrow that setting explicitly. `gateway-edge` validates bearer tokens, maps human `(issuer, subject)` pairs to `users.user_id`, maps machine `(provider_key, issuer, client_id)` tuples to `agent_identities`, and resolves workspace actors server-side.
+Authentication is handled through an external OIDC provider. Local development uses **Keycloak** as the default provider and first machine-identity provisioning adapter, but the runtime contracts are provider-neutral. The default local launcher setting is `AUTH_MODE=any`, so the running gateway accepts OIDC, API key, or OpenBao auth unless you narrow that setting explicitly. `gateway-edge` validates bearer tokens, maps human `(issuer, subject)` pairs to `users.user_id`, maps machine `(provider_key, issuer, client_id)` tuples to `agent_identities`, and resolves workspace actors server-side.
 
 Important implications:
 
 - client apps should not treat `participant_id` as a global human identity
-- authenticated human requests may still include an `actor` object for compatibility, but the gateway derives the effective human actor from the bearer token
+- authenticated human requests may include an `actor` object for compatibility, but the gateway derives the effective human actor from the bearer token
 - machine principals authenticate with client credentials issued by the configured OIDC provider and are linked back to `system_agents` through `agent_identities`
 - organization membership and membership roles live in Postgres, not in Keycloak claims
 - humans and agents share one permission catalog, but global and organization IAM roles are stored separately for each subject kind
@@ -81,7 +114,7 @@ Important implications:
 - the local Keycloak dev setup is intended to allow HTTP during development; `keycloak-init` normalizes `sslRequired=none` for both `master` and `open-talon`, and you can re-apply that with `docker compose up -d keycloak keycloak-init`
 - browser-based admin flows use the `open-talon-web` public client with authorization code + PKCE; terminal flows use `open-talon-tui` with device flow; machine principals use client credentials against the configured provider
 
-For the detailed permission catalog and IAM API surface, see [docs/iam.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/iam.md).
+For the detailed permission catalog and IAM API surface, see [docs/iam.md](./docs/iam.md).
 
 ## Collaboration Model
 
@@ -101,7 +134,7 @@ Important rules:
 
 - the effective tenant hierarchy is `platform > organization > workspace > thread`
 - `users` are global human identities, `organization_memberships` hold org-level access, and `participants` remain workspace-local state
-- `system_agents`, `system_tools`, `llm_providers`, and `memory_providers` can now be platform-global or organization-scoped
+- `system_agents`, `system_tools`, `llm_providers`, and `memory_providers` can be platform-global or organization-scoped
 - thread activity is ordered by a monotonic thread-local `sequence`
 - Postgres is the source of truth for collaboration and execution state; Kafka is the wake-up and fanout bus
 - threads are the shared surface in v1; tracked requests are rendered into the same thread instead of using private DM semantics
@@ -124,7 +157,7 @@ The current thread-native request flow is:
 5. When the request is complete, `core-collab` creates a follow-up task targeted only to the original requesting agent.
 6. `agent-runtime` resumes that agent with the original request, targets, and accumulated answers in execution context.
 
-For workspace-level debugging, Open Talon now also exposes a communication log view backed by canonical `timeline_messages`. It aggregates thread messages, rendered interaction requests, and interaction answers across the workspace, and requires both participant attachment and the IAM permission `workspace.audit.read`. Finalized communications are also appended to workspace JSONL files under `OPEN_TALON_COMMUNICATION_LOG_DIR` (default: `infrastructure/data/communication-logs/<workspace_id>.jsonl`) so end-to-end collaboration traces survive outside the database. These JSONL files now rotate automatically with `OPEN_TALON_COMMUNICATION_LOG_MAX_BYTES` and `OPEN_TALON_COMMUNICATION_LOG_BACKUP_COUNT`, and local `./open-talon start` service logs under `.run/` rotate with `OPEN_TALON_SERVICE_LOG_MAX_BYTES` and `OPEN_TALON_SERVICE_LOG_BACKUP_COUNT`.
+For workspace-level debugging, Open Talon exposes a communication log view backed by canonical `timeline_messages`. It aggregates thread messages, rendered interaction requests, and interaction answers across the workspace, and requires both participant attachment and the IAM permission `workspace.audit.read`. Finalized communications are also appended to workspace JSONL files under `OPEN_TALON_COMMUNICATION_LOG_DIR` (default: `infrastructure/data/communication-logs/<workspace_id>.jsonl`) so end-to-end collaboration traces survive outside the database. These JSONL files rotate automatically with `OPEN_TALON_COMMUNICATION_LOG_MAX_BYTES` and `OPEN_TALON_COMMUNICATION_LOG_BACKUP_COUNT`, and local `./open-talon start` service logs under `.run/` rotate with `OPEN_TALON_SERVICE_LOG_MAX_BYTES` and `OPEN_TALON_SERVICE_LOG_BACKUP_COUNT`.
 
 Common collaboration endpoints:
 
@@ -150,7 +183,7 @@ Common collaboration endpoints:
 
 ## Admin Web
 
-The admin web app lives in [apps/admin-web](/Users/nikolay.kvasov/Development/open-talon-1/apps/admin-web) and is the main browser surface for:
+The admin web app lives in [apps/admin-web](./apps/admin-web) and is the main browser surface for:
 
 - organization creation and membership management
 - runtime overview and operator visibility
@@ -170,7 +203,7 @@ npm run dev
 
 With the local stack running, the default browser entrypoint is [http://localhost:5173](http://localhost:5173).
 
-The local stack seeds a single backfilled organization named `Default Organization`, so the browser auto-selects it until you create more organizations.
+The local stack seeds a single organization named `Default Organization`, so the browser auto-selects it until you create more organizations.
 
 The app expects:
 
@@ -181,12 +214,12 @@ The app expects:
 
 Deployment notes:
 
-- the built SPA now reads browser runtime config from `apps/admin-web/public/runtime-config.json`
+- the built SPA reads browser runtime config from `apps/admin-web/public/runtime-config.json`
 - that runtime file is meant to be replaced per environment so the same built artifact can move across dev, staging, and prod without rebuilding
 - `appBasePath` in that file must match the deployed SPA mount point such as `/` or `/admin`
-- the Vite bundle now emits relative asset paths so the app can be served from a subpath
+- the Vite bundle emits relative asset paths so the app can be served from a subpath
 
-See [apps/admin-web/README.md](/Users/nikolay.kvasov/Development/open-talon-1/apps/admin-web/README.md) for the full browser test and deployment guide.
+See [apps/admin-web/README.md](./apps/admin-web/README.md) for the full browser test and deployment guide.
 
 ## Operational Guardrails
 
@@ -204,7 +237,7 @@ The current defaults are aimed at a single medium-sized internal company deploym
 
 ## Audit Logging
 
-Open Talon now has a dedicated audit subsystem that is separate from the collaboration domain event stream.
+Open Talon has a dedicated audit subsystem that is separate from the collaboration domain event stream.
 
 - `collab_event_log` remains the collaboration/event fanout stream
 - `audit_event_ledger` is the canonical append-only audit ledger
@@ -253,7 +286,7 @@ Provider defaults are selected through env-backed settings:
 
 The authoritative audit interface remains the Open Talon API backed by Postgres. Projection, relay, export, and checkpoint backends are replaceable and must stay non-blocking for canonical writes.
 
-An optional local HyperDX all-in-one profile is now available in Docker Compose for UI and OTLP intake experiments:
+An optional local HyperDX all-in-one profile is available in Docker Compose for UI and OTLP intake experiments:
 
 ```bash
 docker compose -f infrastructure/docker-compose.yaml --profile hyperdx up -d hyperdx
@@ -276,7 +309,7 @@ Open Talon models tools in two layers:
 
 This means a tool is defined once at the platform or organization layer, then added to any compatible workspace that wants to advertise it to attached agents.
 
-Generated tools now follow the same model through `Tinker`:
+Generated tools follow the same model through `Tinker`:
 
 - `Tinker` is a seeded system agent that must be attached to a workspace before users can ask it for new tools
 - a request can target `global` or `organization` scope
@@ -295,11 +328,11 @@ When a tool is attached to a workspace, attached agent participants advertise it
 
 ## Execution Infrastructure
 
-Open Talon now runs agent execution through durable stateless workers:
+Open Talon runs agent execution through durable stateless workers:
 
 - Postgres is the source of truth for execution state
 - Kafka is the wake-up and fanout bus
-- `gateway-edge` no longer runs agent loops in-process
+- `gateway-edge` delegates agent-loop execution to `agent-runtime`
 - `agent-task-worker` claims `tasks`, creates `runs`, and resolves the target LLM engine
 - `agent-loop-worker` claims `run_steps` and executes model turns
 - `tool-worker` claims `tool_calls` and dispatches isolated tool execution
@@ -318,7 +351,7 @@ V1 execution backends:
 
 The Docker backend uses a short-lived container with a read-only root filesystem, dropped capabilities, no-new-privileges, resource limits, and `--network none` by default.
 
-Runtime guardrails now also include:
+Runtime guardrails include:
 
 - bounded retry scheduling through `next_retry_at` on `run_steps` and `tool_calls`
 - reconciler backoff of `30s`, `2m`, and `10m`, with terminal failure after the third expired lease
@@ -344,7 +377,7 @@ Common tool endpoints:
 
 ## Layered Memory
 
-Open Talon now uses a layered memory model with a single canonical store and optional derived providers.
+Open Talon uses a layered memory model with a single canonical store and optional derived providers.
 
 Memory layers:
 
@@ -369,7 +402,7 @@ This intentionally means there is physical duplication between canonical rows an
 - Postgres owns correctness, visibility, confirmation state, lifecycle, and auditability
 - Mem0 and optional graph backends own semantic or relational retrieval
 
-The provider abstraction lives in [services/workspace-memory/workspace_memory/providers.py](/Users/nikolay.kvasov/Development/open-talon-1/services/workspace-memory/workspace_memory/providers.py). `core-collab` always writes canonical memory first and then syncs enabled providers through the common provider interface.
+The provider abstraction lives in [services/workspace-memory/workspace_memory/providers.py](./services/workspace-memory/workspace_memory/providers.py). `core-collab` always writes canonical memory first and then syncs enabled providers through the common provider interface.
 
 Common memory endpoints:
 
@@ -397,10 +430,10 @@ Current built-in providers:
 
 To add another provider:
 
-1. Implement the `MemoryProvider` protocol in [services/workspace-memory/workspace_memory/providers.py](/Users/nikolay.kvasov/Development/open-talon-1/services/workspace-memory/workspace_memory/providers.py).
+1. Implement the `MemoryProvider` protocol in [services/workspace-memory/workspace_memory/providers.py](./services/workspace-memory/workspace_memory/providers.py).
 2. Register it in `build_provider_index(...)`.
 3. Add a provider definition through the memory-provider admin API or seed it in a migration.
-4. Reuse the shared secret resolution helpers in [services/workspace-memory/workspace_memory/secrets.py](/Users/nikolay.kvasov/Development/open-talon-1/services/workspace-memory/workspace_memory/secrets.py).
+4. Reuse the shared secret resolution helpers in [services/workspace-memory/workspace_memory/secrets.py](./services/workspace-memory/workspace_memory/secrets.py).
 5. Add route, health, and provider-level tests.
 
 The provider contract is intentionally small:
@@ -486,7 +519,7 @@ That provider can then be exposed by registering it in `build_provider_index(...
 
 `./open-talon start` brings up the full local infrastructure stack and then starts the supported local processes for:
 
-It now waits for both the gateway readiness endpoint and the configured OIDC discovery document before returning success. In local development, that means Keycloak browser, device-flow, and machine-credential auth should already have their dependencies online when the command exits.
+It waits for both the gateway readiness endpoint and the configured OIDC discovery document before returning success. In local development, that means Keycloak browser, device-flow, and machine-credential auth should already have their dependencies online when the command exits.
 
 - `gateway-edge`
 - `agent-task-worker`
@@ -608,7 +641,7 @@ These are local dev defaults from `infrastructure/.env.example`. Override them i
 
 The bundled pgAdmin server import is also pinned to the default local Postgres connection (`postgres:5432`, database `app_db`, user `admin`). If you change those Postgres values in `infrastructure/.env`, update `infrastructure/pgadmin/servers.json` and `infrastructure/pgadmin/pgpass` to keep the preconfigured connection working.
 
-The compose stack currently pins pgAdmin to `dpage/pgadmin4:9.13.0` in [`infrastructure/docker-compose.yaml`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/docker-compose.yaml#L17) for reproducible local setup.
+The compose stack currently pins pgAdmin to `dpage/pgadmin4:9.13.0` in [`infrastructure/docker-compose.yaml`](./infrastructure/docker-compose.yaml#L17) for reproducible local setup.
 
 ## Persistence Design
 
@@ -678,7 +711,7 @@ curl -X POST http://127.0.0.1:8200/v1/secret/data/open-talon/llm/openai \
   -d '{"data":{"api_key":"sk-..."}}'
 ```
 
-The local OpenBao container now uses persistent file storage, so secrets survive `./open-talon stop` and `docker compose down`. To fully reset the local secret store, remove `infrastructure/data/openbao` before starting the stack again.
+The local OpenBao container uses persistent file storage, so secrets survive `./open-talon stop` and `docker compose down`. To fully reset the local secret store, remove `infrastructure/data/openbao` before starting the stack again.
 
 The runtime secret provider will then try `env` first and `openbao` second by default.
 
@@ -773,20 +806,20 @@ To add another hosted or network LLM provider cleanly:
 
 1. Create or validate the provider through `POST /v1/llm-providers` or `POST /v1/llm-providers/validate` with a unique `engine_id`, endpoint details, capabilities, locality, and `secret_config`.
 2. Store the provider secret in OpenBao, or point `secret_config.env` at an environment variable for local-only development.
-3. If the provider uses a provider-specific wire protocol, add an execution branch in [runtime.py](/Users/nikolay.kvasov/Development/open-talon-1/services/agent-runtime/agent_runtime/runtime.py), similar to the OpenAI path.
-4. If the new provider needs a new secret backend instead of `env` or `openbao`, add a new `SecretProvider` implementation in [secrets.py](/Users/nikolay.kvasov/Development/open-talon-1/services/agent-runtime/agent_runtime/secrets.py) and register it in `build_default_secret_resolver()`.
+3. If the provider uses a provider-specific wire protocol, add an execution branch in [runtime.py](./services/agent-runtime/agent_runtime/runtime.py), similar to the OpenAI path.
+4. If the new provider needs a new secret backend instead of `env` or `openbao`, add a new `SecretProvider` implementation in [secrets.py](./services/agent-runtime/agent_runtime/secrets.py) and register it in `build_default_secret_resolver()`.
 
 For most API-key-based providers, the persistence and secret wiring should not require executor changes beyond the provider-specific request/response format.
 
 ## Quickstart
 
-For the shortest end-to-end local setup flow, see [`docs/system-quickstart.md`](/Users/nikolay.kvasov/Development/open-talon-1/docs/system-quickstart.md).
+For the shortest end-to-end local setup flow, see [`docs/system-quickstart.md`](./docs/system-quickstart.md).
 
 ## TUI
 
-For TUI setup, usage, and slash command documentation, see [`apps/tui/README.md`](/Users/nikolay.kvasov/Development/open-talon-1/apps/tui/README.md).
+For TUI setup, usage, and slash command documentation, see [`apps/tui/README.md`](./apps/tui/README.md).
 
-For the end-to-end Tinker flow, including approval and manual workspace attachment, see [`docs/tinker-tool-generation.md`](/Users/nikolay.kvasov/Development/open-talon-1/docs/tinker-tool-generation.md).
+For the end-to-end Tinker flow, including approval and manual workspace attachment, see [`docs/tinker-tool-generation.md`](./docs/tinker-tool-generation.md).
 
 In the current auth model, the TUI is a **multi-profile** client:
 
@@ -854,12 +887,12 @@ timeline
 
 ## Database Migrations
 
-Database schema changes are tracked as `dbmate`-style SQL files in [`db/migrations`](/Users/nikolay.kvasov/Development/open-talon-1/db/migrations).
+Database schema changes are tracked as `dbmate`-style SQL files in [`db/migrations`](./db/migrations).
 
 - App startup and tests apply pending migrations through the repo's Python migration runner.
-- For local manual migration work, use [`scripts/dbmate.sh`](/Users/nikolay.kvasov/Development/open-talon-1/scripts/dbmate.sh).
+- For local manual migration work, use [`scripts/dbmate.sh`](./scripts/dbmate.sh).
 - `dbmate` itself is the recommended CLI for creating and applying new migration files.
-- Default local values for `DATABASE_URL` and `DBMATE_MIGRATIONS_DIR` are documented in [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example).
+- Default local values for `DATABASE_URL` and `DBMATE_MIGRATIONS_DIR` are documented in [`infrastructure/.env.example`](./infrastructure/.env.example).
 
 Examples:
 
@@ -889,11 +922,11 @@ source .venv/bin/activate
 pytest -q
 ```
 
-For a longer reference, see [`docs/db-migrations.md`](/Users/nikolay.kvasov/Development/open-talon-1/docs/db-migrations.md).
+For a longer reference, see [`docs/db-migrations.md`](./docs/db-migrations.md).
 
 ## Langfuse
 
-The local compose stack now includes a self-hosted Langfuse deployment:
+The local compose stack includes a self-hosted Langfuse deployment:
 
 - `langfuse-web` on `http://localhost:3000`
 - `langfuse-worker` on port `3030`
@@ -901,9 +934,9 @@ The local compose stack now includes a self-hosted Langfuse deployment:
 - `minio` on ports `9090` and `9091`
 - `forgejo` on `http://localhost:3001` with SSH on port `2222`
 
-This setup reuses the repository Postgres server and Valkey container, but Langfuse now uses its own Postgres database (`LANGFUSE_POSTGRES_DB`) so Prisma migrations do not collide with the application schema. Defaults live in `infrastructure/.env.example`.
+This setup reuses the repository Postgres server and Valkey container, but Langfuse uses its own Postgres database (`LANGFUSE_POSTGRES_DB`) so Prisma migrations do not collide with the application schema. Defaults live in `infrastructure/.env.example`.
 
-Langfuse is no longer the only observability shape in the codebase. `agent-runtime` now exports through a provider layer:
+Runtime observability is provider-backed. `agent-runtime` can export through Langfuse or OTLP-compatible sinks:
 
 - `AGENT_RUNTIME_OBSERVABILITY_PROVIDER=langfuse` to use Langfuse
 - `AGENT_RUNTIME_OBSERVABILITY_PROVIDER=otlp` to use OTLP-compatible sinks such as HyperDX
@@ -954,4 +987,4 @@ pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s
 
 ## AI Model Initialization Note
 
-First-time execution will wait for Ollama to fetch the configured default model from `infrastructure/.env`. The suite still allows long waits for first-run downloads, but it no longer assumes multiple heavyweight models by default.
+First-time execution will wait for Ollama to fetch the configured default model from `infrastructure/.env`. The suite allows long waits for first-run downloads and uses the configured local model set from `infrastructure/.env`.

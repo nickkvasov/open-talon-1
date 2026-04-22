@@ -10,7 +10,7 @@ Use it when you need to understand:
 - which HTTP APIs exist today
 - which APIs are intended for humans, browser clients, terminal clients, and software development agents
 
-This is a reference for the implemented system. For local startup steps, use [system-quickstart.md](./system-quickstart.md). For repository coding guidance, use [../AGENTS.md](../AGENTS.md). For future-looking architecture rationale, use [collaboration-system-design.md](./collaboration-system-design.md).
+This is a reference for the implemented system. For local startup steps, use [system-quickstart.md](./system-quickstart.md). For repository coding guidance, use [../AGENTS.md](../AGENTS.md). For design context, use [collaboration-system-design.md](./collaboration-system-design.md).
 
 ## Audience
 
@@ -25,7 +25,8 @@ This reference is written for two audiences:
 - [iam.md](./iam.md): principal IAM model, permission catalog, and IAM API surface
 - [agent-operations-guide.md](./agent-operations-guide.md): practical usage guide for software development agents and scripted clients
 - [db-migrations.md](./db-migrations.md): schema and migration workflow
-- [collaboration-system-design.md](./collaboration-system-design.md): design background and planned evolution
+- [collaboration-system-design.md](./collaboration-system-design.md): design background and architecture notes
+- [research-comparison.md](./research-comparison.md): external ecosystem comparison for multi-agent research and enterprise platforms
 - [../AGENTS.md](../AGENTS.md): repository coding rules for contributors and coding agents
 
 ## System At A Glance
@@ -37,7 +38,7 @@ The main runtime components are:
 - `services/gateway-edge`
   - FastAPI gateway
   - main HTTP, SSE, and WebSocket entrypoint
-  - auth, admin, collaboration, audit, and legacy chat routes
+  - auth, admin, collaboration, audit, and session chat routes
 - `services/core-collab`
   - canonical collaboration kernel
   - repository layer over Postgres
@@ -53,6 +54,39 @@ The main runtime components are:
   - terminal clients for humans and software-driven test users
 - `infrastructure`
   - local Docker-backed dependencies such as Postgres, Kafka, Valkey, Keycloak, OpenBao, Langfuse, MinIO, and optional Memgraph
+
+## Current Runtime Inventory
+
+The repository also includes helper packages that matter when you are documenting or extending the running system:
+
+| Component | Role in the current system | Status in local runtime |
+| --- | --- | --- |
+| `services/workspace-memory` | memory-provider abstraction shared by gateway, core-collab, and runtime | active library, not a standalone service |
+| `services/generated-tools-builder` | OCI packaging and publish helpers for generated tools | active helper library used by Tinker flows |
+| `services/presence-directory` | Valkey-backed websocket presence state | active library used by `gateway-edge` |
+
+## Current Configuration Surface
+
+The current implementation reads configuration from a small number of sources:
+
+- [`infrastructure/.env.example`](../infrastructure/.env.example)
+  - checked-in local defaults for ports, credentials, worker settings, audit providers, and model requirements
+- `infrastructure/.env`
+  - local override file consumed by Docker Compose and `./open-talon`
+- [`services/gateway-edge/gateway_edge/config.py`](../services/gateway-edge/gateway_edge/config.py)
+  - gateway defaults for auth, CORS, Postgres, Kafka, Valkey, audit providers, object storage, and OpenBao
+- [`services/agent-runtime/agent_runtime/config.py`](../services/agent-runtime/agent_runtime/config.py)
+  - runtime defaults for worker concurrency, leases, token caps, execution root, communication-log path, and OCI registry access
+- [`apps/admin-web/public/runtime-config.json`](../apps/admin-web/public/runtime-config.json)
+  - runtime-loadable browser config for gateway URL, Keycloak URL, realm, client ID, and SPA base path
+- `.run/openai.env`
+  - optional ignored local secret file auto-loaded by the Python services for secret resolution
+
+Current auth nuance:
+
+- code defaults in `gateway-edge` use `auth_mode="none"` when no env is set
+- the local checked-in launcher and infra defaults set `AUTH_MODE=any`
+- the practical local developer path is OIDC-first and also accepts API key and OpenBao auth unless you explicitly narrow the mode
 
 ## End-To-End Request Flow
 
@@ -144,7 +178,7 @@ Open Talon separates identity from workspace presence.
 - `oidc`
 - `any`
 
-Current local development defaults use `AUTH_MODE=any`, with Keycloak as the default OIDC provider adapter. That means OIDC is the intended human and machine-principal path, but API keys and OpenBao auth are still accepted locally unless you narrow the auth mode.
+Current local development defaults use `AUTH_MODE=any`, with Keycloak as the default OIDC provider adapter. That means OIDC is the intended human and machine-principal path, and API keys plus OpenBao auth are accepted locally unless you narrow the auth mode.
 
 ### Important Auth Rules
 
@@ -173,7 +207,7 @@ Open Talon uses one permission catalog for both humans and agents:
 
 - identity permissions protect global and organization control-plane APIs
 - workspace-scoped IAM permissions protect workspace management APIs, and the caller must also be attached as a workspace participant
-- local Keycloak `admin` remains a bootstrap path, but steady-state authorization is intended to come from Open Talon IAM roles
+- local Keycloak `admin` acts as a bootstrap path, while steady-state authorization comes from Open Talon IAM roles
 
 Representative IAM routes:
 
@@ -335,14 +369,14 @@ Main router groups:
 
 ### Actor Resolution
 
-Most collaboration write requests still carry an `actor` shape for compatibility.
+Many collaboration write requests carry an `actor` shape for compatibility with non-OIDC and system-initiated flows.
 
 Rules:
 
 - human OIDC requests are resolved server-side
 - for thread-scoped writes, the gateway resolves the effective thread actor
 - for workspace-scoped writes, the gateway resolves the effective workspace actor
-- software agents using API-key or system/operator flows may still supply actor payloads directly
+- software agents using API-key or system/operator flows can supply actor payloads directly
 
 ### Visibility
 
@@ -374,25 +408,43 @@ Current explicit pagination appears on:
 
 Use `limit` and `offset` where exposed.
 
+## Current API Snapshot
+
+Current implementation snapshot from the FastAPI app:
+
+- HTTP route truth lives in the generated OpenAPI document at `/openapi.json`
+- websocket routes implemented outside OpenAPI are:
+  - `/v1/ws/chat/{session_id}`
+  - `/v1/threads/{thread_id}/ws`
+- the router split is:
+  - `health`
+  - `auth`
+  - `chat`
+  - `collaboration`
+  - `iam`
+  - `admin`
+
+For websocket truth, prefer [`services/gateway-edge/gateway_edge/routers/chat.py`](../services/gateway-edge/gateway_edge/routers/chat.py) and [`services/gateway-edge/gateway_edge/routers/collaboration.py`](../services/gateway-edge/gateway_edge/routers/collaboration.py).
+
 ## Endpoint Catalog
 
 This section groups the currently implemented API surface by purpose.
 
-### Health, Auth, And Legacy Chat
+### Health, Auth, And Session Chat
 
 | Method | Path | Summary |
 | --- | --- | --- |
 | `GET` | `/health` | liveness |
 | `GET` | `/ready` | readiness |
 | `GET` | `/v1/me` | authenticated user identity |
-| `POST` | `/v1/chat` | legacy synchronous chat |
-| `POST` | `/v1/chat/stream` | legacy SSE chat streaming |
+| `POST` | `/v1/chat` | synchronous session chat |
+| `POST` | `/v1/chat/stream` | SSE session chat streaming |
 | `GET` | `/v1/history/{session_id}` | session chat history |
 | `GET` | `/v1/sessions/{session_id}` | session info |
 | `DELETE` | `/v1/sessions/{session_id}` | session delete |
 | `WS` | `/v1/ws/chat/{session_id}` | bidirectional chat streaming |
 
-The `chat` APIs are the older session/chat surface. New collaboration work should prefer workspaces, threads, timeline messages, and interaction requests.
+The `chat` APIs provide a session-based chat surface. Shared collaboration flows use workspaces, threads, timeline messages, and interaction requests.
 
 ### Workspaces, Participants, And Roles
 
@@ -459,7 +511,7 @@ Global system-definition APIs are operator/admin APIs.
 | `DELETE` | `/v1/memory-providers/{provider_id}` | delete memory provider |
 | `POST` | `/v1/memory-providers/{provider_id}/health-check` | validate stored memory provider |
 
-In the current implementation, org-scoped create/list routes are explicit. Update and delete endpoints for providers, tools, and agents still live on the top-level admin surface.
+In the current implementation, org-scoped create/list routes are explicit. Update and delete endpoints for providers, tools, and agents live on the top-level admin surface.
 
 ### Git Repositories, Assets, And Tool Attachments
 
@@ -486,6 +538,26 @@ In the current implementation, org-scoped create/list routes are explicit. Updat
 | `POST` | `/v1/workspaces/{workspace_id}/git-repositories` | register workspace Git repository |
 | `GET` | `/v1/workspaces/{workspace_id}/git-repositories` | list workspace Git repositories |
 | `POST` | `/v1/workspaces/{workspace_id}/assets/publish-from-git` | publish workspace asset version |
+
+### Tool Generation And Approval
+
+These routes support the current Tinker flow:
+
+| Method | Path | Summary |
+| --- | --- | --- |
+| `GET` | `/v1/tool-generation/requests` | list tool-generation requests |
+| `GET` | `/v1/tool-generation/requests/{request_id}` | get one tool-generation request |
+| `GET` | `/v1/threads/{thread_id}/tool-generation/requests` | list thread-local tool-generation requests |
+| `POST` | `/v1/tool-generation/requests/{request_id}/revisions` | create a new generated-tool revision |
+| `POST` | `/v1/tool-generation/revisions/{revision_id}/approve` | approve revision and trigger registry verification |
+| `POST` | `/v1/tool-generation/revisions/{revision_id}/reject` | reject revision |
+
+Current business rules:
+
+- generated tools can target `global` or `organization` publication scope
+- approval publishes only into the system catalog, never directly into `workspace_tools`
+- approval requires `tool_generation.review` plus `tool_catalog.write` in the target scope
+- after approval, workspace participants attach the tool manually with `PUT /v1/workspaces/{workspace_id}/tools/{tool_id}`
 
 ### Threads, Timeline, And Interaction Requests
 
@@ -679,7 +751,7 @@ When changing behavior, inspect the whole vertical slice:
 
 ## Guidance For Software Development Agents
 
-Software development agents should prefer the collaboration model, not the legacy chat model, for end-to-end testing.
+Software development agents should use workspaces, threads, timeline messages, and interaction requests for end-to-end testing.
 
 Recommended rules:
 
@@ -696,7 +768,7 @@ For operational details and an end-to-end agent playbook, use [agent-operations-
 
 ## Current Limitations And Non-Goals
 
-- the `chat` APIs are still present but are not the preferred collaboration surface
+- the `chat` APIs provide session-based chat separate from the shared workspace/thread collaboration surface
 - threads are the shared collaboration surface in v1; private participant-to-participant DM semantics are not the main path
 - communication logs capture collaboration communications, not every internal runtime transition
 - audit is metadata-oriented by design and must not inline sensitive prompt or token payloads

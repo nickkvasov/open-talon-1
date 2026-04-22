@@ -2,7 +2,7 @@
 
 This is the fastest path to get the full local Open Talon system running with the current provider-neutral principal IAM model and the default local Keycloak-backed OIDC flow.
 
-The default launcher setting is still `AUTH_MODE=any`, so the local gateway accepts OIDC, API key, or OpenBao auth unless you override that env var. The steps below use the OIDC path because that is the intended human and machine-principal flow.
+The default launcher setting is `AUTH_MODE=any`, so the local gateway accepts OIDC, API key, or OpenBao auth unless you override that env var. The steps below use the OIDC path because that is the intended human and machine-principal flow.
 
 For full current-state reference material, use:
 
@@ -15,6 +15,18 @@ For full current-state reference material, use:
 - Docker with `docker compose`
 - Python 3.12+
 - A clean repo checkout
+
+## Fast Path
+
+If you want the shortest route from clone to first collaboration:
+
+1. Bootstrap the repo Python environment with the commands in `1. Bootstrap Python`.
+2. Start the full local stack with `./open-talon start` from `2. Start The System`.
+3. Confirm the gateway and OIDC discovery document respond from `3. Check The Main Endpoints`.
+4. Start the admin web from `4. Start The Admin Web`, then open `http://localhost:5173` and sign in as `admin` / `admin123`.
+5. Start `tui2` with `./open-talon tui2 --profile admin`.
+6. Run the minimum terminal flow from `8. Use The TUI With A Profile` to select the default organization, create a workspace, create a thread, and send the first message.
+7. Use `9. Quick Verification` and `11. Audit Logging Quick Checks` to confirm the stack is healthy and the collaboration trace is being persisted.
 
 ## 1. Bootstrap Python
 
@@ -35,7 +47,7 @@ Launch the local infrastructure and the supported Python processes:
 ./open-talon start
 ```
 
-The launcher now waits for both the gateway readiness endpoint and the configured OIDC discovery document before it exits successfully. In local development that means the Keycloak browser, device-flow, and machine-credential auth surfaces should be ready when the command returns.
+The launcher waits for both the gateway readiness endpoint and the configured OIDC discovery document before it exits successfully. In local development that means the Keycloak browser, device-flow, and machine-credential auth surfaces should be ready when the command returns.
 
 This starts:
 
@@ -54,7 +66,7 @@ This starts:
 - Ollama
 - Langfuse and its backing services
 
-For audit specifically, the local stack now also provides:
+For audit specifically, the local stack also provides:
 
 - Postgres as the canonical append-only audit ledger store
 - provider-backed non-canonical audit surfaces with local defaults:
@@ -101,7 +113,7 @@ If you want Mem0 graph memory locally, start the system with graph mode enabled:
 ./open-talon start --memgraph
 ```
 
-That keeps Postgres as the canonical memory store and adds the optional local `memgraph` service for Mem0 graph retrieval. Graph retrieval itself is still controlled by the persisted memory-provider definition, not by the launcher flag.
+That keeps Postgres as the canonical memory store and adds the optional local `memgraph` service for Mem0 graph retrieval. Graph retrieval is controlled by the persisted memory-provider definition, not by the launcher flag.
 
 ## 3. Check The Main Endpoints
 
@@ -167,7 +179,7 @@ npm run test:e2e:install
 npm run test:e2e
 ```
 
-See [apps/admin-web/README.md](/Users/nikolay.kvasov/Development/open-talon-1/apps/admin-web/README.md) for the full browser test matrix.
+See [../apps/admin-web/README.md](../apps/admin-web/README.md) for the full browser test matrix.
 
 Current admin-web highlights:
 
@@ -198,18 +210,18 @@ Current admin-web highlights:
 - ClickHouse: `langfuse` / `langfuse`
 - Memgraph: `memgraph` / `memgraph` when started with `./open-talon start --memgraph`
 
-All local defaults come from [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example).
+All local defaults come from [`infrastructure/.env.example`](../infrastructure/.env.example).
 
 OpenBao local data is persistent. Secrets survive `./open-talon stop` and `docker compose down` until you remove `infrastructure/data/openbao`.
 
-Relevant layered-memory defaults from [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example):
+Relevant layered-memory defaults from [`infrastructure/.env.example`](../infrastructure/.env.example):
 
 - `OPEN_TALON_MEM0_COLLECTION=open_talon_memories`
 - `OPEN_TALON_MEMGRAPH_URL=bolt://localhost:7688`
 - `OPEN_TALON_MEMGRAPH_USER=memgraph`
 - `OPEN_TALON_MEMGRAPH_PASSWORD=memgraph`
 
-Relevant runtime-guardrail defaults from [`infrastructure/.env.example`](/Users/nikolay.kvasov/Development/open-talon-1/infrastructure/.env.example):
+Relevant runtime-guardrail defaults from [`infrastructure/.env.example`](../infrastructure/.env.example):
 
 - `OPEN_TALON_GLOBAL_DAILY_TOKEN_CAP=0`
 - `OPEN_TALON_WORKSPACE_DAILY_TOKEN_CAP=0`
@@ -250,7 +262,7 @@ Local multi-tenant defaults:
 
 Current local hardening defaults:
 
-- the local Keycloak `admin` role still acts as bootstrap platform-admin access, but steady-state authorization comes from Open Talon IAM permissions
+- the local Keycloak `admin` role acts as bootstrap platform-admin access, while steady-state authorization comes from Open Talon IAM permissions
 - global system-definition, global publish, provider-management, IAM-management, and runtime-overview APIs require the matching global IAM permission or bootstrap platform-admin access
 - organization CRUD, organization membership changes, and organization-scoped IAM management require organization permissions from membership baseline roles or explicit IAM role bindings
 - `GET /v1/workspaces` only returns workspaces where the authenticated human already has a participant
@@ -363,19 +375,22 @@ The same device-login flow is available for `user-client`:
 ./open-talon user-client auth login --profile user1
 ```
 
-Inside `tui2`, the basic first-run flow is:
+Inside `tui2`, a first end-to-end local session looks like:
 
 ```text
 /auth login
 /account whoami
 /organization list
 /organization use <id|slug|name>
-/workspace list
+/workspace create Sandbox
+/workspace use Sandbox
+/thread create First Thread
+type a normal message and press Enter
 ```
 
 If your user can only see one organization, `tui2` auto-selects it after login. On a fresh local stack that is usually the seeded `Default Organization`.
 
-The full-screen Textual UI is still available:
+The repository also includes the full-screen Textual UI entrypoint:
 
 ```bash
 ./open-talon tui --profile admin
@@ -406,14 +421,14 @@ Important behavior:
 - each user on the same machine should use a different `--profile`
 - profile state and tokens are stored under `~/.open-talon/profiles/<profile>/`
 - the TUI uses Keycloak device flow for human login
-- the TUI may start signed out so `/auth login` can be used, but collaboration actions still require Keycloak authentication
+- the TUI may start signed out so `/auth login` can be used, but collaboration actions require Keycloak authentication
 - `tui2` is the recommended client when you want reliable terminal scrollback, mouse copy/select, and plain clickable/copyable URLs
 - `/copy` copies the full `tui2` timeline to the clipboard
 - `/links` lists detected URLs and `/open <number|last|url>` opens one reliably in `tui2`
 - `/quit` exits the active TUI client and `/clear` clears the visible timeline
 - the gateway derives the authenticated human actor server-side
-- the TUI no longer owns human identity through a local `participant_id`
-- only the current per-profile TUI state/token format is supported; older local auth/state is not migrated and existing users must sign in again
+- the gateway derives the authenticated human actor server-side rather than from local TUI identity state
+- each profile stores its own token and state under `~/.open-talon/profiles/<profile>/`; re-authenticate the profile if local state is stale
 - `user-client` is the recommended entrypoint when one software agent needs to control each human test user separately
 - `user-client --output json` emits machine-readable command results for automation
 - `workspace list` defaults to the selected organization in `tui2` and `user-client`; use `workspace list all` to see every visible workspace
@@ -481,6 +496,19 @@ log [limit]
 quit
 ```
 
+A minimum `user-client` flow for scripted or multi-user testing is:
+
+```text
+auth login
+organization use <id|slug|name>
+workspace create Sandbox
+workspace use Sandbox
+thread create First Thread
+thread use First Thread
+send Hello from user-client
+timeline 20
+```
+
 Typical local usage examples:
 
 ```bash
@@ -534,7 +562,7 @@ POST /v1/tool-generation/revisions/{revision_id}/approve
 PUT /v1/workspaces/{workspace_id}/tools/{tool_id}
 ```
 
-For a deeper walkthrough, see [tinker-tool-generation.md](/Users/nikolay.kvasov/Development/open-talon-1/docs/tinker-tool-generation.md).
+For a deeper walkthrough, see [tinker-tool-generation.md](./tinker-tool-generation.md).
 
 ## 9. Quick Verification
 
@@ -589,7 +617,7 @@ pytest -q
 
 ## 10. Admin Web Deployment Notes
 
-The built admin SPA can now be promoted across environments without rebuilding if you replace [`apps/admin-web/public/runtime-config.json`](/Users/nikolay.kvasov/Development/open-talon-1/apps/admin-web/public/runtime-config.json) in the deployed artifact.
+The built admin SPA can be promoted across environments without rebuilding if you replace [`apps/admin-web/public/runtime-config.json`](../apps/admin-web/public/runtime-config.json) in the deployed artifact.
 
 Example deployed config:
 
@@ -606,7 +634,7 @@ Example deployed config:
 Important deployment rules:
 
 - `appBasePath` must match the subpath where the SPA is mounted
-- the reverse proxy or static host still needs normal SPA fallback behavior for deep links such as `/admin/workspaces`
+- the reverse proxy or static host needs normal SPA fallback behavior for deep links such as `/admin/workspaces`
 - the built bundle uses relative asset paths, so it can be served from `/` or a subpath
 - the Keycloak client redirect URIs and post-logout redirect URIs must include the deployed browser URL
 
@@ -812,14 +840,14 @@ Expected result:
 
 Known current limitation:
 
-- the seeded OpenAI path still posts raw OpenAI response JSON into the final thread message body; execution works, but response formatting is still rough
+- the seeded OpenAI path posts raw OpenAI response JSON into the final thread message body; execution works, but response formatting is rough
 
 ## 14. Common Keycloak Recovery Commands
 
 If the local Keycloak UI says HTTPS is required or the realm state looks stale:
 
 ```bash
-cd /Users/nikolay.kvasov/Development/open-talon-1/infrastructure
+cd infrastructure
 docker compose up -d keycloak keycloak-init
 docker compose logs --tail=100 keycloak-init keycloak
 ```
@@ -827,9 +855,9 @@ docker compose logs --tail=100 keycloak-init keycloak
 If you need to fully recreate the local Keycloak state:
 
 ```bash
-cd /Users/nikolay.kvasov/Development/open-talon-1/infrastructure
+cd infrastructure
 docker compose stop keycloak keycloak-init
-rm -rf /Users/nikolay.kvasov/Development/open-talon-1/infrastructure/data/keycloak
+rm -rf infrastructure/data/keycloak
 docker compose up -d keycloak keycloak-init
 ```
 

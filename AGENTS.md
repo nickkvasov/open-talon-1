@@ -26,6 +26,24 @@ Primary local flow:
 4. Stateless `agent-runtime` workers claim work, execute model/tool steps, and publish events through Kafka.
 5. Events are streamed back over HTTP/SSE/WebSocket.
 
+## Design Principles
+
+- Document and implement the current system, not a planned future shape.
+- Prefer durable state, explicit ownership, and recoverable workflows over in-memory convenience.
+- Keep tenancy, IAM, audit, and secret handling as first-class concerns rather than bolt-ons.
+- Keep humans and agents symmetric in collaboration surfaces, but distinct in identity, auth, and role binding.
+- Prefer thread-native collaboration and explicit task handoff over hidden orchestration.
+- Use the minimum coordination complexity that solves the problem; do not introduce extra agent choreography without a concrete need.
+
+## Software Development Approach
+
+- Read the whole vertical slice before editing: contracts, routers, services, repository, migrations, tests, and docs.
+- Prefer small, additive, reviewable changes over broad rewrites.
+- Change schema, code, tests, and docs together when behavior changes.
+- Prefer explicit interfaces, repository methods, and typed contracts over implicit conventions.
+- Preserve a reproducible local-first developer path: `./open-talon start`, `.venv`, and checked-in defaults should keep working after the change.
+- Treat operational behavior as product behavior. Startup flow, retries, seeded data, env defaults, and admin surfaces all count as implementation, not just wiring.
+
 ## Important Architecture Rules
 
 - Treat `db/migrations` as the schema source of truth.
@@ -81,7 +99,7 @@ Primary local flow:
 - LLM providers are persistent records in `llm_providers`; do not reintroduce env-defined engine registries.
 - Memory providers are persistent records in `memory_providers`; do not hardcode provider definitions in application logic after bootstrapping.
 - `system_agents`, `system_tools`, `llm_providers`, and `memory_providers` support `global` and `organization` scope; `git_repositories`, `workspace_assets`, and `asset_links` support `global`, `organization`, and `workspace` scope.
-- Local OpenBao now uses persistent file storage under `infrastructure/data/openbao`; do not assume `docker compose down` clears local secrets.
+- Local OpenBao uses persistent file storage under `infrastructure/data/openbao`; do not assume `docker compose down` clears local secrets.
 - Postgres is the canonical memory store. Mem0 and optional graph backends such as Memgraph are derived retrieval projections, not the source of truth.
 - Risky tool execution profiles require `trust_level="trusted"`: `workspace_access=read_write`, `network=full`, and `local_process`.
 - Execution retries use `next_retry_at` with bounded backoff. Do not reintroduce immediate infinite lease requeue loops.
@@ -190,7 +208,7 @@ If a change touches schema, repository, participant hydration, routing, or migra
 If a change touches layered memory, memory providers, Mem0, or graph-memory support:
 
 - inspect `services/workspace-memory`, `services/core-collab`, `services/gateway-edge`, and `packages/contracts` together
-- verify canonical persistence and provider projection both still make sense
+- verify canonical persistence and provider projection remain coherent together
 - run relevant `tests/workspace-memory`
 - run relevant memory route tests in `tests/gateway-edge`
 - keep `infrastructure/.env.example`, `infrastructure/docker-compose.yaml`, and `open-talon` aligned if graph mode behavior changes
@@ -216,9 +234,9 @@ If a change touches workspace authz, global admin routes, or workspace membershi
 - run relevant `tests/gateway-edge/test_admin.py`
 - run relevant `tests/gateway-edge/test_iam.py`
 - run relevant organization route and org-membership tests when tenant boundaries changed
-- make sure non-member workspace reads still return `404`
-- make sure non-member organization reads still return `404`
-- make sure global control-plane OIDC reads/writes still require the intended IAM permission or platform-admin bootstrap access
+- make sure non-member workspace reads return `404`
+- make sure non-member organization reads return `404`
+- make sure global control-plane OIDC reads/writes require the intended IAM permission or platform-admin bootstrap access
 
 If a change touches audit logging, audit APIs, event relays, or runtime failure reporting:
 
@@ -228,7 +246,7 @@ If a change touches audit logging, audit APIs, event relays, or runtime failure 
 - verify provider selection and no-op provider behavior where relevant
 - keep shared telemetry/redaction behavior aligned between gateway audit and runtime observability
 - run at least one gateway audit test and one repository chain-verification test
-- verify `organization:<id>` and `workspace:<id>` chains both still verify when tenant-aware audit behavior changes
+- verify `organization:<id>` and `workspace:<id>` chains both verify when tenant-aware audit behavior changes
 - keep MinIO export/checkpoint behavior aligned with docs and env defaults
 
 If a change touches execution lease recovery, budget enforcement, or runtime overview behavior:
@@ -263,7 +281,7 @@ If a change touches Tinker, tool generation, generated-tool approval, or interna
 - Prefer explicit SQL and repository methods for database changes.
 - Keep migration/backfill logic separate from steady-state read/write logic when possible.
 - Do not remove compatibility paths from live data unless the corresponding migration is included.
-- When cleaning legacy columns or data, update both code and migration flow together.
+- When cleaning compatibility columns or transitional data, update both code and migration flow together.
 - When changing worker behavior, cover both durable state transitions and emitted Kafka/thread events in tests.
 - Preserve `next_retry_at`-based scheduling and bounded retry semantics when changing lease reconciliation or claim logic.
 - Preserve normalized `run.output["usage"]` payloads when changing model runtime or provider integrations.
@@ -271,6 +289,14 @@ If a change touches Tinker, tool generation, generated-tool approval, or interna
 - When adding or changing audit or observability integrations, implement or update the provider/registry layer instead of branching directly on vendor behavior in service logic.
 - When adding a new memory provider, implement the shared `MemoryProvider` protocol in `services/workspace-memory/workspace_memory/providers.py` and register it in `build_provider_index(...)` instead of bypassing the abstraction.
 - When working on memory search behavior, preserve the rule that graph relations are additive context only and not the canonical memory store.
+
+## Documentation Maintenance
+
+- Keep [`README.md`](./README.md), [`docs/system-api-reference.md`](./docs/system-api-reference.md), [`docs/system-quickstart.md`](./docs/system-quickstart.md), and [`docs/iam.md`](./docs/iam.md) aligned with the implemented system.
+- When changing routes, auth behavior, permissions, startup flow, ports, env vars, default credentials, seeded resources, or browser runtime config, update the relevant docs in the same change.
+- Do not describe placeholder packages or planned services as active runtime components.
+- Keep documentation focused on implemented behavior, current configuration, and the current API surface.
+- Prefer linking the exact source files that define behavior when prose could drift or become ambiguous.
 
 ## TUI Rules
 
