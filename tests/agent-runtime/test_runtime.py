@@ -41,6 +41,7 @@ from agent_runtime.runtime import (
     _debug_prompt_payload,
     render_prompt,
 )
+from agent_runtime import compaction as compaction_module
 from agent_runtime.observability import (
     OtlpHttpObservabilityProvider,
     build_observability_provider_from_env,
@@ -52,6 +53,7 @@ from agent_runtime.secrets import (
 )
 from open_talon_contracts.models import (
     ActorRef,
+    AgentCompactionPolicy,
     AgentDefinition,
     AgentEndpoint,
     AgentExecutionContext,
@@ -70,10 +72,13 @@ from open_talon_contracts.models import (
     EventEnvelope,
     GeneratedToolManifest,
     MemoryEntry,
+    MemorySearchHit,
+    MemorySearchResponse,
     LlmProviderDefinition,
     ParticipantProfile,
     RoleDefinition,
     Run,
+    SearchMemoryRequest,
     TargetRef,
     Task,
     Thread,
@@ -114,6 +119,13 @@ class FakeKernel:
         self.progress_calls: list[str] = []
         self.completed_results: list[AgentRunResult] = []
         self.failed_errors: list[str] = []
+        self.thread_memory_searches: list[SearchMemoryRequest] = []
+        self.thread_memory_search_response = MemorySearchResponse(
+            query="",
+            provider="postgres",
+            results=[],
+        )
+        self.upserted_run_scratch: list[MemoryEntry] = []
         self._claimed = False
 
     async def list_system_agents(self) -> list[AgentDefinition]:
@@ -176,6 +188,66 @@ class FakeKernel:
         assert system_agent_id == self.system_agent.agent_id
         self.failed_errors.append(error)
         return SimpleNamespace(events=self.failure_events)
+
+    async def search_thread_memory(
+        self,
+        thread_id: UUID,
+        payload: SearchMemoryRequest,
+    ) -> MemorySearchResponse:
+        assert thread_id == self.context.thread.thread_id
+        self.thread_memory_searches.append(payload)
+        return self.thread_memory_search_response.model_copy(update={"query": payload.query})
+
+    async def upsert_run_scratch(
+        self,
+        *,
+        run_id: UUID,
+        actor_input,
+        entry_type: str,
+        content: str,
+        summary: str | None = None,
+        metadata: dict[str, object] | None = None,
+        visibility: str = "agents_only",
+        source: str = "agent_runtime",
+        memory_entry_id: UUID | None = None,
+    ) -> MemoryEntry:
+        assert run_id == self.context.run.run_id
+        existing = next(
+            (
+                entry
+                for entry in self.context.run_memory
+                if memory_entry_id is not None and entry.memory_entry_id == memory_entry_id
+            ),
+            None,
+        )
+        entry = MemoryEntry(
+            memory_entry_id=memory_entry_id or uuid4(),
+            scope="run",
+            state="scratch",
+            workspace_id=self.context.workspace.workspace_id,
+            thread_id=self.context.thread.thread_id,
+            run_id=run_id,
+            entry_type=entry_type,
+            content=content,
+            summary=summary,
+            source=source,
+            created_by=existing.created_by if existing is not None else actor_input.participant_id,
+            updated_by=actor_input.participant_id,
+            visibility=visibility,
+            metadata=dict(metadata or {}),
+            created_at=existing.created_at if existing is not None else _now(),
+            updated_at=_now(),
+            version=(existing.version + 1) if existing is not None else 1,
+        )
+        updated_run_memory = [
+            candidate
+            for candidate in self.context.run_memory
+            if candidate.memory_entry_id != entry.memory_entry_id
+        ]
+        updated_run_memory.insert(0, entry)
+        self.context = self.context.model_copy(update={"run_memory": updated_run_memory})
+        self.upserted_run_scratch.append(entry)
+        return entry
 
 
 def _build_fixture_context(*, endpoint_kind: str = "system"):
@@ -517,6 +589,61 @@ def _build_fixture_context(*, endpoint_kind: str = "system"):
         progress_events=progress_events,
         completion_events=completion_events,
         failure_events=failure_events,
+    )
+
+
+def _message(
+    context: AgentExecutionContext,
+    *,
+    sequence: int,
+    content: str,
+    actor_type: str = "user",
+) -> TimelineMessage:
+    actor_id = (
+        context.participants[0].participant_id
+        if actor_type == "user"
+        else context.participant.participant_id
+    )
+    now = _now()
+    return TimelineMessage(
+        message_id=uuid4(),
+        workspace_id=context.workspace.workspace_id,
+        thread_id=context.thread.thread_id,
+        actor=ActorRef(type=actor_type, id=actor_id),
+        visibility="workspace",
+        content=content,
+        sequence=sequence,
+        correlation_id=context.task.correlation_id,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _memory_entry(
+    context: AgentExecutionContext,
+    *,
+    scope: str,
+    entry_type: str,
+    summary: str,
+    content: str,
+    visibility: str = "workspace",
+) -> MemoryEntry:
+    now = _now()
+    return MemoryEntry(
+        memory_entry_id=uuid4(),
+        scope=scope,
+        state="scratch" if scope == "run" else "confirmed",
+        workspace_id=context.workspace.workspace_id,
+        thread_id=context.thread.thread_id if scope in {"thread", "run"} else None,
+        run_id=context.run.run_id if scope == "run" else None,
+        entry_type=entry_type,
+        summary=summary,
+        content=content,
+        created_by=context.participants[0].participant_id,
+        updated_by=context.participants[0].participant_id,
+        visibility=visibility,
+        created_at=now,
+        updated_at=now,
     )
 
 
@@ -875,6 +1002,447 @@ async def test_agent_runtime_rejects_disabled_managed_llm_provider():
         await runtime._resolve_execution_context(kernel.context)
 
 
+@pytest.mark.asyncio
+async def test_resolve_execution_context_recent_window_preserves_trigger_and_latest_messages():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    messages = [
+        _message(kernel.context, sequence=1, content="msg-1"),
+        _message(kernel.context, sequence=2, content="msg-2"),
+        _message(kernel.context, sequence=3, content="msg-3"),
+        _message(kernel.context, sequence=4, content="msg-4"),
+        _message(kernel.context, sequence=5, content="msg-5"),
+        _message(kernel.context, sequence=6, content="msg-6"),
+    ]
+    kernel.context = kernel.context.model_copy(
+        update={
+            "messages": messages,
+            "trigger_message": messages[1],
+            "run_memory": [
+                _memory_entry(
+                    kernel.context,
+                    scope="run",
+                    entry_type="agent_step_summary",
+                    summary="Run memory 1",
+                    content="run-memory-1",
+                    visibility="agents_only",
+                ),
+                _memory_entry(
+                    kernel.context,
+                    scope="run",
+                    entry_type="agent_step_summary",
+                    summary="Run memory 2",
+                    content="run-memory-2",
+                    visibility="agents_only",
+                ),
+            ],
+            "thread_memory": [
+                _memory_entry(
+                    kernel.context,
+                    scope="thread",
+                    entry_type="decision",
+                    summary="Thread memory 1",
+                    content="thread-memory-1",
+                ),
+                _memory_entry(
+                    kernel.context,
+                    scope="thread",
+                    entry_type="decision",
+                    summary="Thread memory 2",
+                    content="thread-memory-2",
+                ),
+            ],
+            "workspace_memory": [
+                _memory_entry(
+                    kernel.context,
+                    scope="workspace",
+                    entry_type="decision",
+                    summary="Workspace memory 1",
+                    content="workspace-memory-1",
+                ),
+                _memory_entry(
+                    kernel.context,
+                    scope="workspace",
+                    entry_type="decision",
+                    summary="Workspace memory 2",
+                    content="workspace-memory-2",
+                ),
+            ],
+            "agent_harness": AgentHarness(
+                compaction_policy=AgentCompactionPolicy(
+                    strategy="recent_window",
+                    recent_message_count=2,
+                    min_recent_message_count=1,
+                    max_run_memory_entries=1,
+                    max_thread_memory_entries=1,
+                    max_workspace_memory_entries=1,
+                )
+            ),
+        }
+    )
+
+    runtime = AgentTaskRuntime(
+        kernel=kernel,
+        publish_events=lambda events: asyncio.sleep(0),
+        poll_interval_seconds=0.01,
+        executors={
+            "local": SimpleNamespace(),
+            "remote": SimpleNamespace(),
+            "system": SimpleNamespace(),
+        },
+    )
+
+    resolved = await runtime._resolve_execution_context(kernel.context)
+
+    assert [message.sequence for message in resolved.messages] == [2, 5, 6]
+    assert resolved.trigger_message.sequence == 2
+    assert len(resolved.run_memory) == 1
+    assert len(resolved.thread_memory) == 1
+    assert len(resolved.workspace_memory) == 1
+    assert resolved.system_agent.metadata["_runtime_compaction"]["strategy"] == "recent_window"
+    assert resolved.system_agent.metadata["_runtime_compaction"]["fallback_stage"] == "assigned"
+
+
+@pytest.mark.asyncio
+async def test_resolve_execution_context_rolling_summary_upserts_single_run_scratch_entry():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    messages = [
+        _message(kernel.context, sequence=1, content="older planning detail"),
+        _message(kernel.context, sequence=2, content="older migration detail"),
+        _message(kernel.context, sequence=3, content="latest release request"),
+    ]
+    kernel.context = kernel.context.model_copy(
+        update={
+            "messages": messages,
+            "trigger_message": messages[-1],
+            "run_memory": [
+                _memory_entry(
+                    kernel.context,
+                    scope="run",
+                    entry_type="agent_step_summary",
+                    summary="Old run scratch",
+                    content="older run scratch detail",
+                    visibility="agents_only",
+                ),
+                _memory_entry(
+                    kernel.context,
+                    scope="run",
+                    entry_type="agent_step_summary",
+                    summary="Latest run scratch",
+                    content="latest run scratch detail",
+                    visibility="agents_only",
+                ),
+            ],
+            "agent_harness": AgentHarness(
+                compaction_policy=AgentCompactionPolicy(
+                    strategy="rolling_summary",
+                    recent_message_count=1,
+                    min_recent_message_count=1,
+                    max_run_memory_entries=1,
+                    max_thread_memory_entries=1,
+                    max_workspace_memory_entries=1,
+                )
+            ),
+        }
+    )
+
+    runtime = AgentTaskRuntime(
+        kernel=kernel,
+        publish_events=lambda events: asyncio.sleep(0),
+        poll_interval_seconds=0.01,
+        executors={
+            "local": SimpleNamespace(),
+            "remote": SimpleNamespace(),
+            "system": SimpleNamespace(),
+        },
+    )
+
+    first_resolved = await runtime._resolve_execution_context(kernel.context)
+    first_summary = next(
+        entry
+        for entry in first_resolved.run_memory
+        if entry.entry_type == compaction_module.COMPACTION_SUMMARY_ENTRY_TYPE
+    )
+
+    updated_messages = [
+        messages[0].model_copy(update={"content": "older planning detail updated"}),
+        messages[1],
+        messages[2],
+    ]
+    kernel.context = kernel.context.model_copy(update={"messages": updated_messages})
+    second_resolved = await runtime._resolve_execution_context(kernel.context)
+    second_summary = next(
+        entry
+        for entry in second_resolved.run_memory
+        if entry.entry_type == compaction_module.COMPACTION_SUMMARY_ENTRY_TYPE
+    )
+
+    persisted_summaries = [
+        entry
+        for entry in kernel.context.run_memory
+        if entry.entry_type == compaction_module.COMPACTION_SUMMARY_ENTRY_TYPE
+    ]
+    assert len(kernel.upserted_run_scratch) == 2
+    assert first_summary.memory_entry_id == second_summary.memory_entry_id
+    assert second_summary.version == 2
+    assert kernel.upserted_run_scratch[0].memory_entry_id == kernel.upserted_run_scratch[1].memory_entry_id
+    assert len(persisted_summaries) == 1
+    assert persisted_summaries[0].memory_entry_id == first_summary.memory_entry_id
+    assert persisted_summaries[0].version == 2
+
+
+@pytest.mark.asyncio
+async def test_resolve_execution_context_summary_plus_retrieval_searches_thread_memory_and_marks_hits():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    retrieved_entry = _memory_entry(
+        kernel.context,
+        scope="thread",
+        entry_type="decision",
+        summary="Retrieved memory",
+        content="Staging already exposed a migration rollback issue.",
+    )
+    kernel.thread_memory_search_response = MemorySearchResponse(
+        query="",
+        provider="semantic-thread",
+        results=[
+            MemorySearchHit(
+                entry=retrieved_entry,
+                score=0.91,
+                metadata={"provider": "semantic-thread"},
+            )
+        ],
+    )
+    kernel.context = kernel.context.model_copy(
+        update={
+            "agent_harness": AgentHarness(
+                compaction_policy=AgentCompactionPolicy(
+                    strategy="summary_plus_retrieval",
+                    recent_message_count=1,
+                    min_recent_message_count=1,
+                    max_run_memory_entries=1,
+                    max_thread_memory_entries=1,
+                    max_workspace_memory_entries=1,
+                    retrieval_limit=1,
+                    retrieval_provider_key="semantic-thread",
+                )
+            )
+        }
+    )
+
+    runtime = AgentTaskRuntime(
+        kernel=kernel,
+        publish_events=lambda events: asyncio.sleep(0),
+        poll_interval_seconds=0.01,
+        executors={
+            "local": SimpleNamespace(),
+            "remote": SimpleNamespace(),
+            "system": SimpleNamespace(),
+        },
+    )
+
+    resolved = await runtime._resolve_execution_context(kernel.context)
+    search_payload = kernel.thread_memory_searches[0]
+    retrieved = next(
+        entry
+        for entry in resolved.thread_memory
+        if entry.memory_entry_id == retrieved_entry.memory_entry_id
+    )
+
+    assert len(kernel.thread_memory_searches) == 1
+    assert search_payload.use_provider == "semantic-thread"
+    assert kernel.task.title in search_payload.query
+    assert kernel.context.trigger_message.content in search_payload.query
+    assert retrieved.metadata["_compaction_retrieved"] is True
+    assert resolved.system_agent.metadata["_runtime_compaction"]["retrieved_memory_entry_ids"] == [
+        str(retrieved_entry.memory_entry_id)
+    ]
+    assert "[retrieved]" in render_prompt(resolved)
+
+
+@pytest.mark.asyncio
+async def test_resolve_execution_context_fallback_drops_retrieval_before_other_reductions(monkeypatch):
+    kernel = _build_fixture_context(endpoint_kind="system")
+    retrieved_entry = _memory_entry(
+        kernel.context,
+        scope="thread",
+        entry_type="decision",
+        summary="Retrieved memory",
+        content="Long retrieved context that should be dropped first.",
+    )
+    kernel.thread_memory_search_response = MemorySearchResponse(
+        query="",
+        provider="semantic-thread",
+        results=[MemorySearchHit(entry=retrieved_entry, score=1.0)],
+    )
+    kernel.context = kernel.context.model_copy(
+        update={
+            "agent_harness": AgentHarness(
+                compaction_policy=AgentCompactionPolicy(
+                    strategy="summary_plus_retrieval",
+                    max_estimated_input_tokens=10,
+                    recent_message_count=2,
+                    min_recent_message_count=1,
+                    retrieval_provider_key="semantic-thread",
+                )
+            )
+        }
+    )
+    monkeypatch.setattr(
+        compaction_module,
+        "_estimate_tokens",
+        lambda text: 99 if "[retrieved]" in text else 5,
+    )
+
+    runtime = AgentTaskRuntime(
+        kernel=kernel,
+        publish_events=lambda events: asyncio.sleep(0),
+        poll_interval_seconds=0.01,
+        executors={
+            "local": SimpleNamespace(),
+            "remote": SimpleNamespace(),
+            "system": SimpleNamespace(),
+        },
+    )
+
+    resolved = await runtime._resolve_execution_context(kernel.context)
+
+    assert resolved.system_agent.metadata["_runtime_compaction"]["fallback_stage"] == "drop_retrieval"
+    assert not any(entry.metadata.get("_compaction_retrieved") for entry in resolved.thread_memory)
+
+
+@pytest.mark.asyncio
+async def test_resolve_execution_context_fallback_reduces_retention_before_forced_summary(monkeypatch):
+    kernel = _build_fixture_context(endpoint_kind="system")
+    messages = [
+        _message(kernel.context, sequence=1, content="msg-1"),
+        _message(kernel.context, sequence=2, content="msg-2"),
+        _message(kernel.context, sequence=3, content="msg-3"),
+        _message(kernel.context, sequence=4, content="msg-4"),
+        _message(kernel.context, sequence=5, content="msg-5"),
+    ]
+    kernel.context = kernel.context.model_copy(
+        update={
+            "messages": messages,
+            "trigger_message": messages[-1],
+            "agent_harness": AgentHarness(
+                compaction_policy=AgentCompactionPolicy(
+                    strategy="recent_window",
+                    max_estimated_input_tokens=10,
+                    recent_message_count=4,
+                    min_recent_message_count=1,
+                )
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        compaction_module,
+        "_estimate_tokens",
+        lambda text: 99 if "msg-2" in text else 5,
+    )
+
+    runtime = AgentTaskRuntime(
+        kernel=kernel,
+        publish_events=lambda events: asyncio.sleep(0),
+        poll_interval_seconds=0.01,
+        executors={
+            "local": SimpleNamespace(),
+            "remote": SimpleNamespace(),
+            "system": SimpleNamespace(),
+        },
+    )
+
+    resolved = await runtime._resolve_execution_context(kernel.context)
+
+    assert resolved.system_agent.metadata["_runtime_compaction"]["fallback_stage"] == "reduced_retention"
+    assert [message.sequence for message in resolved.messages] == [5]
+
+
+@pytest.mark.asyncio
+async def test_resolve_execution_context_fallback_forces_rolling_summary_when_needed(monkeypatch):
+    kernel = _build_fixture_context(endpoint_kind="system")
+    messages = [
+        _message(kernel.context, sequence=1, content="msg-1"),
+        _message(kernel.context, sequence=2, content="msg-2"),
+        _message(kernel.context, sequence=3, content="msg-3"),
+        _message(kernel.context, sequence=4, content="msg-4"),
+        _message(kernel.context, sequence=5, content="msg-5"),
+    ]
+    kernel.context = kernel.context.model_copy(
+        update={
+            "messages": messages,
+            "trigger_message": messages[-1],
+            "agent_harness": AgentHarness(
+                compaction_policy=AgentCompactionPolicy(
+                    strategy="recent_window",
+                    max_estimated_input_tokens=10,
+                    recent_message_count=4,
+                    min_recent_message_count=1,
+                    max_run_memory_entries=1,
+                )
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        compaction_module,
+        "_estimate_tokens",
+        lambda text: (
+            5
+            if f"[{compaction_module.COMPACTION_SUMMARY_ENTRY_TYPE}/scratch]" in text
+            else 99
+        ),
+    )
+
+    runtime = AgentTaskRuntime(
+        kernel=kernel,
+        publish_events=lambda events: asyncio.sleep(0),
+        poll_interval_seconds=0.01,
+        executors={
+            "local": SimpleNamespace(),
+            "remote": SimpleNamespace(),
+            "system": SimpleNamespace(),
+        },
+    )
+
+    resolved = await runtime._resolve_execution_context(kernel.context)
+
+    assert resolved.system_agent.metadata["_runtime_compaction"]["fallback_stage"] == "forced_rolling_summary"
+    assert any(
+        entry.entry_type == compaction_module.COMPACTION_SUMMARY_ENTRY_TYPE
+        for entry in resolved.run_memory
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_execution_context_raises_when_compaction_cannot_fit(monkeypatch):
+    kernel = _build_fixture_context(endpoint_kind="system")
+    kernel.context = kernel.context.model_copy(
+        update={
+            "agent_harness": AgentHarness(
+                compaction_policy=AgentCompactionPolicy(
+                    strategy="recent_window",
+                    max_estimated_input_tokens=1,
+                    recent_message_count=1,
+                    min_recent_message_count=1,
+                )
+            )
+        }
+    )
+    monkeypatch.setattr(compaction_module, "_estimate_tokens", lambda text: 999)
+
+    runtime = AgentTaskRuntime(
+        kernel=kernel,
+        publish_events=lambda events: asyncio.sleep(0),
+        poll_interval_seconds=0.01,
+        executors={
+            "local": SimpleNamespace(),
+            "remote": SimpleNamespace(),
+            "system": SimpleNamespace(),
+        },
+    )
+
+    with pytest.raises(ValueError, match="Unable to fit agent execution context within compaction policy limit"):
+        await runtime._resolve_execution_context(kernel.context)
+
+
 def test_render_prompt_includes_participants_memory_and_thread_context():
     kernel = _build_fixture_context(endpoint_kind="system")
     prompt = render_prompt(kernel.context)
@@ -933,6 +1501,12 @@ def test_render_prompt_includes_workspace_and_agent_harness_sections():
             selection_principles=["Choose the narrowest tool that answers the question."],
             fallback_when_no_tool_fits="Call out the gap and ask for clarification.",
         ),
+        compaction_policy=AgentCompactionPolicy(
+            strategy="rolling_summary",
+            max_estimated_input_tokens=8000,
+            recent_message_count=6,
+            max_run_memory_entries=4,
+        ),
     )
     kernel.context = kernel.context.model_copy(
         update={
@@ -951,6 +1525,9 @@ def test_render_prompt_includes_workspace_and_agent_harness_sections():
     assert "Agent harness summary" in prompt
     assert "select tools from the current workspace tool catalog dynamically" in prompt
     assert "fallback when no tool fits: Call out the gap and ask for clarification." in prompt
+    assert "compaction policy:" in prompt
+    assert "strategy: rolling_summary" in prompt
+    assert "max run memory entries: 4" in prompt
     assert "repo_search | enabled: yes | Searches the current workspace source tree." in prompt
 
 
@@ -1191,6 +1768,17 @@ class RecordingObserver:
 @pytest.mark.asyncio
 async def test_agent_runtime_emits_task_span_to_observer():
     kernel = _build_fixture_context(endpoint_kind="system")
+    kernel.context = kernel.context.model_copy(
+        update={
+            "agent_harness": AgentHarness(
+                compaction_policy=AgentCompactionPolicy(
+                    strategy="recent_window",
+                    recent_message_count=1,
+                    min_recent_message_count=1,
+                )
+            )
+        }
+    )
     observer = RecordingObserver()
 
     class SuccessfulExecutor:
@@ -1224,6 +1812,7 @@ async def test_agent_runtime_emits_task_span_to_observer():
     assert observer.records[0]["metadata"]["correlation_id"] == str(kernel.context.run.correlation_id)
     assert observer.records[0]["metadata"]["run_id"] == str(kernel.context.run.run_id)
     assert observer.records[0]["metadata"]["task_id"] == str(kernel.task.task_id)
+    assert observer.records[0]["metadata"]["compaction"]["strategy"] == "recent_window"
     updates = observer.records[0]["updates"]
     assert any(update.get("metadata", {}).get("stop_reason") == "completed" for update in updates)
     assert observer.flush_count >= 1
@@ -1673,6 +2262,20 @@ def test_otlp_observability_redacts_sensitive_payloads(monkeypatch):
 @pytest.mark.asyncio
 async def test_local_ollama_executor_debug_dump_writes_request_payload(monkeypatch, tmp_path):
     kernel = _build_fixture_context(endpoint_kind="local")
+    kernel.context = kernel.context.model_copy(
+        update={
+            "system_agent": kernel.context.system_agent.model_copy(
+                update={
+                    "metadata": {
+                        "_runtime_compaction": {
+                            "strategy": "recent_window",
+                            "fallback_stage": "assigned",
+                        }
+                    }
+                }
+            )
+        }
+    )
     debug_file = tmp_path / "agent-runtime-prompts.jsonl"
 
     class FakeResponse:
@@ -1707,6 +2310,7 @@ async def test_local_ollama_executor_debug_dump_writes_request_payload(monkeypat
     record = json.loads(debug_file.read_text(encoding="utf-8").strip())
     assert record["source"] == "local-ollama"
     assert record["message_count"] == 2
+    assert record["compaction"]["strategy"] == "recent_window"
     assert record["request"]["prompt"] == render_prompt(kernel.context)
 
 

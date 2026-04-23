@@ -4826,6 +4826,30 @@ class CollaborationKernel:
         visibility: str = "agents_only",
         source: str = "agent_runtime",
     ) -> MemoryEntry:
+        return await self.upsert_run_scratch(
+            run_id=run_id,
+            actor_input=actor_input,
+            entry_type=entry_type,
+            content=content,
+            summary=summary,
+            metadata=metadata,
+            visibility=visibility,
+            source=source,
+        )
+
+    async def upsert_run_scratch(
+        self,
+        *,
+        run_id: UUID,
+        actor_input: ParticipantInput,
+        entry_type: str,
+        content: str,
+        summary: str | None = None,
+        metadata: dict[str, object] | None = None,
+        visibility: str = "agents_only",
+        source: str = "agent_runtime",
+        memory_entry_id: UUID | None = None,
+    ) -> MemoryEntry:
         run = await self._repository.fetch_run(run_id)
         if run is None:
             raise KeyError(f"Run {run_id} not found")
@@ -4835,8 +4859,13 @@ class CollaborationKernel:
             actor=actor_input,
             now=now,
         )
+        existing_entry: MemoryEntry | None = None
+        if memory_entry_id is not None:
+            existing_entry = await self._repository.fetch_memory_entry(memory_entry_id)
+            if existing_entry is None or existing_entry.run_id != run_id:
+                raise KeyError(f"Run scratch entry {memory_entry_id} not found for run {run_id}")
         entry = MemoryEntry(
-            memory_entry_id=uuid4(),
+            memory_entry_id=memory_entry_id or uuid4(),
             scope="run",
             state="scratch",
             workspace_id=run.workspace_id,
@@ -4846,12 +4875,15 @@ class CollaborationKernel:
             content=content,
             summary=summary,
             source=source,
-            created_by=actor_input.participant_id,
+            created_by=(
+                existing_entry.created_by if existing_entry is not None else actor_input.participant_id
+            ),
             updated_by=actor_input.participant_id,
             visibility=visibility,
             metadata=dict(metadata or {}),
-            created_at=now,
+            created_at=existing_entry.created_at if existing_entry is not None else now,
             updated_at=now,
+            version=(existing_entry.version + 1) if existing_entry is not None else 1,
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():

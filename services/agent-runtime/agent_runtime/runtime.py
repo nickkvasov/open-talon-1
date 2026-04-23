@@ -40,6 +40,7 @@ from .llm_engines import (  # noqa: E402
     build_default_llm_engine_registry,
     resolve_llm_engine_for_context,
 )
+from .compaction import compact_execution_context  # noqa: E402
 from .observability import (  # noqa: E402
     LangfuseRuntimeObserver,
     RuntimeObservation,
@@ -100,6 +101,8 @@ class RuntimeKernel(Protocol):
 
     async def list_llm_providers(self) -> list[Any]: ...
 
+    async def search_thread_memory(self, thread_id: UUID, payload: Any) -> Any: ...
+
     async def list_pending_tasks_for_system_agent(
         self,
         system_agent_id: UUID,
@@ -130,6 +133,20 @@ class RuntimeKernel(Protocol):
         error: str,
         *,
         stop_reason: str = "tool_failure",
+    ) -> Any: ...
+
+    async def upsert_run_scratch(
+        self,
+        *,
+        run_id: UUID,
+        actor_input,
+        entry_type: str,
+        content: str,
+        summary: str | None = None,
+        metadata: dict[str, object] | None = None,
+        visibility: str = "agents_only",
+        source: str = "agent_runtime",
+        memory_entry_id: UUID | None = None,
     ) -> Any: ...
 
 
@@ -459,11 +476,18 @@ class RuntimeExecutionManager:
             resolved.endpoint == context.system_agent.endpoint
             and metadata == context.system_agent.metadata
         ):
-            return context
-        system_agent = context.system_agent.model_copy(
-            update={"endpoint": resolved.endpoint, "metadata": metadata}
+            resolved_context = context
+        else:
+            system_agent = context.system_agent.model_copy(
+                update={"endpoint": resolved.endpoint, "metadata": metadata}
+            )
+            resolved_context = context.model_copy(update={"system_agent": system_agent})
+        compacted = await compact_execution_context(
+            resolved_context,
+            kernel=kernel,
+            render_prompt=render_prompt,
         )
-        return context.model_copy(update={"system_agent": system_agent})
+        return compacted.context
 
 
 class AgentTaskRuntime:
@@ -664,7 +688,14 @@ def render_prompt(context: AgentExecutionContext) -> str:
         lines = []
         for entry in entries:
             label = entry.summary or entry.entry_type
-            lines.append(f"- [{entry.entry_type}/{entry.state}] {label}: {entry.content}")
+            retrieved_suffix = (
+                " [retrieved]"
+                if entry.metadata.get("_compaction_retrieved")
+                else ""
+            )
+            lines.append(
+                f"- [{entry.entry_type}/{entry.state}]{retrieved_suffix} {label}: {entry.content}"
+            )
         return lines
 
     message_lines = []
@@ -928,6 +959,26 @@ def _agent_harness_lines(context: AgentExecutionContext) -> list[str]:
             + ("yes" if memory_policy.use_workspace_memory else "no"),
         ]
     )
+    compaction_policy = harness.compaction_policy
+    lines.extend(
+        [
+            "- compaction policy:",
+            f"  - enabled: {'yes' if compaction_policy.enabled else 'no'}",
+            f"  - strategy: {compaction_policy.strategy}",
+            f"  - overflow behavior: {compaction_policy.overflow_behavior}",
+            f"  - max estimated input tokens: {compaction_policy.max_estimated_input_tokens}",
+            f"  - recent message count: {compaction_policy.recent_message_count}",
+            f"  - minimum recent messages: {compaction_policy.min_recent_message_count}",
+            f"  - max run memory entries: {compaction_policy.max_run_memory_entries}",
+            f"  - max thread memory entries: {compaction_policy.max_thread_memory_entries}",
+            "  - max workspace memory entries: "
+            + str(compaction_policy.max_workspace_memory_entries),
+            f"  - summary max chars: {compaction_policy.summary_max_chars}",
+            f"  - retrieval limit: {compaction_policy.retrieval_limit}",
+            "  - retrieval provider key: "
+            + (compaction_policy.retrieval_provider_key or "default"),
+        ]
+    )
 
     collaboration_policy = harness.collaboration_policy
     lines.append("- collaboration policy:")
@@ -1187,6 +1238,7 @@ def _langfuse_metadata(
             "endpoint_kind": context.system_agent.endpoint.kind,
             "endpoint_url": endpoint_url,
             "provider": provider,
+            "compaction": _runtime_compaction_metadata(context),
         },
     )
     return telemetry_metadata(telemetry_context)
@@ -1267,6 +1319,7 @@ def _debug_prompt_payload(
         "trigger_message_id": (
             str(context.trigger_message.message_id) if context.trigger_message is not None else None
         ),
+        "compaction": _runtime_compaction_metadata(context),
         "request": request_payload,
     }
 
@@ -1291,3 +1344,8 @@ def _debug_prompt_payload(
             default_backup_count=5,
         ),
     )
+
+
+def _runtime_compaction_metadata(context: AgentExecutionContext) -> dict[str, Any] | None:
+    value = context.system_agent.metadata.get("_runtime_compaction")
+    return value if isinstance(value, dict) else None

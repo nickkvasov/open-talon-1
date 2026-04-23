@@ -16,6 +16,53 @@ import { useApi } from '../api/useApi';
 import ConfirmationModal from '../components/Common/ConfirmationModal';
 import { buildAdminActor } from '../config/adminActor';
 
+const defaultAgentData = () => ({
+  display_name: '', description: '', role: 'assistant', capabilities: 'execute_code',
+  endpoint_kind: 'local', endpoint_model: '', endpoint_provider: '',
+  system_prompt: 'You are a helpful assistant.', instructions: '', completion_criteria: '',
+  harness_summary: '',
+  operating_principles: '[]',
+  planning_guidance: '[]',
+  planning_plan_before_act: true,
+  planning_incremental_execution: true,
+  planning_one_goal_at_a_time: true,
+  planning_explicit_uncertainty: true,
+  tool_selection_principles: '[]',
+  tool_read_before_write: true,
+  tool_inspect_schema_before_use: true,
+  tool_prefer_existing_workspace_tools: true,
+  tool_cite_tool_results_in_reasoning: true,
+  tool_verify_side_effects_after_mutation: true,
+  tool_fallback_when_no_tool_fits: '',
+  memory_use_run_memory: true,
+  memory_use_thread_memory: true,
+  memory_use_workspace_memory: true,
+  compaction_enabled: true,
+  compaction_strategy: 'full_context',
+  compaction_overflow_behavior: 'auto_fallback',
+  compaction_max_estimated_input_tokens: 12000,
+  compaction_recent_message_count: 12,
+  compaction_min_recent_message_count: 4,
+  compaction_max_run_memory_entries: 6,
+  compaction_max_thread_memory_entries: 6,
+  compaction_max_workspace_memory_entries: 6,
+  compaction_summary_max_chars: 3000,
+  compaction_retrieval_limit: 5,
+  compaction_retrieval_provider_key: '',
+  collaboration_ask_user_when: '[]',
+  collaboration_escalate_when: '[]',
+  collaboration_delegation_guidance: '[]',
+  collaboration_handoff_guidance: '[]',
+  validation_required_checks: '[]',
+  validation_require_evidence_for_claims: true,
+  validation_require_tool_results_for_completion: false,
+  validation_require_tests_before_done: false,
+  stop_completion_conditions: '[]',
+  stop_stop_conditions: '[]',
+  stop_max_turns: '',
+  skill_refs: '[]'
+});
+
 export default function SwarmResources() {
   const api = useApi();
   const [agents, setAgents] = useState([]);
@@ -34,40 +81,7 @@ export default function SwarmResources() {
   const [editingAgent, setEditingAgent] = useState(null);
   const [editingTool, setEditingTool] = useState(null);
   
-  const [agentData, setAgentData] = useState({
-    display_name: '', description: '', role: 'assistant', capabilities: 'execute_code',
-    endpoint_kind: 'local', endpoint_model: '', endpoint_provider: '',
-    system_prompt: 'You are a helpful assistant.', instructions: '', completion_criteria: '',
-    harness_summary: '',
-    operating_principles: '[]',
-    planning_guidance: '[]',
-    planning_plan_before_act: true,
-    planning_incremental_execution: true,
-    planning_one_goal_at_a_time: true,
-    planning_explicit_uncertainty: true,
-    tool_selection_principles: '[]',
-    tool_read_before_write: true,
-    tool_inspect_schema_before_use: true,
-    tool_prefer_existing_workspace_tools: true,
-    tool_cite_tool_results_in_reasoning: true,
-    tool_verify_side_effects_after_mutation: true,
-    tool_fallback_when_no_tool_fits: '',
-    memory_use_run_memory: true,
-    memory_use_thread_memory: true,
-    memory_use_workspace_memory: true,
-    collaboration_ask_user_when: '[]',
-    collaboration_escalate_when: '[]',
-    collaboration_delegation_guidance: '[]',
-    collaboration_handoff_guidance: '[]',
-    validation_required_checks: '[]',
-    validation_require_evidence_for_claims: true,
-    validation_require_tool_results_for_completion: false,
-    validation_require_tests_before_done: false,
-    stop_completion_conditions: '[]',
-    stop_stop_conditions: '[]',
-    stop_max_turns: '',
-    skill_refs: '[]'
-  });
+  const [agentData, setAgentData] = useState(defaultAgentData());
 
   const [toolData, setToolData] = useState({
     name: '', description: '', param_strategy: 'strict', exec_strategy: 'webhook', exec_url: ''
@@ -139,40 +153,7 @@ export default function SwarmResources() {
   }, [api, scopeMode, selectedOrganizationId]);
 
   const resetAgentForm = () => {
-    setAgentData({
-      display_name: '', description: '', role: 'assistant', capabilities: 'execute_code',
-      endpoint_kind: 'local', endpoint_model: '', endpoint_provider: '',
-      system_prompt: 'You are a helpful assistant.', instructions: '', completion_criteria: '',
-      harness_summary: '',
-      operating_principles: '[]',
-      planning_guidance: '[]',
-      planning_plan_before_act: true,
-      planning_incremental_execution: true,
-      planning_one_goal_at_a_time: true,
-      planning_explicit_uncertainty: true,
-      tool_selection_principles: '[]',
-      tool_read_before_write: true,
-      tool_inspect_schema_before_use: true,
-      tool_prefer_existing_workspace_tools: true,
-      tool_cite_tool_results_in_reasoning: true,
-      tool_verify_side_effects_after_mutation: true,
-      tool_fallback_when_no_tool_fits: '',
-      memory_use_run_memory: true,
-      memory_use_thread_memory: true,
-      memory_use_workspace_memory: true,
-      collaboration_ask_user_when: '[]',
-      collaboration_escalate_when: '[]',
-      collaboration_delegation_guidance: '[]',
-      collaboration_handoff_guidance: '[]',
-      validation_required_checks: '[]',
-      validation_require_evidence_for_claims: true,
-      validation_require_tool_results_for_completion: false,
-      validation_require_tests_before_done: false,
-      stop_completion_conditions: '[]',
-      stop_stop_conditions: '[]',
-      stop_max_turns: '',
-      skill_refs: '[]'
-    });
+    setAgentData(defaultAgentData());
     setEditingAgent(null);
     setAgentModalMode('create');
   };
@@ -191,6 +172,7 @@ export default function SwarmResources() {
     const planning = harness.planning || {};
     const toolUsePolicy = harness.tool_use_policy || {};
     const memoryPolicy = harness.memory_policy || {};
+    const compactionPolicy = harness.compaction_policy || {};
     const collaborationPolicy = harness.collaboration_policy || {};
     const validationPolicy = harness.validation_policy || {};
     const stopPolicy = harness.stop_policy || {};
@@ -224,6 +206,18 @@ export default function SwarmResources() {
       memory_use_run_memory: memoryPolicy.use_run_memory ?? true,
       memory_use_thread_memory: memoryPolicy.use_thread_memory ?? true,
       memory_use_workspace_memory: memoryPolicy.use_workspace_memory ?? true,
+      compaction_enabled: compactionPolicy.enabled ?? true,
+      compaction_strategy: compactionPolicy.strategy || 'full_context',
+      compaction_overflow_behavior: compactionPolicy.overflow_behavior || 'auto_fallback',
+      compaction_max_estimated_input_tokens: compactionPolicy.max_estimated_input_tokens ?? 12000,
+      compaction_recent_message_count: compactionPolicy.recent_message_count ?? 12,
+      compaction_min_recent_message_count: compactionPolicy.min_recent_message_count ?? 4,
+      compaction_max_run_memory_entries: compactionPolicy.max_run_memory_entries ?? 6,
+      compaction_max_thread_memory_entries: compactionPolicy.max_thread_memory_entries ?? 6,
+      compaction_max_workspace_memory_entries: compactionPolicy.max_workspace_memory_entries ?? 6,
+      compaction_summary_max_chars: compactionPolicy.summary_max_chars ?? 3000,
+      compaction_retrieval_limit: compactionPolicy.retrieval_limit ?? 5,
+      compaction_retrieval_provider_key: compactionPolicy.retrieval_provider_key || '',
       collaboration_ask_user_when: JSON.stringify(collaborationPolicy.ask_user_when || [], null, 2),
       collaboration_escalate_when: JSON.stringify(collaborationPolicy.escalate_when || [], null, 2),
       collaboration_delegation_guidance: JSON.stringify(collaborationPolicy.delegation_guidance || [], null, 2),
@@ -263,6 +257,9 @@ export default function SwarmResources() {
     const completionConditions = parseJsonField(agentData.stop_completion_conditions, [], 'Completion conditions');
     const stopConditions = parseJsonField(agentData.stop_stop_conditions, [], 'Stop conditions');
     const skillRefs = parseJsonField(agentData.skill_refs, [], 'Skill refs');
+    const retrievalProviderKey = agentData.compaction_strategy === 'summary_plus_retrieval'
+      ? agentData.compaction_retrieval_provider_key.trim() || null
+      : null;
     const planningDefaults = agentData.planning_plan_before_act
       && agentData.planning_incremental_execution
       && agentData.planning_one_goal_at_a_time
@@ -275,6 +272,18 @@ export default function SwarmResources() {
     const memoryDefaults = agentData.memory_use_run_memory
       && agentData.memory_use_thread_memory
       && agentData.memory_use_workspace_memory;
+    const compactionDefaults = agentData.compaction_enabled
+      && agentData.compaction_strategy === 'full_context'
+      && agentData.compaction_overflow_behavior === 'auto_fallback'
+      && agentData.compaction_max_estimated_input_tokens === 12000
+      && agentData.compaction_recent_message_count === 12
+      && agentData.compaction_min_recent_message_count === 4
+      && agentData.compaction_max_run_memory_entries === 6
+      && agentData.compaction_max_thread_memory_entries === 6
+      && agentData.compaction_max_workspace_memory_entries === 6
+      && agentData.compaction_summary_max_chars === 3000
+      && agentData.compaction_retrieval_limit === 5
+      && !retrievalProviderKey;
     const validationDefaults = agentData.validation_require_evidence_for_claims
       && !agentData.validation_require_tool_results_for_completion
       && !agentData.validation_require_tests_before_done;
@@ -287,6 +296,7 @@ export default function SwarmResources() {
       || !toolDefaults
       || agentData.tool_fallback_when_no_tool_fits.trim()
       || !memoryDefaults
+      || !compactionDefaults
       || askUserWhen.length
       || escalateWhen.length
       || delegationGuidance.length
@@ -325,6 +335,20 @@ export default function SwarmResources() {
         use_run_memory: agentData.memory_use_run_memory,
         use_thread_memory: agentData.memory_use_thread_memory,
         use_workspace_memory: agentData.memory_use_workspace_memory,
+      },
+      compaction_policy: {
+        enabled: agentData.compaction_enabled,
+        strategy: agentData.compaction_strategy,
+        overflow_behavior: agentData.compaction_overflow_behavior,
+        max_estimated_input_tokens: agentData.compaction_max_estimated_input_tokens,
+        recent_message_count: agentData.compaction_recent_message_count,
+        min_recent_message_count: agentData.compaction_min_recent_message_count,
+        max_run_memory_entries: agentData.compaction_max_run_memory_entries,
+        max_thread_memory_entries: agentData.compaction_max_thread_memory_entries,
+        max_workspace_memory_entries: agentData.compaction_max_workspace_memory_entries,
+        summary_max_chars: agentData.compaction_summary_max_chars,
+        retrieval_limit: agentData.compaction_retrieval_limit,
+        retrieval_provider_key: retrievalProviderKey,
       },
       collaboration_policy: {
         ask_user_when: askUserWhen,
@@ -825,6 +849,88 @@ export default function SwarmResources() {
                         <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.memory_use_run_memory} onChange={e => setAgentData({...agentData, memory_use_run_memory: e.target.checked})} />Use run memory</label>
                         <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.memory_use_thread_memory} onChange={e => setAgentData({...agentData, memory_use_thread_memory: e.target.checked})} />Use thread memory</label>
                         <label className="flex items-center gap-2"><input type="checkbox" checked={agentData.memory_use_workspace_memory} onChange={e => setAgentData({...agentData, memory_use_workspace_memory: e.target.checked})} />Use workspace memory</label>
+                      </div>
+                      <h5 className="pt-2 text-sm font-bold text-slate-900 dark:text-white">Compaction Policy</h5>
+                      <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
+                        <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+                          <input
+                            type="checkbox"
+                            checked={agentData.compaction_enabled}
+                            onChange={e => setAgentData({...agentData, compaction_enabled: e.target.checked})}
+                          />
+                          Enable context compaction
+                        </label>
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                          <div>
+                            <label className="mb-1.5 block text-sm font-semibold text-slate-700 dark:text-slate-300">Preset</label>
+                            <select
+                              value={agentData.compaction_strategy}
+                              onChange={e => setAgentData({...agentData, compaction_strategy: e.target.value})}
+                              className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm outline-none transition-all focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-900"
+                            >
+                              <option value="full_context">full_context</option>
+                              <option value="recent_window">recent_window</option>
+                              <option value="rolling_summary">rolling_summary</option>
+                              <option value="summary_plus_retrieval">summary_plus_retrieval</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="mb-1.5 block text-sm font-semibold text-slate-700 dark:text-slate-300">Overflow Behavior</label>
+                            <select
+                              value={agentData.compaction_overflow_behavior}
+                              onChange={e => setAgentData({...agentData, compaction_overflow_behavior: e.target.value})}
+                              className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm outline-none transition-all focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-900"
+                            >
+                              <option value="auto_fallback">auto_fallback</option>
+                            </select>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                          <div>
+                            <label className="mb-1.5 block text-sm font-semibold text-slate-700 dark:text-slate-300">Max Estimated Input Tokens</label>
+                            <input type="number" min="1" value={agentData.compaction_max_estimated_input_tokens} onChange={e => setAgentData({...agentData, compaction_max_estimated_input_tokens: Number(e.target.value)})} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm outline-none transition-all focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-900" />
+                          </div>
+                          <div>
+                            <label className="mb-1.5 block text-sm font-semibold text-slate-700 dark:text-slate-300">Recent Message Count</label>
+                            <input type="number" min="0" value={agentData.compaction_recent_message_count} onChange={e => setAgentData({...agentData, compaction_recent_message_count: Number(e.target.value)})} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm outline-none transition-all focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-900" />
+                          </div>
+                          <div>
+                            <label className="mb-1.5 block text-sm font-semibold text-slate-700 dark:text-slate-300">Minimum Recent Messages</label>
+                            <input type="number" min="0" value={agentData.compaction_min_recent_message_count} onChange={e => setAgentData({...agentData, compaction_min_recent_message_count: Number(e.target.value)})} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm outline-none transition-all focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-900" />
+                          </div>
+                          <div>
+                            <label className="mb-1.5 block text-sm font-semibold text-slate-700 dark:text-slate-300">Max Run Memory Entries</label>
+                            <input type="number" min="0" value={agentData.compaction_max_run_memory_entries} onChange={e => setAgentData({...agentData, compaction_max_run_memory_entries: Number(e.target.value)})} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm outline-none transition-all focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-900" />
+                          </div>
+                          <div>
+                            <label className="mb-1.5 block text-sm font-semibold text-slate-700 dark:text-slate-300">Max Thread Memory Entries</label>
+                            <input type="number" min="0" value={agentData.compaction_max_thread_memory_entries} onChange={e => setAgentData({...agentData, compaction_max_thread_memory_entries: Number(e.target.value)})} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm outline-none transition-all focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-900" />
+                          </div>
+                          <div>
+                            <label className="mb-1.5 block text-sm font-semibold text-slate-700 dark:text-slate-300">Max Workspace Memory Entries</label>
+                            <input type="number" min="0" value={agentData.compaction_max_workspace_memory_entries} onChange={e => setAgentData({...agentData, compaction_max_workspace_memory_entries: Number(e.target.value)})} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm outline-none transition-all focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-900" />
+                          </div>
+                          <div>
+                            <label className="mb-1.5 block text-sm font-semibold text-slate-700 dark:text-slate-300">Summary Max Chars</label>
+                            <input type="number" min="1" value={agentData.compaction_summary_max_chars} onChange={e => setAgentData({...agentData, compaction_summary_max_chars: Number(e.target.value)})} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm outline-none transition-all focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-900" />
+                          </div>
+                          <div>
+                            <label className="mb-1.5 block text-sm font-semibold text-slate-700 dark:text-slate-300">Retrieval Limit</label>
+                            <input type="number" min="0" value={agentData.compaction_retrieval_limit} onChange={e => setAgentData({...agentData, compaction_retrieval_limit: Number(e.target.value)})} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm outline-none transition-all focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-900" />
+                          </div>
+                        </div>
+                        {agentData.compaction_strategy === 'summary_plus_retrieval' && (
+                          <div>
+                            <label className="mb-1.5 block text-sm font-semibold text-slate-700 dark:text-slate-300">Retrieval Provider Key</label>
+                            <input
+                              type="text"
+                              value={agentData.compaction_retrieval_provider_key}
+                              onChange={e => setAgentData({...agentData, compaction_retrieval_provider_key: e.target.value})}
+                              className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm outline-none transition-all focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-900"
+                              placeholder="Leave blank to use the default thread-memory provider"
+                            />
+                          </div>
+                        )}
                       </div>
                       <h5 className="pt-2 text-sm font-bold text-slate-900 dark:text-white">Validation Policy</h5>
                       <div className="grid grid-cols-1 gap-2 text-sm text-slate-600 dark:text-slate-300">

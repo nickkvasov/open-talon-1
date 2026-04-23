@@ -23,6 +23,7 @@ for path in (_CONTRACTS_DIR, _CORE_COLLAB_DIR, _WORKSPACE_MEMORY_DIR):
 
 from open_talon_contracts.agent_contracts import build_default_interaction_contract
 from open_talon_contracts.models import (
+    AgentCompactionPolicy,
     AgentDefinition,
     AgentEndpoint,
     AgentHarness,
@@ -304,6 +305,12 @@ async def test_repository_workspace_and_agent_harness_round_trip():
             tool_use_policy=AgentToolUsePolicy(
                 selection_principles=["Prefer the narrowest tool that provides evidence."],
             ),
+            compaction_policy=AgentCompactionPolicy(
+                strategy="rolling_summary",
+                max_estimated_input_tokens=8_500,
+                recent_message_count=10,
+                max_run_memory_entries=4,
+            ),
         ),
         interaction_contract=build_default_interaction_contract(
             display_name="Harness Agent",
@@ -340,9 +347,11 @@ async def test_repository_workspace_and_agent_harness_round_trip():
         assert fetched_agent.harness.tool_use_policy.selection_principles == [
             "Prefer the narrowest tool that provides evidence."
         ]
+        assert fetched_agent.harness.compaction_policy.strategy == "rolling_summary"
         listed_agent = next(item for item in listed_agents if item.agent_id == agent_id)
         assert listed_agent.harness is not None
         assert listed_agent.harness.summary.startswith("Choose tools dynamically")
+        assert listed_agent.harness.compaction_policy.max_run_memory_entries == 4
     finally:
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM system_agents WHERE agent_id = $1", agent_id)

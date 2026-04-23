@@ -92,6 +92,13 @@ HarnessRuleScope = Literal[
     "completion",
     "security",
 ]
+AgentCompactionStrategy = Literal[
+    "full_context",
+    "recent_window",
+    "rolling_summary",
+    "summary_plus_retrieval",
+]
+AgentCompactionOverflowBehavior = Literal["auto_fallback"]
 
 
 def utcnow() -> datetime:
@@ -206,6 +213,21 @@ class AgentMemoryPolicy(BaseModel):
     use_workspace_memory: bool = True
 
 
+class AgentCompactionPolicy(BaseModel):
+    enabled: bool = True
+    strategy: AgentCompactionStrategy = "full_context"
+    overflow_behavior: AgentCompactionOverflowBehavior = "auto_fallback"
+    max_estimated_input_tokens: int = Field(default=12_000, ge=1)
+    recent_message_count: int = Field(default=12, ge=1)
+    min_recent_message_count: int = Field(default=4, ge=1)
+    max_run_memory_entries: int = Field(default=6, ge=0)
+    max_thread_memory_entries: int = Field(default=6, ge=0)
+    max_workspace_memory_entries: int = Field(default=6, ge=0)
+    summary_max_chars: int = Field(default=3_000, ge=256)
+    retrieval_limit: int = Field(default=5, ge=1)
+    retrieval_provider_key: str | None = None
+
+
 class AgentCollaborationPolicy(BaseModel):
     ask_user_when: list[str] = Field(default_factory=list)
     escalate_when: list[str] = Field(default_factory=list)
@@ -233,6 +255,9 @@ class AgentHarness(BaseModel):
     planning: AgentPlanningPolicy = Field(default_factory=AgentPlanningPolicy)
     tool_use_policy: AgentToolUsePolicy = Field(default_factory=AgentToolUsePolicy)
     memory_policy: AgentMemoryPolicy = Field(default_factory=AgentMemoryPolicy)
+    compaction_policy: AgentCompactionPolicy = Field(
+        default_factory=AgentCompactionPolicy
+    )
     collaboration_policy: AgentCollaborationPolicy = Field(
         default_factory=AgentCollaborationPolicy
     )

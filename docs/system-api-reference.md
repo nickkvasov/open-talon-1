@@ -568,6 +568,8 @@ Global system-definition APIs are operator/admin APIs.
 
 In the current implementation, org-scoped create/list routes are explicit. Update and delete endpoints for providers, tools, and agents live on the top-level admin surface.
 
+System-agent definitions accept an optional typed `harness.compaction_policy` object. Current strategies are `full_context`, `recent_window`, `rolling_summary`, and `summary_plus_retrieval`; the runtime applies this policy immediately before prompt rendering without mutating the canonical `AgentExecutionContext`.
+
 ### Git Repositories, Assets, And Tool Attachments
 
 | Method | Path | Summary |

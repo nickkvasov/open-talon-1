@@ -34,6 +34,7 @@ from open_talon_contracts.log_management import (  # noqa: E402
 )
 from open_talon_contracts.models import (  # noqa: E402
     ActorRef,
+    AgentCompactionPolicy,
     AgentDefinition,
     AgentEndpoint,
     AgentHarness,
@@ -75,6 +76,7 @@ from open_talon_contracts.models import (  # noqa: E402
     ParticipantProfile,
     Run,
     RunStep,
+    SearchMemoryRequest,
     TargetRef,
     ToolCall,
     ToolCallResult,
@@ -1392,6 +1394,11 @@ async def test_kernel_create_and_update_system_agent_round_trips_harness():
             selection_principles=["Prefer the narrowest tool that provides ground truth."],
             fallback_when_no_tool_fits="Explain the gap and ask for help.",
         ),
+        compaction_policy=AgentCompactionPolicy(
+            strategy="rolling_summary",
+            max_estimated_input_tokens=8_000,
+            recent_message_count=10,
+        ),
     )
 
     created = await kernel.create_system_agent(
@@ -1413,6 +1420,11 @@ async def test_kernel_create_and_update_system_agent_round_trips_harness():
         tool_use_policy=AgentToolUsePolicy(
             selection_principles=["Use workspace tools opportunistically."],
             read_before_write=False,
+        ),
+        compaction_policy=AgentCompactionPolicy(
+            strategy="summary_plus_retrieval",
+            retrieval_provider_key="semantic-thread",
+            retrieval_limit=3,
         ),
     )
     updated = await kernel.update_system_agent(
@@ -1498,6 +1510,160 @@ async def test_kernel_update_system_agent_clears_harness_when_explicit_null():
 
     assert updated.agent.harness is None
     assert repository.upserted_agents[-1].harness is None
+
+
+@pytest.mark.asyncio
+async def test_kernel_search_thread_memory_filters_agents_only_hits_for_user_viewer():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    actor = ParticipantInput(
+        participant_id=uuid4(),
+        participant_type="user",
+        user_id=uuid4(),
+        display_name="Nikolay",
+    )
+    repository._workspaces[workspace_id] = Workspace(
+        workspace_id=workspace_id,
+        name="Engineering",
+        description="Shared workspace",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._threads[thread_id] = Thread(
+        thread_id=thread_id,
+        workspace_id=workspace_id,
+        title="Release prep",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._memory_entries[workspace_id] = [
+        MemoryEntry(
+            memory_entry_id=uuid4(),
+            scope="thread",
+            state="confirmed",
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+            entry_type="decision",
+            summary="Workspace-visible decision",
+            content="Migration plan is tracked in staging.",
+            created_by=actor.participant_id,
+            updated_by=actor.participant_id,
+            visibility="workspace",
+            created_at=now,
+            updated_at=now,
+        ),
+        MemoryEntry(
+            memory_entry_id=uuid4(),
+            scope="thread",
+            state="confirmed",
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+            entry_type="decision",
+            summary="Agents-only note",
+            content="Migration rollback command lives in a private scratchpad.",
+            created_by=actor.participant_id,
+            updated_by=actor.participant_id,
+            visibility="agents_only",
+            created_at=now,
+            updated_at=now + timedelta(seconds=1),
+        ),
+    ]
+
+    response = await kernel.search_thread_memory(
+        thread_id,
+        SearchMemoryRequest(
+            actor=actor,
+            query="migration",
+            limit=10,
+            include_graph=False,
+        ),
+    )
+
+    assert response.provider == "postgres"
+    assert len(response.results) == 1
+    assert response.results[0].entry.summary == "Workspace-visible decision"
+
+
+@pytest.mark.asyncio
+async def test_kernel_upsert_run_scratch_reuses_existing_compaction_entry():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    run_id = uuid4()
+    actor = ParticipantInput(
+        participant_id=uuid4(),
+        participant_type="user",
+        user_id=uuid4(),
+        display_name="Nikolay",
+    )
+    repository._workspaces[workspace_id] = Workspace(
+        workspace_id=workspace_id,
+        name="Engineering",
+        description="Shared workspace",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._threads[thread_id] = Thread(
+        thread_id=thread_id,
+        workspace_id=workspace_id,
+        title="Release prep",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._runs[run_id] = Run(
+        run_id=run_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        task_id=uuid4(),
+        participant_id=actor.participant_id,
+        status="started",
+        created_at=now,
+        updated_at=now,
+    )
+
+    first = await kernel.upsert_run_scratch(
+        run_id=run_id,
+        actor_input=actor,
+        entry_type="context_compaction_summary",
+        content="First compacted summary",
+        summary="Compacted context",
+        metadata={"covered_sequence_end": 3},
+        visibility="agents_only",
+        source="agent_runtime_compaction",
+    )
+    second = await kernel.upsert_run_scratch(
+        run_id=run_id,
+        actor_input=actor,
+        entry_type="context_compaction_summary",
+        content="Updated compacted summary",
+        summary="Compacted context",
+        metadata={"covered_sequence_end": 4},
+        visibility="agents_only",
+        source="agent_runtime_compaction",
+        memory_entry_id=first.memory_entry_id,
+    )
+
+    stored = await repository.fetch_memory_entry(first.memory_entry_id)
+    run_entries = await repository.list_memory_entries_for_scope(
+        scope="run",
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        run_id=run_id,
+        state="scratch",
+    )
+
+    assert second.memory_entry_id == first.memory_entry_id
+    assert second.version == 2
+    assert stored is not None
+    assert stored.content == "Updated compacted summary"
+    assert len(
+        [entry for entry in run_entries if entry.entry_type == "context_compaction_summary"]
+    ) == 1
 
 
 @pytest.mark.asyncio

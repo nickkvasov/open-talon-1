@@ -2521,6 +2521,18 @@ async def test_create_and_update_system_agent_round_trips_harness(client, actor_
                     "selection_principles": ["Choose tools dynamically from the workspace catalog."],
                     "fallback_when_no_tool_fits": "Ask for clarification.",
                 },
+                "compaction_policy": {
+                    "strategy": "recent_window",
+                    "max_estimated_input_tokens": 9000,
+                    "recent_message_count": 9,
+                    "min_recent_message_count": 3,
+                    "max_run_memory_entries": 4,
+                    "max_thread_memory_entries": 5,
+                    "max_workspace_memory_entries": 6,
+                    "summary_max_chars": 2400,
+                    "retrieval_limit": 4,
+                    "retrieval_provider_key": None,
+                },
             },
         },
     )
@@ -2528,6 +2540,7 @@ async def test_create_and_update_system_agent_round_trips_harness(client, actor_
     assert create_resp.status_code == 200
     agent_id = create_resp.json()["agent_id"]
     assert create_resp.json()["harness"]["summary"] == "Plan carefully and stay incremental."
+    assert create_resp.json()["harness"]["compaction_policy"]["strategy"] == "recent_window"
 
     update_resp = await client.patch(
         f"/v1/agents/{agent_id}",
@@ -2558,6 +2571,20 @@ async def test_create_and_update_system_agent_round_trips_harness(client, actor_
                     "use_thread_memory": True,
                     "use_workspace_memory": True,
                 },
+                "compaction_policy": {
+                    "enabled": True,
+                    "strategy": "summary_plus_retrieval",
+                    "overflow_behavior": "auto_fallback",
+                    "max_estimated_input_tokens": 7000,
+                    "recent_message_count": 8,
+                    "min_recent_message_count": 3,
+                    "max_run_memory_entries": 3,
+                    "max_thread_memory_entries": 4,
+                    "max_workspace_memory_entries": 5,
+                    "summary_max_chars": 1800,
+                    "retrieval_limit": 2,
+                    "retrieval_provider_key": "semantic-thread",
+                },
                 "collaboration_policy": {
                     "ask_user_when": [],
                     "escalate_when": ["The workspace lacks a suitable tool."],
@@ -2584,6 +2611,8 @@ async def test_create_and_update_system_agent_round_trips_harness(client, actor_
     assert update_resp.status_code == 200
     assert update_resp.json()["harness"]["summary"] == "Updated agent harness."
     assert update_resp.json()["harness"]["memory_policy"]["use_run_memory"] is False
+    assert update_resp.json()["harness"]["compaction_policy"]["strategy"] == "summary_plus_retrieval"
+    assert update_resp.json()["harness"]["compaction_policy"]["retrieval_provider_key"] == "semantic-thread"
     assert update_resp.json()["harness"]["stop_policy"]["max_turns"] == 5
 
 
@@ -2608,6 +2637,11 @@ async def test_update_system_agent_preserves_harness_when_omitted_and_clears_wit
                     "selection_principles": [
                         "Prefer the narrowest tool that provides direct evidence."
                     ]
+                },
+                "compaction_policy": {
+                    "strategy": "rolling_summary",
+                    "recent_message_count": 7,
+                    "max_run_memory_entries": 4,
                 },
             },
         },
@@ -2634,6 +2668,7 @@ async def test_update_system_agent_preserves_harness_when_omitted_and_clears_wit
     assert preserve_resp.status_code == 200
     assert preserve_resp.json()["description"] == "Updated description only."
     assert preserve_resp.json()["harness"]["summary"] == "Preserve this agent harness."
+    assert preserve_resp.json()["harness"]["compaction_policy"]["strategy"] == "rolling_summary"
     assert clear_resp.status_code == 200
     assert clear_resp.json()["harness"] is None
 
