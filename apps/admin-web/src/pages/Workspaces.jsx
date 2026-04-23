@@ -10,11 +10,13 @@ import {
   ShieldCheck, 
   Save,
   ChevronRight,
-  Info
+  Info,
+  Settings2
 } from 'lucide-react';
 import { useApi } from '../api/useApi';
 import ConfirmationModal from '../components/Common/ConfirmationModal';
 import { buildAdminActor } from '../config/adminActor';
+import { buildWorkspaceMutation } from '../lib/adminForms';
 
 export default function Workspaces() {
   const api = useApi();
@@ -27,6 +29,7 @@ export default function Workspaces() {
   // Detail Modal specific states
   const [selectedWorkspace, setSelectedWorkspace] = useState(null);
   const [editingRoleName, setEditingRoleName] = useState('');
+  const [draftRoleName, setDraftRoleName] = useState('');
   const [editingRoleDef, setEditingRoleDef] = useState('');
   
   // Workspace Edit Modal
@@ -126,58 +129,14 @@ export default function Workspaces() {
     setIsEditModalOpen(true);
   };
 
-  const parseJsonField = (raw, fallback, label) => {
-    if (!raw.trim()) {
-      return fallback;
-    }
+  const handleOpenWorkspace = async (workspace) => {
+    setDraftRoleName('');
     try {
-      return JSON.parse(raw);
+      const res = await api.get(`/v1/workspaces/${workspace.workspace_id}`);
+      setSelectedWorkspace(res.data);
     } catch {
-      throw new Error(`${label} must be valid JSON`);
+      setSelectedWorkspace(workspace);
     }
-  };
-
-  const buildWorkspaceHarness = () => {
-    const principles = parseJsonField(
-      workspaceFormData.methodology_principles,
-      [],
-      'Methodology principles',
-    );
-    const methodics = parseJsonField(workspaceFormData.methodics, [], 'Methodics');
-    const executionRules = parseJsonField(
-      workspaceFormData.execution_rules,
-      [],
-      'Execution rules',
-    );
-    const methodology = {
-      ontology: workspaceFormData.methodology_ontology || null,
-      axiology: workspaceFormData.methodology_axiology || null,
-      epistemology: workspaceFormData.methodology_epistemology || null,
-      principles,
-    };
-    const hasMethodology = Boolean(
-      methodology.ontology
-      || methodology.axiology
-      || methodology.epistemology
-      || methodology.principles.length,
-    );
-    const hasHarness = Boolean(
-      workspaceFormData.harness_summary.trim()
-      || hasMethodology
-      || methodics.length
-      || executionRules.length,
-    );
-    if (!hasHarness) {
-      return null;
-    }
-    return {
-      version: 1,
-      summary: workspaceFormData.harness_summary.trim() || null,
-      methodology: hasMethodology ? methodology : null,
-      methodics,
-      execution_rules: executionRules,
-      metadata: {},
-    };
   };
 
   const handleDeleteWorkspace = async (workspace_id, e) => {
@@ -208,19 +167,14 @@ export default function Workspaces() {
   const handleSaveWorkspace = async (e) => {
     e.preventDefault();
     try {
-      const payload = {
+      const payload = buildWorkspaceMutation({
         actor: buildAdminActor(),
-        organization_id: selectedOrganizationId || null,
-        name: workspaceFormData.name,
-        description: workspaceFormData.description,
-        metadata: JSON.parse(workspaceFormData.metadata || '{}'),
-        harness: buildWorkspaceHarness(),
-      };
+        organizationId: selectedOrganizationId,
+        formData: workspaceFormData,
+        modalMode,
+      });
 
       if (modalMode === 'create') {
-        if (!payload.organization_id) {
-          throw new Error('Select an organization before creating a workspace');
-        }
         await api.post('/v1/workspaces', payload);
       } else {
         await api.patch(`/v1/workspaces/${selectedWorkspace.workspace_id}`, payload);
@@ -241,6 +195,7 @@ export default function Workspaces() {
         definition: editingRoleDef
       });
       setEditingRoleName('');
+      setDraftRoleName('');
       setEditingRoleDef('');
       const updatedWs = await api.get(`/v1/workspaces/${workspaceId}`);
       setSelectedWorkspace(updatedWs.data);
@@ -276,6 +231,20 @@ export default function Workspaces() {
       }
     });
   };
+
+  const selectedWorkspaceRecord = selectedWorkspace?.workspace || selectedWorkspace;
+  const selectedWorkspaceId = selectedWorkspaceRecord?.workspace_id || '';
+  const selectedRoleDefinitions = Array.isArray(selectedWorkspace?.role_definitions)
+    ? Object.fromEntries(
+        selectedWorkspace.role_definitions.map((roleDefinition) => [
+          roleDefinition.name,
+          roleDefinition,
+        ])
+      )
+    : (selectedWorkspace?.metadata?.role_definitions || {});
+  const selectedParticipantCount = selectedWorkspaceRecord?.participant_count
+    ?? selectedWorkspace?.participants?.length
+    ?? 0;
 
   if (loading) return <div className="p-8 text-slate-500">Loading workspaces...</div>;
 
@@ -323,7 +292,7 @@ export default function Workspaces() {
         {workspaces.map(ws => (
           <div 
             key={ws.workspace_id} 
-            onClick={() => setSelectedWorkspace(ws)}
+            onClick={() => { void handleOpenWorkspace(ws); }}
             className="group bg-white dark:bg-slate-800 rounded-xl p-6 flex flex-col border border-slate-200 dark:border-slate-700 hover:border-blue-500 dark:hover:border-blue-500 transition-all cursor-pointer shadow-sm relative"
           >
             <div className="flex items-center justify-between mb-4">
@@ -382,8 +351,8 @@ export default function Workspaces() {
       {/* Workspace Create/Edit Modal */}
       {isEditModalOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 transition-opacity animate-in fade-in duration-200">
-          <div className="bg-white dark:bg-slate-800 w-full max-w-2xl rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 animate-in zoom-in-95 duration-200 flex flex-col">
-            <div className="p-6 border-b border-slate-100 dark:border-slate-700 flex justify-between items-center">
+          <div className="bg-white dark:bg-slate-800 w-full max-w-2xl max-h-[90vh] rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 animate-in zoom-in-95 duration-200 flex flex-col overflow-hidden">
+            <div className="p-6 border-b border-slate-100 dark:border-slate-700 flex justify-between items-center shrink-0">
               <div>
                 <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center">
                   <FolderKanban className="w-5 h-5 mr-3 text-blue-500" />
@@ -396,114 +365,116 @@ export default function Workspaces() {
               </button>
             </div>
             
-            <form onSubmit={handleSaveWorkspace} className="p-8 space-y-6">
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Workspace Name</label>
-                <input 
-                  required
-                  type="text" 
-                  value={workspaceFormData.name} 
-                  onChange={e => setWorkspaceFormData({...workspaceFormData, name: e.target.value})} 
-                  className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white"
-                  placeholder="e.g. Project Talon Core"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Description</label>
-                <textarea 
-                  value={workspaceFormData.description} 
-                  onChange={e => setWorkspaceFormData({...workspaceFormData, description: e.target.value})} 
-                  rows={3}
-                  className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
-                  placeholder="What is the scope of this workspace?"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Metadata (JSON)</label>
-                <textarea 
-                  value={workspaceFormData.metadata} 
-                  onChange={e => setWorkspaceFormData({...workspaceFormData, metadata: e.target.value})} 
-                  rows={6}
-                  className="w-full bg-slate-900 dark:bg-black border border-slate-700 rounded-lg px-4 py-3 font-mono text-xs text-blue-400 focus:ring-2 focus:ring-blue-500 outline-none resize-none shadow-inner"
-                  placeholder="{}"
-                />
-              </div>
-              <div className="space-y-6 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 p-5">
+            <form onSubmit={handleSaveWorkspace} className="flex min-h-0 flex-1 flex-col">
+              <div className="flex-1 overflow-y-auto p-8 space-y-6">
                 <div>
-                  <h3 className="text-sm font-bold text-slate-900 dark:text-white">Workspace Harness</h3>
-                  <p className="mt-1 text-xs text-slate-500">Methodology, methodics, and execution rules for this workspace.</p>
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Harness Summary</label>
-                  <textarea
-                    value={workspaceFormData.harness_summary}
-                    onChange={e => setWorkspaceFormData({...workspaceFormData, harness_summary: e.target.value})}
-                    rows={2}
-                    className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
-                    placeholder="High-level execution posture for this workspace..."
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Workspace Name</label>
+                  <input
+                    required
+                    type="text"
+                    value={workspaceFormData.name}
+                    onChange={e => setWorkspaceFormData({...workspaceFormData, name: e.target.value})}
+                    className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white"
+                    placeholder="e.g. Project Talon Core"
                   />
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div>
-                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Ontology</label>
-                    <textarea
-                      value={workspaceFormData.methodology_ontology}
-                      onChange={e => setWorkspaceFormData({...workspaceFormData, methodology_ontology: e.target.value})}
-                      rows={4}
-                      className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Axiology</label>
-                    <textarea
-                      value={workspaceFormData.methodology_axiology}
-                      onChange={e => setWorkspaceFormData({...workspaceFormData, methodology_axiology: e.target.value})}
-                      rows={4}
-                      className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Epistemology</label>
-                    <textarea
-                      value={workspaceFormData.methodology_epistemology}
-                      onChange={e => setWorkspaceFormData({...workspaceFormData, methodology_epistemology: e.target.value})}
-                      rows={4}
-                      className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
-                    />
-                  </div>
-                </div>
                 <div>
-                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Methodology Principles (JSON array)</label>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Description</label>
                   <textarea
-                    value={workspaceFormData.methodology_principles}
-                    onChange={e => setWorkspaceFormData({...workspaceFormData, methodology_principles: e.target.value})}
-                    rows={4}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                    value={workspaceFormData.description}
+                    onChange={e => setWorkspaceFormData({...workspaceFormData, description: e.target.value})}
+                    rows={3}
+                    className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
+                    placeholder="What is the scope of this workspace?"
                   />
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Metadata (JSON)</label>
+                  <textarea
+                    value={workspaceFormData.metadata}
+                    onChange={e => setWorkspaceFormData({...workspaceFormData, metadata: e.target.value})}
+                    rows={6}
+                    className="w-full bg-slate-900 dark:bg-black border border-slate-700 rounded-lg px-4 py-3 font-mono text-xs text-blue-400 focus:ring-2 focus:ring-blue-500 outline-none resize-none shadow-inner"
+                    placeholder="{}"
+                  />
+                </div>
+                <div className="space-y-6 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 p-5">
                   <div>
-                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Methodics (JSON array)</label>
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">Workspace Harness</h3>
+                    <p className="mt-1 text-xs text-slate-500">Methodology, methodics, and execution rules for this workspace.</p>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Harness Summary</label>
                     <textarea
-                      value={workspaceFormData.methodics}
-                      onChange={e => setWorkspaceFormData({...workspaceFormData, methodics: e.target.value})}
-                      rows={8}
+                      value={workspaceFormData.harness_summary}
+                      onChange={e => setWorkspaceFormData({...workspaceFormData, harness_summary: e.target.value})}
+                      rows={2}
+                      className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
+                      placeholder="High-level execution posture for this workspace..."
+                    />
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Ontology</label>
+                      <textarea
+                        value={workspaceFormData.methodology_ontology}
+                        onChange={e => setWorkspaceFormData({...workspaceFormData, methodology_ontology: e.target.value})}
+                        rows={4}
+                        className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Axiology</label>
+                      <textarea
+                        value={workspaceFormData.methodology_axiology}
+                        onChange={e => setWorkspaceFormData({...workspaceFormData, methodology_axiology: e.target.value})}
+                        rows={4}
+                        className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Epistemology</label>
+                      <textarea
+                        value={workspaceFormData.methodology_epistemology}
+                        onChange={e => setWorkspaceFormData({...workspaceFormData, methodology_epistemology: e.target.value})}
+                        rows={4}
+                        className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Methodology Principles (JSON array)</label>
+                    <textarea
+                      value={workspaceFormData.methodology_principles}
+                      onChange={e => setWorkspaceFormData({...workspaceFormData, methodology_principles: e.target.value})}
+                      rows={4}
                       className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
                     />
                   </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Execution Rules (JSON array)</label>
-                    <textarea
-                      value={workspaceFormData.execution_rules}
-                      onChange={e => setWorkspaceFormData({...workspaceFormData, execution_rules: e.target.value})}
-                      rows={8}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
-                    />
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Methodics (JSON array)</label>
+                      <textarea
+                        value={workspaceFormData.methodics}
+                        onChange={e => setWorkspaceFormData({...workspaceFormData, methodics: e.target.value})}
+                        rows={8}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Execution Rules (JSON array)</label>
+                      <textarea
+                        value={workspaceFormData.execution_rules}
+                        onChange={e => setWorkspaceFormData({...workspaceFormData, execution_rules: e.target.value})}
+                        rows={8}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
               
-              <div className="flex justify-end space-x-4 pt-4">
+              <div className="flex justify-end space-x-4 border-t border-slate-100 dark:border-slate-700 bg-white dark:bg-slate-800 px-8 py-4 shrink-0">
                 <button type="button" onClick={() => setIsEditModalOpen(false)} className="px-6 py-2.5 text-slate-500 font-semibold hover:text-slate-800 transition-colors">Cancel</button>
                 <button type="submit" className="px-10 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold shadow-lg shadow-blue-500/20 transition-all">
                   {modalMode === 'edit' ? 'Update' : 'Create'}
@@ -515,7 +486,7 @@ export default function Workspaces() {
       )}
 
       {/* Workspace Detail Modal (Roles & Config) */}
-      {selectedWorkspace && !isEditModalOpen && (
+      {selectedWorkspaceRecord && !isEditModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 transition-opacity animate-in fade-in duration-200">
           <div className="bg-white dark:bg-slate-900 w-full max-w-5xl rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 flex flex-col overflow-hidden max-h-[90vh] animate-in slide-in-from-bottom-4 duration-300">
             <div className="p-6 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center bg-slate-50 dark:bg-slate-900/50 backdrop-blur-md">
@@ -524,15 +495,19 @@ export default function Workspaces() {
                   <FolderKanban className="w-6 h-6" />
                 </div>
                 <div>
-                  <h3 className="text-xl font-extrabold text-slate-900 dark:text-white leading-tight">{selectedWorkspace.name}</h3>
+                  <h3 className="text-xl font-extrabold text-slate-900 dark:text-white leading-tight">{selectedWorkspaceRecord.name}</h3>
                   <div className="flex items-center gap-2 mt-1">
-                    <span className="text-[11px] font-mono text-blue-500 bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 rounded border border-blue-100 dark:border-blue-900">{selectedWorkspace.workspace_id}</span>
+                    <span className="text-[11px] font-mono text-blue-500 bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 rounded border border-blue-100 dark:border-blue-900">{selectedWorkspaceRecord.workspace_id}</span>
                   </div>
                 </div>
               </div>
               <button 
                 className="p-2 text-slate-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/30 rounded-full transition-all" 
-                onClick={() => { setSelectedWorkspace(null); setEditingRoleName(''); }}
+                onClick={() => {
+                  setSelectedWorkspace(null);
+                  setEditingRoleName('');
+                  setDraftRoleName('');
+                }}
               >
                 <X className="w-6 h-6" />
               </button>
@@ -547,13 +522,13 @@ export default function Workspaces() {
                 <div className="grid grid-cols-3 gap-6">
                   <div className="p-5 bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-2xl">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">Capacity</span>
-                    <div className="text-2xl font-black text-slate-900 dark:text-white mt-1">{selectedWorkspace.participant_count}</div>
+                    <div className="text-2xl font-black text-slate-900 dark:text-white mt-1">{selectedParticipantCount}</div>
                     <span className="text-xs text-slate-500">Active Participants</span>
                   </div>
                   <div className="p-5 bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-2xl col-span-2">
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">Manifest</span>
                     <p className="text-sm text-slate-700 dark:text-slate-300 mt-2 font-medium leading-relaxed">
-                      {selectedWorkspace.description || 'No declarative description provided for this cluster execution boundary.'}
+                      {selectedWorkspaceRecord.description || 'No declarative description provided for this cluster execution boundary.'}
                     </p>
                   </div>
                 </div>
@@ -566,7 +541,11 @@ export default function Workspaces() {
                     <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Role Governance</h4>
                   </div>
                   <button 
-                    onClick={() => { setEditingRoleName('new_role'); setEditingRoleDef(''); }}
+                    onClick={() => {
+                      setDraftRoleName('');
+                      setEditingRoleName('new_role');
+                      setEditingRoleDef('');
+                    }}
                     className="text-xs font-bold text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1"
                   >
                     <Plus className="w-3 h-3" /> Add Role Override
@@ -574,7 +553,7 @@ export default function Workspaces() {
                 </div>
 
                 <div className="grid grid-cols-1 gap-4">
-                  {Object.entries(selectedWorkspace.metadata?.role_definitions || {}).map(([roleKey, roleObj]) => (
+                  {Object.entries(selectedRoleDefinitions).map(([roleKey, roleObj]) => (
                     <div key={roleKey} className="group flex flex-col border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden bg-white dark:bg-slate-900 shadow-sm transition-all hover:shadow-md hover:border-slate-300 dark:hover:border-slate-700">
                       <div className="flex justify-between items-center px-5 py-3 border-b border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50">
                         <div className="flex items-center gap-3">
@@ -590,7 +569,7 @@ export default function Workspaces() {
                           </button>
                           <button 
                             type="button"
-                            onClick={(e) => handleDeleteRole(selectedWorkspace.workspace_id, roleKey, e)}
+                            onClick={(e) => handleDeleteRole(selectedWorkspaceId, roleKey, e)}
                             className="p-1.5 text-slate-400 hover:text-rose-500 transition-colors"
                           >
                             <Trash2 className="w-4 h-4" />
@@ -614,14 +593,23 @@ export default function Workspaces() {
                             {editingRoleName === 'new_role' ? 'Define New Role Scope' : `Editing Scope: ${editingRoleName}`}
                           </h5>
                         </div>
-                        <button onClick={() => setEditingRoleName('')} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4"/></button>
+                        <button
+                          onClick={() => {
+                            setEditingRoleName('');
+                            setDraftRoleName('');
+                          }}
+                          className="text-slate-400 hover:text-slate-600"
+                        >
+                          <X className="w-4 h-4"/>
+                        </button>
                       </div>
                       {editingRoleName === 'new_role' && (
                         <input 
                           type="text" 
+                          value={draftRoleName}
                           placeholder="Unique Role Identifier (e.g. lead_developer)"
                           className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-500 outline-none"
-                          onChange={e => setEditingRoleName(e.target.value)}
+                          onChange={e => setDraftRoleName(e.target.value)}
                         />
                       )}
                       <textarea
@@ -632,9 +620,21 @@ export default function Workspaces() {
                         rows={6}
                       />
                       <div className="flex justify-end gap-3">
-                        <button onClick={() => setEditingRoleName('')} className="px-5 py-2 text-sm font-semibold text-slate-500">Cancel</button>
+                        <button
+                          onClick={() => {
+                            setEditingRoleName('');
+                            setDraftRoleName('');
+                          }}
+                          className="px-5 py-2 text-sm font-semibold text-slate-500"
+                        >
+                          Cancel
+                        </button>
                         <button 
-                          onClick={() => handleSaveRole(selectedWorkspace.workspace_id, editingRoleName)}
+                          onClick={() => handleSaveRole(
+                            selectedWorkspaceId,
+                            editingRoleName === 'new_role' ? draftRoleName : editingRoleName,
+                          )}
+                          disabled={editingRoleName === 'new_role' && !draftRoleName.trim()}
                           className="px-8 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold shadow-lg shadow-blue-500/20 flex items-center gap-2"
                         >
                           <Save className="w-4 h-4" /> Commit Definition
@@ -643,7 +643,7 @@ export default function Workspaces() {
                     </div>
                   )}
                   
-                  {Object.keys(selectedWorkspace.metadata?.role_definitions || {}).length === 0 && !editingRoleName && (
+                  {Object.keys(selectedRoleDefinitions).length === 0 && !editingRoleName && (
                       <div className="flex flex-col items-center justify-center p-12 border-2 border-dashed border-slate-100 dark:border-slate-800 rounded-3xl text-center space-y-3">
                         <div className="p-3 bg-slate-50 dark:bg-slate-900 rounded-full text-slate-300">
                           <ShieldCheck className="w-8 h-8" />

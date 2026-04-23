@@ -101,6 +101,14 @@ Examples:
 - `workspace.audit.export`
 - `workspace.audit.verify`
 
+Workspace lifecycle routes are the current exception:
+
+- `POST /v1/workspaces`
+- `PATCH /v1/workspaces/{workspace_id}`
+- `DELETE /v1/workspaces/{workspace_id}`
+
+Those routes are treated as organization control-plane management. They still accept workspace-admin callers, but they also allow organization-admin or platform-admin callers to manage a workspace even when they are not attached as workspace participants.
+
 ## Baseline human authorization
 
 Human users inherit baseline organization permissions from `organization_memberships.role`:

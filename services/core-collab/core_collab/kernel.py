@@ -318,6 +318,9 @@ class CollaborationKernel:
     async def get_organization(self, organization_id: UUID) -> Organization | None:
         return await self._repository.fetch_organization(organization_id)
 
+    async def get_organization_by_slug(self, slug: str) -> Organization | None:
+        return await self._repository.fetch_organization_by_slug(slug)
+
     async def update_organization(
         self,
         organization_id: UUID,
@@ -818,7 +821,11 @@ class CollaborationKernel:
         return {"deleted": True, "workspace_id": str(workspace_id)}
 
     async def update_workspace(
-        self, workspace_id: UUID, payload: UpdateWorkspaceRequest
+        self,
+        workspace_id: UUID,
+        payload: UpdateWorkspaceRequest,
+        *,
+        skip_workspace_permission_check: bool = False,
     ) -> WorkspaceCommandResult:
         logger.debug(
             "Kernel update_workspace workspace_id=%s participant_id=%s",
@@ -828,11 +835,12 @@ class CollaborationKernel:
         workspace = await self._repository.fetch_workspace(workspace_id)
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
-        await self._require_workspace_permission(
-            workspace_id,
-            payload.actor,
-            permission="workspace.roles.write",
-        )
+        if not skip_workspace_permission_check:
+            await self._require_workspace_permission(
+                workspace_id,
+                payload.actor,
+                permission="workspace.roles.write",
+            )
         now = self._now()
         actor = self._actor_from_input(payload.actor)
         updated = workspace.model_copy(

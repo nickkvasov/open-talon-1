@@ -288,7 +288,7 @@ async def test_list_workspaces_allows_platform_admin_to_see_all_visible_org_work
     assert [workspace["name"] for workspace in response.json()] == ["Admin Visible Workspace"]
 
 
-async def test_delete_workspace_requires_workspace_membership_for_platform_admin(
+async def test_delete_workspace_allows_platform_admin_without_workspace_membership(
     client,
     actor_payload,
     monkeypatch,
@@ -333,7 +333,70 @@ async def test_delete_workspace_requires_workspace_membership_for_platform_admin
         json={"actor": actor_payload},
     )
 
-    assert delete_response.status_code == 404
+    assert delete_response.status_code == 200
+    assert delete_response.json() == {
+        "deleted": True,
+        "workspace_id": workspace_id,
+    }
+
+    get_response = await client.get(
+        f"/v1/workspaces/{workspace_id}",
+        headers={"Authorization": "Bearer owner-token"},
+    )
+    assert get_response.status_code == 404
+
+
+async def test_update_workspace_allows_platform_admin_without_workspace_membership(
+    client,
+    actor_payload,
+    monkeypatch,
+):
+    owner_context = _oidc_context(roles=["workspace-user"])
+    admin_context = _oidc_context(roles=["admin"])
+    _patch_oidc_tokens(
+        monkeypatch,
+        {
+            "owner-token": owner_context,
+            "admin-token": admin_context,
+        },
+    )
+
+    membership_response = await client.post(
+        "/v1/organizations/11111111-1111-1111-1111-111111111111/members",
+        headers={"Authorization": "Bearer admin-token"},
+        json={
+            "actor": actor_payload,
+            "user_id": str(owner_context.user_id),
+            "role": "admin",
+        },
+    )
+    assert membership_response.status_code == 200
+
+    create_response = await client.post(
+        "/v1/workspaces",
+        headers={"Authorization": "Bearer owner-token"},
+        json={
+            "name": "Admin Update Workspace",
+            "organization_id": "11111111-1111-1111-1111-111111111111",
+            "actor": actor_payload,
+        },
+    )
+    assert create_response.status_code == 200
+    workspace_id = create_response.json()["workspace"]["workspace_id"]
+
+    update_response = await client.patch(
+        f"/v1/workspaces/{workspace_id}",
+        headers={"Authorization": "Bearer admin-token"},
+        json={
+            "actor": actor_payload,
+            "name": "Updated By Platform Admin",
+            "metadata": {"source": "admin-web"},
+        },
+    )
+
+    assert update_response.status_code == 200
+    assert update_response.json()["workspace"]["name"] == "Updated By Platform Admin"
+    assert update_response.json()["workspace"]["metadata"]["source"] == "admin-web"
 
 
 async def test_list_llm_engines_returns_registered_engines(client, actor_payload):

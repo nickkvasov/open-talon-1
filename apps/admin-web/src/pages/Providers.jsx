@@ -15,6 +15,7 @@ import {
 import ConfirmationModal from '../components/Common/ConfirmationModal';
 import { useApi } from '../api/useApi';
 import { buildAdminActor } from '../config/adminActor';
+import { buildProviderMutation } from '../lib/adminForms';
 
 export default function Providers() {
   const api = useApi();
@@ -230,57 +231,21 @@ export default function Providers() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
-      let payload;
-      let endpoint;
-      let method;
-
-      if (activeTab === 'llm') {
-        payload = {
-          actor: buildAdminActor(),
-          engine_id: llmFormData.engine_id,
-          display_name: llmFormData.display_name,
-          description: llmFormData.description,
-          provider: llmFormData.provider,
-          endpoint_kind: llmFormData.endpoint_kind,
-          url: llmFormData.url || null,
-          default_model: llmFormData.default_model || null,
-          capabilities: llmFormData.capabilities.split(',').map(s => s.trim()).filter(Boolean),
-          locality: llmFormData.locality,
-          priority: parseInt(llmFormData.priority),
-          enabled: llmFormData.enabled,
-          secret_config: JSON.parse(llmFormData.secret_config || '{}'),
-          metadata: JSON.parse(llmFormData.metadata || '{}')
-        };
-        endpoint = modalMode === 'edit'
-          ? `llm-providers/${editingProvider.provider_id}`
-          : scopeMode === 'organization'
-            ? `organizations/${selectedOrganizationId}/llm-providers`
-            : 'llm-providers';
-        method = modalMode === 'edit' ? 'PATCH' : 'POST';
-      } else {
-        payload = {
-          actor: buildAdminActor(),
-          provider_key: memoryFormData.provider_key,
-          display_name: memoryFormData.display_name,
-          description: memoryFormData.description,
-          provider: memoryFormData.provider,
-          enabled: memoryFormData.enabled,
-          config: JSON.parse(memoryFormData.config || '{}'),
-          secret_config: JSON.parse(memoryFormData.secret_config || '{}'),
-          metadata: JSON.parse(memoryFormData.metadata || '{}')
-        };
-        endpoint = modalMode === 'edit'
-          ? `memory-providers/${editingProvider.provider_id}`
-          : scopeMode === 'organization'
-            ? `organizations/${selectedOrganizationId}/memory-providers`
-            : 'memory-providers';
-        method = modalMode === 'edit' ? 'PATCH' : 'POST';
-      }
+      const requestConfig = buildProviderMutation({
+        actor: buildAdminActor(),
+        activeTab,
+        modalMode,
+        scopeMode,
+        selectedOrganizationId,
+        editingProvider,
+        llmFormData,
+        memoryFormData,
+      });
 
       await api.request({
-        url: `/v1/${endpoint}`,
-        method,
-        data: payload,
+        url: requestConfig.url,
+        method: requestConfig.method,
+        data: requestConfig.data,
       });
 
       setIsModalOpen(false);

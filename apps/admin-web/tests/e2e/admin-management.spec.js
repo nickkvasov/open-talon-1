@@ -1,6 +1,8 @@
 import { test, expect } from '@playwright/test';
 import {
   attachBrowserLogging,
+  createOrganizationViaApi,
+  ensureCurrentUserOrganizationMembership,
   openAdminPage,
   signInIfNeeded,
   uniqueName,
@@ -15,35 +17,14 @@ test.beforeEach(async ({ page }) => {
 
 test('workspaces can be created and deleted', async ({ page }) => {
   const organizationName = uniqueName('playwright-org');
-  const organizationSlug = organizationName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
   const workspaceName = uniqueName('playwright-workspace');
+  const organization = await createOrganizationViaApi(page, organizationName);
+  await ensureCurrentUserOrganizationMembership(page, organization.organization_id);
 
   await openAdminPage(page, /^workspaces$/i, /workspace fleet/i);
   const organizationSelect = page.locator('select').first();
   await expect(organizationSelect).toBeVisible();
-  let options = await organizationSelect.locator('option').evaluateAll((nodes) =>
-    nodes.map((node) => node.value).filter(Boolean)
-  );
-  if (options.length === 0) {
-    await openAdminPage(page, /^organizations$/i, /^organizations$/i);
-    const createOrganizationForm = page.locator('form').filter({
-      has: page.getByText(/create organization/i),
-    });
-    await createOrganizationForm.locator('input').nth(0).fill(organizationSlug);
-    await createOrganizationForm.locator('input').nth(1).fill(organizationName);
-    await createOrganizationForm.locator('textarea').nth(0).fill('Organization created by Playwright.');
-    await createOrganizationForm.locator('button[type="submit"]').click();
-    await expect(page.getByText(organizationName, { exact: true })).toBeVisible();
-
-    await openAdminPage(page, /^workspaces$/i, /workspace fleet/i);
-    options = await organizationSelect.locator('option').evaluateAll((nodes) =>
-      nodes.map((node) => node.value).filter(Boolean)
-    );
-  }
-  const selectedValue = await organizationSelect.inputValue();
-  if (!selectedValue && options.length > 0) {
-    await organizationSelect.selectOption(options[0]);
-  }
+  await organizationSelect.selectOption({ label: organization.name });
 
   await page.getByRole('button', { name: /create workspace/i }).click();
   await expect(page.getByRole('heading', { name: /create workspace/i })).toBeVisible();
@@ -59,8 +40,17 @@ test('workspaces can be created and deleted', async ({ page }) => {
     .locator('xpath=ancestor::div[contains(@class,"group")][1]');
 
   await workspaceCard.hover();
+  const deleteWorkspaceResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'DELETE' &&
+      /\/v1\/workspaces\//.test(response.url()) &&
+      response.ok()
+  );
   await workspaceCard.locator('button[type="button"]').click();
   await page.getByRole('button', { name: /^delete$/i }).click();
+  await deleteWorkspaceResponse;
+  await page.reload();
+  await page.locator('select').first().selectOption({ label: organization.name });
   await expect(page.getByRole('heading', { name: workspaceName, exact: true })).not.toBeVisible();
 });
 

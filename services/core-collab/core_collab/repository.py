@@ -814,6 +814,17 @@ class CollaborationRepository:
         )
         return self._organization_from_row(row) if row else None
 
+    async def fetch_organization_by_slug(self, slug: str) -> Organization | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT organization_id, slug, name, description, created_by, created_at, updated_at, metadata
+            FROM organizations
+            WHERE slug = $1
+            """,
+            slug,
+        )
+        return self._organization_from_row(row) if row else None
+
     async def list_organizations(self) -> list[Organization]:
         rows = await self._pool.fetch(
             """

@@ -168,6 +168,7 @@ Common collaboration endpoints:
 
 - `GET /v1/organizations`
 - `POST /v1/organizations`
+- `GET /v1/organizations/by-slug/{organization_slug}`
 - `GET /v1/organizations/{organization_id}`
 - `PATCH /v1/organizations/{organization_id}`
 - `GET /v1/organizations/{organization_id}/members`
@@ -370,8 +371,13 @@ Common tool endpoints:
 
 - `POST /v1/tools`: create a system-wide tool definition
 - `GET /v1/tools`: list system-wide tool definitions
+- `GET /v1/tools/{tool_id}`: get a tool definition by id
 - `GET /v1/organizations/{organization_id}/tools`: list organization-scoped tool definitions
-- `PATCH /v1/tools/{tool_id}`: update a system-wide tool definition
+- `GET /v1/organizations/{organization_id}/tools/{tool_id}`: get an organization-scoped tool definition by id
+- `PATCH /v1/tools/{tool_id}`: update a tool definition by id
+- `PATCH /v1/organizations/{organization_id}/tools/{tool_id}`: update an organization-scoped tool definition
+- `DELETE /v1/tools/{tool_id}`: delete a tool definition by id
+- `DELETE /v1/organizations/{organization_id}/tools/{tool_id}`: delete an organization-scoped tool definition
 - `GET /v1/workspaces/{workspace_id}/tools`: list tools attached to a workspace
 - `PUT /v1/workspaces/{workspace_id}/tools/{tool_id}`: attach a system tool to a workspace
 - `PATCH /v1/workspaces/{workspace_id}/tools/{tool_id}`: update workspace attachment state
@@ -420,9 +426,14 @@ Common memory endpoints:
 - `POST /v1/memory-providers`
 - `POST /v1/memory-providers/validate`
 - `GET /v1/memory-providers`
+- `GET /v1/memory-providers/{provider_id}`
+- `GET /v1/organizations/{organization_id}/memory-providers/{provider_id}`
 - `PATCH /v1/memory-providers/{provider_id}`
+- `PATCH /v1/organizations/{organization_id}/memory-providers/{provider_id}`
 - `DELETE /v1/memory-providers/{provider_id}`
+- `DELETE /v1/organizations/{organization_id}/memory-providers/{provider_id}`
 - `POST /v1/memory-providers/{provider_id}/health-check`
+- `POST /v1/organizations/{organization_id}/memory-providers/{provider_id}/health-check`
 
 ## Extending Memory Providers
 
@@ -724,9 +735,14 @@ Common provider endpoints:
 
 - `GET /v1/llm-providers`
 - `POST /v1/llm-providers`
+- `GET /v1/llm-providers/{provider_id}`
+- `GET /v1/organizations/{organization_id}/llm-providers/{provider_id}`
 - `PATCH /v1/llm-providers/{provider_id}`
+- `PATCH /v1/organizations/{organization_id}/llm-providers/{provider_id}`
 - `DELETE /v1/llm-providers/{provider_id}`
+- `DELETE /v1/organizations/{organization_id}/llm-providers/{provider_id}`
 - `POST /v1/llm-providers/{provider_id}/health-check`
+- `POST /v1/organizations/{organization_id}/llm-providers/{provider_id}/health-check`
 - `POST /v1/llm-providers/validate`
 - `GET /v1/llm-engines`
 

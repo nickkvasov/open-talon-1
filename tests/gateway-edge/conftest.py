@@ -31,6 +31,7 @@ from open_talon_contracts.agent_contracts import (
     build_default_interaction_contract,
     interaction_contract_is_empty,
 )
+from open_talon_contracts.models import normalize_organization_slug
 
 
 @asynccontextmanager
@@ -204,11 +205,84 @@ class MockCollaborationService:
                 visible.append(organization)
         return visible
 
+    async def create_organization(self, payload):
+        from gateway_edge.models import Organization, OrganizationMembership
+
+        if any(organization.slug == payload.slug for organization in self.organizations.values()):
+            raise ValueError(f"Organization slug {payload.slug!r} already exists")
+        now = datetime.now(timezone.utc)
+        organization = Organization(
+            organization_id=uuid4(),
+            slug=payload.slug,
+            name=payload.name,
+            description=payload.description,
+            created_by=payload.actor.user_id or payload.actor.participant_id,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        self.organizations[str(organization.organization_id)] = organization
+        self.organization_memberships.setdefault(str(organization.organization_id), {})
+        if payload.actor.user_id is not None:
+            membership = OrganizationMembership(
+                organization_id=organization.organization_id,
+                user_id=payload.actor.user_id,
+                role="owner",
+                joined_at=now,
+                updated_at=now,
+                metadata={"created_by": str(organization.created_by)},
+            )
+            self.organization_memberships[str(organization.organization_id)][
+                str(payload.actor.user_id)
+            ] = membership.model_dump(mode="json")
+        return organization
+
     async def get_organization(self, organization_id: UUID):
         organization = self.organizations.get(str(organization_id))
         if organization is None:
             raise KeyError(f"Organization {organization_id} not found")
         return organization
+
+    async def get_organization_by_slug(self, slug: str):
+        normalized_slug = normalize_organization_slug(slug)
+        for organization in self.organizations.values():
+            if organization.slug == normalized_slug:
+                return organization
+        raise KeyError(f"Organization slug {normalized_slug!r} not found")
+
+    async def update_organization(
+        self,
+        organization_id: UUID,
+        payload,
+        *,
+        allow_platform_admin: bool = False,
+    ):
+        _ = allow_platform_admin
+        organization = await self.get_organization(organization_id)
+        if payload.slug is not None and any(
+            other.organization_id != organization_id and other.slug == payload.slug
+            for other in self.organizations.values()
+        ):
+            raise ValueError(f"Organization slug {payload.slug!r} already exists")
+        updated = organization.model_copy(
+            update={
+                "slug": payload.slug or organization.slug,
+                "name": payload.name or organization.name,
+                "description": (
+                    payload.description
+                    if payload.description is not None
+                    else organization.description
+                ),
+                "updated_at": datetime.now(timezone.utc),
+                "metadata": (
+                    {**organization.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else organization.metadata
+                ),
+            }
+        )
+        self.organizations[str(organization_id)] = updated
+        return updated
 
     async def list_organization_memberships(self, organization_id: UUID):
         from gateway_edge.models import OrganizationMembership
@@ -358,7 +432,13 @@ class MockCollaborationService:
         self.workspace_sequences.pop(str(workspace_id), None)
         return {"deleted": True, "workspace_id": str(workspace_id)}
 
-    async def update_workspace(self, workspace_id: UUID, payload):
+    async def update_workspace(
+        self,
+        workspace_id: UUID,
+        payload,
+        *,
+        skip_workspace_permission_check: bool = False,
+    ):
         workspace = self.workspaces.get(str(workspace_id))
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")

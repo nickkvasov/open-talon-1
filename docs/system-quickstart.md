@@ -257,6 +257,7 @@ Collaboration roles are not IAM roles. They are workspace-local collaboration an
 Local multi-tenant defaults:
 
 - the migration seeds one organization named `Default Organization` with slug `default`
+- organization slugs are normalized to lowercase hyphenated identifiers; `Acme Ops!!!` becomes `acme-ops`
 - every workspace belongs to an organization
 - `tui2`, `user-client`, and the admin web auto-select the org when exactly one organization is visible
 

@@ -190,6 +190,12 @@ class CollaborationService:
             raise KeyError(f"Organization {organization_id} not found")
         return organization
 
+    async def get_organization_by_slug(self, slug: str) -> Organization:
+        organization = await self._require_kernel().get_organization_by_slug(slug)
+        if organization is None:
+            raise KeyError(f"Organization slug {slug!r} not found")
+        return organization
+
     async def update_organization(
         self,
         organization_id: UUID,
@@ -321,13 +327,19 @@ class CollaborationService:
         self,
         workspace_id: UUID,
         payload: UpdateWorkspaceRequest,
+        *,
+        skip_workspace_permission_check: bool = False,
     ) -> WorkspaceDetail:
         logger.debug(
             "Service update_workspace workspace_id=%s participant_id=%s",
             workspace_id,
             payload.actor.participant_id,
         )
-        result = await self._require_kernel().update_workspace(workspace_id, payload)
+        result = await self._require_kernel().update_workspace(
+            workspace_id,
+            payload,
+            skip_workspace_permission_check=skip_workspace_permission_check,
+        )
         await self._publish_events(result.events)
         assert result.detail is not None
         return result.detail

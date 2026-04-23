@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from open_talon_contracts.models import normalize_organization_slug
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -377,6 +378,115 @@ def _organization_not_found(organization_id: UUID) -> HTTPException:
     return HTTPException(status_code=404, detail=f"Organization {organization_id} not found")
 
 
+def _require_resource_in_organization(
+    *,
+    resource_name: str,
+    resource_id: UUID,
+    organization_id: UUID,
+    resource_organization_id: UUID | None,
+) -> None:
+    if resource_organization_id != organization_id:
+        raise _http_error(
+            KeyError(f"{resource_name} {resource_id} not found in organization {organization_id}")
+        )
+
+
+async def _load_llm_provider(
+    request: Request,
+    provider_id: UUID,
+    *,
+    permission: str,
+    organization_id: UUID | None = None,
+) -> LlmProviderDefinition:
+    provider = await collab_svc.collaboration_service.get_llm_provider(provider_id)
+    if organization_id is not None:
+        _require_resource_in_organization(
+            resource_name="LLM provider",
+            resource_id=provider_id,
+            organization_id=organization_id,
+            resource_organization_id=provider.organization_id,
+        )
+    await _require_identity_permission(
+        request,
+        permission=permission,
+        organization_id=provider.organization_id,
+    )
+    return provider
+
+
+async def _load_memory_provider(
+    request: Request,
+    provider_id: UUID,
+    *,
+    permission: str,
+    organization_id: UUID | None = None,
+) -> MemoryProviderDefinition:
+    provider = await collab_svc.collaboration_service.get_memory_provider(provider_id)
+    if organization_id is not None:
+        _require_resource_in_organization(
+            resource_name="Memory provider",
+            resource_id=provider_id,
+            organization_id=organization_id,
+            resource_organization_id=provider.organization_id,
+        )
+    await _require_identity_permission(
+        request,
+        permission=permission,
+        organization_id=provider.organization_id,
+    )
+    return provider
+
+
+async def _load_system_agent_definition(
+    request: Request,
+    agent_id: UUID,
+    *,
+    permission: str,
+    organization_id: UUID | None = None,
+) -> AgentDefinition:
+    agent = await collab_svc.collaboration_service.get_system_agent(agent_id)
+    if agent is None:
+        raise _http_error(KeyError(f"System agent {agent_id} not found"))
+    if organization_id is not None:
+        _require_resource_in_organization(
+            resource_name="System agent",
+            resource_id=agent_id,
+            organization_id=organization_id,
+            resource_organization_id=agent.organization_id,
+        )
+    await _require_identity_permission(
+        request,
+        permission=permission,
+        organization_id=agent.organization_id,
+    )
+    return agent
+
+
+async def _load_system_tool_definition(
+    request: Request,
+    tool_id: UUID,
+    *,
+    permission: str,
+    organization_id: UUID | None = None,
+) -> SystemToolDefinition:
+    tool = await collab_svc.collaboration_service.get_system_tool(tool_id)
+    if tool is None:
+        raise _http_error(KeyError(f"System tool {tool_id} not found"))
+    if organization_id is not None:
+        _require_resource_in_organization(
+            resource_name="System tool",
+            resource_id=tool_id,
+            organization_id=organization_id,
+            resource_organization_id=tool.organization_id,
+        )
+    await _require_identity_permission(
+        request,
+        permission=permission,
+        organization_id=tool.organization_id,
+    )
+    return tool
+
+
 def _resolve_organization_actor(
     request: Request,
     actor: ParticipantInput,
@@ -521,6 +631,34 @@ async def _require_workspace_admin_or_supervisor(
     )
 
 
+async def _resolve_workspace_lifecycle_actor(
+    request: Request,
+    *,
+    workspace_id: UUID,
+    actor: ParticipantInput,
+) -> tuple[ParticipantInput, bool]:
+    workspace = await collab_svc.collaboration_service.get_workspace(workspace_id)
+    try:
+        workspace_actor = await _require_workspace_permission(
+            request,
+            workspace_id,
+            permission="workspace.roles.write",
+        )
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        # Workspace lifecycle mutations are organization control-plane operations.
+        # A caller who is not attached to the workspace may still administer it if
+        # they hold organization-level admin rights in the owning organization.
+        await _require_identity_permission(
+            request,
+            permission="organization.members.write",
+            organization_id=workspace.workspace.organization_id,
+        )
+        return _resolve_organization_actor(request, actor), True
+    return workspace_actor or actor, False
+
+
 async def _tool_generation_request_for_revision(
     revision_id: UUID,
 ) -> ToolGenerationRequestDetail:
@@ -574,6 +712,30 @@ async def list_organizations(request: Request) -> list[Organization]:
     user_id = None if has_admin_access(request) else (user_context.user_id if user_context else None)
     try:
         return await collab_svc.collaboration_service.list_organizations(user_id=user_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/by-slug/{organization_slug}",
+    response_model=Organization,
+    summary="Get organization detail by slug",
+)
+async def get_organization_by_slug(
+    request: Request,
+    organization_slug: str,
+) -> Organization:
+    normalized_slug = normalize_organization_slug(organization_slug)
+    try:
+        organization = await collab_svc.collaboration_service.get_organization_by_slug(
+            normalized_slug
+        )
+        await _require_identity_permission(
+            request,
+            permission="organization.read",
+            organization_id=organization.organization_id,
+        )
+        return organization
     except Exception as exc:
         raise _http_error(exc) from exc
 
@@ -846,20 +1008,14 @@ async def delete_workspace(
     workspace_id: UUID,
     payload: DeleteWorkspaceRequest = Body(...),
 ) -> dict[str, bool | str]:
-    actor = await _require_workspace_permission(
+    actor, _ = await _resolve_workspace_lifecycle_actor(
         request,
-        workspace_id,
-        permission="workspace.roles.write",
+        workspace_id=workspace_id,
+        actor=payload.actor,
     )
     payload = payload.model_copy(
         update={
             "actor": actor
-            or await _resolve_workspace_actor(
-                request,
-                payload.actor,
-                workspace_id=workspace_id,
-                auto_create=False,
-            )
         }
     )
     logger.debug(
@@ -883,20 +1039,14 @@ async def update_workspace(
     workspace_id: UUID,
     payload: UpdateWorkspaceRequest,
 ) -> WorkspaceDetail:
-    actor = await _require_workspace_permission(
+    actor, skip_workspace_permission_check = await _resolve_workspace_lifecycle_actor(
         request,
-        workspace_id,
-        permission="workspace.roles.write",
+        workspace_id=workspace_id,
+        actor=payload.actor,
     )
     payload = payload.model_copy(
         update={
             "actor": actor
-            or await _resolve_workspace_actor(
-                request,
-                payload.actor,
-                workspace_id=workspace_id,
-                auto_create=False,
-            )
         }
     )
     logger.debug(
@@ -905,7 +1055,11 @@ async def update_workspace(
         _actor_log(payload.actor),
     )
     try:
-        return await collab_svc.collaboration_service.update_workspace(workspace_id, payload)
+        return await collab_svc.collaboration_service.update_workspace(
+            workspace_id,
+            payload,
+            skip_workspace_permission_check=skip_workspace_permission_check,
+        )
     except Exception as exc:
         raise _http_error(exc) from exc
 
@@ -1248,21 +1402,60 @@ async def list_organization_llm_providers(
         raise _http_error(exc) from exc
 
 
+@router.get(
+    "/llm-providers/{provider_id}",
+    response_model=LlmProviderDefinition,
+    summary="Get an LLM provider definition",
+)
+async def get_llm_provider(
+    request: Request,
+    provider_id: UUID,
+) -> LlmProviderDefinition:
+    try:
+        return await _load_llm_provider(
+            request,
+            provider_id,
+            permission="provider.llm.read",
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/llm-providers/{provider_id}",
+    response_model=LlmProviderDefinition,
+    summary="Get an organization-scoped LLM provider definition",
+)
+async def get_organization_llm_provider(
+    request: Request,
+    organization_id: UUID,
+    provider_id: UUID,
+) -> LlmProviderDefinition:
+    try:
+        return await _load_llm_provider(
+            request,
+            provider_id,
+            permission="provider.llm.read",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.patch(
     "/llm-providers/{provider_id}",
     response_model=LlmProviderDefinition,
-    summary="Update a system-level LLM provider definition",
+    summary="Update an LLM provider definition",
 )
 async def update_llm_provider(
     request: Request,
     provider_id: UUID,
     payload: UpdateLlmProviderRequest,
 ) -> LlmProviderDefinition:
-    provider = await collab_svc.collaboration_service.get_llm_provider(provider_id)
-    await _require_identity_permission(
+    await _load_llm_provider(
         request,
+        provider_id,
         permission="provider.llm.write",
-        organization_id=provider.organization_id,
     )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
@@ -1279,27 +1472,84 @@ async def update_llm_provider(
         raise _http_error(exc) from exc
 
 
+@router.patch(
+    "/organizations/{organization_id}/llm-providers/{provider_id}",
+    response_model=LlmProviderDefinition,
+    summary="Update an organization-scoped LLM provider definition",
+)
+async def update_organization_llm_provider(
+    request: Request,
+    organization_id: UUID,
+    provider_id: UUID,
+    payload: UpdateLlmProviderRequest,
+) -> LlmProviderDefinition:
+    await _load_llm_provider(
+        request,
+        provider_id,
+        permission="provider.llm.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        return await collab_svc.collaboration_service.update_llm_provider(
+            provider_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.delete(
     "/llm-providers/{provider_id}",
     response_model=dict,
-    summary="Delete a system-level LLM provider definition",
+    summary="Delete an LLM provider definition",
 )
 async def delete_llm_provider(
     request: Request,
     provider_id: UUID,
     payload: DeleteLlmProviderRequest = Body(...),
 ) -> dict[str, bool | str]:
-    provider = await collab_svc.collaboration_service.get_llm_provider(provider_id)
-    await _require_identity_permission(
+    await _load_llm_provider(
         request,
+        provider_id,
         permission="provider.llm.write",
-        organization_id=provider.organization_id,
     )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP delete_llm_provider provider_id=%s actor=%s",
         provider_id,
         _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.delete_llm_provider(
+            provider_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/organizations/{organization_id}/llm-providers/{provider_id}",
+    response_model=dict,
+    summary="Delete an organization-scoped LLM provider definition",
+)
+async def delete_organization_llm_provider(
+    request: Request,
+    organization_id: UUID,
+    provider_id: UUID,
+    payload: DeleteLlmProviderRequest = Body(...),
+) -> dict[str, bool | str]:
+    await _load_llm_provider(
+        request,
+        provider_id,
+        permission="provider.llm.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
     )
     try:
         return await collab_svc.collaboration_service.delete_llm_provider(
@@ -1319,13 +1569,34 @@ async def health_check_llm_provider(
     request: Request,
     provider_id: UUID,
 ) -> LlmProviderHealthReport:
-    provider = await collab_svc.collaboration_service.get_llm_provider(provider_id)
-    await _require_identity_permission(
+    provider = await _load_llm_provider(
         request,
+        provider_id,
         permission="provider.llm.validate",
-        organization_id=provider.organization_id,
     )
     logger.debug("HTTP health_check_llm_provider provider_id=%s", provider_id)
+    try:
+        return await check_llm_provider_health(provider)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/llm-providers/{provider_id}/health-check",
+    response_model=LlmProviderHealthReport,
+    summary="Validate an organization-scoped LLM provider configuration",
+)
+async def health_check_organization_llm_provider(
+    request: Request,
+    organization_id: UUID,
+    provider_id: UUID,
+) -> LlmProviderHealthReport:
+    provider = await _load_llm_provider(
+        request,
+        provider_id,
+        permission="provider.llm.validate",
+        organization_id=organization_id,
+    )
     try:
         return await check_llm_provider_health(provider)
     except Exception as exc:
@@ -1457,21 +1728,60 @@ async def list_organization_memory_providers(
         raise _http_error(exc) from exc
 
 
+@router.get(
+    "/memory-providers/{provider_id}",
+    response_model=MemoryProviderDefinition,
+    summary="Get a memory provider definition",
+)
+async def get_memory_provider(
+    request: Request,
+    provider_id: UUID,
+) -> MemoryProviderDefinition:
+    try:
+        return await _load_memory_provider(
+            request,
+            provider_id,
+            permission="provider.memory.read",
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/memory-providers/{provider_id}",
+    response_model=MemoryProviderDefinition,
+    summary="Get an organization-scoped memory provider definition",
+)
+async def get_organization_memory_provider(
+    request: Request,
+    organization_id: UUID,
+    provider_id: UUID,
+) -> MemoryProviderDefinition:
+    try:
+        return await _load_memory_provider(
+            request,
+            provider_id,
+            permission="provider.memory.read",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.patch(
     "/memory-providers/{provider_id}",
     response_model=MemoryProviderDefinition,
-    summary="Update a system-level memory provider definition",
+    summary="Update a memory provider definition",
 )
 async def update_memory_provider(
     request: Request,
     provider_id: UUID,
     payload: UpdateMemoryProviderRequest,
 ) -> MemoryProviderDefinition:
-    provider = await collab_svc.collaboration_service.get_memory_provider(provider_id)
-    await _require_identity_permission(
+    await _load_memory_provider(
         request,
+        provider_id,
         permission="provider.memory.write",
-        organization_id=provider.organization_id,
     )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
@@ -1488,27 +1798,84 @@ async def update_memory_provider(
         raise _http_error(exc) from exc
 
 
+@router.patch(
+    "/organizations/{organization_id}/memory-providers/{provider_id}",
+    response_model=MemoryProviderDefinition,
+    summary="Update an organization-scoped memory provider definition",
+)
+async def update_organization_memory_provider(
+    request: Request,
+    organization_id: UUID,
+    provider_id: UUID,
+    payload: UpdateMemoryProviderRequest,
+) -> MemoryProviderDefinition:
+    await _load_memory_provider(
+        request,
+        provider_id,
+        permission="provider.memory.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        return await collab_svc.collaboration_service.update_memory_provider(
+            provider_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.delete(
     "/memory-providers/{provider_id}",
     response_model=dict,
-    summary="Delete a system-level memory provider definition",
+    summary="Delete a memory provider definition",
 )
 async def delete_memory_provider(
     request: Request,
     provider_id: UUID,
     payload: DeleteMemoryProviderRequest = Body(...),
 ) -> dict[str, bool | str]:
-    provider = await collab_svc.collaboration_service.get_memory_provider(provider_id)
-    await _require_identity_permission(
+    await _load_memory_provider(
         request,
+        provider_id,
         permission="provider.memory.write",
-        organization_id=provider.organization_id,
     )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP delete_memory_provider provider_id=%s actor=%s",
         provider_id,
         _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.delete_memory_provider(
+            provider_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/organizations/{organization_id}/memory-providers/{provider_id}",
+    response_model=dict,
+    summary="Delete an organization-scoped memory provider definition",
+)
+async def delete_organization_memory_provider(
+    request: Request,
+    organization_id: UUID,
+    provider_id: UUID,
+    payload: DeleteMemoryProviderRequest = Body(...),
+) -> dict[str, bool | str]:
+    await _load_memory_provider(
+        request,
+        provider_id,
+        permission="provider.memory.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
     )
     try:
         return await collab_svc.collaboration_service.delete_memory_provider(
@@ -1528,13 +1895,34 @@ async def health_check_memory_provider(
     request: Request,
     provider_id: UUID,
 ) -> MemoryProviderHealthReport:
-    provider = await collab_svc.collaboration_service.get_memory_provider(provider_id)
-    await _require_identity_permission(
+    provider = await _load_memory_provider(
         request,
+        provider_id,
         permission="provider.memory.validate",
-        organization_id=provider.organization_id,
     )
     logger.debug("HTTP health_check_memory_provider provider_id=%s", provider_id)
+    try:
+        return await check_memory_provider_health(provider)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/memory-providers/{provider_id}/health-check",
+    response_model=MemoryProviderHealthReport,
+    summary="Validate an organization-scoped memory provider configuration",
+)
+async def health_check_organization_memory_provider(
+    request: Request,
+    organization_id: UUID,
+    provider_id: UUID,
+) -> MemoryProviderHealthReport:
+    provider = await _load_memory_provider(
+        request,
+        provider_id,
+        permission="provider.memory.validate",
+        organization_id=organization_id,
+    )
     try:
         return await check_memory_provider_health(provider)
     except Exception as exc:
@@ -1572,6 +1960,46 @@ async def list_organization_system_agents(
     try:
         return await collab_svc.collaboration_service.list_system_agents(
             scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/agents/{agent_id}",
+    response_model=AgentDefinition,
+    summary="Get an agent definition",
+)
+async def get_system_agent(
+    request: Request,
+    agent_id: UUID,
+) -> AgentDefinition:
+    try:
+        return await _load_system_agent_definition(
+            request,
+            agent_id,
+            permission="agent_catalog.read",
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/agents/{agent_id}",
+    response_model=AgentDefinition,
+    summary="Get an organization-scoped agent definition",
+)
+async def get_organization_system_agent(
+    request: Request,
+    organization_id: UUID,
+    agent_id: UUID,
+) -> AgentDefinition:
+    try:
+        return await _load_system_agent_definition(
+            request,
+            agent_id,
+            permission="agent_catalog.read",
             organization_id=organization_id,
         )
     except Exception as exc:
@@ -1663,23 +2091,60 @@ async def list_organization_system_tools(
         raise _http_error(exc) from exc
 
 
+@router.get(
+    "/tools/{tool_id}",
+    response_model=SystemToolDefinition,
+    summary="Get a tool definition",
+)
+async def get_system_tool(
+    request: Request,
+    tool_id: UUID,
+) -> SystemToolDefinition:
+    try:
+        return await _load_system_tool_definition(
+            request,
+            tool_id,
+            permission="tool_catalog.read",
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/tools/{tool_id}",
+    response_model=SystemToolDefinition,
+    summary="Get an organization-scoped tool definition",
+)
+async def get_organization_system_tool(
+    request: Request,
+    organization_id: UUID,
+    tool_id: UUID,
+) -> SystemToolDefinition:
+    try:
+        return await _load_system_tool_definition(
+            request,
+            tool_id,
+            permission="tool_catalog.read",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.patch(
     "/tools/{tool_id}",
     response_model=SystemToolDefinition,
-    summary="Update a system-wide tool definition",
+    summary="Update a tool definition",
 )
 async def update_system_tool(
     request: Request,
     tool_id: UUID,
     payload: UpdateSystemToolRequest,
 ) -> SystemToolDefinition:
-    tool = await collab_svc.collaboration_service.get_system_tool(tool_id)
-    if tool is None:
-        raise _http_error(KeyError(f"System tool {tool_id} not found"))
-    await _require_identity_permission(
+    await _load_system_tool_definition(
         request,
+        tool_id,
         permission="tool_catalog.write",
-        organization_id=tool.organization_id,
     )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
@@ -1697,22 +2162,48 @@ async def update_system_tool(
 
 
 @router.patch(
+    "/organizations/{organization_id}/tools/{tool_id}",
+    response_model=SystemToolDefinition,
+    summary="Update an organization-scoped tool definition",
+)
+async def update_organization_system_tool(
+    request: Request,
+    organization_id: UUID,
+    tool_id: UUID,
+    payload: UpdateSystemToolRequest,
+) -> SystemToolDefinition:
+    await _load_system_tool_definition(
+        request,
+        tool_id,
+        permission="tool_catalog.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        return await collab_svc.collaboration_service.update_system_tool(
+            tool_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch(
     "/agents/{agent_id}",
     response_model=AgentDefinition,
-    summary="Update a system-level agent definition",
+    summary="Update an agent definition",
 )
 async def update_system_agent(
     request: Request,
     agent_id: UUID,
     payload: UpdateSystemAgentRequest,
 ) -> AgentDefinition:
-    agent = await collab_svc.collaboration_service.get_system_agent(agent_id)
-    if agent is None:
-        raise _http_error(KeyError(f"System agent {agent_id} not found"))
-    await _require_identity_permission(
+    await _load_system_agent_definition(
         request,
+        agent_id,
         permission="agent_catalog.write",
-        organization_id=agent.organization_id,
     )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
@@ -1729,23 +2220,49 @@ async def update_system_agent(
         raise _http_error(exc) from exc
 
 
+@router.patch(
+    "/organizations/{organization_id}/agents/{agent_id}",
+    response_model=AgentDefinition,
+    summary="Update an organization-scoped agent definition",
+)
+async def update_organization_system_agent(
+    request: Request,
+    organization_id: UUID,
+    agent_id: UUID,
+    payload: UpdateSystemAgentRequest,
+) -> AgentDefinition:
+    await _load_system_agent_definition(
+        request,
+        agent_id,
+        permission="agent_catalog.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        return await collab_svc.collaboration_service.update_system_agent(
+            agent_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.delete(
     "/agents/{agent_id}",
     response_model=dict,
-    summary="Delete a system-level agent definition",
+    summary="Delete an agent definition",
 )
 async def delete_system_agent(
     request: Request,
     agent_id: UUID,
     payload: DeleteSystemAgentRequest = Body(...),
 ) -> dict[str, bool | str]:
-    agent = await collab_svc.collaboration_service.get_system_agent(agent_id)
-    if agent is None:
-        raise _http_error(KeyError(f"System agent {agent_id} not found"))
-    await _require_identity_permission(
+    await _load_system_agent_definition(
         request,
+        agent_id,
         permission="agent_catalog.write",
-        organization_id=agent.organization_id,
     )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
@@ -1760,28 +2277,77 @@ async def delete_system_agent(
 
 
 @router.delete(
+    "/organizations/{organization_id}/agents/{agent_id}",
+    response_model=dict,
+    summary="Delete an organization-scoped agent definition",
+)
+async def delete_organization_system_agent(
+    request: Request,
+    organization_id: UUID,
+    agent_id: UUID,
+    payload: DeleteSystemAgentRequest = Body(...),
+) -> dict[str, bool | str]:
+    await _load_system_agent_definition(
+        request,
+        agent_id,
+        permission="agent_catalog.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        return await collab_svc.collaboration_service.delete_system_agent(agent_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
     "/tools/{tool_id}",
     response_model=dict,
-    summary="Delete a system-wide tool definition",
+    summary="Delete a tool definition",
 )
 async def delete_system_tool(
     request: Request,
     tool_id: UUID,
     payload: DeleteSystemToolRequest = Body(...),
 ) -> dict[str, bool | str]:
-    tool = await collab_svc.collaboration_service.get_system_tool(tool_id)
-    if tool is None:
-        raise _http_error(KeyError(f"System tool {tool_id} not found"))
-    await _require_identity_permission(
+    await _load_system_tool_definition(
         request,
+        tool_id,
         permission="tool_catalog.write",
-        organization_id=tool.organization_id,
     )
     payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
     logger.debug(
         "HTTP delete_system_tool tool_id=%s actor=%s",
         tool_id,
         _actor_log(payload.actor),
+    )
+    try:
+        return await collab_svc.collaboration_service.delete_system_tool(tool_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/organizations/{organization_id}/tools/{tool_id}",
+    response_model=dict,
+    summary="Delete an organization-scoped tool definition",
+)
+async def delete_organization_system_tool(
+    request: Request,
+    organization_id: UUID,
+    tool_id: UUID,
+    payload: DeleteSystemToolRequest = Body(...),
+) -> dict[str, bool | str]:
+    await _load_system_tool_definition(
+        request,
+        tool_id,
+        permission="tool_catalog.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
     )
     try:
         return await collab_svc.collaboration_service.delete_system_tool(tool_id, payload)

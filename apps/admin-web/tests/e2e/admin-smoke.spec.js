@@ -5,6 +5,10 @@ test('admin portal smoke flow works in a real browser', async ({ page }) => {
   attachBrowserLogging(page);
 
   await signInIfNeeded(page);
+  await expect(page.getByRole('heading', { name: /runtime overview/i })).toBeVisible();
+  await expect(page.getByText(/total token usage/i)).toBeVisible();
+  await expect(page.getByText(/active queues/i)).toBeVisible();
+  await expect(page.getByText(/failed executions \(24h\)/i)).toBeVisible();
 
   await openAdminPage(page, /identity & users/i, /identity & users/i);
   await expect(page.getByRole('link', { name: /open keycloak admin console/i })).toBeVisible();
@@ -19,6 +23,9 @@ test('admin portal smoke flow works in a real browser', async ({ page }) => {
   await openAdminPage(page, /^providers$/i, /infrastructure providers/i);
   await expect(page.getByRole('button', { name: /llm providers/i })).toBeVisible();
   await expect(page.getByRole('button', { name: /memory providers/i })).toBeVisible();
+
+  await openAdminPage(page, /tool generation/i, /tool generation/i);
+  await expect(page.getByRole('combobox')).toBeVisible();
 
   await openAdminPage(page, /api keys/i, /api keys management/i);
 

@@ -231,6 +231,15 @@ Current MCP session resources:
 - `ot://session/permissions`
 - `ot://session/scope`
 
+MCP HTTP endpoints:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/.well-known/oauth-protected-resource` | OAuth protected-resource metadata for the MCP resource server |
+| `GET` | `/.well-known/oauth-protected-resource/v1/mcp` | versioned OAuth protected-resource metadata for the MCP resource server |
+| `GET` | `/v1/mcp` | MCP SSE notification stream for an existing session |
+| `POST` | `/v1/mcp` | MCP JSON-RPC request endpoint |
+
 Current MCP bootstrap operations:
 
 - `session.get_identity`
@@ -270,19 +279,35 @@ Representative IAM routes:
 | `GET` | `/v1/iam/permissions` | list the shared permission catalog |
 | `GET` | `/v1/iam/human-roles` | list global human IAM roles |
 | `POST` | `/v1/iam/human-roles` | create global human IAM role |
+| `PATCH` | `/v1/iam/human-roles/{role_id}` | update global human IAM role |
+| `DELETE` | `/v1/iam/human-roles/{role_id}` | delete global human IAM role |
 | `GET` | `/v1/iam/agent-roles` | list global agent IAM roles |
 | `POST` | `/v1/iam/agent-roles` | create global agent IAM role |
+| `PATCH` | `/v1/iam/agent-roles/{role_id}` | update global agent IAM role |
+| `DELETE` | `/v1/iam/agent-roles/{role_id}` | delete global agent IAM role |
 | `GET` | `/v1/iam/users/{user_id}/roles` | list direct human IAM role bindings |
 | `POST` | `/v1/iam/users/{user_id}/roles/{role_id}` | bind a human IAM role |
+| `DELETE` | `/v1/iam/users/{user_id}/roles/{role_id}` | unbind a human IAM role |
 | `GET` | `/v1/iam/agent-identities` | list agent identities |
 | `POST` | `/v1/iam/agent-identities` | provision agent identity and return one-time secret |
+| `GET` | `/v1/iam/agent-identities/{agent_identity_id}` | get one agent identity |
+| `GET` | `/v1/iam/agent-identities/{agent_identity_id}/roles` | list IAM roles bound to an agent identity |
+| `POST` | `/v1/iam/agent-identities/{agent_identity_id}/roles/{role_id}` | bind an IAM role to an agent identity |
+| `DELETE` | `/v1/iam/agent-identities/{agent_identity_id}/roles/{role_id}` | unbind an IAM role from an agent identity |
 | `POST` | `/v1/iam/agent-identities/{agent_identity_id}/rotate-secret` | rotate agent-identity secret |
 | `POST` | `/v1/iam/agent-identities/{agent_identity_id}/disable` | disable agent identity |
 | `POST` | `/v1/iam/agent-identities/{agent_identity_id}/enable` | re-enable agent identity |
 | `GET` | `/v1/organizations/{organization_id}/iam/human-roles` | list org-scoped human IAM roles |
 | `POST` | `/v1/organizations/{organization_id}/iam/human-roles` | create org-scoped human IAM role |
+| `PATCH` | `/v1/organizations/{organization_id}/iam/human-roles/{role_id}` | update org-scoped human IAM role |
+| `DELETE` | `/v1/organizations/{organization_id}/iam/human-roles/{role_id}` | delete org-scoped human IAM role |
 | `GET` | `/v1/organizations/{organization_id}/iam/agent-roles` | list org-scoped agent IAM roles |
 | `POST` | `/v1/organizations/{organization_id}/iam/agent-roles` | create org-scoped agent IAM role |
+| `PATCH` | `/v1/organizations/{organization_id}/iam/agent-roles/{role_id}` | update org-scoped agent IAM role |
+| `DELETE` | `/v1/organizations/{organization_id}/iam/agent-roles/{role_id}` | delete org-scoped agent IAM role |
+| `GET` | `/v1/organizations/{organization_id}/iam/users/{user_id}/roles` | list org-scoped human IAM role bindings |
+| `POST` | `/v1/organizations/{organization_id}/iam/users/{user_id}/roles/{role_id}` | bind an org-scoped human IAM role |
+| `DELETE` | `/v1/organizations/{organization_id}/iam/users/{user_id}/roles/{role_id}` | unbind an org-scoped human IAM role |
 | `GET` | `/v1/organizations/{organization_id}/iam/agent-identities` | list org-scoped agent identities |
 | `POST` | `/v1/organizations/{organization_id}/iam/agent-identities` | provision org-scoped agent identity |
 
@@ -507,6 +532,7 @@ The `chat` APIs provide a session-based chat surface. Shared collaboration flows
 | --- | --- | --- |
 | `GET` | `/v1/organizations` | list visible organizations |
 | `POST` | `/v1/organizations` | create organization |
+| `GET` | `/v1/organizations/by-slug/{organization_slug}` | organization detail by normalized slug |
 | `GET` | `/v1/organizations/{organization_id}` | organization detail |
 | `PATCH` | `/v1/organizations/{organization_id}` | update organization |
 | `GET` | `/v1/organizations/{organization_id}/members` | list org memberships |
@@ -539,32 +565,50 @@ Global system-definition APIs are operator/admin APIs.
 | `GET` | `/v1/llm-engines` | list registered LLM engines |
 | `POST` | `/v1/agents` | create system agent definition |
 | `GET` | `/v1/agents` | list system agent definitions |
+| `GET` | `/v1/agents/{agent_id}` | get agent definition by id |
 | `POST` | `/v1/organizations/{organization_id}/agents` | create org-scoped agent definition |
 | `GET` | `/v1/organizations/{organization_id}/agents` | list org-scoped agent definitions |
-| `PATCH` | `/v1/agents/{agent_id}` | update system agent definition |
-| `DELETE` | `/v1/agents/{agent_id}` | delete system agent definition |
+| `GET` | `/v1/organizations/{organization_id}/agents/{agent_id}` | get org-scoped agent definition by id |
+| `PATCH` | `/v1/agents/{agent_id}` | update agent definition by id |
+| `PATCH` | `/v1/organizations/{organization_id}/agents/{agent_id}` | update org-scoped agent definition |
+| `DELETE` | `/v1/agents/{agent_id}` | delete agent definition by id |
+| `DELETE` | `/v1/organizations/{organization_id}/agents/{agent_id}` | delete org-scoped agent definition |
 | `POST` | `/v1/tools` | create system tool |
 | `GET` | `/v1/tools` | list system tools |
+| `GET` | `/v1/tools/{tool_id}` | get tool definition by id |
 | `POST` | `/v1/organizations/{organization_id}/tools` | create org-scoped system tool |
 | `GET` | `/v1/organizations/{organization_id}/tools` | list org-scoped system tools |
-| `PATCH` | `/v1/tools/{tool_id}` | update system tool |
-| `DELETE` | `/v1/tools/{tool_id}` | delete system tool |
+| `GET` | `/v1/organizations/{organization_id}/tools/{tool_id}` | get org-scoped tool definition by id |
+| `PATCH` | `/v1/tools/{tool_id}` | update tool definition by id |
+| `PATCH` | `/v1/organizations/{organization_id}/tools/{tool_id}` | update org-scoped tool definition |
+| `DELETE` | `/v1/tools/{tool_id}` | delete tool definition by id |
+| `DELETE` | `/v1/organizations/{organization_id}/tools/{tool_id}` | delete org-scoped tool definition |
 | `POST` | `/v1/llm-providers` | create LLM provider definition |
 | `POST` | `/v1/organizations/{organization_id}/llm-providers` | create org-scoped LLM provider |
 | `POST` | `/v1/llm-providers/validate` | validate LLM provider without persisting |
 | `GET` | `/v1/llm-providers` | list LLM providers |
 | `GET` | `/v1/organizations/{organization_id}/llm-providers` | list org-scoped LLM providers |
-| `PATCH` | `/v1/llm-providers/{provider_id}` | update LLM provider |
+| `GET` | `/v1/llm-providers/{provider_id}` | get LLM provider definition by id |
+| `GET` | `/v1/organizations/{organization_id}/llm-providers/{provider_id}` | get org-scoped LLM provider by id |
+| `PATCH` | `/v1/llm-providers/{provider_id}` | update LLM provider by id |
+| `PATCH` | `/v1/organizations/{organization_id}/llm-providers/{provider_id}` | update org-scoped LLM provider |
 | `DELETE` | `/v1/llm-providers/{provider_id}` | delete LLM provider |
+| `DELETE` | `/v1/organizations/{organization_id}/llm-providers/{provider_id}` | delete org-scoped LLM provider |
 | `POST` | `/v1/llm-providers/{provider_id}/health-check` | validate stored LLM provider |
+| `POST` | `/v1/organizations/{organization_id}/llm-providers/{provider_id}/health-check` | validate org-scoped stored LLM provider |
 | `POST` | `/v1/memory-providers` | create memory provider definition |
 | `POST` | `/v1/organizations/{organization_id}/memory-providers` | create org-scoped memory provider |
 | `POST` | `/v1/memory-providers/validate` | validate memory provider without persisting |
 | `GET` | `/v1/memory-providers` | list memory providers |
 | `GET` | `/v1/organizations/{organization_id}/memory-providers` | list org-scoped memory providers |
-| `PATCH` | `/v1/memory-providers/{provider_id}` | update memory provider |
+| `GET` | `/v1/memory-providers/{provider_id}` | get memory provider definition by id |
+| `GET` | `/v1/organizations/{organization_id}/memory-providers/{provider_id}` | get org-scoped memory provider by id |
+| `PATCH` | `/v1/memory-providers/{provider_id}` | update memory provider by id |
+| `PATCH` | `/v1/organizations/{organization_id}/memory-providers/{provider_id}` | update org-scoped memory provider |
 | `DELETE` | `/v1/memory-providers/{provider_id}` | delete memory provider |
+| `DELETE` | `/v1/organizations/{organization_id}/memory-providers/{provider_id}` | delete org-scoped memory provider |
 | `POST` | `/v1/memory-providers/{provider_id}/health-check` | validate stored memory provider |
+| `POST` | `/v1/organizations/{organization_id}/memory-providers/{provider_id}/health-check` | validate org-scoped stored memory provider |
 
 In the current implementation, org-scoped create/list routes are explicit. Update and delete endpoints for providers, tools, and agents live on the top-level admin surface.
 

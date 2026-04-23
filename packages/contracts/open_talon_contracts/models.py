@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from .llm_engines import LlmEngineEndpointKind, LlmEngineLocality
 
@@ -103,6 +104,20 @@ AgentCompactionOverflowBehavior = Literal["auto_fallback"]
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+_ORGANIZATION_SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def normalize_organization_slug(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+    if not normalized:
+        raise ValueError("Organization slug must contain at least one letter or number")
+    if not _ORGANIZATION_SLUG_PATTERN.fullmatch(normalized):
+        raise ValueError(
+            "Organization slug must use lowercase letters, numbers, and single hyphens"
+        )
+    return normalized
 
 
 class ActorRef(BaseModel):
@@ -1295,6 +1310,11 @@ class CreateOrganizationRequest(BaseModel):
     description: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("slug", mode="before")
+    @classmethod
+    def _normalize_slug(cls, value: str) -> str:
+        return normalize_organization_slug(value)
+
 
 class UpdateOrganizationRequest(BaseModel):
     actor: ParticipantInput
@@ -1302,6 +1322,13 @@ class UpdateOrganizationRequest(BaseModel):
     name: str | None = None
     description: str | None = None
     metadata: dict[str, Any] | None = None
+
+    @field_validator("slug", mode="before")
+    @classmethod
+    def _normalize_slug(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_organization_slug(value)
 
 
 class AddOrganizationMemberRequest(BaseModel):
