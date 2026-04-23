@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import httpx
 import hvac
+from open_talon_contracts.iam import WORKSPACE_PERMISSION_NAMES
 import psycopg
 import pytest
 
@@ -900,6 +901,7 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
     organization_id: str | None = None
     workspace_id: str | None = None
     workspace_actor: dict[str, Any] | None = None
+    workspace_manager_actor: dict[str, Any] | None = None
     math_agent_id: str | None = None
     published_tool_id: str | None = None
     published_handler_ref: str | None = None
@@ -962,6 +964,10 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
             workspace_actor = _workspace_actor_from_participant(
                 workspace_detail["participants"][0]
             )
+            workspace_manager_actor = {
+                **workspace_actor,
+                "iam_permissions": list(WORKSPACE_PERMISSION_NAMES),
+            }
 
             thread_detail = _json_request(
                 client,
@@ -969,7 +975,7 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
                 f"/v1/workspaces/{workspace_id}/threads",
                 json_body={
                     "title": "Live Fibonacci Tool Request",
-                    "actor": workspace_actor,
+                    "actor": workspace_manager_actor,
                 },
             )
             thread_id = thread_detail["thread"]["thread_id"]
@@ -979,7 +985,7 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
                 "POST",
                 f"/v1/workspaces/{workspace_id}/agents",
                 json_body={
-                    "actor": workspace_actor,
+                    "actor": workspace_manager_actor,
                     "agent_id": _SEEDED_TINKER_AGENT_ID,
                 },
             )
@@ -1085,7 +1091,7 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
                 "PUT",
                 f"/v1/workspaces/{workspace_id}/tools/{published_tool_id}",
                 json_body={
-                    "actor": workspace_actor,
+                    "actor": workspace_manager_actor,
                     "enabled": True,
                 },
             )
@@ -1120,7 +1126,7 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
                 "POST",
                 f"/v1/workspaces/{workspace_id}/agents",
                 json_body={
-                    "actor": workspace_actor,
+                    "actor": workspace_manager_actor,
                     "agent_id": math_agent_id,
                 },
             )
@@ -1227,13 +1233,13 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
                     )
                 except Exception:
                     pass
-            if workspace_id is not None and workspace_actor is not None:
+            if workspace_id is not None and workspace_manager_actor is not None:
                 try:
                     _json_request(
                         client,
                         "DELETE",
                         f"/v1/workspaces/{workspace_id}",
-                        json_body={"actor": workspace_actor},
+                        json_body={"actor": workspace_manager_actor},
                     )
                 except Exception:
                     pass

@@ -984,6 +984,9 @@ pytest tests/business-cases/test_tinker_tool_generation.py -q
 # Live Tinker tool-generation system test (real stack, real runtime, real generated tool path)
 pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s
 
+# Live compaction system test (real stack, real runtime, prompt dump + persisted run scratch assertions)
+pytest -m integration tests/infrastructure/test_agent_compaction_live_system.py -q -s
+
 # Full test coverage: default suite plus integration suite
 pytest -q
 pytest -m integration tests/infrastructure/test_infrastructure.py -v -s
