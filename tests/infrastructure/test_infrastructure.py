@@ -159,16 +159,18 @@ def test_openbao_connection(infrastructure):
     """Test OpenBao secret write and read."""
     client = hvac.Client(url=f'http://localhost:{BAO_PORT}', token=BAO_ROOT_TOKEN)
     assert client.is_authenticated()
+    secret_path = f"test_secret_{uuid.uuid4().hex}"
     
-    # The local init helper keeps the 'secret' KV v2 engine available.
+    # OpenBao storage is persistent in local development, so this test must use
+    # an isolated path instead of reusing a fixed key across runs.
     client.secrets.kv.v2.create_or_update_secret(
-        path='test_secret',
+        path=secret_path,
         secret=dict(foo='bar'),
         mount_point='secret'
     )
     
     response = client.secrets.kv.v2.read_secret_version(
-        path='test_secret',
+        path=secret_path,
         mount_point='secret'
     )
     assert response['data']['data']['foo'] == 'bar'
@@ -250,23 +252,26 @@ def test_functional_valkey_hash_and_ttl(infrastructure):
 def test_functional_openbao_versioned_secrets(infrastructure):
     """Test OpenBao KV v2 engine's secret versioning capabilities."""
     client = hvac.Client(url=f'http://127.0.0.1:{BAO_PORT}', token=BAO_ROOT_TOKEN)
+    secret_path = f"config_secret_{uuid.uuid4().hex}"
     
     client.secrets.kv.v2.create_or_update_secret(
-        path='config_secret',
+        path=secret_path,
         secret={'version': '1', 'data': 'old'},
         mount_point='secret'
     )
     
     client.secrets.kv.v2.create_or_update_secret(
-        path='config_secret',
+        path=secret_path,
         secret={'version': '2', 'data': 'new'},
         mount_point='secret'
     )
     
-    latest = client.secrets.kv.v2.read_secret_version(path='config_secret', mount_point='secret')
+    # The OpenBao dev container keeps data on disk, so a unique path is required
+    # to guarantee this test is asserting against versions created in this run.
+    latest = client.secrets.kv.v2.read_secret_version(path=secret_path, mount_point='secret')
     assert latest['data']['data']['version'] == '2'
     
-    v1 = client.secrets.kv.v2.read_secret_version(path='config_secret', version=1, mount_point='secret')
+    v1 = client.secrets.kv.v2.read_secret_version(path=secret_path, version=1, mount_point='secret')
     assert v1['data']['data']['version'] == '1'
 
 def test_functional_kafka_json_payloads(infrastructure):
