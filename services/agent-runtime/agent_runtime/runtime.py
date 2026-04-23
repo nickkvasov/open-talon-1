@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlparse, urlunparse
 from uuid import UUID
 
 import httpx
@@ -57,6 +59,7 @@ from .secrets import (  # noqa: E402
 logger = logging.getLogger(__name__)
 
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+_LITELLM_MODULE: Any | None = None
 
 
 async def _record_runtime_audit(
@@ -154,6 +157,194 @@ class AgentExecutor(Protocol):
     async def execute(self, context: AgentExecutionContext) -> AgentRunResult: ...
 
 
+def _load_litellm() -> Any:
+    global _LITELLM_MODULE
+    if _LITELLM_MODULE is None:
+        try:
+            _LITELLM_MODULE = importlib.import_module("litellm")
+        except ImportError as exc:  # pragma: no cover - defensive
+            raise RuntimeError(
+                "litellm is required for agent-runtime model execution. "
+                "Reinstall the repo Python environment to pick up the dependency."
+            ) from exc
+    return _LITELLM_MODULE
+
+
+def _litellm_messages(
+    *,
+    system_prompt: str,
+    prompt: str,
+) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt},
+    ]
+
+
+def _litellm_model_name(*, provider: str, model: str) -> str:
+    if "/" in model:
+        return model
+    if provider in {"openai", "ollama"}:
+        return f"{provider}/{model}"
+    return model
+
+
+def _litellm_api_base(
+    *,
+    provider: str,
+    endpoint_url: str | None,
+) -> str | None:
+    if not endpoint_url:
+        return None
+    parsed = urlparse(endpoint_url)
+    if not parsed.scheme or not parsed.netloc:
+        return endpoint_url.rstrip("/")
+    path = parsed.path.rstrip("/")
+    # Provider definitions store full API endpoint URLs, while LiteLLM expects the
+    # provider base URL and derives the concrete route itself.
+    suffixes_by_provider = {
+        "openai": ("/responses", "/chat/completions", "/completions"),
+        "ollama": ("/api/generate", "/api/chat"),
+    }
+    for suffix in suffixes_by_provider.get(provider, ()):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+    normalized = urlunparse(
+        parsed._replace(
+            path=path,
+            params="",
+            query="",
+            fragment="",
+        )
+    )
+    return normalized.rstrip("/")
+
+
+def _litellm_payload(response: Any) -> Any:
+    if hasattr(response, "model_dump"):
+        return response.model_dump()
+    if hasattr(response, "dict"):
+        return response.dict()
+    return response
+
+
+def _litellm_usage_details(payload: Any) -> dict[str, int]:
+    if not isinstance(payload, dict):
+        return {}
+    usage_payload = payload.get("usage")
+    if not isinstance(usage_payload, dict):
+        return {}
+    prompt_tokens = usage_payload.get("prompt_tokens")
+    if not isinstance(prompt_tokens, int):
+        prompt_tokens = usage_payload.get("input_tokens")
+    completion_tokens = usage_payload.get("completion_tokens")
+    if not isinstance(completion_tokens, int):
+        completion_tokens = usage_payload.get("output_tokens")
+    total_tokens = usage_payload.get("total_tokens")
+    usage: dict[str, int] = {}
+    if isinstance(prompt_tokens, int):
+        usage["prompt_tokens"] = prompt_tokens
+    if isinstance(completion_tokens, int):
+        usage["completion_tokens"] = completion_tokens
+    if isinstance(total_tokens, int):
+        usage["total_tokens"] = total_tokens
+    elif usage:
+        usage["total_tokens"] = usage.get("prompt_tokens", 0) + usage.get(
+            "completion_tokens",
+            0,
+        )
+    return usage
+
+
+async def _execute_litellm_completion(
+    *,
+    context: AgentExecutionContext,
+    provider: str,
+    endpoint_url: str | None,
+    model: str,
+    summary: str,
+    debug_source: str,
+    observation_name: str,
+    observation_model: str,
+    endpoint_kind: str,
+    observability: RuntimeObservability,
+    timeout_seconds: float,
+    secret_resolver: SecretResolver | None = None,
+) -> AgentRunResult:
+    prompt = render_prompt(context)
+    messages = _litellm_messages(
+        system_prompt=context.system_agent.system_prompt,
+        prompt=prompt,
+    )
+    litellm_model = _litellm_model_name(provider=provider, model=model)
+    api_base = _litellm_api_base(provider=provider, endpoint_url=endpoint_url)
+    api_key: str | None = None
+    if provider == "openai":
+        if secret_resolver is None:  # pragma: no cover - defensive
+            raise RuntimeError("secret_resolver is required for OpenAI LiteLLM execution")
+        api_key = await secret_resolver.resolve(
+            _openai_api_key_references(context),
+            label="OpenAI API key",
+        )
+    request_payload = {
+        "provider": provider,
+        "model": litellm_model,
+        "api_base": api_base,
+        "system_prompt": context.system_agent.system_prompt,
+        "prompt": prompt,
+        "messages": messages,
+    }
+    _debug_prompt_payload(debug_source, context, request_payload)
+    with observability.start_generation(
+        name=observation_name,
+        model=observation_model,
+        input=request_payload,
+        metadata=_langfuse_metadata(
+            context,
+            endpoint_url=endpoint_url,
+            provider=provider,
+        ),
+    ) as observation:
+        call_kwargs: dict[str, Any] = {
+            "model": litellm_model,
+            "messages": messages,
+            "timeout": timeout_seconds,
+        }
+        if api_base:
+            call_kwargs["api_base"] = api_base
+        if api_key:
+            call_kwargs["api_key"] = api_key
+        payload = _litellm_payload(await _load_litellm().acompletion(**call_kwargs))
+        usage_details = _litellm_usage_details(payload)
+        observation.update(
+            output=payload,
+            usage_details=usage_details or None,
+            metadata={
+                "provider": provider,
+                "endpoint_kind": endpoint_kind,
+                "transport": "litellm",
+            },
+        )
+    result = AgentRunResult(
+        stop_reason="completed",
+        message=_format_thread_message(context, _extract_text_response(payload)),
+        summary=summary,
+        metadata={
+            "provider": provider,
+            "model": model,
+            "endpoint_kind": endpoint_kind,
+            "transport": "litellm",
+            **(
+                {"usage": _usage_metadata(provider=provider, model=model, usage=usage_details)}
+                if usage_details
+                else {}
+            ),
+        },
+    )
+    return result
+
+
 class LocalOllamaExecutor:
     def __init__(
         self,
@@ -173,63 +364,24 @@ class LocalOllamaExecutor:
             or _definition_runtime_value(context, "model")
             or "gemma4:latest"
         )
-        prompt = render_prompt(context)
         logger.debug(
             "LocalOllamaExecutor execute agent_id=%s model=%s thread_id=%s",
             context.system_agent.agent_id,
             model,
             context.thread.thread_id,
         )
-        request_payload = {
-            "model": model,
-            "system": context.system_agent.system_prompt,
-            "prompt": prompt,
-            "stream": False,
-        }
-        _debug_prompt_payload("local-ollama", context, request_payload)
-        with self._observability.start_generation(
-            name="local-ollama-generate",
+        return await _execute_litellm_completion(
+            context=context,
+            provider=provider,
+            endpoint_url=url,
             model=model,
-            input=request_payload,
-            metadata=_langfuse_metadata(context, endpoint_url=url, provider=provider),
-        ) as observation:
-            async with httpx.AsyncClient(
-                timeout=self._timeout_seconds,
-                trust_env=False,
-            ) as client:
-                response = await client.post(url, json=request_payload)
-                response.raise_for_status()
-                payload = response.json()
-        message = _format_thread_message(
-            context,
-            _extract_text_response(payload),
-        )
-        usage_details = _ollama_usage_details(payload)
-        observation.update(
-            output=message,
-            model=model,
-            usage_details=usage_details or None,
-            metadata={
-                "provider": provider,
-                "endpoint_kind": endpoint.kind,
-                "done": payload.get("done"),
-                "done_reason": payload.get("done_reason"),
-            },
-        )
-        return AgentRunResult(
-            stop_reason="completed",
-            message=message,
             summary="Completed with local Ollama",
-            metadata={
-                "provider": provider,
-                "model": model,
-                "endpoint_kind": endpoint.kind,
-                **(
-                    {"usage": _usage_metadata(provider=provider, model=model, usage=usage_details)}
-                    if usage_details
-                    else {}
-                ),
-            },
+            debug_source="local-ollama",
+            observation_name="local-ollama-generate",
+            observation_model=model,
+            endpoint_kind=endpoint.kind,
+            observability=self._observability,
+            timeout_seconds=self._timeout_seconds,
         )
 
 
@@ -261,8 +413,8 @@ class HttpEndpointExecutor:
             endpoint.url,
             context.thread.thread_id,
         )
-        if provider == "openai":
-            return await self._execute_openai(context, provider=provider)
+        if provider in {"openai", "ollama"} and endpoint.model:
+            return await self._execute_litellm(context, provider=provider)
         request_payload = {
             "agent": context.system_agent.model_dump(mode="json"),
             "participant": context.participant.model_dump(mode="json"),
@@ -321,7 +473,7 @@ class HttpEndpointExecutor:
             }
         )
 
-    async def _execute_openai(
+    async def _execute_litellm(
         self,
         context: AgentExecutionContext,
         *,
@@ -334,68 +486,36 @@ class HttpEndpointExecutor:
             )
         if not endpoint.model:
             raise ValueError(
-                f"{self._endpoint_scope.capitalize()} OpenAI agent {context.system_agent.agent_id} is missing a model"
+                f"{self._endpoint_scope.capitalize()} {provider} agent {context.system_agent.agent_id} is missing a model"
             )
-        api_key = await self._secret_resolver.resolve(
-            _openai_api_key_references(context),
-            label="OpenAI API key",
-        )
-
-        request_payload = {
-            "model": endpoint.model,
-            "instructions": context.system_agent.system_prompt,
-            "input": render_prompt(context),
+        summary_by_provider = {
+            "openai": "Completed with remote OpenAI",
+            "ollama": "Completed with remote Ollama",
         }
-        _debug_prompt_payload("openai-responses", context, request_payload)
-        with self._observability.start_generation(
-            name=f"{self._endpoint_scope}-openai-responses",
+        observation_name_by_provider = {
+            "openai": f"{self._endpoint_scope}-openai-responses",
+            "ollama": f"{self._endpoint_scope}-ollama-generate",
+        }
+        debug_source_by_provider = {
+            "openai": "openai-responses",
+            "ollama": "remote-ollama",
+        }
+        return await _execute_litellm_completion(
+            context=context,
+            provider=provider,
+            endpoint_url=endpoint.url,
             model=endpoint.model,
-            input=request_payload,
-            metadata=_langfuse_metadata(
-                context,
-                endpoint_url=endpoint.url,
-                provider=provider,
+            summary=summary_by_provider.get(provider, "Completed with remote provider"),
+            debug_source=debug_source_by_provider.get(provider, f"{provider}-litellm"),
+            observation_name=observation_name_by_provider.get(
+                provider,
+                f"{self._endpoint_scope}-{provider}-generate",
             ),
-        ) as observation:
-            async with httpx.AsyncClient(
-                timeout=self._timeout_seconds,
-                trust_env=False,
-            ) as client:
-                response = await client.post(
-                    endpoint.url,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=request_payload,
-                )
-                response.raise_for_status()
-                payload = response.json()
-            observation.update(
-                output=payload,
-                usage_details=_openai_usage_details(payload) or None,
-                metadata={
-                    "provider": provider,
-                    "endpoint_kind": endpoint.kind,
-                    "status_code": response.status_code,
-                },
-            )
-        result = _coerce_run_result(payload, context=context)
-        usage = _openai_usage_details(payload)
-        return result.model_copy(
-            update={
-                "metadata": {
-                    **result.metadata,
-                    "provider": provider,
-                    "model": endpoint.model,
-                    "endpoint_kind": endpoint.kind,
-                    **(
-                        {"usage": _usage_metadata(provider=provider, model=endpoint.model, usage=usage)}
-                        if usage
-                        else {}
-                    ),
-                }
-            }
+            observation_model=endpoint.model,
+            endpoint_kind=endpoint.kind,
+            observability=self._observability,
+            timeout_seconds=self._timeout_seconds,
+            secret_resolver=self._secret_resolver,
         )
 
 
@@ -1117,9 +1237,34 @@ def _extract_text_response(payload: Any) -> str:
             return payload["output_text"]
         if isinstance(payload.get("text"), str):
             return payload["text"]
+        choices = payload.get("choices")
+        if isinstance(choices, list) and choices:
+            first_choice = choices[0]
+            if isinstance(first_choice, dict):
+                message = first_choice.get("message")
+                if isinstance(message, dict):
+                    content = _text_from_message_content(message.get("content"))
+                    if content:
+                        return content
     if isinstance(payload, str):
         return payload
     return json.dumps(payload)
+
+
+def _text_from_message_content(content: Any) -> str | None:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif item.get("type") == "text" and isinstance(item.get("content"), str):
+                    parts.append(item["content"])
+        if parts:
+            return "\n".join(parts)
+    return None
 
 
 def _coerce_run_result(
@@ -1260,44 +1405,11 @@ def _usage_metadata(
 
 
 def _ollama_usage_details(payload: Any) -> dict[str, int]:
-    if not isinstance(payload, dict):
-        return {}
-    prompt_tokens = payload.get("prompt_eval_count")
-    completion_tokens = payload.get("eval_count")
-    usage: dict[str, int] = {}
-    if isinstance(prompt_tokens, int):
-        usage["prompt_tokens"] = prompt_tokens
-    if isinstance(completion_tokens, int):
-        usage["completion_tokens"] = completion_tokens
-    if usage:
-        usage["total_tokens"] = usage.get("prompt_tokens", 0) + usage.get(
-            "completion_tokens", 0
-        )
-    return usage
+    return _litellm_usage_details(payload)
 
 
 def _openai_usage_details(payload: Any) -> dict[str, int]:
-    if not isinstance(payload, dict):
-        return {}
-    usage_payload = payload.get("usage")
-    if not isinstance(usage_payload, dict):
-        return {}
-    input_tokens = usage_payload.get("input_tokens")
-    output_tokens = usage_payload.get("output_tokens")
-    total_tokens = usage_payload.get("total_tokens")
-    usage: dict[str, int] = {}
-    if isinstance(input_tokens, int):
-        usage["prompt_tokens"] = input_tokens
-    if isinstance(output_tokens, int):
-        usage["completion_tokens"] = output_tokens
-    if isinstance(total_tokens, int):
-        usage["total_tokens"] = total_tokens
-    elif usage:
-        usage["total_tokens"] = usage.get("prompt_tokens", 0) + usage.get(
-            "completion_tokens",
-            0,
-        )
-    return usage
+    return _litellm_usage_details(payload)
 
 
 def _debug_prompt_payload(

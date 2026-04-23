@@ -1822,41 +1822,40 @@ async def test_agent_runtime_emits_task_span_to_observer():
 async def test_local_ollama_executor_emits_generation_observation(monkeypatch):
     kernel = _build_fixture_context(endpoint_kind="local")
     observer = RecordingObserver()
+    request_log: dict[str, object] = {}
 
-    class FakeResponse:
-        headers = {"content-type": "application/json"}
+    async def fake_acompletion(**kwargs):
+        request_log.update(kwargs)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Validated the request.",
+                    }
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 7,
+                "total_tokens": 19,
+            },
+        }
 
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict[str, object]:
-            return {
-                "response": "Validated the request.",
-                "prompt_eval_count": 12,
-                "eval_count": 7,
-                "done": True,
-                "done_reason": "stop",
-            }
-
-    class FakeAsyncClient:
-        def __init__(self, *args, **kwargs) -> None:
-            return None
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, url, json):
-            return FakeResponse()
-
-    monkeypatch.setattr("agent_runtime.runtime.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(
+        "agent_runtime.runtime._load_litellm",
+        lambda: SimpleNamespace(acompletion=fake_acompletion),
+    )
 
     executor = LocalOllamaExecutor(timeout_seconds=1.0, observability=observer)
     result = await executor.execute(kernel.context)
 
     assert "Testing Agent (testing agent)" in (result.message or "")
+    assert request_log["model"] == "ollama/gemma4:latest"
+    assert request_log["api_base"] == "http://127.0.0.1:11434"
+    assert request_log["timeout"] == 1.0
+    assert request_log["messages"][0]["role"] == "system"
+    assert request_log["messages"][1]["content"] == render_prompt(kernel.context)
     assert observer.records[0]["kind"] == "generation"
     assert observer.records[0]["name"] == "local-ollama-generate"
     langfuse_input = observer.records[0]["input"]
@@ -1940,41 +1939,29 @@ async def test_http_executor_calls_openai_responses_with_api_key(monkeypatch):
     observer = RecordingObserver()
     request_log: dict[str, object] = {}
 
-    class FakeResponse:
-        status_code = 200
-        headers = {"content-type": "application/json"}
-
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict[str, object]:
-            return {
-                "output_text": "OpenAI validation complete.",
-                "usage": {
-                    "input_tokens": 21,
-                    "output_tokens": 9,
-                    "total_tokens": 30,
-                },
-            }
-
-    class FakeAsyncClient:
-        def __init__(self, *args, **kwargs) -> None:
-            return None
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, url, headers=None, json=None):
-            request_log["url"] = url
-            request_log["headers"] = headers
-            request_log["json"] = json
-            return FakeResponse()
+    async def fake_acompletion(**kwargs):
+        request_log.update(kwargs)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "OpenAI validation complete.",
+                    }
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 21,
+                "completion_tokens": 9,
+                "total_tokens": 30,
+            },
+        }
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-test")
-    monkeypatch.setattr("agent_runtime.runtime.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(
+        "agent_runtime.runtime._load_litellm",
+        lambda: SimpleNamespace(acompletion=fake_acompletion),
+    )
 
     executor = HttpEndpointExecutor(
         timeout_seconds=1.0,
@@ -1984,10 +1971,12 @@ async def test_http_executor_calls_openai_responses_with_api_key(monkeypatch):
     result = await executor.execute(kernel.context)
 
     assert "Testing Agent (testing agent)" in (result.message or "")
-    assert request_log["url"] == "https://api.openai.com/v1/responses"
-    assert request_log["headers"]["Authorization"] == "Bearer sk-openai-test"
-    assert request_log["json"]["model"] == "gpt-5.4-mini"
-    assert request_log["json"]["input"] == render_prompt(kernel.context)
+    assert request_log["model"] == "openai/gpt-5.4-mini"
+    assert request_log["api_base"] == "https://api.openai.com/v1"
+    assert request_log["api_key"] == "sk-openai-test"
+    assert request_log["timeout"] == 1.0
+    assert request_log["messages"][0]["content"] == "You are a careful testing agent."
+    assert request_log["messages"][1]["content"] == render_prompt(kernel.context)
     assert observer.records[0]["name"] == "remote-openai-responses"
     update = observer.records[0]["updates"][0]
     assert update["usage_details"] == {
@@ -2090,33 +2079,23 @@ async def test_http_executor_can_resolve_openai_api_key_from_openbao(monkeypatch
     )
     request_log: dict[str, object] = {}
 
-    class FakeResponse:
-        status_code = 200
-        headers = {"content-type": "application/json"}
+    async def fake_acompletion(**kwargs):
+        request_log.update(kwargs)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "OpenAI validation complete.",
+                    }
+                }
+            ]
+        }
 
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict[str, object]:
-            return {"output_text": "OpenAI validation complete."}
-
-    class FakeAsyncClient:
-        def __init__(self, *args, **kwargs) -> None:
-            return None
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, url, headers=None, json=None):
-            request_log["url"] = url
-            request_log["headers"] = headers
-            request_log["json"] = json
-            return FakeResponse()
-
-    monkeypatch.setattr("agent_runtime.runtime.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(
+        "agent_runtime.runtime._load_litellm",
+        lambda: SimpleNamespace(acompletion=fake_acompletion),
+    )
 
     resolver = SecretResolver(
         [
@@ -2144,7 +2123,7 @@ async def test_http_executor_can_resolve_openai_api_key_from_openbao(monkeypatch
     result = await executor.execute(kernel.context)
 
     assert "Testing Agent (testing agent)" in (result.message or "")
-    assert request_log["headers"]["Authorization"] == "Bearer sk-openbao-test"
+    assert request_log["api_key"] == "sk-openbao-test"
 
 
 def test_langfuse_runtime_observer_uses_observation_api_for_generation():
@@ -2278,29 +2257,22 @@ async def test_local_ollama_executor_debug_dump_writes_request_payload(monkeypat
     )
     debug_file = tmp_path / "agent-runtime-prompts.jsonl"
 
-    class FakeResponse:
-        headers = {"content-type": "application/json"}
+    async def fake_acompletion(**kwargs):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Validated the request.",
+                    }
+                }
+            ]
+        }
 
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict[str, object]:
-            return {"response": "Validated the request."}
-
-    class FakeAsyncClient:
-        def __init__(self, *args, **kwargs) -> None:
-            return None
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, url, json):
-            return FakeResponse()
-
-    monkeypatch.setattr("agent_runtime.runtime.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(
+        "agent_runtime.runtime._load_litellm",
+        lambda: SimpleNamespace(acompletion=fake_acompletion),
+    )
     monkeypatch.setenv("AGENT_RUNTIME_DEBUG_PROMPTS", "1")
     monkeypatch.setenv("AGENT_RUNTIME_DEBUG_PROMPTS_FILE", str(debug_file))
 

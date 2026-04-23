@@ -2,6 +2,8 @@
 
 Reusable runtime helpers for task-claiming Open Talon agents that emit `task.*` and `run.*` collaboration events, execute isolated tool calls, and drive the live generated-tool path used by Tinker.
 
+Provider-backed model generations route through LiteLLM so local Ollama and managed OpenAI-style endpoints share one completion transport while generic remote agent endpoints continue to use their native JSON contract.
+
 ## Langfuse
 
 `agent-runtime` can emit Langfuse traces for:
