@@ -555,6 +555,8 @@ Current publication rules:
 - approval requires `tool_generation.review` and `tool_catalog.write`
 - workspace participants with `workspace.tools.write` attach it later with `PUT /v1/workspaces/{workspace_id}/tools/{tool_id}`
 
+External MCP servers are managed separately from Open Talon tools. Register global or organization-scoped MCP servers with `/v1/mcp-servers` or `/v1/organizations/{organization_id}/mcp-servers`, then attach them to a workspace with `PUT /v1/workspaces/{workspace_id}/mcp-servers/{server_id}`. MCP tools, resources, and prompts are rendered in separate agent context sections and are not inserted into `system_tools` or `workspace_tools`.
+
 Useful routes:
 
 ```text

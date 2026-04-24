@@ -1,6 +1,7 @@
 from .contracts import ExecutionBackend
 from .docker import DockerExecutionBackend
 from .local_process import LocalProcessExecutionBackend
+from .mcp import McpExecutionBackend
 from .registry import ExecutionBackendRegistry
 
 __all__ = [
@@ -8,4 +9,5 @@ __all__ = [
     "ExecutionBackend",
     "ExecutionBackendRegistry",
     "LocalProcessExecutionBackend",
+    "McpExecutionBackend",
 ]

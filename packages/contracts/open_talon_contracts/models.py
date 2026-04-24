@@ -32,8 +32,9 @@ RunStepStatus = Literal["created", "claimed", "waiting_tools", "completed", "fai
 RunStepKind = Literal["model"]
 ToolCallStatus = Literal["created", "claimed", "completed", "failed"]
 AgentEndpointKind = Literal["local", "system", "remote"]
-ExecutionBackendKind = Literal["docker", "local_process"]
+ExecutionBackendKind = Literal["docker", "local_process", "mcp"]
 ToolTrustLevel = Literal["sandboxed", "trusted"]
+McpTransportKind = Literal["stdio", "streamable_http", "sse"]
 ExecutionWorkspaceRefMode = Literal["local_path"]
 NetworkPolicy = Literal["none", "full"]
 WorkspaceAccessMode = Literal["none", "read_only", "read_write"]
@@ -602,6 +603,110 @@ class MemoryProviderDefinition(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class McpServerDefinition(BaseModel):
+    server_id: UUID
+    scope: RegistryScope = "global"
+    organization_id: UUID | None = None
+    server_key: str
+    display_name: str
+    description: str
+    transport_kind: McpTransportKind = "streamable_http"
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_config: dict[str, Any] = Field(default_factory=dict)
+    trust_level: ToolTrustLevel = "sandboxed"
+    enabled: bool = True
+    last_sync_status: str | None = None
+    last_sync_error: str | None = None
+    last_synced_at: datetime | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class McpToolDefinition(BaseModel):
+    server_id: UUID
+    tool_name: str
+    display_name: str | None = None
+    description: str = ""
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    output_schema: dict[str, Any] = Field(default_factory=dict)
+    capability_hash: str = ""
+    discovered_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class McpResourceDefinition(BaseModel):
+    server_id: UUID
+    uri: str
+    name: str = ""
+    description: str = ""
+    mime_type: str | None = None
+    capability_hash: str = ""
+    discovered_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class McpPromptDefinition(BaseModel):
+    server_id: UUID
+    prompt_name: str
+    description: str = ""
+    arguments_schema: dict[str, Any] = Field(default_factory=dict)
+    capability_hash: str = ""
+    discovered_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceMcpServer(BaseModel):
+    server_id: UUID
+    server_key: str
+    display_name: str
+    description: str
+    transport_kind: McpTransportKind = "streamable_http"
+    trust_level: ToolTrustLevel = "sandboxed"
+    server_enabled: bool = True
+    enabled: bool = True
+    tools_enabled: bool = True
+    resources_enabled: bool = False
+    prompts_enabled: bool = False
+    sampling_enabled: bool = False
+    name_prefix: str = ""
+    tool_allowlist: list[str] = Field(default_factory=list)
+    tool_denylist: list[str] = Field(default_factory=list)
+    resource_allowlist: list[str] = Field(default_factory=list)
+    prompt_allowlist: list[str] = Field(default_factory=list)
+    attached_by: UUID
+    attached_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceMcpCapability(BaseModel):
+    server_id: UUID
+    server_key: str
+    server_display_name: str
+    exposed_name: str
+    remote_name: str
+    description: str = ""
+    enabled: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceMcpTool(WorkspaceMcpCapability):
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    output_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceMcpResource(WorkspaceMcpCapability):
+    uri: str
+    mime_type: str | None = None
+
+
+class WorkspaceMcpPrompt(WorkspaceMcpCapability):
+    arguments_schema: dict[str, Any] = Field(default_factory=dict)
+
+
 class MemoryProviderHealthCheck(BaseModel):
     name: str
     status: Literal["ok", "warn", "fail"]
@@ -1081,7 +1186,7 @@ class ToolCall(BaseModel):
     workspace_id: UUID
     thread_id: UUID
     system_agent_id: UUID
-    tool_id: UUID
+    tool_id: UUID | None = None
     tool_name: str
     status: ToolCallStatus = "created"
     arguments: dict[str, Any] = Field(default_factory=dict)
@@ -1449,6 +1554,19 @@ class CreateMemoryProviderRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class CreateMcpServerRequest(BaseModel):
+    actor: ParticipantInput
+    server_key: str
+    display_name: str
+    description: str
+    transport_kind: McpTransportKind = "streamable_http"
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_config: dict[str, Any] = Field(default_factory=dict)
+    trust_level: ToolTrustLevel = "sandboxed"
+    enabled: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class UpdateLlmProviderRequest(BaseModel):
     actor: ParticipantInput
     engine_id: str | None = None
@@ -1478,11 +1596,63 @@ class UpdateMemoryProviderRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class UpdateMcpServerRequest(BaseModel):
+    actor: ParticipantInput
+    server_key: str | None = None
+    display_name: str | None = None
+    description: str | None = None
+    transport_kind: McpTransportKind | None = None
+    config: dict[str, Any] | None = None
+    secret_config: dict[str, Any] | None = None
+    trust_level: ToolTrustLevel | None = None
+    enabled: bool | None = None
+    metadata: dict[str, Any] | None = None
+
+
 class DeleteLlmProviderRequest(BaseModel):
     actor: ParticipantInput
 
 
 class DeleteMemoryProviderRequest(BaseModel):
+    actor: ParticipantInput
+
+
+class DeleteMcpServerRequest(BaseModel):
+    actor: ParticipantInput
+
+
+class AttachWorkspaceMcpServerRequest(BaseModel):
+    actor: ParticipantInput
+    server_id: UUID | None = None
+    enabled: bool = True
+    tools_enabled: bool = True
+    resources_enabled: bool = False
+    prompts_enabled: bool = False
+    sampling_enabled: bool = False
+    name_prefix: str | None = None
+    tool_allowlist: list[str] = Field(default_factory=list)
+    tool_denylist: list[str] = Field(default_factory=list)
+    resource_allowlist: list[str] = Field(default_factory=list)
+    prompt_allowlist: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateWorkspaceMcpServerRequest(BaseModel):
+    actor: ParticipantInput
+    enabled: bool | None = None
+    tools_enabled: bool | None = None
+    resources_enabled: bool | None = None
+    prompts_enabled: bool | None = None
+    sampling_enabled: bool | None = None
+    name_prefix: str | None = None
+    tool_allowlist: list[str] | None = None
+    tool_denylist: list[str] | None = None
+    resource_allowlist: list[str] | None = None
+    prompt_allowlist: list[str] | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class DeleteWorkspaceMcpServerRequest(BaseModel):
     actor: ParticipantInput
 
 
@@ -1956,6 +2126,10 @@ class AgentExecutionContext(BaseModel):
     participants: list[ParticipantProfile] = Field(default_factory=list)
     role_definitions: list[RoleDefinition] = Field(default_factory=list)
     workspace_tools: list[WorkspaceTool] = Field(default_factory=list)
+    workspace_mcp_servers: list[WorkspaceMcpServer] = Field(default_factory=list)
+    workspace_mcp_tools: list[WorkspaceMcpTool] = Field(default_factory=list)
+    workspace_mcp_resources: list[WorkspaceMcpResource] = Field(default_factory=list)
+    workspace_mcp_prompts: list[WorkspaceMcpPrompt] = Field(default_factory=list)
     internal_tools: list[AgentInternalToolBinding] = Field(default_factory=list)
     messages: list[TimelineMessage] = Field(default_factory=list)
     interaction_requests: list[InteractionRequestDetail] = Field(default_factory=list)

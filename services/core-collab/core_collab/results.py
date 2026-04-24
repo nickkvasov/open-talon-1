@@ -16,6 +16,7 @@ from .contracts import (
     LlmProviderDefinition,
     MemoryEntry,
     MemoryProviderDefinition,
+    McpServerDefinition,
     Organization,
     OrganizationMembership,
     ParticipantProfile,
@@ -35,6 +36,7 @@ from .contracts import (
     WorkspaceAsset,
     WorkspaceAssetVersion,
     WorkspaceDetail,
+    WorkspaceMcpServer,
     WorkspaceTool,
 )
 
@@ -133,6 +135,12 @@ class MemoryProviderCommandResult(CommandResult):
 
 
 @dataclass
+class McpServerCommandResult(CommandResult):
+    server: McpServerDefinition | None = None
+    binding: WorkspaceMcpServer | None = None
+
+
+@dataclass
 class GitRepositoryCommandResult(CommandResult):
     repository: GitRepository | None = None
 
@@ -200,6 +208,7 @@ __all__ = [
     "LlmProviderCommandResult",
     "MemoryCommandResult",
     "MemoryProviderCommandResult",
+    "McpServerCommandResult",
     "MessageCommandResult",
     "OrganizationCommandResult",
     "OrganizationMembershipCommandResult",

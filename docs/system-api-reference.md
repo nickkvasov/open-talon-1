@@ -224,6 +224,7 @@ Current MCP behavior:
 - the visible MCP operation set is filtered from the caller's existing IAM permissions plus workspace participant attachment where the underlying API already requires it
 - successful operation calls return both a short text `content` summary and `structuredContent`; protocol/schema failures stay JSON-RPC errors
 - MCP exposes system API operations only; it does not expose `system_tools`, `workspace_tools`, Tinker-generated tools, or `agent-runtime` execution backends as imported MCP tools
+- External MCP server attachments are modeled separately under `/v1/mcp-servers` and `/v1/workspaces/{workspace_id}/mcp-servers`; they are not imported into Open Talon `system_tools`.
 
 Current MCP session resources:
 
@@ -656,6 +657,24 @@ Git-managed system and organization agent definitions are authored as modular bu
 | `PUT` | `/v1/workspaces/{workspace_id}/tools/{tool_id}` | attach tool to workspace |
 | `PATCH` | `/v1/workspaces/{workspace_id}/tools/{tool_id}` | update workspace tool attachment |
 | `DELETE` | `/v1/workspaces/{workspace_id}/tools/{tool_id}` | detach tool from workspace |
+| `POST` | `/v1/mcp-servers` | create global external MCP server |
+| `GET` | `/v1/mcp-servers` | list global external MCP servers |
+| `GET` | `/v1/mcp-servers/{server_id}` | get external MCP server |
+| `PATCH` | `/v1/mcp-servers/{server_id}` | update external MCP server |
+| `DELETE` | `/v1/mcp-servers/{server_id}` | delete external MCP server |
+| `GET` | `/v1/mcp-servers/{server_id}/tools` | list discovered MCP tools |
+| `GET` | `/v1/mcp-servers/{server_id}/resources` | list discovered MCP resources |
+| `GET` | `/v1/mcp-servers/{server_id}/prompts` | list discovered MCP prompts |
+| `POST` | `/v1/organizations/{organization_id}/mcp-servers` | create organization-scoped external MCP server |
+| `GET` | `/v1/organizations/{organization_id}/mcp-servers` | list organization-scoped external MCP servers |
+| `GET` | `/v1/workspaces/{workspace_id}/catalog/mcp-servers` | list MCP servers visible to workspace |
+| `GET` | `/v1/workspaces/{workspace_id}/mcp-servers` | list MCP servers attached to workspace |
+| `PUT` | `/v1/workspaces/{workspace_id}/mcp-servers/{server_id}` | attach MCP server to workspace |
+| `PATCH` | `/v1/workspaces/{workspace_id}/mcp-servers/{server_id}` | update MCP server attachment |
+| `DELETE` | `/v1/workspaces/{workspace_id}/mcp-servers/{server_id}` | detach MCP server from workspace |
+| `GET` | `/v1/workspaces/{workspace_id}/mcp-tools` | list workspace-visible MCP tools |
+| `GET` | `/v1/workspaces/{workspace_id}/mcp-resources` | list workspace-visible MCP resources |
+| `GET` | `/v1/workspaces/{workspace_id}/mcp-prompts` | list workspace-visible MCP prompts |
 | `POST` | `/v1/workspaces/{workspace_id}/git-repositories` | register workspace Git repository |
 | `GET` | `/v1/workspaces/{workspace_id}/git-repositories` | list workspace Git repositories |
 | `POST` | `/v1/workspaces/{workspace_id}/assets/publish-from-git` | publish workspace asset version |
