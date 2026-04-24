@@ -168,14 +168,20 @@ export default function SwarmResources() {
         scopeMode === 'organization'
           ? `/v1/organizations/${selectedOrganizationId}/mcp-servers`
           : '/v1/mcp-servers';
-      const [agentsRes, toolsRes, mcpServersRes] = await Promise.all([
+      const [agentsRes, toolsRes, mcpServersRes] = await Promise.allSettled([
         api.get(agentsEndpoint),
         api.get(toolsEndpoint),
         api.get(mcpServersEndpoint)
       ]);
-      setAgents(agentsRes.data);
-      setTools(toolsRes.data);
-      setMcpServers(mcpServersRes.data);
+      if (agentsRes.status !== 'fulfilled') {
+        throw agentsRes.reason;
+      }
+      if (toolsRes.status !== 'fulfilled') {
+        throw toolsRes.reason;
+      }
+      setAgents(agentsRes.value.data);
+      setTools(toolsRes.value.data);
+      setMcpServers(mcpServersRes.status === 'fulfilled' ? mcpServersRes.value.data : []);
       try {
         const repositoriesRes = await api.get(gitRepositoriesEndpoint);
         setGitRepositories(repositoriesRes.data);
