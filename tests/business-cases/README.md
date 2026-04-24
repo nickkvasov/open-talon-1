@@ -104,7 +104,9 @@ pytest tests/business-cases/test_tinker_tool_generation.py -q
 
 ## Communication Logs
 
-Each business-case test run now writes persistent workspace communication-log artifacts under:
+Business-case tests write workspace communication-log artifacts to pytest temporary storage by default.
+
+Set `OPEN_TALON_PERSIST_BUSINESS_CASE_LOGS=1` to write persistent artifacts under:
 
 - [tests/business-cases/logs](./logs/README.md)
 
