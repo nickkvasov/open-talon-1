@@ -74,10 +74,22 @@ const defaultGitBundleData = () => ({
   commit_message: 'Publish agent bundle archive'
 });
 
+const defaultMcpServerData = () => ({
+  server_key: '',
+  display_name: '',
+  description: '',
+  transport_kind: 'streamable_http',
+  trust_level: 'sandboxed',
+  enabled: true,
+  url: '',
+  command: ''
+});
+
 export default function SwarmResources() {
   const api = useApi();
   const [agents, setAgents] = useState([]);
   const [tools, setTools] = useState([]);
+  const [mcpServers, setMcpServers] = useState([]);
   const [organizations, setOrganizations] = useState([]);
   const [gitRepositories, setGitRepositories] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -94,10 +106,13 @@ export default function SwarmResources() {
   // Modal states
   const [isAgentModalOpen, setIsAgentModalOpen] = useState(false);
   const [isToolModalOpen, setIsToolModalOpen] = useState(false);
+  const [isMcpModalOpen, setIsMcpModalOpen] = useState(false);
   const [agentModalMode, setAgentModalMode] = useState('create');
   const [toolModalMode, setToolModalMode] = useState('create');
+  const [mcpModalMode, setMcpModalMode] = useState('create');
   const [editingAgent, setEditingAgent] = useState(null);
   const [editingTool, setEditingTool] = useState(null);
+  const [editingMcpServer, setEditingMcpServer] = useState(null);
   
   const [agentData, setAgentData] = useState(defaultAgentData());
 
@@ -105,6 +120,7 @@ export default function SwarmResources() {
     name: '', description: '', param_strategy: 'strict', exec_strategy: 'webhook', exec_url: ''
   });
   const [toolSchema, setToolSchema] = useState('{\n  "type": "object",\n  "properties": {},\n  "required": []\n}');
+  const [mcpServerData, setMcpServerData] = useState(defaultMcpServerData());
   
   const [confirmModal, setConfirmModal] = useState({ 
     isOpen: false, 
@@ -131,6 +147,7 @@ export default function SwarmResources() {
       if (scopeMode === 'organization' && !selectedOrganizationId) {
         setAgents([]);
         setTools([]);
+        setMcpServers([]);
         setGitRepositories([]);
         setError(null);
         return;
@@ -147,12 +164,18 @@ export default function SwarmResources() {
         scopeMode === 'organization'
           ? `/v1/organizations/${selectedOrganizationId}/git-repositories`
           : '/v1/git-repositories';
-      const [agentsRes, toolsRes] = await Promise.all([
+      const mcpServersEndpoint =
+        scopeMode === 'organization'
+          ? `/v1/organizations/${selectedOrganizationId}/mcp-servers`
+          : '/v1/mcp-servers';
+      const [agentsRes, toolsRes, mcpServersRes] = await Promise.all([
         api.get(agentsEndpoint),
-        api.get(toolsEndpoint)
+        api.get(toolsEndpoint),
+        api.get(mcpServersEndpoint)
       ]);
       setAgents(agentsRes.data);
       setTools(toolsRes.data);
+      setMcpServers(mcpServersRes.data);
       try {
         const repositoriesRes = await api.get(gitRepositoriesEndpoint);
         setGitRepositories(repositoriesRes.data);
@@ -196,6 +219,12 @@ export default function SwarmResources() {
     setToolModalMode('create');
   };
 
+  const resetMcpServerForm = () => {
+    setMcpServerData(defaultMcpServerData());
+    setEditingMcpServer(null);
+    setMcpModalMode('create');
+  };
+
   const scopedCatalogPath = (path) => {
     if (scopeMode === 'organization') {
       if (!selectedOrganizationId) {
@@ -213,6 +242,17 @@ export default function SwarmResources() {
     if (!gitBundleData.bundle_path.trim()) {
       throw new Error('Bundle path is required.');
     }
+  };
+
+  const mcpServerPath = (serverId = '') => {
+    const suffix = serverId ? `/${serverId}` : '';
+    if (scopeMode === 'organization') {
+      if (!selectedOrganizationId) {
+        throw new Error('Select an organization before using org-scoped MCP servers.');
+      }
+      return `/v1/organizations/${selectedOrganizationId}/mcp-servers${suffix}`;
+    }
+    return `/v1/mcp-servers${suffix}`;
   };
 
   const handleOpenAgentEdit = (agent) => {
@@ -280,6 +320,22 @@ export default function SwarmResources() {
       skill_refs: JSON.stringify(harness.skill_refs || [], null, 2),
     });
     setIsAgentModalOpen(true);
+  };
+
+  const handleOpenMcpServerEdit = (server) => {
+    setEditingMcpServer(server);
+    setMcpModalMode('edit');
+    setMcpServerData({
+      server_key: server.server_key,
+      display_name: server.display_name,
+      description: server.description,
+      transport_kind: server.transport_kind,
+      trust_level: server.trust_level,
+      enabled: server.enabled,
+      url: server.config?.url || '',
+      command: Array.isArray(server.config?.command) ? server.config.command.join(' ') : ''
+    });
+    setIsMcpModalOpen(true);
   };
 
   const parseJsonField = (raw, fallback, label) => {
@@ -474,6 +530,24 @@ export default function SwarmResources() {
     });
   };
 
+  const handleDeleteMcpServer = async (server_id) => {
+    setConfirmModal({
+      isOpen: true,
+      title: 'Delete MCP Server?',
+      message: 'This removes the external MCP server definition and all workspace MCP attachments.',
+      onConfirm: async () => {
+        try {
+          await api.delete(mcpServerPath(server_id), {
+            data: { actor: buildAdminActor() }
+          });
+          fetchResources();
+        } catch (err) {
+          alert('Failed to delete MCP server: ' + err.message);
+        }
+      }
+    });
+  };
+
   const handleSaveAgent = async () => {
     try {
       const payload = {
@@ -544,6 +618,43 @@ export default function SwarmResources() {
       fetchResources();
     } catch (err) {
       setError('Failed to save tool: ' + err.message);
+    }
+  };
+
+  const handleSaveMcpServer = async () => {
+    try {
+      const config = mcpServerData.transport_kind === 'stdio'
+        ? { command: mcpServerData.command.split(' ').map(s => s.trim()).filter(Boolean) }
+        : { url: mcpServerData.url };
+      const payload = {
+        actor: buildAdminActor(),
+        server_key: mcpServerData.server_key,
+        display_name: mcpServerData.display_name,
+        description: mcpServerData.description,
+        transport_kind: mcpServerData.transport_kind,
+        trust_level: mcpServerData.trust_level,
+        enabled: mcpServerData.enabled,
+        config,
+        metadata: {}
+      };
+      if (mcpModalMode === 'create') {
+        if (scopeMode === 'organization' && !selectedOrganizationId) {
+          throw new Error('Select an organization before creating an org-scoped MCP server.');
+        }
+        await api.post(
+          scopeMode === 'organization'
+            ? `/v1/organizations/${selectedOrganizationId}/mcp-servers`
+            : '/v1/mcp-servers',
+          payload
+        );
+      } else {
+        await api.patch(mcpServerPath(editingMcpServer.server_id), payload);
+      }
+      setIsMcpModalOpen(false);
+      resetMcpServerForm();
+      fetchResources();
+    } catch (err) {
+      setError('Failed to save MCP server: ' + err.message);
     }
   };
 
@@ -997,6 +1108,71 @@ export default function SwarmResources() {
             )}
           </div>
         </div>
+
+        {/* MCP Servers List */}
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Globe className="text-cyan-500 w-5 h-5" />
+            <h2 className="text-lg font-bold dark:text-white">MCP Servers</h2>
+            <span className="text-xs bg-slate-100 dark:bg-slate-800 text-slate-500 py-1 px-2 rounded-full font-mono">
+              {mcpServers.length}
+            </span>
+            <button
+              type="button"
+              onClick={() => { resetMcpServerForm(); setIsMcpModalOpen(true); }}
+              className="ml-auto p-2 text-slate-400 hover:text-cyan-500 hover:bg-cyan-50 dark:hover:bg-cyan-900/30 rounded-lg transition-all"
+              title="Add MCP Server"
+            >
+              <Plus className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl divide-y divide-slate-100 dark:divide-slate-700 shadow-sm overflow-hidden">
+            {mcpServers.length === 0 ? (
+              <div className="p-8 text-slate-500 text-center italic">No external MCP servers registered.</div>
+            ) : (
+              mcpServers.map(server => (
+                <div key={server.server_id} className="p-5 flex items-start justify-between hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors">
+                  <div className="space-y-2 max-w-[70%]">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-slate-900 dark:text-white text-lg">{server.display_name}</span>
+                      <span className="text-[10px] bg-cyan-50 dark:bg-cyan-900/40 text-cyan-600 dark:text-cyan-400 px-2 py-0.5 rounded-full font-mono border border-cyan-100 dark:border-cyan-800 uppercase tracking-tight">
+                        {server.transport_kind}
+                      </span>
+                      <span className="text-[10px] bg-slate-100 dark:bg-slate-700 text-slate-500 px-2 py-0.5 rounded-full uppercase tracking-tight">
+                        {server.trust_level}
+                      </span>
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full uppercase tracking-tight ${server.enabled ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400' : 'bg-slate-100 text-slate-500 dark:bg-slate-700'}`}>
+                        {server.enabled ? 'enabled' : 'disabled'}
+                      </span>
+                    </div>
+                    <p className="text-sm text-slate-500 dark:text-slate-400 line-clamp-1">{server.description}</p>
+                    <div className="flex items-center text-xs text-slate-400 font-mono">
+                      {server.server_key}
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleOpenMcpServerEdit(server); }}
+                      className="p-2 text-slate-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded-lg transition-all"
+                      title="Edit MCP Server"
+                    >
+                      <Edit2 className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteMcpServer(server.server_id); }}
+                      className="p-2 text-slate-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/30 rounded-lg transition-all"
+                      title="Delete MCP Server"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Agent Modal */}
@@ -1404,6 +1580,82 @@ export default function SwarmResources() {
                   className="px-10 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold shadow-lg shadow-emerald-500/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
                 >
                   {toolModalMode === 'edit' ? 'Update Tool' : 'Register Tool'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MCP Server Modal */}
+      {isMcpModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 transition-opacity animate-in fade-in duration-200">
+          <div className="bg-white dark:bg-slate-800 w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 animate-in zoom-in-95 duration-200 flex flex-col">
+            <div className="sticky top-0 z-10 p-6 border-b border-slate-100 dark:border-slate-700 flex justify-between items-center bg-white dark:bg-slate-800/95 backdrop-blur-md">
+              <div>
+                <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center">
+                  <span className="p-1.5 rounded-lg mr-3 bg-cyan-100 dark:bg-cyan-900/30 text-cyan-600">
+                    <Globe className="w-6 h-6"/>
+                  </span>
+                  {mcpModalMode === 'edit' ? 'Update' : 'Register'} MCP Server
+                </h2>
+                <p className="text-slate-500 text-sm mt-1">External MCP servers are managed separately from Open Talon tools</p>
+              </div>
+              <button onClick={() => setIsMcpModalOpen(false)} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full transition-all">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-8 space-y-6">
+              <div className="grid grid-cols-2 gap-6">
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Server Key</label>
+                  <input type="text" value={mcpServerData.server_key} onChange={e => setMcpServerData({...mcpServerData, server_key: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-cyan-500 outline-none transition-all font-mono text-sm" placeholder="github" />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Display Name</label>
+                  <input type="text" value={mcpServerData.display_name} onChange={e => setMcpServerData({...mcpServerData, display_name: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-cyan-500 outline-none transition-all" placeholder="GitHub MCP" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Description</label>
+                <textarea value={mcpServerData.description} onChange={e => setMcpServerData({...mcpServerData, description: e.target.value})} rows={2} className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-cyan-500 outline-none transition-all text-sm resize-none" />
+              </div>
+              <div className="grid grid-cols-3 gap-6 p-4 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-100 dark:border-slate-700">
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Transport</label>
+                  <select value={mcpServerData.transport_kind} onChange={e => setMcpServerData({...mcpServerData, transport_kind: e.target.value, trust_level: e.target.value === 'stdio' ? 'trusted' : mcpServerData.trust_level})} className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-cyan-500 outline-none transition-all">
+                    <option value="streamable_http">Streamable HTTP</option>
+                    <option value="sse">Legacy SSE</option>
+                    <option value="stdio">Stdio</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Trust</label>
+                  <select value={mcpServerData.trust_level} onChange={e => setMcpServerData({...mcpServerData, trust_level: e.target.value})} className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-cyan-500 outline-none transition-all">
+                    <option value="sandboxed">Sandboxed</option>
+                    <option value="trusted">Trusted</option>
+                  </select>
+                </div>
+                <label className="flex items-center gap-2 pt-8 text-sm text-slate-600 dark:text-slate-300">
+                  <input type="checkbox" checked={mcpServerData.enabled} onChange={e => setMcpServerData({...mcpServerData, enabled: e.target.checked})} />
+                  Enabled
+                </label>
+              </div>
+              {mcpServerData.transport_kind === 'stdio' ? (
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Command</label>
+                  <input type="text" value={mcpServerData.command} onChange={e => setMcpServerData({...mcpServerData, command: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-cyan-500 outline-none transition-all font-mono text-sm" placeholder="npx -y @modelcontextprotocol/server-filesystem" />
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">URL</label>
+                  <input type="text" value={mcpServerData.url} onChange={e => setMcpServerData({...mcpServerData, url: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-cyan-500 outline-none transition-all font-mono text-sm" placeholder="https://mcp.example.com/mcp" />
+                </div>
+              )}
+              <div className="flex justify-end space-x-4 pt-4">
+                <button onClick={() => setIsMcpModalOpen(false)} className="px-6 py-2.5 text-slate-500 font-semibold hover:text-slate-800 dark:hover:text-slate-200 transition-colors">Cancel</button>
+                <button onClick={handleSaveMcpServer} className="px-10 py-2.5 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg font-bold shadow-lg shadow-cyan-500/20 transition-all">
+                  {mcpModalMode === 'edit' ? 'Update Server' : 'Register Server'}
                 </button>
               </div>
             </div>

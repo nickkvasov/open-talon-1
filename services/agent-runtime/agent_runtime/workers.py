@@ -30,6 +30,7 @@ from .execution import (
     DockerExecutionBackend,
     ExecutionBackendRegistry,
     LocalProcessExecutionBackend,
+    McpExecutionBackend,
 )
 from .execution.utils import to_tool_call_result
 from .runtime import RuntimeExecutionManager
@@ -313,6 +314,7 @@ class ToolWorker:
         self._publisher = publisher
         self._settings = settings
         self._backend_registry = backend_registry
+        self._backend_registry.register(McpExecutionBackend(kernel=kernel))
         self._observability = observability or build_observability_provider_from_env(
             service_name="agent-runtime",
             legacy_env_prefix="AGENT_RUNTIME",

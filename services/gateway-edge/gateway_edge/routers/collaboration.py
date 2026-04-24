@@ -38,6 +38,7 @@ from gateway_edge.models import (
     AuditExportRequest,
     AuditExportResult,
     AttachWorkspaceToolRequest,
+    AttachWorkspaceMcpServerRequest,
     AssetLink,
     CreateGitRepositoryRequest,
     CreateAgentGitWorktreeSessionRequest,
@@ -46,6 +47,7 @@ from gateway_edge.models import (
     CreateInteractionRequestsRequest,
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
+    CreateMcpServerRequest,
     CreateOrganizationRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
@@ -59,16 +61,22 @@ from gateway_edge.models import (
     CreateWorkspaceRequest,
     DeleteLlmProviderRequest,
     DeleteMemoryProviderRequest,
+    DeleteMcpServerRequest,
     DeleteParticipantRequest,
     DeleteRoleDefinitionRequest,
     DeleteSystemAgentRequest,
     DeleteSystemToolRequest,
     DeleteWorkspaceToolRequest,
+    DeleteWorkspaceMcpServerRequest,
     DeleteWorkspaceRequest,
     MemoryEntry,
     MemoryProviderDefinition,
     MemoryProviderHealthReport,
     MemorySearchResponse,
+    McpPromptDefinition,
+    McpResourceDefinition,
+    McpServerDefinition,
+    McpToolDefinition,
     RuntimeOverviewResponse,
     LlmEngineDescriptor,
     LlmProviderDefinition,
@@ -98,15 +106,21 @@ from gateway_edge.models import (
     UpdateAgentParticipantRequest,
     UpdateLlmProviderRequest,
     UpdateMemoryProviderRequest,
+    UpdateMcpServerRequest,
     UpdateMemoryEntryRequest,
     UpdateOrganizationRequest,
     ReviewToolGenerationRevisionRequest,
     UpdateWorkspaceToolRequest,
+    UpdateWorkspaceMcpServerRequest,
     UpdateWorkspaceRequest,
     Workspace,
     WorkspaceAsset,
     WorkspaceAssetVersion,
     WorkspaceDetail,
+    WorkspaceMcpPrompt,
+    WorkspaceMcpResource,
+    WorkspaceMcpServer,
+    WorkspaceMcpTool,
     WorkspaceTool,
     ValidateAgentBundleFromGitRequest,
     AddOrganizationMemberRequest,
@@ -1162,6 +1176,24 @@ async def list_workspace_catalog_tools(
         raise _http_error(exc) from exc
 
 
+@router.get(
+    "/workspaces/{workspace_id}/catalog/mcp-servers",
+    response_model=list[McpServerDefinition],
+    summary="List external MCP servers visible to a workspace",
+)
+async def list_workspace_catalog_mcp_servers(
+    request: Request,
+    workspace_id: UUID,
+) -> list[McpServerDefinition]:
+    try:
+        await _require_workspace_membership(request, workspace_id)
+        return await collab_svc.collaboration_service.list_workspace_catalog_mcp_servers(
+            workspace_id
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.delete(
     "/workspaces/{workspace_id}/participants/{participant_id}",
     response_model=dict,
@@ -2137,6 +2169,236 @@ async def health_check_organization_memory_provider(
     )
     try:
         return await check_memory_provider_health(provider)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+async def _load_mcp_server(
+    request: Request,
+    server_id: UUID,
+    *,
+    permission: str,
+    organization_id: UUID | None = None,
+) -> McpServerDefinition:
+    server = await collab_svc.collaboration_service.get_mcp_server(server_id)
+    if organization_id is not None and server.organization_id != organization_id:
+        raise HTTPException(status_code=404, detail=f"MCP server {server_id} not found")
+    await _require_identity_permission(
+        request,
+        permission=permission,
+        organization_id=organization_id or server.organization_id,
+    )
+    return server
+
+
+@router.post(
+    "/mcp-servers",
+    response_model=McpServerDefinition,
+    summary="Create a global external MCP server definition",
+)
+async def create_mcp_server(
+    request: Request,
+    payload: CreateMcpServerRequest,
+) -> McpServerDefinition:
+    await _require_identity_permission(request, permission="provider.mcp.write")
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.create_mcp_server(payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/mcp-servers",
+    response_model=McpServerDefinition,
+    summary="Create an organization-scoped external MCP server definition",
+)
+async def create_organization_mcp_server(
+    request: Request,
+    organization_id: UUID,
+    payload: CreateMcpServerRequest,
+) -> McpServerDefinition:
+    await _require_identity_permission(
+        request,
+        permission="provider.mcp.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.create_mcp_server(
+            payload,
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/mcp-servers",
+    response_model=list[McpServerDefinition],
+    summary="List global external MCP server definitions",
+)
+async def list_mcp_servers(request: Request) -> list[McpServerDefinition]:
+    await _require_identity_permission(request, permission="provider.mcp.read")
+    try:
+        return await collab_svc.collaboration_service.list_mcp_servers()
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/mcp-servers",
+    response_model=list[McpServerDefinition],
+    summary="List organization-scoped external MCP server definitions",
+)
+async def list_organization_mcp_servers(
+    request: Request,
+    organization_id: UUID,
+) -> list[McpServerDefinition]:
+    await _require_identity_permission(
+        request,
+        permission="provider.mcp.read",
+        organization_id=organization_id,
+    )
+    try:
+        return await collab_svc.collaboration_service.list_mcp_servers(
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/mcp-servers/{server_id}", response_model=McpServerDefinition)
+async def get_mcp_server(request: Request, server_id: UUID) -> McpServerDefinition:
+    try:
+        return await _load_mcp_server(
+            request,
+            server_id,
+            permission="provider.mcp.read",
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/mcp-servers/{server_id}",
+    response_model=McpServerDefinition,
+)
+async def get_organization_mcp_server(
+    request: Request,
+    organization_id: UUID,
+    server_id: UUID,
+) -> McpServerDefinition:
+    try:
+        return await _load_mcp_server(
+            request,
+            server_id,
+            permission="provider.mcp.read",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch("/mcp-servers/{server_id}", response_model=McpServerDefinition)
+async def update_mcp_server(
+    request: Request,
+    server_id: UUID,
+    payload: UpdateMcpServerRequest,
+) -> McpServerDefinition:
+    await _load_mcp_server(request, server_id, permission="provider.mcp.write")
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.update_mcp_server(server_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch(
+    "/organizations/{organization_id}/mcp-servers/{server_id}",
+    response_model=McpServerDefinition,
+)
+async def update_organization_mcp_server(
+    request: Request,
+    organization_id: UUID,
+    server_id: UUID,
+    payload: UpdateMcpServerRequest,
+) -> McpServerDefinition:
+    await _load_mcp_server(
+        request,
+        server_id,
+        permission="provider.mcp.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.update_mcp_server(server_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete("/mcp-servers/{server_id}", response_model=dict)
+async def delete_mcp_server(
+    request: Request,
+    server_id: UUID,
+    payload: DeleteMcpServerRequest = Body(...),
+) -> dict[str, bool | str]:
+    await _load_mcp_server(request, server_id, permission="provider.mcp.write")
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.delete_mcp_server(server_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/organizations/{organization_id}/mcp-servers/{server_id}",
+    response_model=dict,
+)
+async def delete_organization_mcp_server(
+    request: Request,
+    organization_id: UUID,
+    server_id: UUID,
+    payload: DeleteMcpServerRequest = Body(...),
+) -> dict[str, bool | str]:
+    await _load_mcp_server(
+        request,
+        server_id,
+        permission="provider.mcp.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.delete_mcp_server(server_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/mcp-servers/{server_id}/tools", response_model=list[McpToolDefinition])
+async def list_mcp_server_tools(request: Request, server_id: UUID) -> list[McpToolDefinition]:
+    await _load_mcp_server(request, server_id, permission="provider.mcp.read")
+    try:
+        return await collab_svc.collaboration_service.list_mcp_server_tools(server_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/mcp-servers/{server_id}/resources", response_model=list[McpResourceDefinition])
+async def list_mcp_server_resources(request: Request, server_id: UUID) -> list[McpResourceDefinition]:
+    await _load_mcp_server(request, server_id, permission="provider.mcp.read")
+    try:
+        return await collab_svc.collaboration_service.list_mcp_server_resources(server_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/mcp-servers/{server_id}/prompts", response_model=list[McpPromptDefinition])
+async def list_mcp_server_prompts(request: Request, server_id: UUID) -> list[McpPromptDefinition]:
+    await _load_mcp_server(request, server_id, permission="provider.mcp.read")
+    try:
+        return await collab_svc.collaboration_service.list_mcp_server_prompts(server_id)
     except Exception as exc:
         raise _http_error(exc) from exc
 
@@ -3386,6 +3648,181 @@ async def list_workspace_tools(
     try:
         await _require_workspace_membership(request, workspace_id)
         return await collab_svc.collaboration_service.list_workspace_tools(workspace_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/workspaces/{workspace_id}/mcp-servers",
+    response_model=list[WorkspaceMcpServer],
+    summary="List external MCP servers attached to a workspace",
+)
+async def list_workspace_mcp_servers(
+    request: Request,
+    workspace_id: UUID,
+) -> list[WorkspaceMcpServer]:
+    try:
+        await _require_workspace_membership(request, workspace_id)
+        return await collab_svc.collaboration_service.list_workspace_mcp_servers(workspace_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/workspaces/{workspace_id}/mcp-tools",
+    response_model=list[WorkspaceMcpTool],
+    summary="List external MCP tools available in a workspace",
+)
+async def list_workspace_mcp_tools(
+    request: Request,
+    workspace_id: UUID,
+) -> list[WorkspaceMcpTool]:
+    try:
+        await _require_workspace_membership(request, workspace_id)
+        return await collab_svc.collaboration_service.list_workspace_mcp_tools(workspace_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/workspaces/{workspace_id}/mcp-resources",
+    response_model=list[WorkspaceMcpResource],
+    summary="List external MCP resource references available in a workspace",
+)
+async def list_workspace_mcp_resources(
+    request: Request,
+    workspace_id: UUID,
+) -> list[WorkspaceMcpResource]:
+    try:
+        await _require_workspace_membership(request, workspace_id)
+        return await collab_svc.collaboration_service.list_workspace_mcp_resources(workspace_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/workspaces/{workspace_id}/mcp-prompts",
+    response_model=list[WorkspaceMcpPrompt],
+    summary="List external MCP prompt templates available in a workspace",
+)
+async def list_workspace_mcp_prompts(
+    request: Request,
+    workspace_id: UUID,
+) -> list[WorkspaceMcpPrompt]:
+    try:
+        await _require_workspace_membership(request, workspace_id)
+        return await collab_svc.collaboration_service.list_workspace_mcp_prompts(workspace_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.put(
+    "/workspaces/{workspace_id}/mcp-servers/{server_id}",
+    response_model=WorkspaceMcpServer,
+    summary="Attach an external MCP server to a workspace",
+)
+async def attach_workspace_mcp_server(
+    request: Request,
+    workspace_id: UUID,
+    server_id: UUID,
+    payload: AttachWorkspaceMcpServerRequest,
+) -> WorkspaceMcpServer:
+    actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.mcp_servers.write",
+    )
+    payload = payload.model_copy(
+        update={
+            "server_id": server_id,
+            "actor": actor
+            or await _resolve_workspace_actor(
+                request,
+                payload.actor,
+                workspace_id=workspace_id,
+                auto_create=False,
+            ),
+        }
+    )
+    try:
+        return await collab_svc.collaboration_service.attach_workspace_mcp_server(
+            workspace_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch(
+    "/workspaces/{workspace_id}/mcp-servers/{server_id}",
+    response_model=WorkspaceMcpServer,
+    summary="Update a workspace MCP server attachment",
+)
+async def update_workspace_mcp_server(
+    request: Request,
+    workspace_id: UUID,
+    server_id: UUID,
+    payload: UpdateWorkspaceMcpServerRequest,
+) -> WorkspaceMcpServer:
+    actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.mcp_servers.write",
+    )
+    payload = payload.model_copy(
+        update={
+            "actor": actor
+            or await _resolve_workspace_actor(
+                request,
+                payload.actor,
+                workspace_id=workspace_id,
+                auto_create=False,
+            )
+        }
+    )
+    try:
+        return await collab_svc.collaboration_service.update_workspace_mcp_server(
+            workspace_id,
+            server_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/workspaces/{workspace_id}/mcp-servers/{server_id}",
+    response_model=dict,
+    summary="Detach an external MCP server from a workspace",
+)
+async def delete_workspace_mcp_server(
+    request: Request,
+    workspace_id: UUID,
+    server_id: UUID,
+    payload: DeleteWorkspaceMcpServerRequest = Body(...),
+) -> dict[str, bool | str]:
+    actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.mcp_servers.write",
+    )
+    payload = payload.model_copy(
+        update={
+            "actor": actor
+            or await _resolve_workspace_actor(
+                request,
+                payload.actor,
+                workspace_id=workspace_id,
+                auto_create=False,
+            )
+        }
+    )
+    try:
+        return await collab_svc.collaboration_service.delete_workspace_mcp_server(
+            workspace_id,
+            server_id,
+            payload,
+        )
     except Exception as exc:
         raise _http_error(exc) from exc
 

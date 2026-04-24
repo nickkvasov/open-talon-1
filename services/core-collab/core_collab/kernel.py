@@ -47,6 +47,7 @@ from .contracts import (
     AuditEvent,
     AuditEventDraft,
     AuditEventPage,
+    AttachWorkspaceMcpServerRequest,
     AttachWorkspaceToolRequest,
     AssumeParticipantRoleRequest,
     Artifact,
@@ -64,6 +65,7 @@ from .contracts import (
     CreateInteractionRequestsRequest,
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
+    CreateMcpServerRequest,
     CreateOrganizationRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
@@ -77,11 +79,13 @@ from .contracts import (
     CreateWorkspaceRequest,
     DeleteLlmProviderRequest,
     DeleteMemoryProviderRequest,
+    DeleteMcpServerRequest,
     DeleteParticipantRequest,
     DeleteRoleDefinitionRequest,
     DeleteSystemAgentRequest,
     DeleteSystemToolRequest,
     DeleteWorkspaceToolRequest,
+    DeleteWorkspaceMcpServerRequest,
     DeleteWorkspaceRequest,
     ExecutionWorkspaceRef,
     EventEnvelope,
@@ -99,6 +103,10 @@ from .contracts import (
     MemoryProviderRecord,
     MemorySearchHit,
     MemorySearchResponse,
+    McpPromptDefinition,
+    McpResourceDefinition,
+    McpServerDefinition,
+    McpToolDefinition,
     LlmProviderDefinition,
     IamRoleDefinition,
     Organization,
@@ -137,6 +145,7 @@ from .contracts import (
     LinkAssetRequest,
     UpdateLlmProviderRequest,
     UpdateMemoryProviderRequest,
+    UpdateMcpServerRequest,
     UpdateOrganizationRequest,
     UpsertRoleDefinitionRequest,
     RemoveOrganizationMemberRequest,
@@ -148,10 +157,15 @@ from .contracts import (
     UpdateMemoryEntryRequest,
     UpdateWorkspaceRequest,
     UpdateWorkspaceToolRequest,
+    UpdateWorkspaceMcpServerRequest,
     Workspace,
     WorkspaceAsset,
     WorkspaceAssetVersion,
     WorkspaceDetail,
+    WorkspaceMcpPrompt,
+    WorkspaceMcpResource,
+    WorkspaceMcpServer,
+    WorkspaceMcpTool,
     WorkspaceTool,
     GitRepository,
 )
@@ -167,6 +181,7 @@ from .results import (
     LlmProviderCommandResult,
     MemoryCommandResult,
     MemoryProviderCommandResult,
+    McpServerCommandResult,
     MessageCommandResult,
     OrganizationCommandResult,
     OrganizationMembershipCommandResult,
@@ -1306,6 +1321,143 @@ class CollaborationKernel:
                 await self._repository.upsert_memory_provider(conn, provider)
         return MemoryProviderCommandResult(provider=provider)
 
+    async def create_mcp_server(
+        self,
+        payload: CreateMcpServerRequest,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> McpServerCommandResult:
+        self._validate_registry_scope(scope=scope, organization_id=organization_id)
+        if payload.transport_kind == "stdio" and payload.trust_level != "trusted":
+            raise ValueError("stdio MCP servers require trust_level='trusted'")
+        now = self._now()
+        server = McpServerDefinition(
+            server_id=uuid4(),
+            scope=scope,
+            organization_id=organization_id,
+            server_key=payload.server_key,
+            display_name=payload.display_name,
+            description=payload.description,
+            transport_kind=payload.transport_kind,
+            config=payload.config,
+            secret_config=payload.secret_config,
+            trust_level=payload.trust_level,
+            enabled=payload.enabled,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_mcp_server(conn, server)
+        return McpServerCommandResult(server=server)
+
+    async def list_mcp_servers(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[McpServerDefinition]:
+        self._validate_registry_scope(scope=scope, organization_id=organization_id)
+        return await self._repository.list_mcp_servers(
+            scope=scope,
+            organization_id=organization_id,
+        )
+
+    async def list_workspace_catalog_mcp_servers(
+        self,
+        workspace_id: UUID,
+    ) -> list[McpServerDefinition]:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        servers = await self._repository.list_mcp_servers(scope="global")
+        servers.extend(
+            await self._repository.list_mcp_servers(
+                scope="organization",
+                organization_id=workspace.organization_id,
+            )
+        )
+        return servers
+
+    async def get_mcp_server(self, server_id: UUID) -> McpServerDefinition | None:
+        return await self._repository.fetch_mcp_server(server_id)
+
+    async def update_mcp_server(
+        self,
+        server_id: UUID,
+        payload: UpdateMcpServerRequest,
+    ) -> McpServerCommandResult:
+        existing = await self._repository.fetch_mcp_server(server_id)
+        if existing is None:
+            raise KeyError(f"MCP server {server_id} not found")
+        transport_kind = payload.transport_kind or existing.transport_kind
+        trust_level = payload.trust_level or existing.trust_level
+        if transport_kind == "stdio" and trust_level != "trusted":
+            raise ValueError("stdio MCP servers require trust_level='trusted'")
+        now = self._now()
+        updated = existing.model_copy(
+            update={
+                "server_key": payload.server_key or existing.server_key,
+                "display_name": payload.display_name or existing.display_name,
+                "description": payload.description or existing.description,
+                "transport_kind": transport_kind,
+                "config": existing.config if payload.config is None else payload.config,
+                "secret_config": (
+                    existing.secret_config
+                    if payload.secret_config is None
+                    else payload.secret_config
+                ),
+                "trust_level": trust_level,
+                "enabled": existing.enabled if payload.enabled is None else payload.enabled,
+                "updated_by": payload.actor.participant_id,
+                "updated_at": now,
+                "metadata": (
+                    {**existing.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else existing.metadata
+                ),
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_mcp_server(conn, updated)
+        return McpServerCommandResult(server=updated)
+
+    async def delete_mcp_server(
+        self,
+        server_id: UUID,
+        payload: DeleteMcpServerRequest,
+    ) -> dict[str, bool | str]:
+        _ = payload
+        existing = await self._repository.fetch_mcp_server(server_id)
+        if existing is None:
+            raise KeyError(f"MCP server {server_id} not found")
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                deleted = await self._repository.delete_mcp_server(conn, server_id=server_id)
+        if not deleted:
+            raise KeyError(f"MCP server {server_id} not found")
+        return {"deleted": True, "server_id": str(server_id)}
+
+    async def list_mcp_server_tools(self, server_id: UUID) -> list[McpToolDefinition]:
+        if await self._repository.fetch_mcp_server(server_id) is None:
+            raise KeyError(f"MCP server {server_id} not found")
+        return await self._repository.list_mcp_server_tools(server_id)
+
+    async def list_mcp_server_resources(self, server_id: UUID) -> list[McpResourceDefinition]:
+        if await self._repository.fetch_mcp_server(server_id) is None:
+            raise KeyError(f"MCP server {server_id} not found")
+        return await self._repository.list_mcp_server_resources(server_id)
+
+    async def list_mcp_server_prompts(self, server_id: UUID) -> list[McpPromptDefinition]:
+        if await self._repository.fetch_mcp_server(server_id) is None:
+            raise KeyError(f"MCP server {server_id} not found")
+        return await self._repository.list_mcp_server_prompts(server_id)
+
     async def list_system_tools(
         self,
         *,
@@ -2229,6 +2381,214 @@ class CollaborationKernel:
             raise KeyError(f"Workspace {workspace_id} not found")
         return await self._repository.list_workspace_tools(workspace_id)
 
+    async def list_workspace_mcp_servers(self, workspace_id: UUID) -> list[WorkspaceMcpServer]:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        return await self._repository.list_workspace_mcp_servers(workspace_id)
+
+    async def list_workspace_mcp_tools(self, workspace_id: UUID) -> list[WorkspaceMcpTool]:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        return await self._repository.list_workspace_mcp_tools(workspace_id)
+
+    async def list_workspace_mcp_resources(self, workspace_id: UUID) -> list[WorkspaceMcpResource]:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        return await self._repository.list_workspace_mcp_resources(workspace_id)
+
+    async def list_workspace_mcp_prompts(self, workspace_id: UUID) -> list[WorkspaceMcpPrompt]:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        return await self._repository.list_workspace_mcp_prompts(workspace_id)
+
+    async def attach_workspace_mcp_server(
+        self,
+        workspace_id: UUID,
+        payload: AttachWorkspaceMcpServerRequest,
+    ) -> McpServerCommandResult:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        await self._require_workspace_permission(
+            workspace_id,
+            payload.actor,
+            permission="workspace.mcp_servers.write",
+        )
+        if payload.server_id is None:
+            raise ValueError("server_id is required")
+        server = await self._repository.fetch_mcp_server(payload.server_id)
+        if server is None:
+            raise KeyError(f"MCP server {payload.server_id} not found")
+        if not self._resource_visible_to_workspace(server.scope, server.organization_id, workspace):
+            raise PermissionError(f"MCP server {payload.server_id} is not visible in workspace {workspace_id}")
+        now = self._now()
+        prefix = payload.name_prefix
+        if prefix is None:
+            prefix = f"mcp_{server.server_key}__"
+        binding = WorkspaceMcpServer(
+            server_id=server.server_id,
+            server_key=server.server_key,
+            display_name=server.display_name,
+            description=server.description,
+            transport_kind=server.transport_kind,
+            trust_level=server.trust_level,
+            server_enabled=server.enabled,
+            enabled=payload.enabled,
+            tools_enabled=payload.tools_enabled,
+            resources_enabled=payload.resources_enabled,
+            prompts_enabled=payload.prompts_enabled,
+            sampling_enabled=payload.sampling_enabled,
+            name_prefix=prefix,
+            tool_allowlist=payload.tool_allowlist,
+            tool_denylist=payload.tool_denylist,
+            resource_allowlist=payload.resource_allowlist,
+            prompt_allowlist=payload.prompt_allowlist,
+            attached_by=payload.actor.participant_id,
+            attached_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_workspace_mcp_server(
+                    conn,
+                    workspace_id=workspace_id,
+                    binding=binding,
+                )
+                event = await self._build_workspace_event(
+                    conn,
+                    workspace_id,
+                    "workspace.mcp_server_attached",
+                    actor=self._actor_from_input(payload.actor),
+                    target=TargetRef(type="mcp_server", id=server.server_id),
+                    payload=binding.model_dump(mode="json"),
+                    visibility="workspace",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        return McpServerCommandResult(server=server, binding=binding, events=[event])
+
+    async def update_workspace_mcp_server(
+        self,
+        workspace_id: UUID,
+        server_id: UUID,
+        payload: UpdateWorkspaceMcpServerRequest,
+    ) -> McpServerCommandResult:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        await self._require_workspace_permission(
+            workspace_id,
+            payload.actor,
+            permission="workspace.mcp_servers.write",
+        )
+        existing = await self._repository.fetch_workspace_mcp_server(workspace_id, server_id)
+        if existing is None:
+            raise KeyError(f"MCP server {server_id} not attached to workspace {workspace_id}")
+        server = await self._repository.fetch_mcp_server(server_id)
+        if server is None:
+            raise KeyError(f"MCP server {server_id} not found")
+        now = self._now()
+        updated = existing.model_copy(
+            update={
+                "enabled": existing.enabled if payload.enabled is None else payload.enabled,
+                "tools_enabled": (
+                    existing.tools_enabled
+                    if payload.tools_enabled is None
+                    else payload.tools_enabled
+                ),
+                "resources_enabled": (
+                    existing.resources_enabled
+                    if payload.resources_enabled is None
+                    else payload.resources_enabled
+                ),
+                "prompts_enabled": (
+                    existing.prompts_enabled
+                    if payload.prompts_enabled is None
+                    else payload.prompts_enabled
+                ),
+                "sampling_enabled": (
+                    existing.sampling_enabled
+                    if payload.sampling_enabled is None
+                    else payload.sampling_enabled
+                ),
+                "name_prefix": existing.name_prefix if payload.name_prefix is None else payload.name_prefix,
+                "tool_allowlist": existing.tool_allowlist if payload.tool_allowlist is None else payload.tool_allowlist,
+                "tool_denylist": existing.tool_denylist if payload.tool_denylist is None else payload.tool_denylist,
+                "resource_allowlist": existing.resource_allowlist if payload.resource_allowlist is None else payload.resource_allowlist,
+                "prompt_allowlist": existing.prompt_allowlist if payload.prompt_allowlist is None else payload.prompt_allowlist,
+                "updated_at": now,
+                "metadata": (
+                    {**existing.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else existing.metadata
+                ),
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_workspace_mcp_server(
+                    conn,
+                    workspace_id=workspace_id,
+                    binding=updated,
+                )
+                event = await self._build_workspace_event(
+                    conn,
+                    workspace_id,
+                    "workspace.mcp_server_updated",
+                    actor=self._actor_from_input(payload.actor),
+                    target=TargetRef(type="mcp_server", id=server_id),
+                    payload=updated.model_dump(mode="json"),
+                    visibility="workspace",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        return McpServerCommandResult(server=server, binding=updated, events=[event])
+
+    async def delete_workspace_mcp_server(
+        self,
+        workspace_id: UUID,
+        server_id: UUID,
+        payload: DeleteWorkspaceMcpServerRequest,
+    ) -> dict[str, bool | str]:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        await self._require_workspace_permission(
+            workspace_id,
+            payload.actor,
+            permission="workspace.mcp_servers.write",
+        )
+        existing = await self._repository.fetch_workspace_mcp_server(workspace_id, server_id)
+        if existing is None:
+            raise KeyError(f"MCP server {server_id} not attached to workspace {workspace_id}")
+        now = self._now()
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                deleted = await self._repository.delete_workspace_mcp_server(
+                    conn,
+                    workspace_id=workspace_id,
+                    server_id=server_id,
+                )
+                event = await self._build_workspace_event(
+                    conn,
+                    workspace_id,
+                    "workspace.mcp_server_detached",
+                    actor=self._actor_from_input(payload.actor),
+                    target=TargetRef(type="mcp_server", id=server_id),
+                    payload=existing.model_dump(mode="json"),
+                    visibility="workspace",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        if not deleted:
+            raise KeyError(f"MCP server {server_id} not attached to workspace {workspace_id}")
+        return {"deleted": True, "server_id": str(server_id), "workspace_id": str(workspace_id)}
+
     async def attach_workspace_tool(
         self,
         workspace_id: UUID,
@@ -2887,10 +3247,29 @@ class CollaborationKernel:
                             task.workspace_id,
                             draft.tool_name,
                         )
+                    mcp_tool = None
                     if tool is None:
+                        mcp_tool = await self._repository.fetch_workspace_mcp_tool_by_name(
+                            task.workspace_id,
+                            draft.tool_name,
+                        )
+                    if tool is None and mcp_tool is None:
                         raise KeyError(
                             f"Tool {draft.tool_name!r} not found for system agent {step.system_agent_id} in workspace {task.workspace_id}"
                         )
+                    execution_spec = (
+                        self._build_tool_execution_spec(
+                            tool=tool,
+                            draft=draft,
+                            workspace_id=task.workspace_id,
+                        )
+                        if tool is not None
+                        else self._build_mcp_tool_execution_spec(
+                            tool=mcp_tool,
+                            draft=draft,
+                            workspace_id=task.workspace_id,
+                        )
+                    )
                     tool_call = ToolCall(
                         tool_call_id=uuid4(),
                         run_id=run.run_id,
@@ -2899,19 +3278,27 @@ class CollaborationKernel:
                         workspace_id=task.workspace_id,
                         thread_id=task.thread_id,
                         system_agent_id=step.system_agent_id,
-                        tool_id=tool.tool_id,
-                        tool_name=tool.name,
+                        tool_id=tool.tool_id if tool is not None else None,
+                        tool_name=tool.name if tool is not None else mcp_tool.exposed_name,
                         status="created",
                         arguments=draft.arguments,
-                        execution_spec=self._build_tool_execution_spec(
-                            tool=tool,
-                            draft=draft,
-                            workspace_id=task.workspace_id,
-                        ).model_dump(mode="json"),
+                        execution_spec=execution_spec.model_dump(mode="json"),
                         submitted_at=now,
                         created_at=now,
                         updated_at=now,
-                        metadata=draft.metadata,
+                        metadata={
+                            **draft.metadata,
+                            **(
+                                {}
+                                if mcp_tool is None
+                                else {
+                                    "tool_source": "mcp_server",
+                                    "mcp_server_id": str(mcp_tool.server_id),
+                                    "mcp_server_key": mcp_tool.server_key,
+                                    "mcp_tool_name": mcp_tool.remote_name,
+                                }
+                            ),
+                        },
                     )
                     await self._repository.upsert_tool_call(conn, tool_call)
                     event = await self._build_thread_event(
@@ -6977,6 +7364,37 @@ class CollaborationKernel:
                 "tool_id": str(tool.tool_id),
                 "tool_name": tool.name,
                 "backend_kind": tool.execution.backend_kind,
+            },
+        )
+
+    def _build_mcp_tool_execution_spec(
+        self,
+        *,
+        tool: WorkspaceMcpTool,
+        draft: AgentToolCallDraft,
+        workspace_id: UUID,
+    ) -> ExecutionSpec:
+        return ExecutionSpec(
+            invocation_id=uuid4(),
+            handler_ref=tool.remote_name,
+            inline_payload=draft.arguments,
+            artifact_refs=draft.artifact_refs,
+            execution_workspace=(
+                draft.execution_workspace
+                if draft.execution_workspace is not None
+                else self._execution_workspace_for_workspace(workspace_id)
+            ),
+            limits=ExecutionLimits(timeout_seconds=60, network="full", workspace_access="none"),
+            env_refs=draft.env_refs,
+            result_sink=draft.result_sink,
+            profile={"workspace_access": "none", "network": "full"},
+            metadata={
+                "tool_source": "mcp_server",
+                "backend_kind": "mcp",
+                "mcp_server_id": str(tool.server_id),
+                "mcp_server_key": tool.server_key,
+                "mcp_tool_name": tool.remote_name,
+                "tool_name": tool.exposed_name,
             },
         )
 

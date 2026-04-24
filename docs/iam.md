@@ -75,6 +75,9 @@ Examples:
 - `provider.memory.read`
 - `provider.memory.write`
 - `provider.memory.validate`
+- `provider.mcp.read`
+- `provider.mcp.write`
+- `provider.mcp.validate`
 - `git_registry.read`
 - `git_registry.write`
 - `asset_catalog.read`
@@ -125,6 +128,8 @@ Agent permissions come from:
 - the same workspace-scoped IAM permissions as human principals, evaluated only after the linked agent is attached as a workspace participant
 
 The MCP adapter uses those same agent permissions. It filters visible MCP operations by the current session scope and then rechecks the underlying IAM permission on every call.
+
+External MCP server management is separate from the gateway-mounted MCP adapter and from the Open Talon tool catalog. Global and organization MCP server definitions use `provider.mcp.*` permissions. Workspace MCP server attachment uses `workspace.mcp_servers.write` after participant attachment. Do not use `tool_catalog.*` or `workspace.tools.write` to manage external MCP servers.
 
 Git-managed agent publishing uses the existing permission model: system-wide publish requires global `agent_catalog.write`, organization-wide publish requires organization-scoped `agent_catalog.write`, and Git repository registration requires `git_registry.write`. Agents can author files through gateway/MCP managed-worktree tools, but only gateway validation/publish writes `system_agents`.
 

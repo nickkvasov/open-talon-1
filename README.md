@@ -140,6 +140,7 @@ Important rules:
 - the effective tenant hierarchy is `platform > organization > workspace > thread`
 - `users` are global human identities, `organization_memberships` hold org-level access, and `participants` remain workspace-local state
 - `system_agents`, `system_tools`, `llm_providers`, and `memory_providers` can be platform-global or organization-scoped
+- `mcp_servers` are separate external MCP integration definitions; they are not Open Talon `system_tools`
 - thread activity is ordered by a monotonic thread-local `sequence`
 - Postgres is the source of truth for collaboration and execution state; Kafka is the wake-up and fanout bus
 - threads are the shared surface in v1; tracked requests are rendered into the same thread instead of using private DM semantics
@@ -313,6 +314,14 @@ Open Talon models tools in two layers:
 - `system_tools`: platform-global or organization-scoped tool definitions
 - `workspace_tools`: workspace-scoped attachments that enable a system tool for a specific workspace
 
+External MCP integrations use a separate model:
+
+- `mcp_servers`: platform-global or organization-scoped external MCP server definitions
+- `mcp_server_tools`, `mcp_server_resources`, and `mcp_server_prompts`: discovered MCP capabilities cached from those servers
+- `workspace_mcp_servers`: workspace-scoped attachments that make selected MCP capabilities visible to agents
+
+MCP tools are rendered and executed as external MCP capabilities. They are never inserted into `system_tools`, never attached through `workspace_tools`, and never published by Tinker. The gateway-mounted `/v1/mcp` endpoint remains the inbound Open Talon system API adapter and does not import or proxy these external MCP servers.
+
 This means a tool is defined once at the platform or organization layer, then added to any compatible workspace that wants to advertise it to attached agents.
 
 Generated tools follow the same model through `Tinker`:
@@ -382,6 +391,12 @@ Common tool endpoints:
 - `PUT /v1/workspaces/{workspace_id}/tools/{tool_id}`: attach a system tool to a workspace
 - `PATCH /v1/workspaces/{workspace_id}/tools/{tool_id}`: update workspace attachment state
 - `DELETE /v1/workspaces/{workspace_id}/tools/{tool_id}`: detach a tool from a workspace
+- `GET /v1/mcp-servers`: list global external MCP server definitions
+- `POST /v1/mcp-servers`: create a global external MCP server definition
+- `GET /v1/organizations/{organization_id}/mcp-servers`: list organization-scoped external MCP server definitions
+- `POST /v1/organizations/{organization_id}/mcp-servers`: create an organization-scoped external MCP server definition
+- `GET /v1/workspaces/{workspace_id}/mcp-servers`: list external MCP servers attached to a workspace
+- `PUT /v1/workspaces/{workspace_id}/mcp-servers/{server_id}`: attach an external MCP server to a workspace
 - `GET /v1/tool-generation/requests`: list tool-generation requests for admins
 - `GET /v1/threads/{thread_id}/tool-generation/requests`: list tool-generation requests for a thread
 - `POST /v1/tool-generation/revisions/{revision_id}/approve`: publish a generated tool into the system catalog

@@ -54,6 +54,7 @@ from gateway_edge.models import (
     CreateIamRoleRequest,
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
+    CreateMcpServerRequest,
     CreateOrganizationRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
@@ -67,11 +68,13 @@ from gateway_edge.models import (
     CreateWorkspaceRequest,
     DeleteLlmProviderRequest,
     DeleteMemoryProviderRequest,
+    DeleteMcpServerRequest,
     DeleteParticipantRequest,
     DeleteRoleDefinitionRequest,
     DeleteSystemAgentRequest,
     DeleteSystemToolRequest,
     DeleteWorkspaceToolRequest,
+    DeleteWorkspaceMcpServerRequest,
     DeleteWorkspaceRequest,
     EventEnvelope,
     GitRepository,
@@ -80,6 +83,10 @@ from gateway_edge.models import (
     MemoryEntry,
     MemoryProviderDefinition,
     MemorySearchResponse,
+    McpPromptDefinition,
+    McpResourceDefinition,
+    McpServerDefinition,
+    McpToolDefinition,
     LlmProviderDefinition,
     Organization,
     OrganizationMembership,
@@ -109,15 +116,22 @@ from gateway_edge.models import (
     UpdateAgentParticipantRequest,
     UpdateLlmProviderRequest,
     UpdateMemoryProviderRequest,
+    UpdateMcpServerRequest,
     UpdateMemoryEntryRequest,
     UpdateOrganizationRequest,
     ReviewToolGenerationRevisionRequest,
     UpdateWorkspaceToolRequest,
+    UpdateWorkspaceMcpServerRequest,
     Workspace,
     WorkspaceAsset,
     WorkspaceAssetVersion,
     WorkspaceDetail,
+    WorkspaceMcpPrompt,
+    WorkspaceMcpResource,
+    WorkspaceMcpServer,
+    WorkspaceMcpTool,
     WorkspaceTool,
+    AttachWorkspaceMcpServerRequest,
     ValidateAgentBundleFromGitRequest,
     AddOrganizationMemberRequest,
     RemoveOrganizationMemberRequest,
@@ -458,6 +472,21 @@ class CollaborationService:
         assert result.provider is not None
         return result.provider
 
+    async def create_mcp_server(
+        self,
+        payload: CreateMcpServerRequest,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> McpServerDefinition:
+        result = await self._require_kernel().create_mcp_server(
+            payload,
+            scope=scope,
+            organization_id=organization_id,
+        )
+        assert result.server is not None
+        return result.server
+
     async def list_system_agents(
         self,
         *,
@@ -497,6 +526,23 @@ class CollaborationService:
             organization_id=organization_id,
         )
 
+    async def list_mcp_servers(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[McpServerDefinition]:
+        return await self._require_kernel().list_mcp_servers(
+            scope=scope,
+            organization_id=organization_id,
+        )
+
+    async def list_workspace_catalog_mcp_servers(
+        self,
+        workspace_id: UUID,
+    ) -> list[McpServerDefinition]:
+        return await self._require_kernel().list_workspace_catalog_mcp_servers(workspace_id)
+
     async def get_llm_provider(self, provider_id: UUID) -> LlmProviderDefinition:
         provider = await self._require_kernel().get_llm_provider(provider_id)
         if provider is None:
@@ -508,6 +554,21 @@ class CollaborationService:
         if provider is None:
             raise KeyError(f"Memory provider {provider_id} not found")
         return provider
+
+    async def get_mcp_server(self, server_id: UUID) -> McpServerDefinition:
+        server = await self._require_kernel().get_mcp_server(server_id)
+        if server is None:
+            raise KeyError(f"MCP server {server_id} not found")
+        return server
+
+    async def list_mcp_server_tools(self, server_id: UUID) -> list[McpToolDefinition]:
+        return await self._require_kernel().list_mcp_server_tools(server_id)
+
+    async def list_mcp_server_resources(self, server_id: UUID) -> list[McpResourceDefinition]:
+        return await self._require_kernel().list_mcp_server_resources(server_id)
+
+    async def list_mcp_server_prompts(self, server_id: UUID) -> list[McpPromptDefinition]:
+        return await self._require_kernel().list_mcp_server_prompts(server_id)
 
     async def create_system_tool(
         self,
@@ -571,6 +632,20 @@ class CollaborationService:
         result = await self._require_kernel().update_memory_provider(provider_id, payload)
         assert result.provider is not None
         return result.provider
+
+    async def update_mcp_server(
+        self, server_id: UUID, payload: UpdateMcpServerRequest
+    ) -> McpServerDefinition:
+        result = await self._require_kernel().update_mcp_server(server_id, payload)
+        assert result.server is not None
+        return result.server
+
+    async def delete_mcp_server(
+        self,
+        server_id: UUID,
+        payload: DeleteMcpServerRequest,
+    ) -> dict[str, bool | str]:
+        return await self._require_kernel().delete_mcp_server(server_id, payload)
 
     async def update_system_agent(
         self, agent_id: UUID, payload: UpdateSystemAgentRequest
@@ -1340,6 +1415,53 @@ class CollaborationService:
     async def list_workspace_tools(self, workspace_id: UUID) -> list[WorkspaceTool]:
         logger.debug("Service list_workspace_tools workspace_id=%s", workspace_id)
         return await self._require_kernel().list_workspace_tools(workspace_id)
+
+    async def list_workspace_mcp_servers(self, workspace_id: UUID) -> list[WorkspaceMcpServer]:
+        return await self._require_kernel().list_workspace_mcp_servers(workspace_id)
+
+    async def list_workspace_mcp_tools(self, workspace_id: UUID) -> list[WorkspaceMcpTool]:
+        return await self._require_kernel().list_workspace_mcp_tools(workspace_id)
+
+    async def list_workspace_mcp_resources(self, workspace_id: UUID) -> list[WorkspaceMcpResource]:
+        return await self._require_kernel().list_workspace_mcp_resources(workspace_id)
+
+    async def list_workspace_mcp_prompts(self, workspace_id: UUID) -> list[WorkspaceMcpPrompt]:
+        return await self._require_kernel().list_workspace_mcp_prompts(workspace_id)
+
+    async def attach_workspace_mcp_server(
+        self,
+        workspace_id: UUID,
+        payload: AttachWorkspaceMcpServerRequest,
+    ) -> WorkspaceMcpServer:
+        result = await self._require_kernel().attach_workspace_mcp_server(workspace_id, payload)
+        assert result.binding is not None
+        return result.binding
+
+    async def update_workspace_mcp_server(
+        self,
+        workspace_id: UUID,
+        server_id: UUID,
+        payload: UpdateWorkspaceMcpServerRequest,
+    ) -> WorkspaceMcpServer:
+        result = await self._require_kernel().update_workspace_mcp_server(
+            workspace_id,
+            server_id,
+            payload,
+        )
+        assert result.binding is not None
+        return result.binding
+
+    async def delete_workspace_mcp_server(
+        self,
+        workspace_id: UUID,
+        server_id: UUID,
+        payload: DeleteWorkspaceMcpServerRequest,
+    ) -> dict[str, bool | str]:
+        return await self._require_kernel().delete_workspace_mcp_server(
+            workspace_id,
+            server_id,
+            payload,
+        )
 
     async def attach_workspace_tool(
         self,

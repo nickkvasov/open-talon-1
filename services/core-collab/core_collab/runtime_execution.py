@@ -250,6 +250,22 @@ class RuntimeExecutionService:
             )
         run = await self._resolve_run_for_context(task, participant, run_id)
         workspace_tools = await self._repository.list_workspace_tools(task.workspace_id)
+        workspace_mcp_servers = await self._optional_repository_list(
+            "list_workspace_mcp_servers",
+            task.workspace_id,
+        )
+        workspace_mcp_tools = await self._optional_repository_list(
+            "list_workspace_mcp_tools",
+            task.workspace_id,
+        )
+        workspace_mcp_resources = await self._optional_repository_list(
+            "list_workspace_mcp_resources",
+            task.workspace_id,
+        )
+        workspace_mcp_prompts = await self._optional_repository_list(
+            "list_workspace_mcp_prompts",
+            task.workspace_id,
+        )
         internal_tools = await self._repository.list_agent_internal_tools(system_agent_id)
         participants = [
             self._advertise_workspace_tools(item, workspace_tools)
@@ -335,6 +351,10 @@ class RuntimeExecutionService:
             participants=participants,
             role_definitions=self._role_definitions_from_workspace(workspace),
             workspace_tools=workspace_tools,
+            workspace_mcp_servers=workspace_mcp_servers,
+            workspace_mcp_tools=workspace_mcp_tools,
+            workspace_mcp_resources=workspace_mcp_resources,
+            workspace_mcp_prompts=workspace_mcp_prompts,
             internal_tools=internal_tools,
             messages=visible_messages,
             interaction_requests=interaction_requests,
@@ -361,6 +381,12 @@ class RuntimeExecutionService:
         if scope == "workspace":
             return policy.use_workspace_memory
         return True
+
+    async def _optional_repository_list(self, method_name: str, *args):
+        method = getattr(self._repository, method_name, None)
+        if method is None:
+            return []
+        return await method(*args)
 
     async def build_agent_execution_context_for_run_step(
         self,
