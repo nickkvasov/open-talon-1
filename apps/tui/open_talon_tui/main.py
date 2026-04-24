@@ -58,22 +58,34 @@ _LLM_PROVIDER_UPDATE_USAGE = (
     "usage: /llm-provider update <id|engine_id|name> field=value [field=value ...]"
 )
 
-_CFG_DIR.mkdir(parents=True, exist_ok=True)
-_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    level=os.getenv("OPEN_TALON_TUI_LOG_LEVEL", "DEBUG").upper(),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        TimedRotatingFileHandler(
-            _LOG_FILE,
-            when="midnight",
-            interval=1,
-            backupCount=7,
-            encoding="utf-8",
-        ),
-    ],
-)
 logger = logging.getLogger(__name__)
+_LOGGING_CONFIGURED = False
+
+
+def _ensure_config_dirs() -> None:
+    _CFG_DIR.mkdir(parents=True, exist_ok=True)
+    _PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _configure_logging() -> None:
+    global _LOGGING_CONFIGURED
+    if _LOGGING_CONFIGURED:
+        return
+    _ensure_config_dirs()
+    logging.basicConfig(
+        level=os.getenv("OPEN_TALON_TUI_LOG_LEVEL", "DEBUG").upper(),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            TimedRotatingFileHandler(
+                _LOG_FILE,
+                when="midnight",
+                interval=1,
+                backupCount=7,
+                encoding="utf-8",
+            ),
+        ],
+    )
+    _LOGGING_CONFIGURED = True
 
 
 def _parse_command_assignments(raw: str) -> dict[str, str]:
@@ -270,6 +282,7 @@ def _cleanup_profile_dir(profile: str) -> None:
 
 
 def list_profiles() -> list[str]:
+    _ensure_config_dirs()
     profiles: list[str] = []
     for item in sorted(_PROFILES_DIR.iterdir()):
         if not item.is_dir():
@@ -2779,6 +2792,7 @@ def _build_auth_login_parser() -> argparse.ArgumentParser:
 
 
 def _run_auth_login_cli(args: argparse.Namespace) -> None:
+    _configure_logging()
     if not (args.oidc_issuer_url and args.oidc_client_id):
         raise SystemExit(
             "The TUI auth login command requires Keycloak OIDC. Pass --oidc-issuer-url and --oidc-client-id."
@@ -2802,6 +2816,7 @@ def _run_auth_login_cli(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    _configure_logging()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:2] == ["auth", "login"]:
         parser = _build_auth_login_parser()

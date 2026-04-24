@@ -10,6 +10,7 @@ import pytest
 
 
 _LOG_ROOT = Path(__file__).parent / "logs"
+_PERSIST_LOGS_ENV = "OPEN_TALON_PERSIST_BUSINESS_CASE_LOGS"
 
 
 def _slugify(value: str) -> str:
@@ -34,12 +35,22 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[object]):
 
 
 @pytest.fixture
-def business_case_log_dir(request: pytest.FixtureRequest) -> Path:
+def business_case_log_dir(
+    request: pytest.FixtureRequest,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Path:
     module_name = Path(str(request.node.fspath)).stem
     module_slug = _slugify(module_name.removeprefix("test_"))
     test_slug = _slugify(getattr(request.node, "originalname", None) or request.node.name)
     run_id = f"{_utc_stamp()}_pid{os.getpid()}"
-    test_root = _LOG_ROOT / module_slug / test_slug
+    persist_logs = os.getenv(_PERSIST_LOGS_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    log_root = _LOG_ROOT if persist_logs else tmp_path_factory.mktemp("business-case-logs")
+    test_root = log_root / module_slug / test_slug
     run_dir = test_root / "runs" / run_id
     started_at = datetime.now(timezone.utc)
 
@@ -73,14 +84,14 @@ def business_case_log_dir(request: pytest.FixtureRequest) -> Path:
         "finished_at": finished_at.isoformat(),
         "duration_seconds": round((finished_at - started_at).total_seconds(), 3),
         "log_files": log_files,
-        "run_directory": str(run_dir.relative_to(_LOG_ROOT)),
+        "run_directory": str(run_dir.relative_to(log_root)),
     }
     _write_json(manifest_path, manifest)
     _write_json(
         test_root / "latest.json",
         {
             "latest_run_id": run_id,
-            "latest_run_directory": str(run_dir.relative_to(_LOG_ROOT)),
+            "latest_run_directory": str(run_dir.relative_to(log_root)),
             "latest_status": status,
             "updated_at": finished_at.isoformat(),
         },
