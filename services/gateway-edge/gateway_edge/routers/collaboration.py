@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Body, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from open_talon_contracts.models import normalize_organization_slug
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -18,9 +18,20 @@ from gateway_edge.config import settings
 from gateway_edge.iam.authorization import authorization_engine
 from gateway_edge.models import (
     ActivateAssetVersionRequest,
+    ActivateAgentDefinitionVersionRequest,
     AuthContext,
     AssumeParticipantRoleRequest,
+    AgentBundlePublishResult,
+    AgentBundleUploadResult,
+    AgentBundleValidationResult,
     AgentDefinition,
+    AgentDefinitionVersion,
+    AgentGitCommitRequest,
+    AgentGitCommitResult,
+    AgentGitDiffResult,
+    AgentGitFileContent,
+    AgentGitFileMutationRequest,
+    AgentGitWorktreeSession,
     AuditChainVerificationResult,
     AuditEvent,
     AuditEventPage,
@@ -29,6 +40,7 @@ from gateway_edge.models import (
     AttachWorkspaceToolRequest,
     AssetLink,
     CreateGitRepositoryRequest,
+    CreateAgentGitWorktreeSessionRequest,
     CreateAgentParticipantRequest,
     CreateInteractionAnswerRequest,
     CreateInteractionRequestsRequest,
@@ -69,6 +81,7 @@ from gateway_edge.models import (
     ParticipantInput,
     ParticipantProfile,
     PublishAssetFromGitRequest,
+    PublishAgentBundleFromGitRequest,
     ResolvedAssetBinding,
     RoleDefinition,
     SystemToolDefinition,
@@ -95,6 +108,7 @@ from gateway_edge.models import (
     WorkspaceAssetVersion,
     WorkspaceDetail,
     WorkspaceTool,
+    ValidateAgentBundleFromGitRequest,
     AddOrganizationMemberRequest,
     RemoveOrganizationMemberRequest,
 )
@@ -227,6 +241,21 @@ async def _require_workspace_permission(
     return resolution.workspace_participant.model_copy(
         update={"iam_permissions": sorted(resolution.workspace_permissions)}
     )
+
+
+async def _require_worktree_session_permission(
+    request: Request,
+    session_id: UUID,
+) -> AgentGitWorktreeSession:
+    session = collab_svc.collaboration_service.get_agent_git_worktree_session(session_id)
+    if session is None:
+        raise KeyError(f"Git worktree session {session_id} not found")
+    await _require_identity_permission(
+        request,
+        permission="agent_catalog.write",
+        organization_id=session.organization_id if session.scope == "organization" else None,
+    )
+    return session
 
 
 async def _require_workspace_audit_access(request: Request, workspace_id: UUID) -> None:
@@ -1262,6 +1291,189 @@ async def create_organization_system_agent(
         raise _http_error(exc) from exc
 
 
+@router.post(
+    "/agents/validate-from-git",
+    response_model=AgentBundleValidationResult,
+    summary="Validate a system-wide Git-managed agent bundle without publishing",
+)
+async def validate_system_agent_bundle_from_git(
+    request: Request,
+    payload: ValidateAgentBundleFromGitRequest,
+) -> AgentBundleValidationResult:
+    await _require_identity_permission(request, permission="agent_catalog.write")
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.validate_agent_bundle_from_git(
+            scope="global",
+            organization_id=None,
+            payload=payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/agents/validate-from-git",
+    response_model=AgentBundleValidationResult,
+    summary="Validate an organization-wide Git-managed agent bundle without publishing",
+)
+async def validate_organization_agent_bundle_from_git(
+    request: Request,
+    organization_id: UUID,
+    payload: ValidateAgentBundleFromGitRequest,
+) -> AgentBundleValidationResult:
+    await _require_identity_permission(
+        request,
+        permission="agent_catalog.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.validate_agent_bundle_from_git(
+            scope="organization",
+            organization_id=organization_id,
+            payload=payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/agents/publish-from-git",
+    response_model=AgentBundlePublishResult,
+    summary="Publish a system-wide Git-managed agent bundle",
+)
+async def publish_system_agent_bundle_from_git(
+    request: Request,
+    payload: PublishAgentBundleFromGitRequest,
+) -> AgentBundlePublishResult:
+    await _require_identity_permission(request, permission="agent_catalog.write")
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.publish_agent_bundle_from_git(
+            scope="global",
+            organization_id=None,
+            payload=payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/agents/publish-from-git",
+    response_model=AgentBundlePublishResult,
+    summary="Publish an organization-wide Git-managed agent bundle",
+)
+async def publish_organization_agent_bundle_from_git(
+    request: Request,
+    organization_id: UUID,
+    payload: PublishAgentBundleFromGitRequest,
+) -> AgentBundlePublishResult:
+    await _require_identity_permission(
+        request,
+        permission="agent_catalog.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.publish_agent_bundle_from_git(
+            scope="organization",
+            organization_id=organization_id,
+            payload=payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/agents/bundles/upload",
+    response_model=AgentBundleUploadResult,
+    summary="Upload, commit, and optionally publish a system-wide agent bundle archive",
+)
+async def upload_system_agent_bundle_archive(
+    request: Request,
+    repository_id: UUID = Form(...),
+    branch: str = Form(...),
+    bundle_path: str = Form(...),
+    publish: bool = Form(False),
+    base_revision: str | None = Form(None),
+    commit_message: str | None = Form(None),
+    archive: UploadFile = File(...),
+) -> AgentBundleUploadResult:
+    await _require_identity_permission(request, permission="agent_catalog.write")
+    actor = _resolve_global_actor(
+        request,
+        ParticipantInput(
+            participant_id=uuid4(),
+            participant_type="user",
+            display_name="agent-bundle-uploader",
+        ),
+    )
+    try:
+        return await collab_svc.collaboration_service.upload_agent_bundle_archive(
+            scope="global",
+            organization_id=None,
+            actor=actor,
+            repository_id=repository_id,
+            branch=branch,
+            bundle_path=bundle_path,
+            archive_bytes=await archive.read(),
+            publish=publish,
+            base_revision=base_revision,
+            commit_message=commit_message,
+            metadata={},
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/agents/bundles/upload",
+    response_model=AgentBundleUploadResult,
+    summary="Upload, commit, and optionally publish an organization-wide agent bundle archive",
+)
+async def upload_organization_agent_bundle_archive(
+    request: Request,
+    organization_id: UUID,
+    repository_id: UUID = Form(...),
+    branch: str = Form(...),
+    bundle_path: str = Form(...),
+    publish: bool = Form(False),
+    base_revision: str | None = Form(None),
+    commit_message: str | None = Form(None),
+    archive: UploadFile = File(...),
+) -> AgentBundleUploadResult:
+    await _require_identity_permission(
+        request,
+        permission="agent_catalog.write",
+        organization_id=organization_id,
+    )
+    actor = _resolve_organization_actor(
+        request,
+        ParticipantInput(
+            participant_id=uuid4(),
+            participant_type="user",
+            display_name="agent-bundle-uploader",
+        ),
+    )
+    try:
+        return await collab_svc.collaboration_service.upload_agent_bundle_archive(
+            scope="organization",
+            organization_id=organization_id,
+            actor=actor,
+            repository_id=repository_id,
+            branch=branch,
+            bundle_path=bundle_path,
+            archive_bytes=await archive.read(),
+            publish=publish,
+            base_revision=base_revision,
+            commit_message=commit_message,
+            metadata={},
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get(
     "/llm-engines",
     response_model=list[LlmEngineDescriptor],
@@ -2006,6 +2218,104 @@ async def get_organization_system_agent(
         raise _http_error(exc) from exc
 
 
+@router.get(
+    "/agents/{agent_id}/versions",
+    response_model=list[AgentDefinitionVersion],
+    summary="List published versions for a system-wide agent definition",
+)
+async def list_agent_definition_versions(
+    request: Request,
+    agent_id: UUID,
+) -> list[AgentDefinitionVersion]:
+    await _load_system_agent_definition(
+        request,
+        agent_id,
+        permission="agent_catalog.read",
+    )
+    try:
+        return await collab_svc.collaboration_service.list_agent_definition_versions(agent_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/agents/{agent_id}/versions",
+    response_model=list[AgentDefinitionVersion],
+    summary="List published versions for an organization-wide agent definition",
+)
+async def list_organization_agent_definition_versions(
+    request: Request,
+    organization_id: UUID,
+    agent_id: UUID,
+) -> list[AgentDefinitionVersion]:
+    await _load_system_agent_definition(
+        request,
+        agent_id,
+        permission="agent_catalog.read",
+        organization_id=organization_id,
+    )
+    try:
+        return await collab_svc.collaboration_service.list_agent_definition_versions(agent_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/agents/{agent_id}/versions/{agent_version_id}/activate",
+    response_model=AgentBundlePublishResult,
+    summary="Activate a published version for a system-wide agent definition",
+)
+async def activate_agent_definition_version(
+    request: Request,
+    agent_id: UUID,
+    agent_version_id: UUID,
+    payload: ActivateAgentDefinitionVersionRequest,
+) -> AgentBundlePublishResult:
+    await _load_system_agent_definition(
+        request,
+        agent_id,
+        permission="agent_catalog.write",
+    )
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.activate_agent_definition_version(
+            agent_id=agent_id,
+            agent_version_id=agent_version_id,
+            payload=payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/agents/{agent_id}/versions/{agent_version_id}/activate",
+    response_model=AgentBundlePublishResult,
+    summary="Activate a published version for an organization-wide agent definition",
+)
+async def activate_organization_agent_definition_version(
+    request: Request,
+    organization_id: UUID,
+    agent_id: UUID,
+    agent_version_id: UUID,
+    payload: ActivateAgentDefinitionVersionRequest,
+) -> AgentBundlePublishResult:
+    await _load_system_agent_definition(
+        request,
+        agent_id,
+        permission="agent_catalog.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.activate_agent_definition_version(
+            agent_id=agent_id,
+            agent_version_id=agent_version_id,
+            payload=payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.post(
     "/tools",
     response_model=SystemToolDefinition,
@@ -2447,6 +2757,192 @@ async def list_organization_git_repositories(
             organization_id=organization_id,
             workspace_id=None,
         )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/agent-git/worktrees",
+    response_model=AgentGitWorktreeSession,
+    summary="Create a managed worktree session for system-wide agent authoring",
+)
+async def create_system_agent_git_worktree(
+    request: Request,
+    payload: CreateAgentGitWorktreeSessionRequest,
+) -> AgentGitWorktreeSession:
+    await _require_identity_permission(request, permission="agent_catalog.write")
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.create_agent_git_worktree_session(
+            scope="global",
+            organization_id=None,
+            payload=payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/agent-git/worktrees",
+    response_model=AgentGitWorktreeSession,
+    summary="Create a managed worktree session for organization-wide agent authoring",
+)
+async def create_organization_agent_git_worktree(
+    request: Request,
+    organization_id: UUID,
+    payload: CreateAgentGitWorktreeSessionRequest,
+) -> AgentGitWorktreeSession:
+    await _require_identity_permission(
+        request,
+        permission="agent_catalog.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.create_agent_git_worktree_session(
+            scope="organization",
+            organization_id=organization_id,
+            payload=payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/agent-git/worktrees/{session_id}/files",
+    response_model=AgentGitFileContent,
+    summary="Read a file from a managed agent-authoring worktree",
+)
+async def read_agent_git_worktree_file(
+    request: Request,
+    session_id: UUID,
+    path: str = Query(...),
+) -> AgentGitFileContent:
+    await _require_worktree_session_permission(request, session_id)
+    try:
+        return await collab_svc.collaboration_service.read_agent_git_worktree_file(
+            session_id,
+            path,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.put(
+    "/agent-git/worktrees/{session_id}/files",
+    response_model=AgentGitFileContent,
+    summary="Write a file in a managed agent-authoring worktree",
+)
+async def write_agent_git_worktree_file(
+    request: Request,
+    session_id: UUID,
+    payload: AgentGitFileMutationRequest,
+) -> AgentGitFileContent:
+    session = await _require_worktree_session_permission(request, session_id)
+    payload = payload.model_copy(
+        update={
+            "actor": (
+                _resolve_organization_actor(request, payload.actor)
+                if session.scope == "organization"
+                else _resolve_global_actor(request, payload.actor)
+            )
+        }
+    )
+    try:
+        return await collab_svc.collaboration_service.write_agent_git_worktree_file(
+            session_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/agent-git/worktrees/{session_id}/files",
+    response_model=dict,
+    summary="Delete a file from a managed agent-authoring worktree",
+)
+async def delete_agent_git_worktree_file(
+    request: Request,
+    session_id: UUID,
+    payload: AgentGitFileMutationRequest = Body(...),
+) -> dict[str, bool | str]:
+    session = await _require_worktree_session_permission(request, session_id)
+    payload = payload.model_copy(
+        update={
+            "actor": (
+                _resolve_organization_actor(request, payload.actor)
+                if session.scope == "organization"
+                else _resolve_global_actor(request, payload.actor)
+            )
+        }
+    )
+    try:
+        return await collab_svc.collaboration_service.delete_agent_git_worktree_file(
+            session_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/agent-git/worktrees/{session_id}/diff",
+    response_model=AgentGitDiffResult,
+    summary="Preview changes in a managed agent-authoring worktree",
+)
+async def diff_agent_git_worktree(
+    request: Request,
+    session_id: UUID,
+) -> AgentGitDiffResult:
+    await _require_worktree_session_permission(request, session_id)
+    try:
+        return await collab_svc.collaboration_service.diff_agent_git_worktree(session_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/agent-git/worktrees/{session_id}/commit",
+    response_model=AgentGitCommitResult,
+    summary="Commit and optionally push changes from a managed agent-authoring worktree",
+)
+async def commit_agent_git_worktree(
+    request: Request,
+    session_id: UUID,
+    payload: AgentGitCommitRequest,
+) -> AgentGitCommitResult:
+    session = await _require_worktree_session_permission(request, session_id)
+    payload = payload.model_copy(
+        update={
+            "actor": (
+                _resolve_organization_actor(request, payload.actor)
+                if session.scope == "organization"
+                else _resolve_global_actor(request, payload.actor)
+            )
+        }
+    )
+    try:
+        return await collab_svc.collaboration_service.commit_agent_git_worktree(
+            session_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/agent-git/worktrees/{session_id}",
+    response_model=dict,
+    summary="Discard a managed agent-authoring worktree session",
+)
+async def discard_agent_git_worktree(
+    request: Request,
+    session_id: UUID,
+) -> dict[str, bool | str]:
+    await _require_worktree_session_permission(request, session_id)
+    try:
+        return await collab_svc.collaboration_service.discard_agent_git_worktree(session_id)
     except Exception as exc:
         raise _http_error(exc) from exc
 

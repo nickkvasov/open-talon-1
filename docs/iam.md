@@ -35,7 +35,7 @@ Open Talon does not mint or broker JWTs. Human users authenticate through normal
 
 In local development, the launcher still defaults to `AUTH_MODE=any`. OIDC is the intended principal-IAM path, but API key and OpenBao auth remain accepted locally unless you narrow that setting.
 
-The gateway also exposes an MCP adapter at `/v1/mcp` for OIDC-authenticated software clients. That MCP surface reuses the same `agent_identities`, IAM role bindings, and workspace participant attachment rules described here. It does not define a second permission catalog, and it does not expose Open Talon `system_tools`, `workspace_tools`, Tinker-generated tools, or `agent-runtime` execution backends as MCP-imported tools. The current MCP slice also exposes read-only session resources for identity, permissions, and scope, and it emits `tools/list_changed` plus `resources/list_changed` notifications after scope changes.
+The gateway also exposes an MCP adapter at `/v1/mcp` for OIDC-authenticated software clients. That MCP surface reuses the same `agent_identities`, IAM role bindings, and workspace participant attachment rules described here. It does not define a second permission catalog, and it does not expose Open Talon `system_tools`, `workspace_tools`, Tinker-generated tools, or `agent-runtime` execution backends as MCP-imported tools. It does expose gateway-backed agent Git authoring and agent bundle validate/publish operations when the principal has the matching catalog permissions. The current MCP slice also exposes read-only session resources for identity, permissions, and scope, and it emits `tools/list_changed` plus `resources/list_changed` notifications after scope changes.
 
 ## Persistence
 
@@ -125,6 +125,8 @@ Agent permissions come from:
 - the same workspace-scoped IAM permissions as human principals, evaluated only after the linked agent is attached as a workspace participant
 
 The MCP adapter uses those same agent permissions. It filters visible MCP operations by the current session scope and then rechecks the underlying IAM permission on every call.
+
+Git-managed agent publishing uses the existing permission model: system-wide publish requires global `agent_catalog.write`, organization-wide publish requires organization-scoped `agent_catalog.write`, and Git repository registration requires `git_registry.write`. Agents can author files through gateway/MCP managed-worktree tools, but only gateway validation/publish writes `system_agents`.
 
 ## Role layers
 

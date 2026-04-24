@@ -83,6 +83,9 @@ class MockCollaborationService:
         self.assets = {}
         self.asset_versions = {}
         self.asset_links = {}
+        self.agent_definition_versions = {}
+        self.agent_git_worktree_sessions = {}
+        self.agent_git_worktree_files = {}
         self.tool_generation_requests = {}
         self.iam_roles = {}
         self.human_role_bindings = {}
@@ -554,6 +557,360 @@ class MockCollaborationService:
 
     async def get_system_agent(self, agent_id: UUID):
         return self.system_agents.get(str(agent_id))
+
+    async def validate_agent_bundle_from_git(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None = None,
+        payload,
+    ):
+        from gateway_edge.models import AgentBundleValidationResult, AgentDefinition
+
+        repository = self.git_repositories.get(str(payload.repository_id))
+        if repository is None:
+            raise KeyError(f"Git repository {payload.repository_id} not found")
+        if repository.scope != scope or repository.organization_id != organization_id:
+            raise PermissionError("Repository is outside the requested agent bundle scope")
+        if "invalid" in payload.bundle_path:
+            return AgentBundleValidationResult(
+                valid=False,
+                scope=scope,
+                organization_id=organization_id,
+                repository_id=repository.repo_id,
+                resolved_revision=payload.revision or repository.default_branch,
+                bundle_path=payload.bundle_path,
+                diagnostics=[
+                    {
+                        "code": "agent_bundle_invalid",
+                        "message": "Invalid test bundle",
+                        "severity": "error",
+                    }
+                ],
+            )
+        agent_key = payload.bundle_path.strip("/").split("/")[-1] or "agent"
+        now = datetime.now(timezone.utc)
+        compiled = AgentDefinition(
+            agent_id=uuid4(),
+            agent_key=agent_key,
+            scope=scope,
+            organization_id=organization_id,
+            display_name=f"{agent_key.title()} Agent",
+            description="Git-managed test agent.",
+            role="agent_admin",
+            capabilities=["agent_catalog", "git_catalog"],
+            endpoint={"kind": "remote", "model": "gpt-5.4"},
+            system_prompt="Validate and publish agent definitions.",
+            harness={"version": 1, "summary": "Git-managed harness."},
+            interaction_contract=build_default_interaction_contract(
+                display_name=f"{agent_key.title()} Agent",
+                role="agent_admin",
+                description="Git-managed test agent.",
+                capabilities=["agent_catalog", "git_catalog"],
+            ),
+            definition={"source": "git", "agent_key": agent_key, "bundle_path": payload.bundle_path},
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "source": "git",
+                "git_bundle": {
+                    "repository_id": str(repository.repo_id),
+                    "resolved_revision": payload.revision or repository.default_branch,
+                    "bundle_path": payload.bundle_path,
+                },
+            },
+        )
+        return AgentBundleValidationResult(
+            valid=True,
+            scope=scope,
+            organization_id=organization_id,
+            repository_id=repository.repo_id,
+            resolved_revision=payload.revision or repository.default_branch,
+            bundle_path=payload.bundle_path,
+            agent_key=agent_key,
+            compiled_agent=compiled,
+            source_files={
+                "manifest": f"{payload.bundle_path}/agent.yaml",
+                "prompt": f"{payload.bundle_path}/PROMPT.md",
+            },
+            metadata={"manifest_sha256": "test-manifest"},
+        )
+
+    async def publish_agent_bundle_from_git(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None = None,
+        payload,
+    ):
+        from gateway_edge.models import AgentBundlePublishResult, AgentDefinitionVersion
+
+        validation = await self.validate_agent_bundle_from_git(
+            scope=scope,
+            organization_id=organization_id,
+            payload=payload,
+        )
+        if not validation.valid or validation.compiled_agent is None:
+            raise ValueError(validation.diagnostics[0].message if validation.diagnostics else "Invalid bundle")
+        existing = next(
+            (
+                agent
+                for agent in self.system_agents.values()
+                if agent.scope == scope
+                and agent.organization_id == organization_id
+                and agent.agent_key == validation.agent_key
+            ),
+            None,
+        )
+        agent_id = existing.agent_id if existing is not None else validation.compiled_agent.agent_id
+        existing_version = next(
+            (
+                version
+                for version in self.agent_definition_versions.values()
+                if version.agent_id == agent_id
+                and version.git_repository_id == payload.repository_id
+                and version.git_commit_sha == validation.resolved_revision
+                and version.bundle_path == payload.bundle_path
+            ),
+            None,
+        )
+        if existing_version is None:
+            version_number = (
+                max(
+                    [
+                        version.version
+                        for version in self.agent_definition_versions.values()
+                        if version.agent_id == agent_id
+                    ],
+                    default=0,
+                )
+                + 1
+            )
+            version = AgentDefinitionVersion(
+                agent_version_id=uuid4(),
+                agent_id=agent_id,
+                version=version_number,
+                scope=scope,
+                organization_id=organization_id,
+                agent_key=validation.agent_key,
+                git_repository_id=payload.repository_id,
+                git_commit_sha=validation.resolved_revision or "HEAD",
+                bundle_path=payload.bundle_path,
+                manifest_sha256=str(validation.metadata.get("manifest_sha256") or "test-manifest"),
+                compiled_definition=validation.compiled_agent.model_dump(mode="json"),
+                published_by=payload.actor.participant_id,
+                published_at=datetime.now(timezone.utc),
+                metadata=payload.metadata,
+            )
+            self.agent_definition_versions[str(version.agent_version_id)] = version
+        else:
+            version = existing_version
+        agent = validation.compiled_agent.model_copy(
+            update={
+                "agent_id": agent_id,
+                "active_agent_version_id": version.agent_version_id,
+                "metadata": {
+                    **validation.compiled_agent.metadata,
+                    "source": "git",
+                    "active_agent_version_id": str(version.agent_version_id),
+                },
+            }
+        )
+        self.system_agents[str(agent.agent_id)] = agent
+        validation = validation.model_copy(update={"compiled_agent": agent})
+        return AgentBundlePublishResult(agent=agent, version=version, validation=validation)
+
+    async def list_agent_definition_versions(self, agent_id: UUID):
+        return sorted(
+            [
+                version
+                for version in self.agent_definition_versions.values()
+                if version.agent_id == agent_id
+            ],
+            key=lambda item: item.version,
+            reverse=True,
+        )
+
+    async def activate_agent_definition_version(self, *, agent_id: UUID, agent_version_id: UUID, payload):
+        from gateway_edge.models import AgentBundlePublishResult, AgentBundleValidationResult, AgentDefinition
+
+        agent = self.system_agents.get(str(agent_id))
+        version = self.agent_definition_versions.get(str(agent_version_id))
+        if agent is None or version is None or version.agent_id != agent_id:
+            raise KeyError(f"Agent definition version {agent_version_id} not found")
+        compiled = AgentDefinition.model_validate(version.compiled_definition)
+        activated = compiled.model_copy(
+            update={
+                "agent_id": agent_id,
+                "active_agent_version_id": agent_version_id,
+                "metadata": {
+                    **compiled.metadata,
+                    "source": "git",
+                    "active_agent_version_id": str(agent_version_id),
+                    "activated_from_version": version.version,
+                },
+            }
+        )
+        self.system_agents[str(agent_id)] = activated
+        validation = AgentBundleValidationResult(
+            valid=True,
+            scope=activated.scope,
+            organization_id=activated.organization_id,
+            repository_id=version.git_repository_id,
+            resolved_revision=version.git_commit_sha,
+            bundle_path=version.bundle_path,
+            agent_key=activated.agent_key,
+            compiled_agent=activated,
+        )
+        return AgentBundlePublishResult(agent=activated, version=version, validation=validation)
+
+    async def create_agent_git_worktree_session(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None = None,
+        payload,
+    ):
+        from gateway_edge.models import AgentGitWorktreeSession
+
+        repository = self.git_repositories.get(str(payload.repository_id))
+        if repository is None:
+            raise KeyError(f"Git repository {payload.repository_id} not found")
+        if repository.scope != scope or repository.organization_id != organization_id:
+            raise PermissionError("Repository is outside the requested worktree scope")
+        session = AgentGitWorktreeSession(
+            session_id=uuid4(),
+            repository_id=repository.repo_id,
+            scope=scope,
+            organization_id=organization_id,
+            branch=payload.branch,
+            base_revision=payload.base_revision,
+            bundle_path=payload.bundle_path,
+            worktree_path=f"/tmp/open-talon-test/{repository.repo_id}",
+            created_by=payload.actor.participant_id,
+            metadata=payload.metadata,
+        )
+        self.agent_git_worktree_sessions[str(session.session_id)] = session
+        self.agent_git_worktree_files[str(session.session_id)] = {}
+        return session
+
+    def get_agent_git_worktree_session(self, session_id: UUID):
+        return self.agent_git_worktree_sessions.get(str(session_id))
+
+    async def read_agent_git_worktree_file(self, session_id: UUID, path: str):
+        from gateway_edge.models import AgentGitFileContent
+
+        files = self.agent_git_worktree_files.get(str(session_id))
+        if files is None or path not in files:
+            raise KeyError(f"Git worktree file {path} not found")
+        return AgentGitFileContent(path=path, content=files[path])
+
+    async def write_agent_git_worktree_file(self, session_id: UUID, payload):
+        from gateway_edge.models import AgentGitFileContent
+
+        session = self.get_agent_git_worktree_session(session_id)
+        if session is None:
+            raise KeyError(f"Git worktree session {session_id} not found")
+        if not payload.path.startswith(session.bundle_path):
+            raise ValueError("File path must stay inside the session bundle path")
+        self.agent_git_worktree_files.setdefault(str(session_id), {})[payload.path] = payload.content or ""
+        return AgentGitFileContent(path=payload.path, content=payload.content or "")
+
+    async def delete_agent_git_worktree_file(self, session_id: UUID, payload):
+        files = self.agent_git_worktree_files.setdefault(str(session_id), {})
+        files.pop(payload.path, None)
+        return {"deleted": True, "path": payload.path}
+
+    async def diff_agent_git_worktree(self, session_id: UUID):
+        from gateway_edge.models import AgentGitDiffResult
+
+        files = self.agent_git_worktree_files.get(str(session_id), {})
+        return AgentGitDiffResult(
+            session_id=session_id,
+            diff="\n".join(f"modified {path}" for path in files),
+            changed_files=sorted(files),
+        )
+
+    async def commit_agent_git_worktree(self, session_id: UUID, payload):
+        from gateway_edge.models import AgentGitCommitResult
+
+        files = self.agent_git_worktree_files.get(str(session_id), {})
+        session = self.get_agent_git_worktree_session(session_id)
+        if session is None:
+            raise KeyError(f"Git worktree session {session_id} not found")
+        return AgentGitCommitResult(
+            session_id=session_id,
+            commit_sha="commit-worktree",
+            branch=session.branch,
+            pushed=payload.push,
+            changed_files=sorted(files),
+        )
+
+    async def discard_agent_git_worktree(self, session_id: UUID):
+        self.agent_git_worktree_sessions.pop(str(session_id), None)
+        self.agent_git_worktree_files.pop(str(session_id), None)
+        return {"discarded": True, "session_id": str(session_id)}
+
+    async def upload_agent_bundle_archive(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None,
+        actor,
+        repository_id: UUID,
+        branch: str,
+        bundle_path: str,
+        archive_bytes: bytes,
+        publish: bool = False,
+        base_revision: str | None = None,
+        commit_message: str | None = None,
+        metadata: dict | None = None,
+    ):
+        from gateway_edge.models import (
+            AgentBundleUploadResult,
+            AgentGitCommitResult,
+            CreateAgentGitWorktreeSessionRequest,
+            PublishAgentBundleFromGitRequest,
+        )
+
+        session = await self.create_agent_git_worktree_session(
+            scope=scope,
+            organization_id=organization_id,
+            payload=CreateAgentGitWorktreeSessionRequest(
+                actor=actor,
+                repository_id=repository_id,
+                branch=branch,
+                bundle_path=bundle_path,
+                base_revision=base_revision,
+                metadata=metadata or {},
+            ),
+        )
+        commit = AgentGitCommitResult(
+            session_id=session.session_id,
+            commit_sha="commit-upload",
+            branch=branch,
+            pushed=True,
+            changed_files=[f"{bundle_path}/agent.yaml"],
+        )
+        publish_result = None
+        if publish:
+            publish_result = await self.publish_agent_bundle_from_git(
+                scope=scope,
+                organization_id=organization_id,
+                payload=PublishAgentBundleFromGitRequest(
+                    actor=actor,
+                    repository_id=repository_id,
+                    bundle_path=bundle_path,
+                    revision=commit.commit_sha,
+                    metadata=metadata or {},
+                ),
+            )
+        return AgentBundleUploadResult(
+            session=session,
+            commit=commit,
+            publish_result=publish_result,
+        )
 
     def _system_agents_referencing_engine(self, engine_id: str):
         referenced = []

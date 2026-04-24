@@ -309,8 +309,10 @@ class AgentInteractionContract(BaseModel):
 
 class AgentDefinition(BaseModel):
     agent_id: UUID
+    agent_key: str | None = None
     scope: RegistryScope = "global"
     organization_id: UUID | None = None
+    active_agent_version_id: UUID | None = None
     display_name: str
     description: str
     role: str
@@ -790,6 +792,26 @@ class WorkspaceAssetVersion(BaseModel):
     sha256: str
     created_by: UUID
     created_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentDefinitionVersion(BaseModel):
+    agent_version_id: UUID
+    agent_id: UUID
+    version: int
+    scope: RegistryScope = "global"
+    organization_id: UUID | None = None
+    agent_key: str
+    git_repository_id: UUID | None = None
+    git_commit_sha: str
+    bundle_path: str
+    manifest_sha256: str
+    compiled_definition: dict[str, Any] = Field(default_factory=dict)
+    prompt_asset_id: UUID | None = None
+    prompt_asset_version_id: UUID | None = None
+    skill_asset_refs: list[dict[str, Any]] = Field(default_factory=list)
+    published_by: UUID
+    published_at: datetime = Field(default_factory=utcnow)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -1592,6 +1614,142 @@ class PublishAssetFromGitRequest(BaseModel):
     revision: str | None = None
     content_type: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentBundleGitSource(BaseModel):
+    repository_id: UUID
+    bundle_path: str
+    revision: str | None = None
+
+
+class ValidateAgentBundleFromGitRequest(BaseModel):
+    actor: ParticipantInput
+    repository_id: UUID
+    bundle_path: str
+    revision: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PublishAgentBundleFromGitRequest(BaseModel):
+    actor: ParticipantInput
+    repository_id: UUID
+    bundle_path: str
+    revision: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ActivateAgentDefinitionVersionRequest(BaseModel):
+    actor: ParticipantInput
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentBundleValidationDiagnostic(BaseModel):
+    code: str
+    message: str
+    path: str | None = None
+    severity: Literal["error", "warning"] = "error"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentBundleValidationResult(BaseModel):
+    valid: bool
+    scope: RegistryScope = "global"
+    organization_id: UUID | None = None
+    repository_id: UUID | None = None
+    resolved_revision: str | None = None
+    bundle_path: str | None = None
+    agent_key: str | None = None
+    compiled_agent: AgentDefinition | None = None
+    diagnostics: list[AgentBundleValidationDiagnostic] = Field(default_factory=list)
+    source_files: dict[str, str] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentBundlePublishResult(BaseModel):
+    agent: AgentDefinition
+    version: AgentDefinitionVersion
+    validation: AgentBundleValidationResult
+
+
+class UploadAgentBundleArchiveRequest(BaseModel):
+    actor: ParticipantInput
+    repository_id: UUID
+    branch: str
+    bundle_path: str
+    publish: bool = False
+    revision: str | None = None
+    commit_message: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentGitWorktreeSession(BaseModel):
+    session_id: UUID
+    repository_id: UUID
+    scope: RegistryScope = "global"
+    organization_id: UUID | None = None
+    branch: str
+    base_revision: str | None = None
+    bundle_path: str
+    worktree_path: str
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateAgentGitWorktreeSessionRequest(BaseModel):
+    actor: ParticipantInput
+    repository_id: UUID
+    branch: str
+    bundle_path: str
+    base_revision: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentGitFileReadRequest(BaseModel):
+    path: str
+
+
+class AgentGitFileContent(BaseModel):
+    path: str
+    content: str
+    content_type: str | None = None
+    sha256: str | None = None
+
+
+class AgentGitFileMutationRequest(BaseModel):
+    actor: ParticipantInput
+    path: str
+    content: str | None = None
+    content_type: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentGitDiffResult(BaseModel):
+    session_id: UUID
+    diff: str
+    changed_files: list[str] = Field(default_factory=list)
+
+
+class AgentGitCommitRequest(BaseModel):
+    actor: ParticipantInput
+    message: str
+    push: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentGitCommitResult(BaseModel):
+    session_id: UUID
+    commit_sha: str
+    branch: str
+    pushed: bool = False
+    changed_files: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentBundleUploadResult(BaseModel):
+    session: AgentGitWorktreeSession
+    commit: AgentGitCommitResult
+    publish_result: AgentBundlePublishResult | None = None
 
 
 class LinkAssetRequest(BaseModel):

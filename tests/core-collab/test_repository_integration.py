@@ -25,6 +25,7 @@ from open_talon_contracts.agent_contracts import build_default_interaction_contr
 from open_talon_contracts.models import (
     AgentCompactionPolicy,
     AgentDefinition,
+    AgentDefinitionVersion,
     AgentEndpoint,
     AgentHarness,
     AgentToolUsePolicy,
@@ -525,6 +526,123 @@ async def test_repository_workspace_assets_round_trip_and_resolve_workspace_over
             await conn.execute("DELETE FROM workspace_assets WHERE asset_id IN ($1, $2)", global_asset_id, workspace_asset_id)
             await conn.execute("DELETE FROM git_repositories WHERE repo_id IN ($1, $2)", global_repo_id, workspace_repo_id)
             await conn.execute("DELETE FROM workspaces WHERE workspace_id = $1", workspace_id)
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_repository_agent_definition_versions_round_trip_active_projection():
+    try:
+        pool = await asyncpg.create_pool(dsn=_postgres_dsn(), min_size=1, max_size=2)
+    except Exception as exc:  # pragma: no cover - integration environment dependent
+        pytest.skip(f"Postgres not available for repository integration test: {exc}")
+
+    repository = CollaborationRepository(pool)
+    await apply_pending_migrations(pool)
+
+    now = datetime.now(timezone.utc)
+    owner_id = uuid4()
+    repo_id = uuid4()
+    agent_id = uuid4()
+    version_id = uuid4()
+    agent_key = f"it-agent-{uuid4().hex[:8]}"
+    agent = AgentDefinition(
+        agent_id=agent_id,
+        agent_key=agent_key,
+        display_name="Integration Git Agent",
+        description="Git-managed repository integration agent.",
+        role="agent_admin",
+        capabilities=["agent_catalog"],
+        endpoint=AgentEndpoint(kind="remote", model="gpt-5.4"),
+        system_prompt="Publish carefully.",
+        harness=AgentHarness(summary="Integration harness."),
+        interaction_contract=build_default_interaction_contract(
+            display_name="Integration Git Agent",
+            role="agent_admin",
+            description="Git-managed repository integration agent.",
+            capabilities=["agent_catalog"],
+        ),
+        definition={"source": "git"},
+        created_by=owner_id,
+        created_at=now,
+        updated_at=now,
+        metadata={"source": "git"},
+    )
+    git_repo = GitRepository(
+        repo_id=repo_id,
+        scope="global",
+        organization_id=None,
+        workspace_id=None,
+        name=f"it-agent-defs-{uuid4().hex[:8]}",
+        local_path="/tmp/it-agent-defs",
+        default_branch="main",
+        created_by=owner_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    version = AgentDefinitionVersion(
+        agent_version_id=version_id,
+        agent_id=agent_id,
+        version=1,
+        scope="global",
+        organization_id=None,
+        agent_key=agent_key,
+        git_repository_id=repo_id,
+        git_commit_sha="abc123",
+        bundle_path="agents/integration",
+        manifest_sha256="manifest",
+        compiled_definition=agent.model_dump(mode="json"),
+        published_by=owner_id,
+        published_at=now,
+        metadata={"source": "integration-test"},
+    )
+
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await repository.upsert_git_repository(conn, git_repo)
+                await repository.upsert_system_agent(conn, agent)
+                await repository.upsert_agent_definition_version(conn, version)
+                await repository.upsert_system_agent(
+                    conn,
+                    agent.model_copy(
+                        update={
+                            "active_agent_version_id": version_id,
+                            "metadata": {
+                                **agent.metadata,
+                                "active_agent_version_id": str(version_id),
+                            },
+                        }
+                    ),
+                )
+
+        fetched_agent = await repository.fetch_system_agent(agent_id)
+        by_key = await repository.fetch_system_agent_by_key(
+            scope="global",
+            organization_id=None,
+            agent_key=agent_key,
+        )
+        versions = await repository.list_agent_definition_versions(agent_id)
+        by_source = await repository.fetch_agent_definition_version_by_source(
+            agent_id=agent_id,
+            git_repository_id=repo_id,
+            git_commit_sha="abc123",
+            bundle_path="agents/integration",
+        )
+
+        assert fetched_agent is not None
+        assert fetched_agent.agent_key == agent_key
+        assert fetched_agent.active_agent_version_id == version_id
+        assert by_key is not None
+        assert by_key.agent_id == agent_id
+        assert [item.agent_version_id for item in versions] == [version_id]
+        assert by_source is not None
+        assert by_source.manifest_sha256 == "manifest"
+        assert by_source.compiled_definition["agent_key"] == agent_key
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM system_agents WHERE agent_id = $1", agent_id)
+            await conn.execute("DELETE FROM git_repositories WHERE repo_id = $1", repo_id)
         await pool.close()
 
 

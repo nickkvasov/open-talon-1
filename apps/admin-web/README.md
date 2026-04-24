@@ -2,6 +2,8 @@
 
 This app includes a Playwright browser suite that signs in through the default local Keycloak OIDC provider, validates the main admin surfaces, and exercises a few real management flows against the local gateway. Authorization decisions are still enforced by Open Talon IAM on the backend.
 
+Agent catalog management supports both manual database-backed definitions and Git-managed definitions. Git-managed agents are authored as Forgejo bundles and published through gateway APIs into the active `system_agents` projection with immutable `agent_definition_versions` history. The Swarm Resources page exposes validation, publish, archive upload, and version activation controls for Git-managed bundles.
+
 ## Prerequisites
 
 Start the local backend stack from the repo root:

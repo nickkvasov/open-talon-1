@@ -36,6 +36,7 @@ from open_talon_contracts.models import (  # noqa: E402
     ActorRef,
     AgentCompactionPolicy,
     AgentDefinition,
+    AgentDefinitionVersion,
     AgentEndpoint,
     AgentHarness,
     AgentInternalToolBinding,
@@ -169,6 +170,7 @@ class FakeRepository:
         communication_log_dir: str | Path | None = None,
     ) -> None:
         self._agents = {agent.agent_id: agent for agent in agents or []}
+        self._agent_versions = {}
         self._pool = _FakePool(self)
         self._communication_log_dir = (
             Path(communication_log_dir) if communication_log_dir is not None else None
@@ -256,6 +258,56 @@ class FakeRepository:
 
     async def fetch_system_agent(self, agent_id):
         return self._agents.get(agent_id)
+
+    async def fetch_system_agent_by_key(self, *, scope: str, organization_id, agent_key: str):
+        for agent in self._agents.values():
+            if (
+                agent.scope == scope
+                and agent.organization_id == organization_id
+                and agent.agent_key == agent_key
+            ):
+                return agent
+        return None
+
+    async def next_agent_definition_version(self, conn, agent_id):
+        versions = [
+            version.version
+            for version in self._agent_versions.values()
+            if version.agent_id == agent_id
+        ]
+        return max(versions, default=0) + 1
+
+    async def upsert_agent_definition_version(self, conn, version: AgentDefinitionVersion):
+        self._agent_versions[version.agent_version_id] = version
+
+    async def fetch_agent_definition_version_by_source(
+        self,
+        *,
+        agent_id,
+        git_repository_id,
+        git_commit_sha,
+        bundle_path,
+    ):
+        for version in self._agent_versions.values():
+            if (
+                version.agent_id == agent_id
+                and version.git_repository_id == git_repository_id
+                and version.git_commit_sha == git_commit_sha
+                and version.bundle_path == bundle_path
+            ):
+                return version
+        return None
+
+    async def fetch_agent_definition_version(self, agent_version_id):
+        return self._agent_versions.get(agent_version_id)
+
+    async def list_agent_definition_versions(self, agent_id):
+        versions = [
+            version
+            for version in self._agent_versions.values()
+            if version.agent_id == agent_id
+        ]
+        return sorted(versions, key=lambda item: item.version, reverse=True)
 
     async def fetch_task(self, task_id):
         return self._tasks.get(task_id)
@@ -1510,6 +1562,172 @@ async def test_kernel_update_system_agent_clears_harness_when_explicit_null():
 
     assert updated.agent.harness is None
     assert repository.upserted_agents[-1].harness is None
+
+
+def _compiled_git_agent(
+    *,
+    agent_key: str = "admin",
+    display_name: str = "Admin Agent",
+    scope: str = "global",
+    organization_id=None,
+    prompt: str = "Manage agent definitions safely.",
+) -> AgentDefinition:
+    return AgentDefinition(
+        agent_id=uuid4(),
+        agent_key=agent_key,
+        scope=scope,
+        organization_id=organization_id,
+        display_name=display_name,
+        description="Git-managed agent definition.",
+        role="agent_admin",
+        capabilities=["agent_catalog", "git_catalog"],
+        endpoint=AgentEndpoint(kind="remote", model="gpt-5.4"),
+        system_prompt=prompt,
+        harness=AgentHarness(summary=f"{display_name} harness."),
+        interaction_contract=build_default_interaction_contract(
+            display_name=display_name,
+            role="agent_admin",
+            description="Git-managed agent definition.",
+            capabilities=["agent_catalog", "git_catalog"],
+        ),
+        definition={"source": "git", "agent_key": agent_key},
+        created_by=uuid4(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        metadata={"source": "git"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_kernel_publish_git_managed_agent_creates_versions_and_is_idempotent():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    publisher_id = uuid4()
+    repo_id = uuid4()
+
+    first_agent, first_version = await kernel.publish_git_managed_agent_definition(
+        compiled_agent=_compiled_git_agent(prompt="Version one."),
+        git_repository_id=repo_id,
+        git_commit_sha="commit-one",
+        bundle_path="agents/admin",
+        manifest_sha256="manifest-one",
+        published_by=publisher_id,
+        metadata={"channel": "test"},
+    )
+    repeated_agent, repeated_version = await kernel.publish_git_managed_agent_definition(
+        compiled_agent=_compiled_git_agent(prompt="Version one."),
+        git_repository_id=repo_id,
+        git_commit_sha="commit-one",
+        bundle_path="agents/admin",
+        manifest_sha256="manifest-one",
+        published_by=publisher_id,
+        metadata={"channel": "test"},
+    )
+    second_agent, second_version = await kernel.publish_git_managed_agent_definition(
+        compiled_agent=_compiled_git_agent(prompt="Version two."),
+        git_repository_id=repo_id,
+        git_commit_sha="commit-two",
+        bundle_path="agents/admin",
+        manifest_sha256="manifest-two",
+        published_by=publisher_id,
+        metadata={"channel": "test"},
+    )
+
+    assert first_agent.agent_id == repeated_agent.agent_id == second_agent.agent_id
+    assert first_version.agent_version_id == repeated_version.agent_version_id
+    assert first_version.version == 1
+    assert second_version.version == 2
+    assert second_agent.active_agent_version_id == second_version.agent_version_id
+    assert len(repository._agent_versions) == 2
+    assert repository._agents[first_agent.agent_id].system_prompt == "Version two."
+
+
+@pytest.mark.asyncio
+async def test_kernel_activate_agent_definition_version_rolls_back_projection():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    publisher_id = uuid4()
+    repo_id = uuid4()
+
+    first_agent, first_version = await kernel.publish_git_managed_agent_definition(
+        compiled_agent=_compiled_git_agent(prompt="Stable prompt."),
+        git_repository_id=repo_id,
+        git_commit_sha="commit-stable",
+        bundle_path="agents/admin",
+        manifest_sha256="manifest-stable",
+        published_by=publisher_id,
+    )
+    await kernel.publish_git_managed_agent_definition(
+        compiled_agent=_compiled_git_agent(prompt="Broken prompt."),
+        git_repository_id=repo_id,
+        git_commit_sha="commit-broken",
+        bundle_path="agents/admin",
+        manifest_sha256="manifest-broken",
+        published_by=publisher_id,
+    )
+
+    activated_agent, activated_version = await kernel.activate_agent_definition_version(
+        agent_id=first_agent.agent_id,
+        agent_version_id=first_version.agent_version_id,
+        actor_id=publisher_id,
+        metadata={"reason": "rollback"},
+    )
+
+    assert activated_version.agent_version_id == first_version.agent_version_id
+    assert activated_agent.system_prompt == "Stable prompt."
+    assert activated_agent.active_agent_version_id == first_version.agent_version_id
+    assert activated_agent.metadata["activated_from_version"] == 1
+    assert repository._agents[first_agent.agent_id].system_prompt == "Stable prompt."
+
+
+@pytest.mark.asyncio
+async def test_kernel_git_agent_keys_are_isolated_by_scope_and_manual_agents_still_work():
+    manual_agent = AgentDefinition(
+        agent_id=uuid4(),
+        display_name="Manual Agent",
+        description="Manual database-backed agent.",
+        role="assistant",
+        capabilities=["chat"],
+        endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+        system_prompt="Manual prompt.",
+        created_by=uuid4(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    repository = FakeRepository([manual_agent])
+    kernel = CollaborationKernel(repository)
+    organization_id = uuid4()
+    repo_id = uuid4()
+    publisher_id = uuid4()
+
+    global_agent, _ = await kernel.publish_git_managed_agent_definition(
+        compiled_agent=_compiled_git_agent(agent_key="admin", scope="global", organization_id=None),
+        git_repository_id=repo_id,
+        git_commit_sha="global-commit",
+        bundle_path="agents/admin",
+        manifest_sha256="global-manifest",
+        published_by=publisher_id,
+    )
+    org_agent, _ = await kernel.publish_git_managed_agent_definition(
+        compiled_agent=_compiled_git_agent(
+            agent_key="admin",
+            display_name="Org Admin Agent",
+            scope="organization",
+            organization_id=organization_id,
+        ),
+        git_repository_id=repo_id,
+        git_commit_sha="org-commit",
+        bundle_path="agents/admin",
+        manifest_sha256="org-manifest",
+        published_by=publisher_id,
+    )
+
+    assert manual_agent.agent_key is None
+    assert repository._agents[manual_agent.agent_id].metadata == {}
+    assert global_agent.agent_id != org_agent.agent_id
+    assert global_agent.scope == "global"
+    assert org_agent.scope == "organization"
+    assert org_agent.organization_id == organization_id
 
 
 @pytest.mark.asyncio

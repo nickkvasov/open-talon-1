@@ -266,6 +266,7 @@ Current local hardening defaults:
 - the local Keycloak `admin` role acts as bootstrap platform-admin access, while steady-state authorization comes from Open Talon IAM permissions
 - global system-definition, global publish, provider-management, IAM-management, and runtime-overview APIs require the matching global IAM permission or bootstrap platform-admin access
 - organization CRUD, organization membership changes, and organization-scoped IAM management require organization permissions from membership baseline roles or explicit IAM role bindings
+- Git-managed agent definitions use explicit validate/publish calls. Gateway compiles Forgejo bundles into `system_agents`, records immutable `agent_definition_versions`, and uses managed worktrees or archive upload for remote agent-authoring flows.
 - `GET /v1/workspaces` only returns workspaces where the authenticated human already has a participant
 - non-members should receive `404` for workspace, thread, memory, and workspace-scoped asset reads
 - workspace role-definition changes, workspace agent management, workspace tool management, workspace Git repository creation, and workspace asset publishing require the matching workspace-scoped IAM permission together with participant attachment
@@ -290,6 +291,7 @@ Identity and execution boundaries:
 - human identity is global in `users` and `auth_identities`
 - organization membership and membership roles live in `organizations` and `organization_memberships`
 - agent identity/configuration is global in `system_agents`
+- Git-managed agent authoring is versioned in Forgejo and `agent_definition_versions`, but runtime execution still reads the active `system_agents` projection only.
 - workspace-local presence, collaboration roles, capabilities, and visibility live in `participants`
 - Postgres is the source of truth for collaboration and execution state
 - Kafka is the fanout and worker wake-up bus, not the canonical store

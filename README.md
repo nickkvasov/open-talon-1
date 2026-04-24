@@ -560,7 +560,7 @@ Local services:
 - `valkey`: session store, API-key cache, and short-lived gateway state
 - `langfuse-web`: Langfuse UI and API surface
 - `langfuse-worker`: Langfuse background processing
-- `forgejo`: local Git forge for live repo workflows and authored agent/tool definitions
+- `forgejo`: local Git forge for live repo workflows and authored agent/tool definitions; agent bundles are validated/published through the gateway into `system_agents` and immutable `agent_definition_versions`
 - `ollama`: local model serving endpoint
 - `memgraph`: optional local graph backend for Mem0 graph memory when started with `./open-talon start --memgraph`
 

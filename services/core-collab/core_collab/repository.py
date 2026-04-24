@@ -21,6 +21,7 @@ from .contracts import (
     ActorRef,
     AgentConfiguration,
     AgentDefinition,
+    AgentDefinitionVersion,
     AgentIdentity,
     AgentInternalToolBinding,
     AgentEndpoint,
@@ -1383,13 +1384,16 @@ class CollaborationRepository:
         await conn.execute(
             """
             INSERT INTO system_agents (
-                agent_id, scope, organization_id, display_name, description, role, capabilities, endpoint,
+                agent_id, agent_key, scope, organization_id, active_agent_version_id,
+                display_name, description, role, capabilities, endpoint,
                 system_prompt, harness, interaction_contract, definition, created_by, created_at, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             ON CONFLICT (agent_id) DO UPDATE
-                SET scope = EXCLUDED.scope,
+                SET agent_key = EXCLUDED.agent_key,
+                    scope = EXCLUDED.scope,
                     organization_id = EXCLUDED.organization_id,
+                    active_agent_version_id = EXCLUDED.active_agent_version_id,
                     display_name = EXCLUDED.display_name,
                     description = EXCLUDED.description,
                     role = EXCLUDED.role,
@@ -1403,8 +1407,10 @@ class CollaborationRepository:
                     metadata = EXCLUDED.metadata
             """,
             agent.agent_id,
+            agent.agent_key,
             agent.scope,
             agent.organization_id,
+            agent.active_agent_version_id,
             agent.display_name,
             agent.description,
             agent.role,
@@ -2672,7 +2678,8 @@ class CollaborationRepository:
     ) -> list[AgentDefinition]:
         rows = await self._pool.fetch(
             """
-            SELECT agent_id, scope, organization_id, display_name, description, role, capabilities, endpoint,
+            SELECT agent_id, agent_key, scope, organization_id, active_agent_version_id,
+                   display_name, description, role, capabilities, endpoint,
                    system_prompt, harness, interaction_contract, definition, created_by, created_at, updated_at, metadata
             FROM system_agents
             WHERE scope = $1
@@ -2693,7 +2700,8 @@ class CollaborationRepository:
     ) -> list[AgentDefinition]:
         rows = await self._pool.fetch(
             """
-            SELECT agent_id, scope, organization_id, display_name, description, role, capabilities, endpoint,
+            SELECT agent_id, agent_key, scope, organization_id, active_agent_version_id,
+                   display_name, description, role, capabilities, endpoint,
                    system_prompt, harness, interaction_contract, definition, created_by, created_at, updated_at, metadata
             FROM system_agents
             WHERE endpoint->>'engine_id' = $1
@@ -2770,7 +2778,8 @@ class CollaborationRepository:
     async def fetch_system_agent(self, agent_id: UUID) -> AgentDefinition | None:
         row = await self._pool.fetchrow(
             """
-            SELECT agent_id, scope, organization_id, display_name, description, role, capabilities, endpoint,
+            SELECT agent_id, agent_key, scope, organization_id, active_agent_version_id,
+                   display_name, description, role, capabilities, endpoint,
                    system_prompt, harness, interaction_contract, definition, created_by, created_at, updated_at, metadata
             FROM system_agents
             WHERE agent_id = $1
@@ -2778,6 +2787,153 @@ class CollaborationRepository:
             agent_id,
         )
         return self._system_agent_from_row(row) if row else None
+
+    async def fetch_system_agent_by_key(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None,
+        agent_key: str,
+    ) -> AgentDefinition | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT agent_id, agent_key, scope, organization_id, active_agent_version_id,
+                   display_name, description, role, capabilities, endpoint,
+                   system_prompt, harness, interaction_contract, definition, created_by, created_at, updated_at, metadata
+            FROM system_agents
+            WHERE scope = $1
+              AND (
+                    ($2::uuid IS NULL AND organization_id IS NULL)
+                 OR organization_id = $2
+              )
+              AND agent_key = $3
+            """,
+            scope,
+            organization_id,
+            agent_key,
+        )
+        return self._system_agent_from_row(row) if row else None
+
+    async def next_agent_definition_version(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        agent_id: UUID,
+    ) -> int:
+        value = await conn.fetchval(
+            """
+            SELECT COALESCE(MAX(version), 0) + 1
+            FROM agent_definition_versions
+            WHERE agent_id = $1
+            """,
+            agent_id,
+        )
+        return int(value)
+
+    async def upsert_agent_definition_version(
+        self,
+        conn: asyncpg.Connection,
+        version: AgentDefinitionVersion,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO agent_definition_versions (
+                agent_version_id, agent_id, version, scope, organization_id, agent_key,
+                git_repository_id, git_commit_sha, bundle_path, manifest_sha256,
+                compiled_definition, prompt_asset_id, prompt_asset_version_id, skill_asset_refs,
+                published_by, published_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            ON CONFLICT (agent_version_id) DO UPDATE
+                SET compiled_definition = EXCLUDED.compiled_definition,
+                    prompt_asset_id = EXCLUDED.prompt_asset_id,
+                    prompt_asset_version_id = EXCLUDED.prompt_asset_version_id,
+                    skill_asset_refs = EXCLUDED.skill_asset_refs,
+                    metadata = EXCLUDED.metadata
+            """,
+            version.agent_version_id,
+            version.agent_id,
+            version.version,
+            version.scope,
+            version.organization_id,
+            version.agent_key,
+            version.git_repository_id,
+            version.git_commit_sha,
+            version.bundle_path,
+            version.manifest_sha256,
+            self._json_dumps(version.compiled_definition),
+            version.prompt_asset_id,
+            version.prompt_asset_version_id,
+            self._json_dumps(version.skill_asset_refs),
+            version.published_by,
+            version.published_at,
+            self._json_dumps(version.metadata),
+        )
+
+    async def fetch_agent_definition_version_by_source(
+        self,
+        *,
+        agent_id: UUID,
+        git_repository_id: UUID | None,
+        git_commit_sha: str,
+        bundle_path: str,
+    ) -> AgentDefinitionVersion | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT agent_version_id, agent_id, version, scope, organization_id, agent_key,
+                   git_repository_id, git_commit_sha, bundle_path, manifest_sha256,
+                   compiled_definition, prompt_asset_id, prompt_asset_version_id, skill_asset_refs,
+                   published_by, published_at, metadata
+            FROM agent_definition_versions
+            WHERE agent_id = $1
+              AND (
+                    ($2::uuid IS NULL AND git_repository_id IS NULL)
+                 OR git_repository_id = $2
+              )
+              AND git_commit_sha = $3
+              AND bundle_path = $4
+            """,
+            agent_id,
+            git_repository_id,
+            git_commit_sha,
+            bundle_path,
+        )
+        return self._agent_definition_version_from_row(row) if row else None
+
+    async def fetch_agent_definition_version(
+        self,
+        agent_version_id: UUID,
+    ) -> AgentDefinitionVersion | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT agent_version_id, agent_id, version, scope, organization_id, agent_key,
+                   git_repository_id, git_commit_sha, bundle_path, manifest_sha256,
+                   compiled_definition, prompt_asset_id, prompt_asset_version_id, skill_asset_refs,
+                   published_by, published_at, metadata
+            FROM agent_definition_versions
+            WHERE agent_version_id = $1
+            """,
+            agent_version_id,
+        )
+        return self._agent_definition_version_from_row(row) if row else None
+
+    async def list_agent_definition_versions(
+        self,
+        agent_id: UUID,
+    ) -> list[AgentDefinitionVersion]:
+        rows = await self._pool.fetch(
+            """
+            SELECT agent_version_id, agent_id, version, scope, organization_id, agent_key,
+                   git_repository_id, git_commit_sha, bundle_path, manifest_sha256,
+                   compiled_definition, prompt_asset_id, prompt_asset_version_id, skill_asset_refs,
+                   published_by, published_at, metadata
+            FROM agent_definition_versions
+            WHERE agent_id = $1
+            ORDER BY version DESC
+            """,
+            agent_id,
+        )
+        return [self._agent_definition_version_from_row(row) for row in rows]
 
     async def fetch_system_tool(self, tool_id: UUID) -> SystemToolDefinition | None:
         row = await self._pool.fetchrow(
@@ -4882,8 +5038,10 @@ class CollaborationRepository:
     def _system_agent_from_row(row: asyncpg.Record) -> AgentDefinition:
         return AgentDefinition(
             agent_id=row["agent_id"],
+            agent_key=row["agent_key"],
             scope=row["scope"],
             organization_id=row["organization_id"],
+            active_agent_version_id=row["active_agent_version_id"],
             display_name=row["display_name"],
             description=row["description"],
             role=row["role"],
@@ -4911,6 +5069,34 @@ class CollaborationRepository:
             created_by=row["created_by"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _agent_definition_version_from_row(
+        row: asyncpg.Record,
+    ) -> AgentDefinitionVersion:
+        return AgentDefinitionVersion(
+            agent_version_id=row["agent_version_id"],
+            agent_id=row["agent_id"],
+            version=row["version"],
+            scope=row["scope"],
+            organization_id=row["organization_id"],
+            agent_key=row["agent_key"],
+            git_repository_id=row["git_repository_id"],
+            git_commit_sha=row["git_commit_sha"],
+            bundle_path=row["bundle_path"],
+            manifest_sha256=row["manifest_sha256"],
+            compiled_definition=CollaborationRepository._json_value(
+                row["compiled_definition"], default={}
+            ),
+            prompt_asset_id=row["prompt_asset_id"],
+            prompt_asset_version_id=row["prompt_asset_version_id"],
+            skill_asset_refs=CollaborationRepository._json_value(
+                row["skill_asset_refs"], default=[]
+            ),
+            published_by=row["published_by"],
+            published_at=row["published_at"],
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),
         )
 

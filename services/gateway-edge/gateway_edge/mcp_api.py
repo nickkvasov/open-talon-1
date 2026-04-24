@@ -15,21 +15,34 @@ from gateway_edge.config import settings
 from gateway_edge.iam.authorization import PermissionResolution, authorization_engine
 from gateway_edge.models import (
     AuthContext,
+    AgentBundlePublishResult,
+    AgentBundleValidationResult,
+    AgentGitCommitRequest,
+    AgentGitCommitResult,
+    AgentGitDiffResult,
+    AgentGitFileContent,
+    AgentGitFileMutationRequest,
+    AgentGitWorktreeSession,
+    CreateAgentGitWorktreeSessionRequest,
+    CreateGitRepositoryRequest,
     CreateInteractionRequest,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
     CreateThreadRequest,
+    GitRepository,
     MemoryEntry,
     MemorySearchResponse,
     Organization,
     OrganizationMembership,
     ParticipantInput,
+    PublishAgentBundleFromGitRequest,
     Thread,
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
     Workspace,
     WorkspaceDetail,
+    ValidateAgentBundleFromGitRequest,
 )
 from gateway_edge.services import collaboration as collab_svc
 from gateway_edge.services.iam import iam_service
@@ -92,6 +105,49 @@ class ThreadMemorySearchArgs(BaseModel):
     use_provider: str | None = None
     include_graph: bool = True
     metadata_filters: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentBundleGitArgs(BaseModel):
+    repository_id: UUID
+    bundle_path: str
+    revision: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentGitRepoEnsureArgs(BaseModel):
+    name: str
+    local_path: str
+    forgejo_url: str | None = None
+    clone_url: str | None = None
+    default_branch: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentGitWorktreeCreateArgs(BaseModel):
+    repository_id: UUID
+    branch: str
+    bundle_path: str
+    base_revision: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentGitWorktreeFileArgs(BaseModel):
+    session_id: UUID
+    path: str
+    content: str | None = None
+    content_type: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentGitWorktreeRefArgs(BaseModel):
+    session_id: UUID
+
+
+class AgentGitWorktreeCommitArgs(BaseModel):
+    session_id: UUID
+    message: str
+    push: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class McpScopeCandidate(BaseModel):
@@ -261,6 +317,32 @@ class McpApiContext:
             detail = await collab_svc.collaboration_service.get_workspace(self.active_scope_id)
             return detail.workspace.organization_id
         return None
+
+    def identity_actor(self) -> ParticipantInput:
+        participant_id = (
+            self.auth_context.user_id
+            or self.auth_context.system_agent_id
+            or self.auth_context.agent_identity_id
+            or uuid4()
+        )
+        return ParticipantInput(
+            participant_id=participant_id,
+            participant_type=(
+                "agent" if self.auth_context.principal_type == "agent" else "user"
+            ),
+            user_id=(
+                self.auth_context.user_id
+                if self.auth_context.principal_type == "human"
+                else None
+            ),
+            display_name=(
+                self.auth_context.display_name
+                or self.auth_context.client_id
+                or self.auth_context.subject
+                or self.auth_context.principal_type
+            ),
+            iam_permissions=[],
+        )
 
     async def require_visible(self, operation: OperationDefinition) -> None:
         if not await self.operation_visible(operation):
@@ -691,6 +773,106 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             requires_workspace_actor=True,
             handler_name="handle_memory_thread_search",
         ),
+        "agent_catalog.bundle.validate": OperationDefinition(
+            name="agent_catalog.bundle.validate",
+            description="Validate a Git-managed agent bundle in the current global or organization scope.",
+            input_model=AgentBundleGitArgs,
+            output_schema=_type_schema(AgentBundleValidationResult),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="agent_catalog.write",
+            handler_name="handle_agent_catalog_bundle_validate",
+        ),
+        "agent_catalog.bundle.publish": OperationDefinition(
+            name="agent_catalog.bundle.publish",
+            description="Publish a Git-managed agent bundle in the current global or organization scope.",
+            input_model=AgentBundleGitArgs,
+            output_schema=_type_schema(AgentBundlePublishResult),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="agent_catalog.write",
+            handler_name="handle_agent_catalog_bundle_publish",
+        ),
+        "agent_git.repo.ensure": OperationDefinition(
+            name="agent_git.repo.ensure",
+            description="Register or update a Git repository for agent definition authoring.",
+            input_model=AgentGitRepoEnsureArgs,
+            output_schema=_type_schema(GitRepository),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="git_registry.write",
+            handler_name="handle_agent_git_repo_ensure",
+        ),
+        "agent_git.worktree.create": OperationDefinition(
+            name="agent_git.worktree.create",
+            description="Create a managed Git worktree session for agent definition authoring.",
+            input_model=AgentGitWorktreeCreateArgs,
+            output_schema=_type_schema(AgentGitWorktreeSession),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="agent_catalog.write",
+            handler_name="handle_agent_git_worktree_create",
+        ),
+        "agent_git.file.read": OperationDefinition(
+            name="agent_git.file.read",
+            description="Read a file from a managed agent-authoring Git worktree.",
+            input_model=AgentGitWorktreeFileArgs,
+            output_schema=_type_schema(AgentGitFileContent),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="agent_catalog.write",
+            handler_name="handle_agent_git_file_read",
+        ),
+        "agent_git.file.write": OperationDefinition(
+            name="agent_git.file.write",
+            description="Write a file in a managed agent-authoring Git worktree.",
+            input_model=AgentGitWorktreeFileArgs,
+            output_schema=_type_schema(AgentGitFileContent),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="agent_catalog.write",
+            handler_name="handle_agent_git_file_write",
+        ),
+        "agent_git.file.delete": OperationDefinition(
+            name="agent_git.file.delete",
+            description="Delete a file from a managed agent-authoring Git worktree.",
+            input_model=AgentGitWorktreeFileArgs,
+            output_schema=_type_schema(dict[str, Any]),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="agent_catalog.write",
+            handler_name="handle_agent_git_file_delete",
+        ),
+        "agent_git.diff.preview": OperationDefinition(
+            name="agent_git.diff.preview",
+            description="Preview a managed agent-authoring Git worktree diff.",
+            input_model=AgentGitWorktreeRefArgs,
+            output_schema=_type_schema(AgentGitDiffResult),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="agent_catalog.write",
+            handler_name="handle_agent_git_diff_preview",
+        ),
+        "agent_git.commit.push": OperationDefinition(
+            name="agent_git.commit.push",
+            description="Commit and optionally push a managed agent-authoring Git worktree.",
+            input_model=AgentGitWorktreeCommitArgs,
+            output_schema=_type_schema(AgentGitCommitResult),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="agent_catalog.write",
+            handler_name="handle_agent_git_commit_push",
+        ),
+        "agent_git.worktree.discard": OperationDefinition(
+            name="agent_git.worktree.discard",
+            description="Discard a managed agent-authoring Git worktree session.",
+            input_model=AgentGitWorktreeRefArgs,
+            output_schema=_type_schema(dict[str, Any]),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="agent_catalog.write",
+            handler_name="handle_agent_git_worktree_discard",
+        ),
         "iam.agent_identities.list": OperationDefinition(
             name="iam.agent_identities.list",
             description="List agent identities in the current global or organization scope.",
@@ -898,6 +1080,150 @@ async def handle_memory_thread_search(
         args.thread_id,
         CreateThreadMemorySearchRequest.from_args(actor, args),
     )
+
+
+async def handle_agent_catalog_bundle_validate(
+    ctx: McpApiContext,
+    args: AgentBundleGitArgs,
+) -> AgentBundleValidationResult:
+    actor = ctx.identity_actor()
+    organization_id = ctx.active_scope_id if ctx.active_scope_kind == "organization" else None
+    return await collab_svc.collaboration_service.validate_agent_bundle_from_git(
+        scope="organization" if organization_id is not None else "global",
+        organization_id=organization_id,
+        payload=ValidateAgentBundleFromGitRequest(actor=actor, **args.model_dump()),
+    )
+
+
+async def handle_agent_catalog_bundle_publish(
+    ctx: McpApiContext,
+    args: AgentBundleGitArgs,
+) -> AgentBundlePublishResult:
+    actor = ctx.identity_actor()
+    organization_id = ctx.active_scope_id if ctx.active_scope_kind == "organization" else None
+    return await collab_svc.collaboration_service.publish_agent_bundle_from_git(
+        scope="organization" if organization_id is not None else "global",
+        organization_id=organization_id,
+        payload=PublishAgentBundleFromGitRequest(actor=actor, **args.model_dump()),
+    )
+
+
+async def handle_agent_git_repo_ensure(
+    ctx: McpApiContext,
+    args: AgentGitRepoEnsureArgs,
+) -> GitRepository:
+    actor = ctx.identity_actor()
+    organization_id = ctx.active_scope_id if ctx.active_scope_kind == "organization" else None
+    return await collab_svc.collaboration_service.create_git_repository(
+        scope="organization" if organization_id is not None else "global",
+        organization_id=organization_id,
+        workspace_id=None,
+        payload=CreateGitRepositoryRequest(actor=actor, **args.model_dump()),
+    )
+
+
+async def handle_agent_git_worktree_create(
+    ctx: McpApiContext,
+    args: AgentGitWorktreeCreateArgs,
+) -> AgentGitWorktreeSession:
+    actor = ctx.identity_actor()
+    organization_id = ctx.active_scope_id if ctx.active_scope_kind == "organization" else None
+    return await collab_svc.collaboration_service.create_agent_git_worktree_session(
+        scope="organization" if organization_id is not None else "global",
+        organization_id=organization_id,
+        payload=CreateAgentGitWorktreeSessionRequest(actor=actor, **args.model_dump()),
+    )
+
+
+async def handle_agent_git_file_read(
+    ctx: McpApiContext,
+    args: AgentGitWorktreeFileArgs,
+) -> AgentGitFileContent:
+    _ensure_mcp_worktree_scope(ctx, args.session_id)
+    return await collab_svc.collaboration_service.read_agent_git_worktree_file(
+        args.session_id,
+        args.path,
+    )
+
+
+async def handle_agent_git_file_write(
+    ctx: McpApiContext,
+    args: AgentGitWorktreeFileArgs,
+) -> AgentGitFileContent:
+    _ensure_mcp_worktree_scope(ctx, args.session_id)
+    actor = ctx.identity_actor()
+    return await collab_svc.collaboration_service.write_agent_git_worktree_file(
+        args.session_id,
+        AgentGitFileMutationRequest(
+            actor=actor,
+            path=args.path,
+            content=args.content,
+            content_type=args.content_type,
+            metadata=args.metadata,
+        ),
+    )
+
+
+async def handle_agent_git_file_delete(
+    ctx: McpApiContext,
+    args: AgentGitWorktreeFileArgs,
+) -> dict[str, bool | str]:
+    _ensure_mcp_worktree_scope(ctx, args.session_id)
+    actor = ctx.identity_actor()
+    return await collab_svc.collaboration_service.delete_agent_git_worktree_file(
+        args.session_id,
+        AgentGitFileMutationRequest(
+            actor=actor,
+            path=args.path,
+            content=args.content,
+            content_type=args.content_type,
+            metadata=args.metadata,
+        ),
+    )
+
+
+async def handle_agent_git_diff_preview(
+    ctx: McpApiContext,
+    args: AgentGitWorktreeRefArgs,
+) -> AgentGitDiffResult:
+    _ensure_mcp_worktree_scope(ctx, args.session_id)
+    return await collab_svc.collaboration_service.diff_agent_git_worktree(args.session_id)
+
+
+async def handle_agent_git_commit_push(
+    ctx: McpApiContext,
+    args: AgentGitWorktreeCommitArgs,
+) -> AgentGitCommitResult:
+    _ensure_mcp_worktree_scope(ctx, args.session_id)
+    actor = ctx.identity_actor()
+    return await collab_svc.collaboration_service.commit_agent_git_worktree(
+        args.session_id,
+        AgentGitCommitRequest(
+            actor=actor,
+            message=args.message,
+            push=args.push,
+            metadata=args.metadata,
+        ),
+    )
+
+
+async def handle_agent_git_worktree_discard(
+    ctx: McpApiContext,
+    args: AgentGitWorktreeRefArgs,
+) -> dict[str, bool | str]:
+    _ensure_mcp_worktree_scope(ctx, args.session_id)
+    return await collab_svc.collaboration_service.discard_agent_git_worktree(args.session_id)
+
+
+def _ensure_mcp_worktree_scope(ctx: McpApiContext, session_id: UUID) -> None:
+    session = collab_svc.collaboration_service.get_agent_git_worktree_session(session_id)
+    if session is None:
+        raise KeyError(f"Git worktree session {session_id} not found")
+    if session.scope == "organization":
+        if ctx.active_scope_kind != "organization" or ctx.active_scope_id != session.organization_id:
+            raise PermissionError("Git worktree session is outside the active organization scope")
+    elif ctx.active_scope_kind != "global":
+        raise PermissionError("System-wide Git worktree sessions require global MCP scope")
 
 
 async def handle_iam_agent_identities_list(

@@ -34,6 +34,7 @@ from .contracts import (
     AgentArtifactDraft,
     AgentConfiguration,
     AgentDefinition,
+    AgentDefinitionVersion,
     AgentIdentity,
     AgentExecutionContext,
     AgentInternalToolBinding,
@@ -1042,6 +1043,156 @@ class CollaborationKernel:
             )
         )
         return agents
+
+    async def publish_git_managed_agent_definition(
+        self,
+        *,
+        compiled_agent: AgentDefinition,
+        git_repository_id: UUID,
+        git_commit_sha: str,
+        bundle_path: str,
+        manifest_sha256: str,
+        prompt_asset_id: UUID | None = None,
+        prompt_asset_version_id: UUID | None = None,
+        skill_asset_refs: list[dict] | None = None,
+        published_by: UUID,
+        metadata: dict | None = None,
+    ) -> tuple[AgentDefinition, AgentDefinitionVersion]:
+        if not compiled_agent.agent_key:
+            raise ValueError("Git-managed agent definitions require agent_key")
+        self._validate_registry_scope(
+            scope=compiled_agent.scope,
+            organization_id=compiled_agent.organization_id,
+        )
+        now = self._now()
+        existing = await self._repository.fetch_system_agent_by_key(
+            scope=compiled_agent.scope,
+            organization_id=compiled_agent.organization_id,
+            agent_key=compiled_agent.agent_key,
+        )
+        agent_id = existing.agent_id if existing is not None else compiled_agent.agent_id
+        existing_version = (
+            await self._repository.fetch_agent_definition_version_by_source(
+                agent_id=agent_id,
+                git_repository_id=git_repository_id,
+                git_commit_sha=git_commit_sha,
+                bundle_path=bundle_path,
+            )
+            if existing is not None
+            else None
+        )
+        if existing_version is not None:
+            agent = compiled_agent.model_copy(
+                update={
+                    "agent_id": agent_id,
+                    "active_agent_version_id": existing_version.agent_version_id,
+                    "created_by": existing.created_by,
+                    "created_at": existing.created_at,
+                    "updated_at": now,
+                    "metadata": {
+                        **existing.metadata,
+                        **compiled_agent.metadata,
+                        "source": "git",
+                        "active_agent_version_id": str(existing_version.agent_version_id),
+                    },
+                }
+            )
+            async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+                async with conn.transaction():
+                    await self._repository.upsert_system_agent(conn, agent)
+            return agent, existing_version
+
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                version_number = await self._repository.next_agent_definition_version(
+                    conn,
+                    agent_id=agent_id,
+                )
+                version = AgentDefinitionVersion(
+                    agent_version_id=uuid4(),
+                    agent_id=agent_id,
+                    version=version_number,
+                    scope=compiled_agent.scope,
+                    organization_id=compiled_agent.organization_id,
+                    agent_key=compiled_agent.agent_key,
+                    git_repository_id=git_repository_id,
+                    git_commit_sha=git_commit_sha,
+                    bundle_path=bundle_path,
+                    manifest_sha256=manifest_sha256,
+                    compiled_definition=compiled_agent.model_dump(mode="json"),
+                    prompt_asset_id=prompt_asset_id,
+                    prompt_asset_version_id=prompt_asset_version_id,
+                    skill_asset_refs=skill_asset_refs or [],
+                    published_by=published_by,
+                    published_at=now,
+                    metadata=metadata or {},
+                )
+                agent = compiled_agent.model_copy(
+                    update={
+                        "agent_id": agent_id,
+                        "active_agent_version_id": version.agent_version_id,
+                        "created_by": existing.created_by if existing is not None else compiled_agent.created_by,
+                        "created_at": existing.created_at if existing is not None else compiled_agent.created_at,
+                        "updated_at": now,
+                        "metadata": {
+                            **(existing.metadata if existing is not None else {}),
+                            **compiled_agent.metadata,
+                            "source": "git",
+                            "active_agent_version_id": str(version.agent_version_id),
+                        },
+                    }
+                )
+                await self._repository.upsert_system_agent(conn, agent)
+                await self._repository.upsert_agent_definition_version(conn, version)
+        return agent, version
+
+    async def list_agent_definition_versions(
+        self,
+        agent_id: UUID,
+    ) -> list[AgentDefinitionVersion]:
+        agent = await self._repository.fetch_system_agent(agent_id)
+        if agent is None:
+            raise KeyError(f"System agent {agent_id} not found")
+        return await self._repository.list_agent_definition_versions(agent_id)
+
+    async def activate_agent_definition_version(
+        self,
+        *,
+        agent_id: UUID,
+        agent_version_id: UUID,
+        actor_id: UUID,
+        metadata: dict | None = None,
+    ) -> tuple[AgentDefinition, AgentDefinitionVersion]:
+        _ = actor_id, metadata
+        existing = await self._repository.fetch_system_agent(agent_id)
+        if existing is None:
+            raise KeyError(f"System agent {agent_id} not found")
+        version = await self._repository.fetch_agent_definition_version(agent_version_id)
+        if version is None or version.agent_id != agent_id:
+            raise KeyError(
+                f"Agent definition version {agent_version_id} does not belong to agent {agent_id}"
+            )
+        compiled = AgentDefinition.model_validate(version.compiled_definition)
+        agent = compiled.model_copy(
+            update={
+                "agent_id": agent_id,
+                "active_agent_version_id": agent_version_id,
+                "created_by": existing.created_by,
+                "created_at": existing.created_at,
+                "updated_at": self._now(),
+                "metadata": {
+                    **existing.metadata,
+                    **compiled.metadata,
+                    "source": "git",
+                    "active_agent_version_id": str(agent_version_id),
+                    "activated_from_version": version.version,
+                },
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_system_agent(conn, agent)
+        return agent, version
 
     async def create_system_tool(
         self,

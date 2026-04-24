@@ -554,6 +554,153 @@ async def test_mcp_scope_change_emits_notifications_and_filters_operations(
     assert "not available" in denied_direct_call.json()["result"]["content"][0]["text"]
 
 
+async def test_mcp_agent_git_and_catalog_tools_require_matching_permissions(
+    client,
+    actor_payload,
+    monkeypatch,
+):
+    organization_id = "11111111-1111-1111-1111-111111111111"
+    admin = _oidc_context(roles=["admin"])
+    _patch_oidc_tokens(monkeypatch, {"admin-token": admin})
+
+    reader_agent = await _create_org_agent(
+        client,
+        token="admin-token",
+        organization_id=organization_id,
+        actor_payload=actor_payload,
+        display_name="Catalog Reader Agent",
+    )
+    author_agent = await _create_org_agent(
+        client,
+        token="admin-token",
+        organization_id=organization_id,
+        actor_payload=actor_payload,
+        display_name="Catalog Author Agent",
+    )
+    reader_role_id = await _create_org_agent_role(
+        client,
+        token="admin-token",
+        organization_id=organization_id,
+        actor_payload=actor_payload,
+        name="agent-git-reader",
+        permissions=["organization.read"],
+    )
+    author_role_id = await _create_org_agent_role(
+        client,
+        token="admin-token",
+        organization_id=organization_id,
+        actor_payload=actor_payload,
+        name="agent-git-author",
+        permissions=["organization.read", "agent_catalog.write", "git_registry.write"],
+    )
+    reader_identity = await _provision_org_agent_identity(
+        client,
+        token="admin-token",
+        organization_id=organization_id,
+        actor_payload=actor_payload,
+        system_agent_id=reader_agent["agent_id"],
+        client_id="agent-git-reader-client",
+    )
+    author_identity = await _provision_org_agent_identity(
+        client,
+        token="admin-token",
+        organization_id=organization_id,
+        actor_payload=actor_payload,
+        system_agent_id=author_agent["agent_id"],
+        client_id="agent-git-author-client",
+    )
+    await _bind_agent_role(
+        client,
+        token="admin-token",
+        actor_payload=actor_payload,
+        agent_identity_id=reader_identity["agent_identity_id"],
+        role_id=reader_role_id,
+    )
+    await _bind_agent_role(
+        client,
+        token="admin-token",
+        actor_payload=actor_payload,
+        agent_identity_id=author_identity["agent_identity_id"],
+        role_id=author_role_id,
+    )
+
+    _patch_oidc_tokens(
+        monkeypatch,
+        {
+            "admin-token": admin,
+            "reader-token": _agent_context(
+                agent_identity_id=reader_identity["agent_identity_id"],
+                system_agent_id=reader_identity["system_agent_id"],
+                client_id=reader_identity["client_id"],
+            ),
+            "author-token": _agent_context(
+                agent_identity_id=author_identity["agent_identity_id"],
+                system_agent_id=author_identity["system_agent_id"],
+                client_id=author_identity["client_id"],
+            ),
+        },
+    )
+
+    reader_session_id = await _mcp_initialize(client, token="reader-token")
+    author_session_id = await _mcp_initialize(client, token="author-token")
+    for token, session_id in [
+        ("reader-token", reader_session_id),
+        ("author-token", author_session_id),
+    ]:
+        response = await _mcp_tool_call(
+            client,
+            token=token,
+            session_id=session_id,
+            name="session.set_scope",
+            arguments={"scope": "organization", "organization_id": organization_id},
+        )
+        assert response.status_code == 200
+        assert response.json()["result"]["isError"] is False
+
+    reader_tools_response = await _mcp_tools_list(
+        client,
+        token="reader-token",
+        session_id=reader_session_id,
+    )
+    author_tools_response = await _mcp_tools_list(
+        client,
+        token="author-token",
+        session_id=author_session_id,
+    )
+    reader_tool_names = {
+        item["name"] for item in reader_tools_response.json()["result"]["tools"]
+    }
+    author_tool_names = {
+        item["name"] for item in author_tools_response.json()["result"]["tools"]
+    }
+
+    expected_author_tools = {
+        "agent_catalog.bundle.validate",
+        "agent_catalog.bundle.publish",
+        "agent_git.repo.ensure",
+        "agent_git.worktree.create",
+        "agent_git.file.read",
+        "agent_git.file.write",
+        "agent_git.file.delete",
+        "agent_git.diff.preview",
+        "agent_git.commit.push",
+        "agent_git.worktree.discard",
+    }
+    assert expected_author_tools <= author_tool_names
+    assert expected_author_tools.isdisjoint(reader_tool_names)
+
+    denied_call = await _mcp_tool_call(
+        client,
+        token="reader-token",
+        session_id=reader_session_id,
+        name="agent_catalog.bundle.validate",
+        arguments={"repository_id": str(uuid4()), "bundle_path": "agents/admin"},
+    )
+    assert denied_call.status_code == 200
+    assert denied_call.json()["result"]["isError"] is True
+    assert "not available" in denied_call.json()["result"]["content"][0]["text"]
+
+
 async def test_mcp_workspace_scope_requires_attachment(
     client,
     actor_payload,

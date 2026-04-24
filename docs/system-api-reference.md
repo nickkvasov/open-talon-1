@@ -614,6 +614,8 @@ In the current implementation, org-scoped create/list routes are explicit. Updat
 
 System-agent definitions accept an optional typed `harness.compaction_policy` object. Current strategies are `full_context`, `recent_window`, `rolling_summary`, and `summary_plus_retrieval`; the runtime applies this policy immediately before prompt rendering without mutating the canonical `AgentExecutionContext`.
 
+Git-managed system and organization agent definitions are authored as modular bundles under `agents/<agent_key>/` and published through the gateway. The publish flow compiles the bundle into the existing `system_agents` runtime projection and writes immutable `agent_definition_versions` history. Runtime workers continue to read Postgres only; Forgejo and managed worktrees are authoring infrastructure, not runtime dependencies.
+
 ### Git Repositories, Assets, And Tool Attachments
 
 | Method | Path | Summary |
@@ -622,6 +624,24 @@ System-agent definitions accept an optional typed `harness.compaction_policy` ob
 | `GET` | `/v1/git-repositories` | list global Git repositories |
 | `POST` | `/v1/organizations/{organization_id}/git-repositories` | register org Git repository |
 | `GET` | `/v1/organizations/{organization_id}/git-repositories` | list org Git repositories |
+| `POST` | `/v1/agents/validate-from-git` | validate system-wide agent bundle |
+| `POST` | `/v1/organizations/{organization_id}/agents/validate-from-git` | validate org-wide agent bundle |
+| `POST` | `/v1/agents/publish-from-git` | publish system-wide agent bundle |
+| `POST` | `/v1/organizations/{organization_id}/agents/publish-from-git` | publish org-wide agent bundle |
+| `POST` | `/v1/agents/bundles/upload` | upload, commit, and optionally publish system-wide agent bundle archive |
+| `POST` | `/v1/organizations/{organization_id}/agents/bundles/upload` | upload, commit, and optionally publish org-wide agent bundle archive |
+| `GET` | `/v1/agents/{agent_id}/versions` | list published agent definition versions |
+| `GET` | `/v1/organizations/{organization_id}/agents/{agent_id}/versions` | list org agent definition versions |
+| `POST` | `/v1/agents/{agent_id}/versions/{agent_version_id}/activate` | activate a prior agent definition version |
+| `POST` | `/v1/organizations/{organization_id}/agents/{agent_id}/versions/{agent_version_id}/activate` | activate an org agent definition version |
+| `POST` | `/v1/agent-git/worktrees` | create system-wide managed agent-authoring worktree |
+| `POST` | `/v1/organizations/{organization_id}/agent-git/worktrees` | create org managed agent-authoring worktree |
+| `GET` | `/v1/agent-git/worktrees/{session_id}/files` | read managed worktree file |
+| `PUT` | `/v1/agent-git/worktrees/{session_id}/files` | write managed worktree file |
+| `DELETE` | `/v1/agent-git/worktrees/{session_id}/files` | delete managed worktree file |
+| `GET` | `/v1/agent-git/worktrees/{session_id}/diff` | preview managed worktree diff |
+| `POST` | `/v1/agent-git/worktrees/{session_id}/commit` | commit and optionally push managed worktree |
+| `DELETE` | `/v1/agent-git/worktrees/{session_id}` | discard managed worktree |
 | `POST` | `/v1/assets/publish-from-git` | publish global asset version |
 | `POST` | `/v1/organizations/{organization_id}/assets/publish-from-git` | publish org asset version |
 | `GET` | `/v1/organizations/{organization_id}/assets` | list org assets |

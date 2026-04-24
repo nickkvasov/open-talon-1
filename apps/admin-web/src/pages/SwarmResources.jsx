@@ -10,7 +10,10 @@ import {
   X,
   Code2,
   Cpu,
-  Globe
+  Globe,
+  GitBranch,
+  RotateCcw,
+  Upload
 } from 'lucide-react';
 import { useApi } from '../api/useApi';
 import ConfirmationModal from '../components/Common/ConfirmationModal';
@@ -63,15 +66,30 @@ const defaultAgentData = () => ({
   skill_refs: '[]'
 });
 
+const defaultGitBundleData = () => ({
+  repository_id: '',
+  revision: 'main',
+  branch: 'main',
+  bundle_path: 'agents/',
+  commit_message: 'Publish agent bundle archive'
+});
+
 export default function SwarmResources() {
   const api = useApi();
   const [agents, setAgents] = useState([]);
   const [tools, setTools] = useState([]);
   const [organizations, setOrganizations] = useState([]);
+  const [gitRepositories, setGitRepositories] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [scopeMode, setScopeMode] = useState('global');
   const [selectedOrganizationId, setSelectedOrganizationId] = useState('');
+  const [gitBundleData, setGitBundleData] = useState(defaultGitBundleData());
+  const [gitBundleArchive, setGitBundleArchive] = useState(null);
+  const [gitActionResult, setGitActionResult] = useState(null);
+  const [gitBusy, setGitBusy] = useState(false);
+  const [agentVersions, setAgentVersions] = useState({});
+  const [expandedVersionAgentId, setExpandedVersionAgentId] = useState(null);
 
   // Modal states
   const [isAgentModalOpen, setIsAgentModalOpen] = useState(false);
@@ -113,6 +131,7 @@ export default function SwarmResources() {
       if (scopeMode === 'organization' && !selectedOrganizationId) {
         setAgents([]);
         setTools([]);
+        setGitRepositories([]);
         setError(null);
         return;
       }
@@ -124,12 +143,22 @@ export default function SwarmResources() {
         scopeMode === 'organization'
           ? `/v1/organizations/${selectedOrganizationId}/tools`
           : '/v1/tools';
+      const gitRepositoriesEndpoint =
+        scopeMode === 'organization'
+          ? `/v1/organizations/${selectedOrganizationId}/git-repositories`
+          : '/v1/git-repositories';
       const [agentsRes, toolsRes] = await Promise.all([
         api.get(agentsEndpoint),
         api.get(toolsEndpoint)
       ]);
       setAgents(agentsRes.data);
       setTools(toolsRes.data);
+      try {
+        const repositoriesRes = await api.get(gitRepositoriesEndpoint);
+        setGitRepositories(repositoriesRes.data);
+      } catch {
+        setGitRepositories([]);
+      }
       setError(null);
     } catch (err) {
       setError(err.message || 'Failed to fetch swarm resources');
@@ -165,6 +194,25 @@ export default function SwarmResources() {
     setToolSchema('{\n  "type": "object",\n  "properties": {},\n  "required": []\n}');
     setEditingTool(null);
     setToolModalMode('create');
+  };
+
+  const scopedCatalogPath = (path) => {
+    if (scopeMode === 'organization') {
+      if (!selectedOrganizationId) {
+        throw new Error('Select an organization before using org-scoped Git authoring.');
+      }
+      return `/v1/organizations/${selectedOrganizationId}${path}`;
+    }
+    return `/v1${path}`;
+  };
+
+  const requireGitBundleFields = () => {
+    if (!gitBundleData.repository_id) {
+      throw new Error('Select a Git repository.');
+    }
+    if (!gitBundleData.bundle_path.trim()) {
+      throw new Error('Bundle path is required.');
+    }
   };
 
   const handleOpenAgentEdit = (agent) => {
@@ -499,6 +547,113 @@ export default function SwarmResources() {
     }
   };
 
+  const handleValidateGitBundle = async () => {
+    try {
+      requireGitBundleFields();
+      setGitBusy(true);
+      setGitActionResult(null);
+      const response = await api.post(scopedCatalogPath('/agents/validate-from-git'), {
+        actor: buildAdminActor(),
+        repository_id: gitBundleData.repository_id,
+        bundle_path: gitBundleData.bundle_path.trim(),
+        revision: gitBundleData.revision.trim() || null,
+        metadata: {}
+      });
+      setGitActionResult({ kind: 'validate', data: response.data });
+      setError(null);
+    } catch (err) {
+      setError('Failed to validate Git agent bundle: ' + err.message);
+    } finally {
+      setGitBusy(false);
+    }
+  };
+
+  const handlePublishGitBundle = async () => {
+    try {
+      requireGitBundleFields();
+      setGitBusy(true);
+      setGitActionResult(null);
+      const response = await api.post(scopedCatalogPath('/agents/publish-from-git'), {
+        actor: buildAdminActor(),
+        repository_id: gitBundleData.repository_id,
+        bundle_path: gitBundleData.bundle_path.trim(),
+        revision: gitBundleData.revision.trim() || null,
+        metadata: {}
+      });
+      setGitActionResult({ kind: 'publish', data: response.data });
+      await fetchResources();
+      setError(null);
+    } catch (err) {
+      setError('Failed to publish Git agent bundle: ' + err.message);
+    } finally {
+      setGitBusy(false);
+    }
+  };
+
+  const handleUploadGitBundle = async (publish) => {
+    try {
+      requireGitBundleFields();
+      if (!gitBundleArchive) {
+        throw new Error('Select a zip or tar archive.');
+      }
+      setGitBusy(true);
+      setGitActionResult(null);
+      const formData = new FormData();
+      formData.append('repository_id', gitBundleData.repository_id);
+      formData.append('branch', gitBundleData.branch.trim() || 'main');
+      formData.append('bundle_path', gitBundleData.bundle_path.trim());
+      formData.append('publish', publish ? 'true' : 'false');
+      if (gitBundleData.revision.trim()) {
+        formData.append('base_revision', gitBundleData.revision.trim());
+      }
+      if (gitBundleData.commit_message.trim()) {
+        formData.append('commit_message', gitBundleData.commit_message.trim());
+      }
+      formData.append('archive', gitBundleArchive);
+      const response = await api.post(scopedCatalogPath('/agents/bundles/upload'), formData);
+      setGitActionResult({ kind: publish ? 'upload-publish' : 'upload', data: response.data });
+      await fetchResources();
+      setError(null);
+    } catch (err) {
+      setError('Failed to upload Git agent bundle: ' + err.message);
+    } finally {
+      setGitBusy(false);
+    }
+  };
+
+  const handleLoadAgentVersions = async (agent) => {
+    try {
+      const response = await api.get(scopedCatalogPath(`/agents/${agent.agent_id}/versions`));
+      setAgentVersions((current) => ({ ...current, [agent.agent_id]: response.data }));
+      setExpandedVersionAgentId(expandedVersionAgentId === agent.agent_id ? null : agent.agent_id);
+      setError(null);
+    } catch (err) {
+      setError('Failed to load agent versions: ' + err.message);
+    }
+  };
+
+  const handleActivateAgentVersion = async (agent, version) => {
+    try {
+      setGitBusy(true);
+      const response = await api.post(
+        scopedCatalogPath(`/agents/${agent.agent_id}/versions/${version.agent_version_id}/activate`),
+        {
+          actor: buildAdminActor(),
+          metadata: { source: 'admin-web' }
+        }
+      );
+      setGitActionResult({ kind: 'activate', data: response.data });
+      await fetchResources();
+      const versions = await api.get(scopedCatalogPath(`/agents/${agent.agent_id}/versions`));
+      setAgentVersions((current) => ({ ...current, [agent.agent_id]: versions.data }));
+      setError(null);
+    } catch (err) {
+      setError('Failed to activate agent version: ' + err.message);
+    } finally {
+      setGitBusy(false);
+    }
+  };
+
   if (loading) return <div className="p-8 text-slate-500">Loading swarm definitions...</div>;
 
   return (
@@ -568,6 +723,125 @@ export default function SwarmResources() {
         </div>
       )}
 
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-800">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-xl">
+            <h2 className="flex items-center text-lg font-bold text-slate-900 dark:text-white">
+              <GitBranch className="mr-2 h-5 w-5 text-amber-500" />
+              Git-managed agent bundles
+            </h2>
+            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+              Validate, publish, upload, and roll back modular agent bundles through the gateway catalog APIs.
+            </p>
+          </div>
+          <div className="grid w-full gap-3 lg:max-w-4xl lg:grid-cols-4">
+            <select
+              value={gitBundleData.repository_id}
+              onChange={(e) => setGitBundleData({ ...gitBundleData, repository_id: e.target.value })}
+              className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
+            >
+              <option value="">Select repository</option>
+              {gitRepositories.map((repository) => (
+                <option key={repository.repository_id} value={repository.repository_id}>
+                  {repository.name}
+                </option>
+              ))}
+            </select>
+            <input
+              type="text"
+              value={gitBundleData.revision}
+              onChange={(e) => setGitBundleData({ ...gitBundleData, revision: e.target.value })}
+              className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-mono dark:border-slate-700 dark:bg-slate-900"
+              placeholder="revision or branch"
+            />
+            <input
+              type="text"
+              value={gitBundleData.bundle_path}
+              onChange={(e) => setGitBundleData({ ...gitBundleData, bundle_path: e.target.value })}
+              className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-mono dark:border-slate-700 dark:bg-slate-900"
+              placeholder="agents/<agent_key>"
+            />
+            <div className="flex gap-2">
+              <button
+                type="button"
+                disabled={gitBusy || gitRepositories.length === 0}
+                onClick={handleValidateGitBundle}
+                className="flex-1 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 transition-all hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300"
+              >
+                Validate
+              </button>
+              <button
+                type="button"
+                disabled={gitBusy || gitRepositories.length === 0}
+                onClick={handlePublishGitBundle}
+                className="flex-1 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white transition-all hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Publish
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_1fr_auto_auto]">
+          <input
+            type="text"
+            value={gitBundleData.branch}
+            onChange={(e) => setGitBundleData({ ...gitBundleData, branch: e.target.value })}
+            className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-mono dark:border-slate-700 dark:bg-slate-900"
+            placeholder="commit branch"
+          />
+          <input
+            type="text"
+            value={gitBundleData.commit_message}
+            onChange={(e) => setGitBundleData({ ...gitBundleData, commit_message: e.target.value })}
+            className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
+            placeholder="commit message"
+          />
+          <label className="flex cursor-pointer items-center justify-center rounded-lg border border-dashed border-slate-300 px-3 py-2 text-sm text-slate-500 hover:border-blue-300 hover:text-blue-600 dark:border-slate-700 dark:text-slate-400">
+            <Upload className="mr-2 h-4 w-4" />
+            {gitBundleArchive ? gitBundleArchive.name : 'Choose archive'}
+            <input
+              type="file"
+              accept=".zip,.tar,.gz,.tgz"
+              className="hidden"
+              onChange={(e) => setGitBundleArchive(e.target.files?.[0] || null)}
+            />
+          </label>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              disabled={gitBusy || gitRepositories.length === 0}
+              onClick={() => handleUploadGitBundle(false)}
+              className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700"
+            >
+              Upload
+            </button>
+            <button
+              type="button"
+              disabled={gitBusy || gitRepositories.length === 0}
+              onClick={() => handleUploadGitBundle(true)}
+              className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Upload + publish
+            </button>
+          </div>
+        </div>
+        {gitRepositories.length === 0 && (
+          <p className="mt-3 text-xs text-slate-400">
+            No Git repositories are visible for this scope. Register one first or check `git_registry.read`.
+          </p>
+        )}
+        {gitActionResult && (
+          <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm dark:border-slate-700 dark:bg-slate-900">
+            <div className="font-semibold text-slate-800 dark:text-slate-100">
+              Last action: {gitActionResult.kind}
+            </div>
+            <pre className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950 p-3 text-xs text-cyan-200">
+              {JSON.stringify(gitActionResult.data, null, 2)}
+            </pre>
+          </div>
+        )}
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         {/* Agents List */}
         <div className="space-y-4">
@@ -593,8 +867,16 @@ export default function SwarmResources() {
                       <span className="text-[10px] bg-slate-100 dark:bg-slate-700 text-slate-500 px-2 py-0.5 rounded-full uppercase tracking-tight">
                         {agent.scope || 'global'}
                       </span>
+                      <span className="text-[10px] bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 px-2 py-0.5 rounded-full uppercase tracking-tight border border-amber-100 dark:border-amber-800">
+                        {agent.metadata?.source === 'git' ? 'git-managed' : 'manual'}
+                      </span>
                     </div>
                     <p className="text-sm text-slate-500 dark:text-slate-400 line-clamp-1">{agent.description}</p>
+                    {agent.metadata?.source === 'git' && (
+                      <div className="text-[11px] text-slate-400 dark:text-slate-500 font-mono">
+                        key {agent.agent_key || 'unknown'} · version {agent.metadata?.active_agent_version_id || agent.active_agent_version_id || 'pending'}
+                      </div>
+                    )}
                     <div className="flex flex-wrap gap-1.5">
                       {agent.capabilities.map(c => (
                         <span key={c} className="text-[10px] bg-slate-100 dark:bg-slate-900 text-slate-500 dark:text-slate-400 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-800 font-medium">
@@ -602,8 +884,44 @@ export default function SwarmResources() {
                         </span>
                       ))}
                     </div>
+                    {expandedVersionAgentId === agent.agent_id && (
+                      <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-900">
+                        <div className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">
+                          Published versions
+                        </div>
+                        {(agentVersions[agent.agent_id] || []).length === 0 ? (
+                          <div className="text-xs text-slate-400">No published Git versions.</div>
+                        ) : (
+                          <div className="space-y-2">
+                            {agentVersions[agent.agent_id].map((version) => (
+                              <div key={version.agent_version_id} className="flex items-center justify-between gap-3 rounded-lg bg-white p-2 text-xs dark:bg-slate-800">
+                                <div className="min-w-0 font-mono text-slate-500 dark:text-slate-400">
+                                  v{version.version} · {version.git_commit_sha?.slice(0, 12)} · {version.bundle_path}
+                                </div>
+                                <button
+                                  type="button"
+                                  disabled={gitBusy || agent.active_agent_version_id === version.agent_version_id}
+                                  onClick={() => handleActivateAgentVersion(agent, version)}
+                                  className="shrink-0 rounded-md border border-slate-200 px-2 py-1 font-semibold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700"
+                                >
+                                  {agent.active_agent_version_id === version.agent_version_id ? 'Active' : 'Activate'}
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleLoadAgentVersions(agent); }}
+                      className="p-2 text-slate-400 hover:text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-900/30 rounded-lg transition-all"
+                      title="Version History"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                    </button>
                     <button 
                       onClick={() => handleOpenAgentEdit(agent)}
                       className="p-2 text-slate-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded-lg transition-all"

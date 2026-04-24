@@ -150,6 +150,10 @@ class Settings(BaseSettings):
     asset_storage_force_path_style: bool = True
     asset_storage_presign_expiry_seconds: int = 900
     forgejo_base_url: str = "http://127.0.0.1:3001"
+    git_worktree_root: str = str(_ROOT_DIR / "infrastructure" / "data" / "git-worktrees")
+    agent_bundle_max_file_bytes: int = 256_000
+    agent_bundle_max_archive_bytes: int = 2_000_000
+    agent_bundle_max_files: int = 64
     communication_log_dir: str = str(
         _ROOT_DIR / "infrastructure" / "data" / "communication-logs"
     )
