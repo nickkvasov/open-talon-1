@@ -135,6 +135,7 @@ async def _mcp_context_snapshot(
     scope: str,
     request_id_base: int = 100,
     organization_id: str | None = None,
+    project_id: str | None = None,
     workspace_id: str | None = None,
 ) -> dict[str, object]:
     session_id = await _mcp_initialize(client, token=token)
@@ -148,6 +149,8 @@ async def _mcp_context_snapshot(
     scope_args = {"scope": scope}
     if organization_id is not None:
         scope_args["organization_id"] = organization_id
+    if project_id is not None:
+        scope_args["project_id"] = project_id
     if workspace_id is not None:
         scope_args["workspace_id"] = workspace_id
     set_scope_response = await _mcp_tool_call(
@@ -211,6 +214,27 @@ async def _create_workspace(client, *, token: str, organization_id: str, actor_p
     )
     assert response.status_code == 200
     return response.json()["workspace"]["workspace_id"]
+
+
+async def _add_org_member(
+    client,
+    *,
+    token: str,
+    organization_id: str,
+    actor_payload: dict[str, str],
+    user_id: str,
+    role: str = "member",
+) -> None:
+    response = await client.post(
+        f"/v1/organizations/{organization_id}/members",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "actor": actor_payload,
+            "user_id": user_id,
+            "role": role,
+        },
+    )
+    assert response.status_code == 200
 
 
 async def _create_org_agent(client, *, token: str, organization_id: str, actor_payload: dict[str, str], display_name: str):
@@ -840,6 +864,152 @@ async def test_mcp_workspace_scope_requires_attachment(
     assert hidden_call.status_code == 200
     assert hidden_call.json()["result"]["isError"] is True
     assert "not available" in hidden_call.json()["result"]["content"][0]["text"]
+
+
+async def test_mcp_project_scope_harmonizes_project_and_workspace_operations(
+    client,
+    actor_payload,
+    monkeypatch,
+):
+    organization_id = "11111111-1111-1111-1111-111111111111"
+    admin_context = _oidc_context(roles=["admin"])
+    creator_context = _oidc_context(roles=["workspace-user"])
+    owner_context = _oidc_context(roles=["workspace-user"])
+    viewer_context = _oidc_context(roles=["workspace-user"])
+    outsider_context = _oidc_context(roles=["workspace-user"])
+    _patch_oidc_tokens(
+        monkeypatch,
+        {
+            "admin-token": admin_context,
+            "creator-token": creator_context,
+            "owner-token": owner_context,
+            "viewer-token": viewer_context,
+            "outsider-token": outsider_context,
+        },
+    )
+
+    for context, role in [
+        (creator_context, "admin"),
+        (owner_context, "member"),
+        (viewer_context, "member"),
+        (outsider_context, "member"),
+    ]:
+        await _add_org_member(
+            client,
+            token="admin-token",
+            organization_id=organization_id,
+            actor_payload=actor_payload,
+            user_id=str(context.user_id),
+            role=role,
+        )
+
+    project_response = await client.post(
+        f"/v1/organizations/{organization_id}/projects",
+        headers={"Authorization": "Bearer creator-token"},
+        json={
+            "slug": "MCP Private Project",
+            "name": "MCP Private Project",
+            "actor": actor_payload,
+            "owner": {"user_id": str(owner_context.user_id)},
+            "viewers": [{"user_id": str(viewer_context.user_id)}],
+        },
+    )
+    assert project_response.status_code == 200
+    project = project_response.json()
+
+    workspace_response = await client.post(
+        f"/v1/organizations/{organization_id}/projects/{project['project_id']}/workspaces",
+        headers={"Authorization": "Bearer owner-token"},
+        json={"name": "MCP Private Workspace", "actor": actor_payload},
+    )
+    assert workspace_response.status_code == 200
+    workspace = workspace_response.json()["workspace"]
+
+    viewer_session_id = await _mcp_initialize(client, token="viewer-token")
+    scopes_response = await _mcp_tool_call(
+        client,
+        token="viewer-token",
+        session_id=viewer_session_id,
+        name="session.list_scopes",
+    )
+    assert scopes_response.status_code == 200
+    scopes = scopes_response.json()["result"]["structuredContent"]
+    assert {
+        "kind": "project",
+        "id": project["project_id"],
+        "label": "MCP Private Project",
+        "organization_id": organization_id,
+        "project_id": None,
+    } in scopes
+
+    set_project_scope = await _mcp_tool_call(
+        client,
+        token="viewer-token",
+        session_id=viewer_session_id,
+        name="session.set_scope",
+        arguments={"scope": "project", "project_id": project["project_id"]},
+    )
+    assert set_project_scope.json()["result"]["isError"] is False
+
+    tools_response = await _mcp_tools_list(
+        client,
+        token="viewer-token",
+        session_id=viewer_session_id,
+    )
+    tool_names = {item["name"] for item in tools_response.json()["result"]["tools"]}
+    assert "projects.get" in tool_names
+    assert "workspaces.list" in tool_names
+    assert "workspaces.create" not in tool_names
+    assert "projects.access.upsert" not in tool_names
+
+    project_get = await _mcp_tool_call(
+        client,
+        token="viewer-token",
+        session_id=viewer_session_id,
+        name="projects.get",
+    )
+    assert project_get.json()["result"]["isError"] is False
+    assert project_get.json()["result"]["structuredContent"]["project_id"] == project["project_id"]
+
+    workspaces_list = await _mcp_tool_call(
+        client,
+        token="viewer-token",
+        session_id=viewer_session_id,
+        name="workspaces.list",
+    )
+    assert workspaces_list.json()["result"]["isError"] is False
+    assert [item["workspace_id"] for item in workspaces_list.json()["result"]["structuredContent"]] == [
+        workspace["workspace_id"]
+    ]
+
+    denied_create = await _mcp_tool_call(
+        client,
+        token="viewer-token",
+        session_id=viewer_session_id,
+        name="workspaces.create",
+        arguments={"name": "Viewer Created Workspace"},
+    )
+    assert denied_create.json()["result"]["isError"] is True
+    assert "not available" in denied_create.json()["result"]["content"][0]["text"]
+
+    outsider_session_id = await _mcp_initialize(client, token="outsider-token")
+    outsider_set_scope = await _mcp_tool_call(
+        client,
+        token="outsider-token",
+        session_id=outsider_session_id,
+        name="session.set_scope",
+        arguments={"scope": "project", "project_id": project["project_id"]},
+    )
+    assert outsider_set_scope.json()["result"]["isError"] is False
+
+    outsider_get = await _mcp_tool_call(
+        client,
+        token="outsider-token",
+        session_id=outsider_session_id,
+        name="projects.get",
+    )
+    assert outsider_get.json()["result"]["isError"] is True
+    assert "not available" in outsider_get.json()["result"]["content"][0]["text"]
 
 
 async def test_mcp_threads_create_and_message_create_round_trip(

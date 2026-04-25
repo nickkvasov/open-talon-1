@@ -103,7 +103,7 @@ Important implications:
 - client apps should not treat `participant_id` as a global human identity
 - authenticated human requests may include an `actor` object for compatibility, but the gateway derives the effective human actor from the bearer token
 - agent identities authenticate with client credentials issued by the configured OIDC provider and are linked back to `system_agents` through `agent_identities`
-- when `MCP_ENABLED=true`, the gateway-mounted MCP server at `/v1/mcp` is OIDC-only and exposes permission-scoped system API operations, not Open Talon catalog/runtime tools
+- when `MCP_ENABLED=true`, the gateway-mounted MCP server at `/v1/mcp` is OIDC-only and exposes permission-scoped system API operations across organization, project, workspace, thread, memory, IAM lookup, and agent authoring surfaces, not Open Talon catalog/runtime tools
 - the current MCP slice exposes read-only session resources at `ot://session/identity`, `ot://session/permissions`, and `ot://session/scope`
 - organization membership and membership roles live in Postgres, not in Keycloak claims
 - humans and agents share one permission catalog, but global and organization IAM roles are stored separately for each subject kind

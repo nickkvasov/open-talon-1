@@ -224,9 +224,9 @@ Current MCP behavior:
 - `/v1/mcp` is always OIDC-only, even when the main gateway auth mode is `any`
 - requests without an `Origin` header are allowed; when `Origin` is present it must match `MCP_ALLOWED_ORIGINS` or fall back to `CORS_ORIGINS`
 - MCP session state is stored in Valkey with `MCP_SESSION_TTL_SECONDS` controlling session expiry; the default is `3600`
-- MCP sessions keep an active scope of `global`, `organization:<id>`, or `workspace:<id>`
+- MCP sessions keep an active scope of `global`, `organization:<id>`, `project:<id>`, or `workspace:<id>`
 - successful scope changes emit `notifications/tools/list_changed` and `notifications/resources/list_changed`
-- the visible MCP operation set is filtered from the caller's existing IAM permissions plus workspace participant attachment where the underlying API already requires it
+- the visible MCP operation set is filtered from the caller's existing IAM permissions, project-local `creator`/`owner`/`editor`/`viewer` permissions in project scope, and workspace participant attachment where the underlying API already requires it
 - successful operation calls return both a short text `content` summary and `structuredContent`; protocol/schema failures stay JSON-RPC errors
 - MCP exposes system API operations only; it does not expose `system_tools`, `workspace_tools`, Tinker-generated tools, or `agent-runtime` execution backends as imported MCP tools
 - External MCP server attachments are modeled separately under `/v1/mcp-servers` and `/v1/workspaces/{workspace_id}/mcp-servers`; they are not imported into Open Talon `system_tools`.
@@ -258,7 +258,15 @@ Current MCP system API operations:
 - `organizations.list`
 - `organizations.get`
 - `organizations.members.list`
+- `projects.list`
+- `projects.create`
+- `projects.get`
+- `projects.update`
+- `projects.access.list`
+- `projects.access.upsert`
+- `projects.access.remove`
 - `workspaces.list`
+- `workspaces.create`
 - `workspaces.get`
 - `threads.create`
 - `threads.list`
@@ -268,6 +276,16 @@ Current MCP system API operations:
 - `memory.workspace.list`
 - `memory.workspace.create`
 - `memory.thread.search`
+- `agent_catalog.bundle.validate`
+- `agent_catalog.bundle.publish`
+- `agent_git.repo.ensure`
+- `agent_git.worktree.create`
+- `agent_git.file.read`
+- `agent_git.file.write`
+- `agent_git.file.delete`
+- `agent_git.diff.preview`
+- `agent_git.commit.push`
+- `agent_git.worktree.discard`
 - `iam.agent_identities.list`
 
 ### Principal IAM APIs

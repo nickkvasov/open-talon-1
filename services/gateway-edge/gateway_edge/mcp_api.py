@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException, Request
 from fastapi.encoders import jsonable_encoder
+from open_talon_contracts.iam import PROJECT_ROLE_BASE_PERMISSIONS
 from pydantic import BaseModel, Field, TypeAdapter
 
 from gateway_edge.config import settings
@@ -28,18 +29,27 @@ from gateway_edge.models import (
     CreateInteractionRequest,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
+    CreateProjectRequest,
     CreateThreadRequest,
+    CreateWorkspaceRequest,
     GitRepository,
     MemoryEntry,
     MemorySearchResponse,
     Organization,
     OrganizationMembership,
     ParticipantInput,
+    Project,
+    ProjectAccessBinding,
+    ProjectAccessRole,
+    ProjectSubjectRef,
     PublishAgentBundleFromGitRequest,
+    RemoveProjectAccessRequest,
     Thread,
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    UpdateProjectRequest,
+    UpsertProjectAccessRequest,
     Workspace,
     WorkspaceDetail,
     ValidateAgentBundleFromGitRequest,
@@ -55,6 +65,7 @@ MCP_SERVER_INFO = {
     "version": "0.1.0",
 }
 _MCP_SESSION_PREFIX = "mcp:sessions:"
+McpScopeKind = Literal["global", "organization", "project", "workspace"]
 
 
 class EmptyArgs(BaseModel):
@@ -62,9 +73,60 @@ class EmptyArgs(BaseModel):
 
 
 class SessionSetScopeArgs(BaseModel):
-    scope: Literal["global", "organization", "workspace"]
+    scope: McpScopeKind
     organization_id: UUID | None = None
+    project_id: UUID | None = None
     workspace_id: UUID | None = None
+
+
+class ProjectRefArgs(BaseModel):
+    project_id: UUID | None = None
+
+
+class ProjectCreateArgs(BaseModel):
+    slug: str
+    name: str
+    description: str | None = None
+    owner: ProjectSubjectRef | None = None
+    owners: list[ProjectSubjectRef] = Field(default_factory=list)
+    editors: list[ProjectSubjectRef] = Field(default_factory=list)
+    viewers: list[ProjectSubjectRef] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectUpdateArgs(BaseModel):
+    project_id: UUID | None = None
+    slug: str | None = None
+    name: str | None = None
+    description: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class ProjectAccessListArgs(BaseModel):
+    project_id: UUID | None = None
+
+
+class ProjectAccessUpsertArgs(BaseModel):
+    subject: ProjectSubjectRef
+    role: ProjectAccessRole
+    project_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectAccessRemoveArgs(BaseModel):
+    subject: ProjectSubjectRef
+    project_id: UUID | None = None
+
+
+class WorkspaceListArgs(BaseModel):
+    project_id: UUID | None = None
+
+
+class WorkspaceCreateArgs(BaseModel):
+    name: str
+    description: str | None = None
+    project_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ThreadRefArgs(BaseModel):
@@ -151,17 +213,18 @@ class AgentGitWorktreeCommitArgs(BaseModel):
 
 
 class McpScopeCandidate(BaseModel):
-    kind: Literal["global", "organization", "workspace"]
+    kind: McpScopeKind
     id: UUID | None = None
     label: str
     organization_id: UUID | None = None
+    project_id: UUID | None = None
 
 
 class McpSessionState(BaseModel):
     session_id: UUID
     principal_fingerprint: str
     principal_type: Literal["human", "agent"]
-    active_scope_kind: Literal["global", "organization", "workspace"] = "global"
+    active_scope_kind: McpScopeKind = "global"
     active_scope_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
@@ -173,9 +236,10 @@ class OperationDefinition:
     description: str
     input_model: type[BaseModel]
     output_schema: dict[str, Any]
-    allowed_scopes: frozenset[Literal["global", "organization", "workspace"]]
+    allowed_scopes: frozenset[McpScopeKind]
     required_permission_type: Literal["identity", "workspace"] | None
     required_permission: str | None
+    required_project_permission: str | None = None
     requires_workspace_actor: bool = False
     handler_name: str = ""
 
@@ -212,7 +276,7 @@ notification_hub = McpNotificationHub()
 def _scope_payload(session: McpSessionState) -> dict[str, Any]:
     if session.active_scope_kind == "global":
         return {"scope": "global"}
-    field = "organization_id" if session.active_scope_kind == "organization" else "workspace_id"
+    field = f"{session.active_scope_kind}_id"
     return {"scope": session.active_scope_kind, field: str(session.active_scope_id)}
 
 
@@ -285,7 +349,7 @@ class McpApiContext:
         self._resolution: PermissionResolution | None = None
 
     @property
-    def active_scope_kind(self) -> Literal["global", "organization", "workspace"]:
+    def active_scope_kind(self) -> McpScopeKind:
         return self.session.active_scope_kind
 
     @property
@@ -301,6 +365,13 @@ class McpApiContext:
                 organization_id=self.active_scope_id,
             )
             return self._resolution
+        if self.active_scope_kind == "project" and self.active_scope_id is not None:
+            project = await collab_svc.collaboration_service.get_project(self.active_scope_id)
+            self._resolution = await authorization_engine.compute_effective_permissions(
+                self.auth_context,
+                organization_id=project.organization_id,
+            )
+            return self._resolution
         if self.active_scope_kind == "workspace" and self.active_scope_id is not None:
             self._resolution = await authorization_engine.compute_effective_permissions(
                 self.auth_context,
@@ -313,9 +384,20 @@ class McpApiContext:
     async def active_organization_id(self) -> UUID | None:
         if self.active_scope_kind == "organization":
             return self.active_scope_id
+        if self.active_scope_kind == "project" and self.active_scope_id is not None:
+            project = await collab_svc.collaboration_service.get_project(self.active_scope_id)
+            return project.organization_id
         if self.active_scope_kind == "workspace" and self.active_scope_id is not None:
             detail = await collab_svc.collaboration_service.get_workspace(self.active_scope_id)
             return detail.workspace.organization_id
+        return None
+
+    async def active_project_id(self) -> UUID | None:
+        if self.active_scope_kind == "project":
+            return self.active_scope_id
+        if self.active_scope_kind == "workspace" and self.active_scope_id is not None:
+            detail = await collab_svc.collaboration_service.get_workspace(self.active_scope_id)
+            return detail.workspace.project_id
         return None
 
     def identity_actor(self) -> ParticipantInput:
@@ -355,6 +437,16 @@ class McpApiContext:
             return False
         try:
             await self._authorize_operation(operation)
+            if (
+                operation.required_project_permission is not None
+                and self.active_scope_kind == "project"
+                and self.active_scope_id is not None
+            ):
+                project = await collab_svc.collaboration_service.get_project(self.active_scope_id)
+                await self.require_project_permission(
+                    project,
+                    permission=operation.required_project_permission,
+                )
             if operation.requires_workspace_actor and self.active_scope_kind == "workspace":
                 await self.resolve_workspace_actor(auto_create=False)
             return True
@@ -412,6 +504,46 @@ class McpApiContext:
         if self.active_scope_kind != "workspace" or thread.thread.workspace_id != self.active_scope_id:
             raise PermissionError(f"Thread {thread_id} is outside the active workspace scope")
         return thread
+
+    def project_subject(self) -> ProjectSubjectRef | None:
+        if self.auth_context.principal_type == "human" and self.auth_context.user_id is not None:
+            return ProjectSubjectRef(user_id=self.auth_context.user_id)
+        if self.auth_context.principal_type == "agent" and self.auth_context.system_agent_id is not None:
+            return ProjectSubjectRef(system_agent_id=self.auth_context.system_agent_id)
+        return None
+
+    async def project_access_binding(self, project: Project) -> ProjectAccessBinding | None:
+        subject = self.project_subject()
+        if subject is None:
+            return None
+        bindings = await collab_svc.collaboration_service.list_project_access(
+            project.organization_id,
+            project.project_id,
+            actor=None,
+            allow_platform_admin=True,
+        )
+        for binding in bindings:
+            if subject.user_id is not None and binding.user_id == subject.user_id:
+                return binding
+            if subject.system_agent_id is not None and binding.system_agent_id == subject.system_agent_id:
+                return binding
+        return None
+
+    async def require_project_permission(
+        self,
+        project: Project,
+        *,
+        permission: str,
+    ) -> ProjectAccessBinding | None:
+        if self.auth_context.platform_admin:
+            return None
+        binding = await self.project_access_binding(project)
+        if binding is None:
+            raise KeyError(f"Project {project.project_id} not found")
+        effective_permissions = PROJECT_ROLE_BASE_PERMISSIONS.get(binding.role, ())
+        if permission not in effective_permissions:
+            raise PermissionError(f"Project permission {permission!r} required")
+        return binding
 
     async def identity_payload(self) -> dict[str, Any]:
         return {
@@ -486,15 +618,32 @@ class McpApiContext:
                 ]
 
         seen_orgs: set[UUID] = set()
+        visible_organizations: list[Organization] = []
         for organization in organizations:
             if organization.organization_id in seen_orgs:
                 continue
             seen_orgs.add(organization.organization_id)
+            visible_organizations.append(organization)
             candidates.append(
                 McpScopeCandidate(
                     kind="organization",
                     id=organization.organization_id,
                     label=organization.name,
+                )
+            )
+
+        projects = await self._list_project_scope_candidates(visible_organizations)
+        seen_projects: set[UUID] = set()
+        for project in projects:
+            if project.project_id in seen_projects:
+                continue
+            seen_projects.add(project.project_id)
+            candidates.append(
+                McpScopeCandidate(
+                    kind="project",
+                    id=project.project_id,
+                    label=project.name,
+                    organization_id=project.organization_id,
                 )
             )
 
@@ -510,6 +659,7 @@ class McpApiContext:
                     id=workspace.workspace_id,
                     label=workspace.name,
                     organization_id=workspace.organization_id,
+                    project_id=workspace.project_id,
                 )
             )
 
@@ -518,6 +668,32 @@ class McpApiContext:
             key=lambda item: (item.kind, item.label.lower(), str(item.id) if item.id else ""),
         )
         return self._scope_candidates
+
+    async def _list_project_scope_candidates(
+        self,
+        organizations: list[Organization],
+    ) -> list[Project]:
+        projects: list[Project] = []
+        for organization in organizations:
+            try:
+                await authorization_engine.authorize(
+                    "mcp.projects.list",
+                    {
+                        "auth_context": self.auth_context,
+                        "permission_type": "identity",
+                        "permission": "project.read",
+                        "organization_id": organization.organization_id,
+                        "workspace_id": None,
+                    },
+                )
+            except Exception:
+                continue
+            projects.extend(
+                await collab_svc.collaboration_service.list_projects(
+                    organization.organization_id
+                )
+            )
+        return projects
 
     async def _list_workspace_scope_candidates(
         self,
@@ -562,12 +738,16 @@ class McpApiContext:
         if args.scope == "global":
             target_id = None
         elif args.scope == "organization":
-            if args.organization_id is None or args.workspace_id is not None:
-                raise ValueError("organization scope requires organization_id and forbids workspace_id")
+            if args.organization_id is None or args.project_id is not None or args.workspace_id is not None:
+                raise ValueError("organization scope requires organization_id and forbids project_id/workspace_id")
             target_id = args.organization_id
+        elif args.scope == "project":
+            if args.project_id is None or args.organization_id is not None or args.workspace_id is not None:
+                raise ValueError("project scope requires project_id and forbids organization_id/workspace_id")
+            target_id = args.project_id
         else:
-            if args.workspace_id is None or args.organization_id is not None:
-                raise ValueError("workspace scope requires workspace_id and forbids organization_id")
+            if args.workspace_id is None or args.organization_id is not None or args.project_id is not None:
+                raise ValueError("workspace scope requires workspace_id and forbids organization_id/project_id")
             target_id = args.workspace_id
 
         if args.scope != "global":
@@ -599,7 +779,7 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             description="Return the authenticated Open Talon principal bound to the MCP session.",
             input_model=EmptyArgs,
             output_schema=_type_schema(dict[str, Any]),
-            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            allowed_scopes=frozenset({"global", "organization", "project", "workspace"}),
             required_permission_type=None,
             required_permission=None,
             handler_name="handle_session_get_identity",
@@ -609,17 +789,17 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             description="Return effective Open Talon permissions in the current MCP scope.",
             input_model=EmptyArgs,
             output_schema=_type_schema(dict[str, Any]),
-            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            allowed_scopes=frozenset({"global", "organization", "project", "workspace"}),
             required_permission_type=None,
             required_permission=None,
             handler_name="handle_session_get_permissions",
         ),
         "session.list_scopes": OperationDefinition(
             name="session.list_scopes",
-            description="List global, organization, and workspace scopes available to this principal.",
+            description="List global, organization, project, and workspace scopes available to this principal.",
             input_model=EmptyArgs,
             output_schema=_type_schema(list[McpScopeCandidate]),
-            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            allowed_scopes=frozenset({"global", "organization", "project", "workspace"}),
             required_permission_type=None,
             required_permission=None,
             handler_name="handle_session_list_scopes",
@@ -629,7 +809,7 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             description="Set the active Open Talon scope for subsequent MCP API operations.",
             input_model=SessionSetScopeArgs,
             output_schema=_type_schema(dict[str, Any]),
-            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            allowed_scopes=frozenset({"global", "organization", "project", "workspace"}),
             required_permission_type=None,
             required_permission=None,
             handler_name="handle_session_set_scope",
@@ -664,15 +844,103 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             required_permission="organization.members.read",
             handler_name="handle_organizations_members_list",
         ),
+        "projects.list": OperationDefinition(
+            name="projects.list",
+            description="List projects inside the active organization scope.",
+            input_model=EmptyArgs,
+            output_schema=_type_schema(list[Project]),
+            allowed_scopes=frozenset({"organization", "project"}),
+            required_permission_type="identity",
+            required_permission="project.read",
+            required_project_permission="project.read",
+            handler_name="handle_projects_list",
+        ),
+        "projects.create": OperationDefinition(
+            name="projects.create",
+            description="Create a project inside the active organization scope.",
+            input_model=ProjectCreateArgs,
+            output_schema=_type_schema(Project),
+            allowed_scopes=frozenset({"organization"}),
+            required_permission_type="identity",
+            required_permission="project.write",
+            handler_name="handle_projects_create",
+        ),
+        "projects.get": OperationDefinition(
+            name="projects.get",
+            description="Return project detail for a project in the active organization or project scope.",
+            input_model=ProjectRefArgs,
+            output_schema=_type_schema(Project),
+            allowed_scopes=frozenset({"organization", "project"}),
+            required_permission_type="identity",
+            required_permission="project.read",
+            required_project_permission="project.read",
+            handler_name="handle_projects_get",
+        ),
+        "projects.update": OperationDefinition(
+            name="projects.update",
+            description="Update project metadata for a project in the active organization or project scope.",
+            input_model=ProjectUpdateArgs,
+            output_schema=_type_schema(Project),
+            allowed_scopes=frozenset({"organization", "project"}),
+            required_permission_type="identity",
+            required_permission="project.read",
+            required_project_permission="project.write",
+            handler_name="handle_projects_update",
+        ),
+        "projects.access.list": OperationDefinition(
+            name="projects.access.list",
+            description="List project access bindings for a project in the active organization or project scope.",
+            input_model=ProjectAccessListArgs,
+            output_schema=_type_schema(list[ProjectAccessBinding]),
+            allowed_scopes=frozenset({"organization", "project"}),
+            required_permission_type="identity",
+            required_permission="project.read",
+            required_project_permission="project.read",
+            handler_name="handle_projects_access_list",
+        ),
+        "projects.access.upsert": OperationDefinition(
+            name="projects.access.upsert",
+            description="Create or update a project access binding.",
+            input_model=ProjectAccessUpsertArgs,
+            output_schema=_type_schema(ProjectAccessBinding),
+            allowed_scopes=frozenset({"organization", "project"}),
+            required_permission_type="identity",
+            required_permission="project.read",
+            required_project_permission="project.access.write",
+            handler_name="handle_projects_access_upsert",
+        ),
+        "projects.access.remove": OperationDefinition(
+            name="projects.access.remove",
+            description="Remove a project access binding.",
+            input_model=ProjectAccessRemoveArgs,
+            output_schema=_type_schema(dict[str, Any]),
+            allowed_scopes=frozenset({"organization", "project"}),
+            required_permission_type="identity",
+            required_permission="project.read",
+            required_project_permission="project.access.write",
+            handler_name="handle_projects_access_remove",
+        ),
         "workspaces.list": OperationDefinition(
             name="workspaces.list",
-            description="List workspaces accessible in the current global, organization, or workspace scope.",
-            input_model=EmptyArgs,
+            description="List workspaces accessible in the current global, organization, project, or workspace scope.",
+            input_model=WorkspaceListArgs,
             output_schema=_type_schema(list[Workspace]),
-            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            allowed_scopes=frozenset({"global", "organization", "project", "workspace"}),
             required_permission_type="identity",
             required_permission="workspace.list",
+            required_project_permission="workspace.list",
             handler_name="handle_workspaces_list",
+        ),
+        "workspaces.create": OperationDefinition(
+            name="workspaces.create",
+            description="Create a workspace in the active organization or project scope.",
+            input_model=WorkspaceCreateArgs,
+            output_schema=_type_schema(WorkspaceDetail),
+            allowed_scopes=frozenset({"organization", "project"}),
+            required_permission_type="identity",
+            required_permission="workspace.list",
+            required_project_permission="workspace.create",
+            handler_name="handle_workspaces_create",
         ),
         "workspaces.get": OperationDefinition(
             name="workspaces.get",
@@ -981,30 +1249,161 @@ async def handle_organizations_members_list(
     return await collab_svc.collaboration_service.list_organization_memberships(ctx.active_scope_id)
 
 
-async def handle_workspaces_list(ctx: McpApiContext, _: EmptyArgs) -> list[Workspace]:
+async def _resolve_project_arg(ctx: McpApiContext, project_id: UUID | None) -> Project:
+    effective_project_id = project_id or (
+        ctx.active_scope_id if ctx.active_scope_kind == "project" else None
+    )
+    if effective_project_id is None:
+        raise ValueError("A project_id argument or active project scope is required")
+    project = await collab_svc.collaboration_service.get_project(effective_project_id)
+    active_org_id = await ctx.active_organization_id()
+    if active_org_id is not None and project.organization_id != active_org_id:
+        raise PermissionError(f"Project {project.project_id} is outside the active organization scope")
+    return project
+
+
+async def handle_projects_list(ctx: McpApiContext, _: EmptyArgs) -> list[Project]:
+    if ctx.active_scope_kind == "project" and ctx.active_scope_id is not None:
+        project = await collab_svc.collaboration_service.get_project(ctx.active_scope_id)
+        return [project]
+    if ctx.active_scope_kind != "organization" or ctx.active_scope_id is None:
+        raise ValueError("projects.list requires an active organization or project scope")
+    return await collab_svc.collaboration_service.list_projects(ctx.active_scope_id)
+
+
+async def handle_projects_create(ctx: McpApiContext, args: ProjectCreateArgs) -> Project:
+    if ctx.active_scope_kind != "organization" or ctx.active_scope_id is None:
+        raise ValueError("projects.create requires an active organization scope")
+    payload = CreateProjectRequest(actor=ctx.identity_actor(), **args.model_dump())
+    return await collab_svc.collaboration_service.create_project(
+        ctx.active_scope_id,
+        payload,
+        allow_platform_admin=ctx.auth_context.platform_admin,
+    )
+
+
+async def handle_projects_get(ctx: McpApiContext, args: ProjectRefArgs) -> Project:
+    project = await _resolve_project_arg(ctx, args.project_id)
+    await ctx.require_project_permission(project, permission="project.read")
+    return project
+
+
+async def handle_projects_update(ctx: McpApiContext, args: ProjectUpdateArgs) -> Project:
+    project = await _resolve_project_arg(ctx, args.project_id)
+    await ctx.require_project_permission(project, permission="project.write")
+    payload = UpdateProjectRequest(
+        actor=ctx.identity_actor(),
+        **args.model_dump(exclude={"project_id"}),
+    )
+    return await collab_svc.collaboration_service.update_project(
+        project.organization_id,
+        project.project_id,
+        payload,
+        allow_platform_admin=ctx.auth_context.platform_admin,
+    )
+
+
+async def handle_projects_access_list(
+    ctx: McpApiContext,
+    args: ProjectAccessListArgs,
+) -> list[ProjectAccessBinding]:
+    project = await _resolve_project_arg(ctx, args.project_id)
+    await ctx.require_project_permission(project, permission="project.read")
+    return await collab_svc.collaboration_service.list_project_access(
+        project.organization_id,
+        project.project_id,
+        actor=None,
+        allow_platform_admin=True,
+    )
+
+
+async def handle_projects_access_upsert(
+    ctx: McpApiContext,
+    args: ProjectAccessUpsertArgs,
+) -> ProjectAccessBinding:
+    project = await _resolve_project_arg(ctx, args.project_id)
+    await ctx.require_project_permission(project, permission="project.access.write")
+    payload = UpsertProjectAccessRequest(
+        actor=ctx.identity_actor(),
+        **args.model_dump(exclude={"project_id"}),
+    )
+    return await collab_svc.collaboration_service.upsert_project_access(
+        project.organization_id,
+        project.project_id,
+        payload,
+        allow_platform_admin=ctx.auth_context.platform_admin,
+    )
+
+
+async def handle_projects_access_remove(
+    ctx: McpApiContext,
+    args: ProjectAccessRemoveArgs,
+) -> dict[str, Any]:
+    project = await _resolve_project_arg(ctx, args.project_id)
+    await ctx.require_project_permission(project, permission="project.access.write")
+    payload = RemoveProjectAccessRequest(
+        actor=ctx.identity_actor(),
+        **args.model_dump(exclude={"project_id"}),
+    )
+    return await collab_svc.collaboration_service.remove_project_access(
+        project.organization_id,
+        project.project_id,
+        payload,
+        allow_platform_admin=ctx.auth_context.platform_admin,
+    )
+
+
+async def handle_workspaces_list(ctx: McpApiContext, args: WorkspaceListArgs) -> list[Workspace]:
     if ctx.active_scope_kind == "workspace" and ctx.active_scope_id is not None:
         detail = await collab_svc.collaboration_service.get_workspace(ctx.active_scope_id)
         return [detail.workspace]
-    organization_id = ctx.active_scope_id if ctx.active_scope_kind == "organization" else None
+    organization_id = await ctx.active_organization_id()
+    project_id = args.project_id or (
+        ctx.active_scope_id if ctx.active_scope_kind == "project" else None
+    )
+    if project_id is not None:
+        project = await _resolve_project_arg(ctx, project_id)
+        await ctx.require_project_permission(project, permission="workspace.list")
+        organization_id = project.organization_id
     if ctx.auth_context.principal_type == "human":
         user_id = None if ctx.auth_context.platform_admin else ctx.auth_context.user_id
         return await collab_svc.collaboration_service.list_workspaces(
             user_id=user_id,
             organization_id=organization_id,
+            project_id=project_id,
         )
-    scopes = await ctx.list_scope_candidates()
-    visible_workspace_ids = {
-        scope.id
-        for scope in scopes
-        if scope.kind == "workspace"
-        and scope.id is not None
-        and (organization_id is None or scope.organization_id == organization_id)
-    }
-    workspaces = await collab_svc.collaboration_service.list_workspaces(
-        user_id=None,
+    if ctx.auth_context.system_agent_id is None and not ctx.auth_context.platform_admin:
+        return []
+    return await collab_svc.collaboration_service.list_workspaces(
+        system_agent_id=None
+        if ctx.auth_context.platform_admin
+        else ctx.auth_context.system_agent_id,
         organization_id=organization_id,
+        project_id=project_id,
     )
-    return [workspace for workspace in workspaces if workspace.workspace_id in visible_workspace_ids]
+
+
+async def handle_workspaces_create(ctx: McpApiContext, args: WorkspaceCreateArgs) -> WorkspaceDetail:
+    organization_id = await ctx.active_organization_id()
+    if organization_id is None:
+        raise ValueError("workspaces.create requires an active organization or project scope")
+    project_id = args.project_id or (
+        ctx.active_scope_id if ctx.active_scope_kind == "project" else None
+    )
+    if project_id is not None:
+        project = await _resolve_project_arg(ctx, project_id)
+        await ctx.require_project_permission(project, permission="workspace.create")
+        organization_id = project.organization_id
+    payload = CreateWorkspaceRequest(
+        actor=ctx.identity_actor(),
+        organization_id=organization_id,
+        project_id=project_id,
+        **args.model_dump(exclude={"project_id"}),
+    )
+    return await collab_svc.collaboration_service.create_workspace(
+        payload,
+        allow_platform_admin=ctx.auth_context.platform_admin,
+    )
 
 
 async def handle_workspaces_get(ctx: McpApiContext, _: EmptyArgs) -> WorkspaceDetail:
