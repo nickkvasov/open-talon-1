@@ -76,7 +76,8 @@ The design proposal therefore argued for moving from `request -> response` to `s
 - `Project`
   - organization-local work grouping that owns workspaces
   - has typed creator and owner references for either a user or system agent
-  - exposes project structure only to explicit `owner`, `editor`, or `viewer` project access bindings
+  - exposes project structure only to explicit `creator`, `owner`, `editor`, or `viewer` project access bindings
+  - maps those roles to project-local permissions instead of treating them as workspace collaboration roles
 - `Workspace`
   - collaboration boundary inside a project
 - `Thread`

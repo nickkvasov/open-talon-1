@@ -292,8 +292,8 @@ Identity and execution boundaries:
 
 - human identity is global in `users` and `auth_identities`
 - organization membership and membership roles live in `organizations` and `organization_memberships`
-- project grouping lives in `projects`; project creator/owner and viewer/editor/owner access live in `project_access_bindings`
-- project and project-workspace listings are project-access-scoped; workspace detail still depends on IAM and workspace participant attachment
+- project grouping lives in `projects`; project creator, owner, editor, and viewer access live in `project_access_bindings`
+- organization project catalog listing is organization-permission scoped; specific project structure and project-workspace listings are project-access-scoped
 - agent identity/configuration is global in `system_agents`
 - Git-managed agent authoring is versioned in Forgejo and `agent_definition_versions`, but runtime execution still reads the active `system_agents` projection only.
 - workspace-local presence, collaboration roles, capabilities, and visibility live in `participants`

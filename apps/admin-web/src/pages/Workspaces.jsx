@@ -505,7 +505,7 @@ export default function Workspaces() {
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Owner User ID</label>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Owner User IDs</label>
                   <input
                     type="text"
                     value={projectFormData.owner_user_id}
@@ -514,7 +514,7 @@ export default function Workspaces() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Owner Agent ID</label>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Owner Agent IDs</label>
                   <input
                     type="text"
                     value={projectFormData.owner_system_agent_id}

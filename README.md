@@ -108,8 +108,9 @@ Important implications:
 - organization membership and membership roles live in Postgres, not in Keycloak claims
 - humans and agents share one permission catalog, but global and organization IAM roles are stored separately for each subject kind
 - human org membership provides the baseline permission bundle for `owner`, `admin`, and `member`; extra human IAM roles can extend those permissions
-- project access is explicit: each project records typed creator and owner references, and `owner`, `editor`, or `viewer` bindings for users or system agents
-- OIDC project listings and project workspace listings are project-access-scoped; a principal with no project binding cannot see that project or the workspace structure inside it
+- project access is explicit: each project records typed creator and primary owner references, and `creator`, `owner`, `editor`, or `viewer` bindings for users or system agents
+- organization-level project listings require organization `project.read`; project details, access management, and project workspace structure also require local project access
+- project access roles map to project-local permissions: creators and owners can read/write/manage access/create workspaces, editors can read/write/create workspaces, and viewers can read/list workspace structure
 - workspace detail and workspace-scoped operations still require IAM permissions together with participant attachment; collaboration-role definitions do not grant authorization
 - OIDC workspace-scoped reads are membership-scoped; non-members should see `404` for workspace, thread, memory, and workspace-scoped asset reads
 - organization-scoped reads are also membership-scoped; non-members should see `404` there as well

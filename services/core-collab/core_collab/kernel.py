@@ -27,6 +27,7 @@ from workspace_memory import (
 )
 from open_talon_contracts.iam import (
     ORGANIZATION_ROLE_BASE_PERMISSIONS,
+    PROJECT_ROLE_BASE_PERMISSIONS,
 )
 
 from .contracts import (
@@ -340,7 +341,7 @@ class CollaborationKernel:
                             self._project_access_binding(
                                 default_project.project_id,
                                 self._actor_project_subject(payload.actor),
-                                "owner",
+                                "creator",
                                 now=now,
                                 metadata={"created_by": str(created_by), "managed": True},
                             ),
@@ -403,6 +404,7 @@ class CollaborationKernel:
             project.project_id,
             owner=owner_subject,
             creator=creator_subject,
+            owners=payload.owners,
             editors=payload.editors,
             viewers=payload.viewers,
             now=now,
@@ -427,18 +429,7 @@ class CollaborationKernel:
             raise KeyError(f"Organization {organization_id} not found")
         if not hasattr(self._repository, "list_projects"):
             return []
-        if include_all:
-            return await self._repository.list_projects(organization_id)
-        if user_id is not None and hasattr(self._repository, "list_projects_for_user"):
-            return await self._repository.list_projects_for_user(
-                organization_id=organization_id,
-                user_id=user_id,
-            )
-        if system_agent_id is not None and hasattr(self._repository, "list_projects_for_agent"):
-            return await self._repository.list_projects_for_agent(
-                organization_id=organization_id,
-                system_agent_id=system_agent_id,
-            )
+        _ = user_id, system_agent_id, include_all
         return await self._repository.list_projects(organization_id)
 
     async def get_project(self, project_id: UUID) -> Project | None:
@@ -461,10 +452,10 @@ class CollaborationKernel:
         if not allow_platform_admin:
             if actor_user_id is not None:
                 await self._require_organization_membership(organization_id, actor_user_id)
-            await self._require_project_role(
+            await self._require_project_permission(
                 project_id,
                 payload.actor,
-                allowed_roles={"owner", "editor"},
+                permission="project.write",
             )
         updated = project.model_copy(
             update={
@@ -503,10 +494,10 @@ class CollaborationKernel:
             actor_user_id = self._actor_user_id(actor)
             if actor_user_id is not None:
                 await self._require_organization_membership(organization_id, actor_user_id)
-            await self._require_project_role(
+            await self._require_project_permission(
                 project_id,
                 actor,
-                allowed_roles={"owner", "editor", "viewer"},
+                permission="project.read",
             )
         if not hasattr(self._repository, "list_project_access_bindings"):
             return []
@@ -527,20 +518,26 @@ class CollaborationKernel:
             actor_user_id = self._actor_user_id(payload.actor)
             if actor_user_id is not None:
                 await self._require_organization_membership(organization_id, actor_user_id)
-            await self._require_project_role(
+            await self._require_project_permission(
                 project_id,
                 payload.actor,
-                allowed_roles={"owner"},
+                permission="project.access.write",
             )
         now = self._now()
+        subject_is_creator = self._project_subject_matches(
+            payload.subject,
+            user_id=project.creator_user_id,
+            system_agent_id=project.creator_system_agent_id,
+        )
+        if payload.role == "creator" and not subject_is_creator:
+            raise ValueError("Project creator cannot be reassigned through access bindings")
         binding = self._project_access_binding(
             project_id,
             payload.subject,
-            payload.role,
+            "creator" if subject_is_creator else payload.role,
             now=now,
             metadata=payload.metadata,
         )
-        owner_demotions: list[ProjectAccessBinding] = []
         project_update: Project | None = None
         if payload.role == "owner":
             project_update = project.model_copy(
@@ -550,36 +547,10 @@ class CollaborationKernel:
                     "updated_at": now,
                 }
             )
-            if hasattr(self._repository, "list_project_access_bindings"):
-                for existing in await self._repository.list_project_access_bindings(project_id):
-                    if existing.role != "owner":
-                        continue
-                    existing_subject = ProjectSubjectRef(
-                        user_id=existing.user_id,
-                        system_agent_id=existing.system_agent_id,
-                    )
-                    if self._project_subject_key(existing_subject) == self._project_subject_key(
-                        payload.subject
-                    ):
-                        continue
-                    owner_demotions.append(
-                        existing.model_copy(
-                            update={
-                                "role": "editor",
-                                "updated_at": now,
-                                "metadata": {
-                                    **existing.metadata,
-                                    "owner_transferred_at": now.isoformat(),
-                                },
-                            }
-                        )
-                    )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 if project_update is not None:
                     await self._repository.upsert_project(conn, project_update)
-                for demotion in owner_demotions:
-                    await self._repository.upsert_project_access_binding(conn, demotion)
                 await self._repository.upsert_project_access_binding(conn, binding)
         return binding
 
@@ -600,14 +571,20 @@ class CollaborationKernel:
             system_agent_id=project.owner_system_agent_id,
         ):
             raise ValueError("Cannot remove the project owner")
+        if self._project_subject_matches(
+            payload.subject,
+            user_id=project.creator_user_id,
+            system_agent_id=project.creator_system_agent_id,
+        ):
+            raise ValueError("Cannot remove the project creator")
         if not allow_platform_admin:
             actor_user_id = self._actor_user_id(payload.actor)
             if actor_user_id is not None:
                 await self._require_organization_membership(organization_id, actor_user_id)
-            await self._require_project_role(
+            await self._require_project_permission(
                 project_id,
                 payload.actor,
-                allowed_roles={"owner"},
+                permission="project.access.write",
             )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
@@ -1011,10 +988,10 @@ class CollaborationKernel:
                 "workspace.list",
             )
         if not allow_platform_admin and not project_requires_upsert:
-            await self._require_project_role(
+            await self._require_project_permission(
                 project.project_id,
                 payload.actor,
-                allowed_roles={"owner", "editor"},
+                permission="workspace.create",
             )
         workspace_id = uuid4()
         now = self._now()
@@ -1051,7 +1028,7 @@ class CollaborationKernel:
                             self._project_access_binding(
                                 project.project_id,
                                 self._actor_project_subject(payload.actor),
-                                "owner",
+                                "creator",
                                 now=now,
                                 metadata={"managed": True, "source": "default_project"},
                             ),
@@ -3120,7 +3097,9 @@ class CollaborationKernel:
             participant_id=participant_id,
             workspace_id=workspace_id,
             participant_type=payload.actor.participant_type,
-            user_id=participant_id if payload.actor.participant_type == "user" else None,
+            user_id=self._actor_user_id(payload.actor)
+            if payload.actor.participant_type == "user"
+            else None,
             display_name=payload.actor.display_name,
             description=description,
             roles=[payload.role],
@@ -3144,10 +3123,10 @@ class CollaborationKernel:
                         conn,
                         self._project_access_binding(
                             workspace.project_id,
-                            ProjectSubjectRef(system_agent_id=system_agent.agent_id),
+                            self._actor_project_subject(payload.actor),
                             "viewer",
                             now=now,
-                            metadata={"source": "workspace_agent_attachment"},
+                            metadata={"source": "workspace_participant_role_assumed"},
                         ),
                     )
                 event = await self._build_workspace_event(
@@ -8050,11 +8029,17 @@ class CollaborationKernel:
         *,
         owner: ProjectSubjectRef,
         creator: ProjectSubjectRef,
+        owners: list[ProjectSubjectRef],
         editors: list[ProjectSubjectRef],
         viewers: list[ProjectSubjectRef],
         now: datetime,
     ) -> list[ProjectAccessBinding]:
-        role_rank: dict[ProjectAccessRole, int] = {"viewer": 0, "editor": 1, "owner": 2}
+        role_rank: dict[ProjectAccessRole, int] = {
+            "viewer": 0,
+            "editor": 1,
+            "owner": 2,
+            "creator": 3,
+        }
         subjects: dict[tuple[str, UUID], tuple[ProjectSubjectRef, ProjectAccessRole]] = {}
 
         def add(subject: ProjectSubjectRef, role: ProjectAccessRole) -> None:
@@ -8067,8 +8052,10 @@ class CollaborationKernel:
             add(subject, "viewer")
         for subject in editors:
             add(subject, "editor")
-        add(creator, "editor")
+        for subject in owners:
+            add(subject, "owner")
         add(owner, "owner")
+        add(creator, "creator")
         return [
             CollaborationKernel._project_access_binding(
                 project_id,
@@ -8102,17 +8089,18 @@ class CollaborationKernel:
             )
         return None
 
-    async def _require_project_role(
+    async def _require_project_permission(
         self,
         project_id: UUID,
         actor: ParticipantInput,
         *,
-        allowed_roles: set[ProjectAccessRole],
+        permission: str,
     ) -> ProjectAccessBinding:
         binding = await self._fetch_project_access_for_actor(project_id, actor)
-        if binding is None or binding.role not in allowed_roles:
+        effective_permissions = PROJECT_ROLE_BASE_PERMISSIONS.get(binding.role, ()) if binding else ()
+        if binding is None or permission not in effective_permissions:
             raise PermissionError(
-                f"Project {project_id} requires one of roles {sorted(allowed_roles)!r}"
+                f"Project {project_id} requires project permission {permission!r}"
             )
         return binding
 

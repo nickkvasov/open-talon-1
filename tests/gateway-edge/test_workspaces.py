@@ -254,6 +254,7 @@ async def test_project_access_controls_project_and_workspace_structure(
 ):
     organization_id = "11111111-1111-1111-1111-111111111111"
     admin_context = _oidc_context(roles=["admin"])
+    creator_context = _oidc_context(roles=["workspace-user"])
     owner_context = _oidc_context(roles=["workspace-user"])
     viewer_context = _oidc_context(roles=["workspace-user"])
     editor_context = _oidc_context(roles=["workspace-user"])
@@ -262,6 +263,7 @@ async def test_project_access_controls_project_and_workspace_structure(
         monkeypatch,
         {
             "admin-token": admin_context,
+            "creator-token": creator_context,
             "owner-token": owner_context,
             "viewer-token": viewer_context,
             "editor-token": editor_context,
@@ -269,21 +271,27 @@ async def test_project_access_controls_project_and_workspace_structure(
         },
     )
 
-    for context in [owner_context, viewer_context, editor_context, outsider_context]:
+    for context, role in [
+        (creator_context, "admin"),
+        (owner_context, "member"),
+        (viewer_context, "member"),
+        (editor_context, "member"),
+        (outsider_context, "member"),
+    ]:
         membership_response = await client.post(
             f"/v1/organizations/{organization_id}/members",
             headers={"Authorization": "Bearer admin-token"},
             json={
                 "actor": actor_payload,
                 "user_id": str(context.user_id),
-                "role": "member",
+                "role": role,
             },
         )
         assert membership_response.status_code == 200
 
     project_response = await client.post(
         f"/v1/organizations/{organization_id}/projects",
-        headers={"Authorization": "Bearer admin-token"},
+        headers={"Authorization": "Bearer creator-token"},
         json={
             "slug": "Private Project",
             "name": "Private Project",
@@ -310,7 +318,9 @@ async def test_project_access_controls_project_and_workspace_structure(
         headers={"Authorization": "Bearer outsider-token"},
     )
     assert outsider_projects.status_code == 200
-    assert outsider_projects.json() == []
+    assert project["project_id"] in {
+        item["project_id"] for item in outsider_projects.json()
+    }
 
     outsider_project = await client.get(
         f"/v1/organizations/{organization_id}/projects/{project['project_id']}",
@@ -346,6 +356,28 @@ async def test_project_access_controls_project_and_workspace_structure(
         json={"name": "Editor Workspace", "actor": actor_payload},
     )
     assert editor_create.status_code == 200
+
+    creator_access = await client.put(
+        f"/v1/organizations/{organization_id}/projects/{project['project_id']}/access",
+        headers={"Authorization": "Bearer creator-token"},
+        json={
+            "actor": actor_payload,
+            "subject": {"user_id": str(uuid4())},
+            "role": "viewer",
+        },
+    )
+    assert creator_access.status_code == 200
+
+    editor_access = await client.put(
+        f"/v1/organizations/{organization_id}/projects/{project['project_id']}/access",
+        headers={"Authorization": "Bearer editor-token"},
+        json={
+            "actor": actor_payload,
+            "subject": {"user_id": str(uuid4())},
+            "role": "viewer",
+        },
+    )
+    assert editor_access.status_code == 403
 
 
 async def test_list_workspaces_filters_to_authenticated_project_access_in_oidc_mode(

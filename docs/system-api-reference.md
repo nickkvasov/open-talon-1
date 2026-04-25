@@ -143,7 +143,9 @@ Open Talon separates identity from workspace presence.
 - Organizations are identified by `organizations.organization_id`
 - Projects are identified by `projects.project_id` and belong to one organization
 - Projects record typed creator and owner references for either a user or system agent
-- Project visibility is controlled by `project_access_bindings` with `owner`, `editor`, and `viewer` roles for users or system agents
+- Organization-level project listing is controlled by organization `project.read`; specific project metadata, access management, and project workspace structure are controlled by `project_access_bindings`
+- Project access bindings use `creator`, `owner`, `editor`, and `viewer` roles for users or system agents
+- Project roles are evaluated as project-local permissions: `creator` and `owner` include project read/write, access management, workspace listing, and workspace creation; `editor` includes project read/write plus workspace listing/creation; `viewer` includes project read and workspace listing only
 - Human org membership and membership roles live in `organization_memberships`
 - Organization membership roles provide the baseline human permission bundle
 - The external OIDC provider is not the source of truth for org membership or authorization

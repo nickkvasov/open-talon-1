@@ -1,12 +1,12 @@
 # Database Migrations
 
-Open Talon tracks database changes as `dbmate`-style SQL files in [`db/migrations`](../db/migrations).
+Open Talon tracks database changes as reviewable SQL files in [`db/migrations`](../db/migrations).
 
 ## Source Of Truth
 
 - Migration files are the source of truth for schema evolution.
 - The application startup path applies pending migrations through the Python runner in [`services/core-collab/core_collab/migrations.py`](../services/core-collab/core_collab/migrations.py).
-- The preferred developer CLI is [`scripts/dbmate.sh`](../scripts/dbmate.sh).
+- [`scripts/dbmate.sh`](../scripts/dbmate.sh) is available for creating timestamped migration files, but the existing migration set is plain SQL and the Python runner remains the authoritative local apply/status path until the dbmate version format is harmonized.
 
 ## Environment
 
@@ -23,14 +23,8 @@ The wrapper script uses those same conventions and defaults to the local dev Pos
 # create a migration
 ./scripts/dbmate.sh new add_workspace_archival
 
-# apply pending migrations
-./scripts/dbmate.sh up
-
-# show current status
-./scripts/dbmate.sh status
-
-# rollback the most recent migration
-./scripts/dbmate.sh rollback
+# apply pending migrations through the same path used by startup/tests
+./open-talon start
 ```
 
 ## Authoring Guidelines
@@ -47,8 +41,7 @@ If you add GitHub Actions or another CI system later, the minimal migration gate
 
 ```bash
 source .venv/bin/activate
-./scripts/dbmate.sh up
 pytest -q
 ```
 
-That catches broken migration SQL before application tests run.
+Repository and gateway startup tests exercise the Python migration runner before using the database.

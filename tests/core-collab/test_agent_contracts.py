@@ -1320,10 +1320,13 @@ async def test_kernel_project_access_filters_projects_and_project_workspaces():
     )
     assert workspace_result.workspace is not None
 
-    assert await kernel.list_projects(
-        organization.organization_id,
-        user_id=outsider_user_id,
-    ) == []
+    assert [
+        item.project_id
+        for item in await kernel.list_projects(
+            organization.organization_id,
+            user_id=outsider_user_id,
+        )
+    ] == [project.project_id]
     assert await kernel.list_workspaces(
         user_id=outsider_user_id,
         organization_id=organization.organization_id,
@@ -1403,7 +1406,178 @@ async def test_kernel_project_access_filters_projects_and_project_workspaces():
     )
     roles_by_user = {binding.user_id: binding.role for binding in bindings}
     assert roles_by_user[viewer_user_id] == "owner"
-    assert roles_by_user[owner.user_id] == "editor"
+    assert roles_by_user[owner.user_id] == "creator"
+    extra_viewer_id = uuid4()
+    extra_viewer = await kernel.upsert_project_access(
+        organization.organization_id,
+        project.project_id,
+        UpsertProjectAccessRequest(
+            actor=owner,
+            subject=ProjectSubjectRef(user_id=extra_viewer_id),
+            role="viewer",
+        ),
+    )
+    assert extra_viewer.role == "viewer"
+    with pytest.raises(ValueError):
+        await kernel.remove_project_access(
+            organization.organization_id,
+            project.project_id,
+            RemoveProjectAccessRequest(
+                actor=owner,
+                subject=ProjectSubjectRef(user_id=viewer_user_id),
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_kernel_project_creator_owner_editor_viewer_permissions_compose():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    creator = ParticipantInput(
+        participant_id=uuid4(),
+        participant_type="user",
+        user_id=uuid4(),
+        display_name="Creator",
+    )
+    owner_user_id = uuid4()
+    second_owner_user_id = uuid4()
+    editor_user_id = uuid4()
+    viewer_user_id = uuid4()
+    owner = ParticipantInput(
+        participant_id=owner_user_id,
+        participant_type="user",
+        user_id=owner_user_id,
+        display_name="Owner",
+    )
+    viewer = ParticipantInput(
+        participant_id=viewer_user_id,
+        participant_type="user",
+        user_id=viewer_user_id,
+        display_name="Viewer",
+    )
+    second_owner = ParticipantInput(
+        participant_id=second_owner_user_id,
+        participant_type="user",
+        user_id=second_owner_user_id,
+        display_name="Second Owner",
+    )
+    editor = ParticipantInput(
+        participant_id=editor_user_id,
+        participant_type="user",
+        user_id=editor_user_id,
+        display_name="Editor",
+    )
+    organization = Organization(
+        organization_id=uuid4(),
+        slug="role-permissions",
+        name="Role Permissions",
+        created_by=creator.user_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    repository._organizations[organization.organization_id] = organization
+
+    project_result = await kernel.create_project(
+        organization.organization_id,
+        CreateProjectRequest(
+            actor=creator,
+            slug="Role Project",
+            name="Role Project",
+            owner=ProjectSubjectRef(user_id=owner_user_id),
+            owners=[ProjectSubjectRef(user_id=second_owner_user_id)],
+            editors=[ProjectSubjectRef(user_id=editor_user_id)],
+            viewers=[ProjectSubjectRef(user_id=viewer_user_id)],
+        ),
+    )
+    project = project_result.project
+    assert project is not None
+    bindings = await kernel.list_project_access(
+        organization.organization_id,
+        project.project_id,
+        actor=viewer,
+    )
+    roles_by_user = {binding.user_id: binding.role for binding in bindings}
+    assert roles_by_user[creator.user_id] == "creator"
+    assert roles_by_user[owner_user_id] == "owner"
+    assert roles_by_user[second_owner_user_id] == "owner"
+    assert roles_by_user[editor_user_id] == "editor"
+    assert roles_by_user[viewer_user_id] == "viewer"
+
+    updated = await kernel.update_project(
+        organization.organization_id,
+        project.project_id,
+        UpdateProjectRequest(actor=creator, name="Creator Can Edit"),
+    )
+    assert updated.project is not None
+    assert updated.project.name == "Creator Can Edit"
+
+    with pytest.raises(PermissionError):
+        await kernel.update_project(
+            organization.organization_id,
+            project.project_id,
+            UpdateProjectRequest(actor=viewer, name="Viewer Cannot Edit"),
+        )
+
+    await kernel.upsert_project_access(
+        organization.organization_id,
+        project.project_id,
+        UpsertProjectAccessRequest(
+            actor=owner,
+            subject=ProjectSubjectRef(user_id=uuid4()),
+            role="viewer",
+        ),
+    )
+    creator_binding = await kernel.upsert_project_access(
+        organization.organization_id,
+        project.project_id,
+        UpsertProjectAccessRequest(
+            actor=creator,
+            subject=ProjectSubjectRef(user_id=uuid4()),
+            role="viewer",
+        ),
+    )
+    assert creator_binding.role == "viewer"
+    with pytest.raises(ValueError):
+        await kernel.upsert_project_access(
+            organization.organization_id,
+            project.project_id,
+            UpsertProjectAccessRequest(
+                actor=creator,
+                subject=ProjectSubjectRef(user_id=uuid4()),
+                role="creator",
+            ),
+        )
+    second_owner_binding = await kernel.upsert_project_access(
+        organization.organization_id,
+        project.project_id,
+        UpsertProjectAccessRequest(
+            actor=second_owner,
+            subject=ProjectSubjectRef(user_id=uuid4()),
+            role="viewer",
+        ),
+    )
+    assert second_owner_binding.role == "viewer"
+    editor_workspace = await kernel.create_workspace(
+        CreateWorkspaceRequest(
+            organization_id=organization.organization_id,
+            project_id=project.project_id,
+            name="Editor Workspace",
+            actor=editor,
+        ),
+    )
+    assert editor_workspace.workspace is not None
+    with pytest.raises(PermissionError):
+        await kernel.upsert_project_access(
+            organization.organization_id,
+            project.project_id,
+            UpsertProjectAccessRequest(
+                actor=editor,
+                subject=ProjectSubjectRef(user_id=uuid4()),
+                role="viewer",
+            ),
+        )
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,8 @@ from .iam import (
     IDENTITY_PERMISSION_DESCRIPTIONS,
     IDENTITY_PERMISSION_NAMES,
     ORGANIZATION_ROLE_BASE_PERMISSIONS,
+    PROJECT_PERMISSION_DESCRIPTIONS,
+    PROJECT_ROLE_BASE_PERMISSIONS,
     WORKSPACE_PERMISSION_DESCRIPTIONS,
     WORKSPACE_PERMISSION_NAMES,
 )
@@ -473,6 +475,8 @@ __all__ = [
     "load_repo_local_env",
     "interaction_contract_is_empty",
     "ORGANIZATION_ROLE_BASE_PERMISSIONS",
+    "PROJECT_PERMISSION_DESCRIPTIONS",
+    "PROJECT_ROLE_BASE_PERMISSIONS",
     "redact_payload",
     "telemetry_metadata",
     "runtime_preferences_from_definition",

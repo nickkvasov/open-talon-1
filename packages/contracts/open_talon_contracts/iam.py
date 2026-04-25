@@ -48,6 +48,29 @@ WORKSPACE_PERMISSION_DESCRIPTIONS: dict[str, str] = {
     "workspace.audit.verify": "Verify workspace audit chains.",
 }
 
+PROJECT_PERMISSION_DESCRIPTIONS: dict[str, str] = {
+    "project.read": "Read project metadata and workspace structure for a project-bound principal.",
+    "project.write": "Update project metadata for a project-bound principal.",
+    "project.access.write": "Create, update, or remove project access bindings.",
+    "workspace.list": "List workspace structure inside a project.",
+    "workspace.create": "Create workspaces inside a project.",
+}
+
+PROJECT_ROLE_BASE_PERMISSIONS: dict[str, tuple[str, ...]] = {
+    "creator": tuple(PROJECT_PERMISSION_DESCRIPTIONS),
+    "owner": tuple(PROJECT_PERMISSION_DESCRIPTIONS),
+    "editor": (
+        "project.read",
+        "project.write",
+        "workspace.list",
+        "workspace.create",
+    ),
+    "viewer": (
+        "project.read",
+        "workspace.list",
+    ),
+}
+
 IDENTITY_PERMISSION_NAMES: tuple[str, ...] = tuple(IDENTITY_PERMISSION_DESCRIPTIONS.keys())
 WORKSPACE_PERMISSION_NAMES: tuple[str, ...] = tuple(WORKSPACE_PERMISSION_DESCRIPTIONS.keys())
 
@@ -111,6 +134,8 @@ __all__ = [
     "IDENTITY_PERMISSION_DESCRIPTIONS",
     "IDENTITY_PERMISSION_NAMES",
     "ORGANIZATION_ROLE_BASE_PERMISSIONS",
+    "PROJECT_PERMISSION_DESCRIPTIONS",
+    "PROJECT_ROLE_BASE_PERMISSIONS",
     "WORKSPACE_PERMISSION_DESCRIPTIONS",
     "WORKSPACE_PERMISSION_NAMES",
 ]

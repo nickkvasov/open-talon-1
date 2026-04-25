@@ -383,7 +383,7 @@ class Project(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-ProjectAccessRole = Literal["owner", "editor", "viewer"]
+ProjectAccessRole = Literal["creator", "owner", "editor", "viewer"]
 ProjectSubjectType = Literal["user", "agent"]
 
 
@@ -1530,6 +1530,7 @@ class CreateProjectRequest(BaseModel):
     name: str
     description: str | None = None
     owner: ProjectSubjectRef | None = None
+    owners: list[ProjectSubjectRef] = Field(default_factory=list)
     editors: list[ProjectSubjectRef] = Field(default_factory=list)
     viewers: list[ProjectSubjectRef] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

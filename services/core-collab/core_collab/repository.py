@@ -985,7 +985,7 @@ class CollaborationRepository:
             FROM project_access_bindings
             WHERE project_id = $1
             ORDER BY
-                CASE role WHEN 'owner' THEN 0 WHEN 'editor' THEN 1 ELSE 2 END,
+                CASE role WHEN 'creator' THEN 0 WHEN 'owner' THEN 1 WHEN 'editor' THEN 2 ELSE 3 END,
                 created_at ASC
             """,
             project_id,
@@ -3154,7 +3154,7 @@ class CollaborationRepository:
               ON access.project_id = w.project_id
              AND access.subject_type = 'user'
              AND access.user_id = $1
-             AND access.role IN ('owner', 'editor', 'viewer')
+             AND access.role IN ('creator', 'owner', 'editor', 'viewer')
             WHERE TRUE
               AND ($2::uuid IS NULL OR w.organization_id = $2)
               AND ($3::uuid IS NULL OR w.project_id = $3)
@@ -3182,7 +3182,7 @@ class CollaborationRepository:
               ON access.project_id = w.project_id
              AND access.subject_type = 'agent'
              AND access.system_agent_id = $1
-             AND access.role IN ('owner', 'editor', 'viewer')
+             AND access.role IN ('creator', 'owner', 'editor', 'viewer')
             WHERE ($2::uuid IS NULL OR w.organization_id = $2)
               AND ($3::uuid IS NULL OR w.project_id = $3)
             ORDER BY w.created_at ASC

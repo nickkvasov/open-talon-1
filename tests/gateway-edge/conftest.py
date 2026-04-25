@@ -82,7 +82,7 @@ class MockCollaborationService:
                 project_id=self.default_project.project_id,
                 subject_type="user",
                 user_id=self.default_organization.created_by,
-                role="owner",
+                role="creator",
                 created_at=now,
                 updated_at=now,
                 metadata={},
@@ -226,7 +226,7 @@ class MockCollaborationService:
                     project_id=project_id,
                     subject_type="user",
                     user_id=payload.actor.user_id,
-                    role="owner",
+                    role="creator",
                     created_at=now,
                     updated_at=now,
                     metadata={"source": "workspace_create"},
@@ -239,7 +239,7 @@ class MockCollaborationService:
                     project_id=project_id,
                     subject_type="agent",
                     system_agent_id=payload.actor.participant_id,
-                    role="owner",
+                    role="creator",
                     created_at=now,
                     updated_at=now,
                     metadata={"source": "workspace_create"},
@@ -351,7 +351,7 @@ class MockCollaborationService:
                 project_id=default_project.project_id,
                 subject_type="user",
                 user_id=payload.actor.user_id,
-                role="owner",
+                role="creator",
                 created_at=now,
                 updated_at=now,
                 metadata={},
@@ -453,31 +453,32 @@ class MockCollaborationService:
                     metadata={},
                 )
             )
-        if actor_user_id is not None and actor_user_id != owner_user_id:
+        if actor_user_id is not None:
             bindings.append(
                 ProjectAccessBinding(
                     project_id=project.project_id,
                     subject_type="user",
                     user_id=actor_user_id,
-                    role="editor",
+                    role="creator",
                     created_at=now,
                     updated_at=now,
                     metadata={},
                 )
             )
-        if actor_system_agent_id is not None and actor_system_agent_id != owner_system_agent_id:
+        if actor_system_agent_id is not None:
             bindings.append(
                 ProjectAccessBinding(
                     project_id=project.project_id,
                     subject_type="agent",
                     system_agent_id=actor_system_agent_id,
-                    role="editor",
+                    role="creator",
                     created_at=now,
                     updated_at=now,
                     metadata={},
                 )
             )
         for subject, role in [
+            *[(subject, "owner") for subject in payload.owners],
             *[(subject, "editor") for subject in payload.editors],
             *[(subject, "viewer") for subject in payload.viewers],
         ]:
@@ -497,7 +498,7 @@ class MockCollaborationService:
             subject_id = binding.user_id or binding.system_agent_id
             key = (str(project.project_id), binding.subject_type, str(subject_id))
             existing = self.project_access_bindings.get(key)
-            role_rank = {"viewer": 0, "editor": 1, "owner": 2}
+            role_rank = {"viewer": 0, "editor": 1, "owner": 2, "creator": 3}
             if existing is None or role_rank[binding.role] > role_rank[existing.role]:
                 self.project_access_bindings[key] = binding
         return project
@@ -615,12 +616,21 @@ class MockCollaborationService:
         if project.organization_id != organization_id:
             raise KeyError(f"Project {project_id} not found in organization {organization_id}")
         now = datetime.now(timezone.utc)
+        subject_is_creator = (
+            payload.subject.user_id is not None
+            and payload.subject.user_id == project.creator_user_id
+        ) or (
+            payload.subject.system_agent_id is not None
+            and payload.subject.system_agent_id == project.creator_system_agent_id
+        )
+        if payload.role == "creator" and not subject_is_creator:
+            raise ValueError("Project creator cannot be reassigned through access bindings")
         binding = ProjectAccessBinding(
             project_id=project_id,
             subject_type="agent" if payload.subject.system_agent_id is not None else "user",
             user_id=payload.subject.user_id,
             system_agent_id=payload.subject.system_agent_id,
-            role=payload.role,
+            role="creator" if subject_is_creator else payload.role,
             created_at=now,
             updated_at=now,
             metadata=payload.metadata,
@@ -630,14 +640,6 @@ class MockCollaborationService:
             (str(project_id), binding.subject_type, str(subject_id))
         ] = binding
         if payload.role == "owner":
-            for key, existing in list(self.project_access_bindings.items()):
-                if key[0] != str(project_id) or existing.role != "owner":
-                    continue
-                if key == (str(project_id), binding.subject_type, str(subject_id)):
-                    continue
-                self.project_access_bindings[key] = existing.model_copy(
-                    update={"role": "editor", "updated_at": now}
-                )
             self.projects[str(project_id)] = project.model_copy(
                 update={
                     "owner_user_id": binding.user_id,
@@ -667,6 +669,14 @@ class MockCollaborationService:
             and payload.subject.system_agent_id is not None
         ):
             raise ValueError("Cannot remove the project owner")
+        if (
+            payload.subject.user_id is not None
+            and payload.subject.user_id == project.creator_user_id
+        ) or (
+            payload.subject.system_agent_id == project.creator_system_agent_id
+            and payload.subject.system_agent_id is not None
+        ):
+            raise ValueError("Cannot remove the project creator")
         subject_type = "agent" if payload.subject.system_agent_id is not None else "user"
         subject_id = payload.subject.system_agent_id or payload.subject.user_id
         key = (str(project_id), subject_type, str(subject_id))

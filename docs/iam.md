@@ -124,7 +124,16 @@ Project routes are organization control-plane routes:
 - `PUT /v1/organizations/{organization_id}/projects/{project_id}/access`
 - `DELETE /v1/organizations/{organization_id}/projects/{project_id}/access`
 
-Project creation still requires organization-level `project.write`. Project reads require `project.read` plus an explicit project access binding unless the caller is a platform admin or API-key/system path. Project access bindings can target a user or system agent with role `owner`, `editor`, or `viewer`. Owners and editors can update project metadata and create workspaces in the project; viewers can read the project and list workspace structure. Owners manage access bindings. Workspace creation can target a project directly with `/v1/organizations/{organization_id}/projects/{project_id}/workspaces` or with `project_id` on `POST /v1/workspaces`.
+Project creation still requires organization-level `project.write`. Listing projects in an organization requires organization-level `project.read` and returns the organization's project catalog. Reading a specific project, listing workspace structure inside it, creating project workspaces, and managing project access require organization permission plus an explicit project access binding unless the caller is a platform admin or API-key/system path. The project access role then contributes project-local permissions:
+
+| Project role | Project-local permissions |
+| --- | --- |
+| `creator` | `project.read`, `project.write`, `project.access.write`, `workspace.list`, `workspace.create` |
+| `owner` | `project.read`, `project.write`, `project.access.write`, `workspace.list`, `workspace.create` |
+| `editor` | `project.read`, `project.write`, `workspace.list`, `workspace.create` |
+| `viewer` | `project.read`, `workspace.list` |
+
+Project access bindings can target a user or system agent. When a project is created, the creator is granted `creator`; if no separate owner is supplied, the creator is also the primary owner. Owners and the creator manage access bindings. Workspace creation can target a project directly with `/v1/organizations/{organization_id}/projects/{project_id}/workspaces` or with `project_id` on `POST /v1/workspaces`.
 
 ## Baseline human authorization
 

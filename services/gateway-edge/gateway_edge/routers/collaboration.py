@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from open_talon_contracts.iam import PROJECT_ROLE_BASE_PERMISSIONS
 from open_talon_contracts.models import normalize_organization_slug
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -91,7 +92,6 @@ from gateway_edge.models import (
     ParticipantProfile,
     Project,
     ProjectAccessBinding,
-    ProjectAccessRole,
     ProjectSubjectRef,
     PublishAssetFromGitRequest,
     PublishAgentBundleFromGitRequest,
@@ -448,9 +448,11 @@ async def _load_project(
     *,
     permission: str,
     organization_id: UUID | None = None,
-    allowed_roles: set[ProjectAccessRole] | None = None,
+    project_permission: str = "project.read",
 ) -> Project:
     project = await collab_svc.collaboration_service.get_project(project_id)
+    if project is None:
+        raise _http_error(KeyError(f"Project {project_id} not found"))
     if organization_id is not None:
         _require_resource_in_organization(
             resource_name="Project",
@@ -466,7 +468,7 @@ async def _load_project(
     await _require_project_access(
         request,
         project,
-        allowed_roles=allowed_roles or {"owner", "editor", "viewer"},
+        project_permission=project_permission,
     )
     return project
 
@@ -511,7 +513,7 @@ async def _require_project_access(
     request: Request,
     project: Project,
     *,
-    allowed_roles: set[ProjectAccessRole],
+    project_permission: str,
 ) -> ProjectAccessBinding | None:
     auth_context = _oidc_auth_context(request)
     if auth_context is None or auth_context.kind == "api_key" or has_admin_access(request):
@@ -519,10 +521,11 @@ async def _require_project_access(
     binding = await _project_access_binding_for_request(request, project)
     if binding is None:
         raise _http_error(KeyError(f"Project {project.project_id} not found"))
-    if binding.role not in allowed_roles:
+    effective_permissions = PROJECT_ROLE_BASE_PERMISSIONS.get(binding.role, ())
+    if project_permission not in effective_permissions:
         raise HTTPException(
             status_code=403,
-            detail=f"Project role {sorted(allowed_roles)!r} required",
+            detail=f"Project permission {project_permission!r} required",
         )
     return binding
 
@@ -1031,19 +1034,8 @@ async def list_organization_projects(
         permission="project.read",
         organization_id=organization_id,
     )
-    auth_context = _oidc_auth_context(request)
-    subject = _project_subject_from_auth_context(auth_context)
-    if auth_context is not None and not has_admin_access(request) and subject is None:
-        return []
     try:
-        return await collab_svc.collaboration_service.list_projects_for_principal(
-            organization_id,
-            user_id=None if has_admin_access(request) else (subject.user_id if subject else None),
-            system_agent_id=None
-            if has_admin_access(request)
-            else (subject.system_agent_id if subject else None),
-            include_all=has_admin_access(request) or auth_context is None,
-        )
+        return await collab_svc.collaboration_service.list_projects(organization_id)
     except Exception as exc:
         raise _http_error(exc) from exc
 
@@ -1085,7 +1077,7 @@ async def update_organization_project(
         project_id,
         permission="project.read",
         organization_id=organization_id,
-        allowed_roles={"owner", "editor"},
+        project_permission="project.write",
     )
     payload = payload.model_copy(
         update={"actor": _resolve_organization_actor(request, payload.actor)}
@@ -1116,7 +1108,7 @@ async def list_project_access(
         project_id,
         permission="project.read",
         organization_id=organization_id,
-        allowed_roles={"owner", "editor", "viewer"},
+        project_permission="project.read",
     )
     try:
         return await collab_svc.collaboration_service.list_project_access(
@@ -1145,7 +1137,7 @@ async def upsert_project_access(
         project_id,
         permission="project.read",
         organization_id=organization_id,
-        allowed_roles={"owner"},
+        project_permission="project.access.write",
     )
     payload = payload.model_copy(
         update={"actor": _resolve_organization_actor(request, payload.actor)}
@@ -1177,7 +1169,7 @@ async def remove_project_access(
         project_id,
         permission="project.read",
         organization_id=organization_id,
-        allowed_roles={"owner"},
+        project_permission="project.access.write",
     )
     payload = payload.model_copy(
         update={"actor": _resolve_organization_actor(request, payload.actor)}
@@ -1202,7 +1194,7 @@ async def create_workspace(request: Request, payload: CreateWorkspaceRequest) ->
             payload.project_id,
             permission="workspace.list",
             organization_id=payload.organization_id,
-            allowed_roles={"owner", "editor"},
+            project_permission="workspace.create",
         )
     if payload.organization_id is not None and project is None:
         await _require_identity_permission(
@@ -1249,7 +1241,7 @@ async def list_workspaces(
             project_id,
             permission="workspace.list",
             organization_id=organization_id,
-            allowed_roles={"owner", "editor", "viewer"},
+            project_permission="workspace.list",
         )
         if organization_id is None:
             organization_id = project.organization_id
@@ -1314,7 +1306,7 @@ async def create_organization_workspace(
             payload.project_id,
             permission="workspace.list",
             organization_id=organization_id,
-            allowed_roles={"owner", "editor"},
+            project_permission="workspace.create",
         )
     payload = payload.model_copy(
         update={
@@ -1352,7 +1344,7 @@ async def list_organization_workspaces(
             project_id,
             permission="workspace.list",
             organization_id=organization_id,
-            allowed_roles={"owner", "editor", "viewer"},
+            project_permission="workspace.list",
         )
     auth_context = _oidc_auth_context(request)
     user_id = (
@@ -1392,7 +1384,7 @@ async def create_project_workspace(
         project_id,
         permission="workspace.list",
         organization_id=organization_id,
-        allowed_roles={"owner", "editor"},
+        project_permission="workspace.create",
     )
     payload = payload.model_copy(
         update={
@@ -1425,7 +1417,7 @@ async def list_project_workspaces(
         project_id,
         permission="workspace.list",
         organization_id=organization_id,
-        allowed_roles={"owner", "editor", "viewer"},
+        project_permission="workspace.list",
     )
     auth_context = _oidc_auth_context(request)
     user_id = (

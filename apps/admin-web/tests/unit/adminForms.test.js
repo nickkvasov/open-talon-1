@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  buildProjectMutation,
   buildMemoryProviderPayload,
   buildProviderMutation,
   buildWorkspaceHarness,
@@ -102,6 +103,37 @@ test('buildWorkspaceMutation raises labeled errors for invalid JSON fields', () 
     }),
     /Metadata must be valid JSON\./,
   );
+});
+
+test('buildProjectMutation serializes creator owner editor viewer access subjects', () => {
+  const payload = buildProjectMutation({
+    actor,
+    formData: {
+      slug: 'project-one',
+      name: 'Project One',
+      description: '',
+      owner_user_id: '11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222',
+      owner_system_agent_id: '',
+      editor_user_ids: '33333333-3333-3333-3333-333333333333',
+      editor_system_agent_ids: '',
+      viewer_user_ids: '',
+      viewer_system_agent_ids: '44444444-4444-4444-4444-444444444444',
+      metadata: '{"source":"unit"}',
+    },
+  });
+
+  assert.equal(payload.owner.user_id, '11111111-1111-1111-1111-111111111111');
+  assert.deepEqual(payload.owners, [
+    { user_id: '11111111-1111-1111-1111-111111111111' },
+    { user_id: '22222222-2222-2222-2222-222222222222' },
+  ]);
+  assert.deepEqual(payload.editors, [
+    { user_id: '33333333-3333-3333-3333-333333333333' },
+  ]);
+  assert.deepEqual(payload.viewers, [
+    { system_agent_id: '44444444-4444-4444-4444-444444444444' },
+  ]);
+  assert.deepEqual(payload.metadata, { source: 'unit' });
 });
 
 test('buildProviderMutation builds organization-scoped llm requests', () => {

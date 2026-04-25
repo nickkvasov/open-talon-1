@@ -81,9 +81,6 @@ export function buildProjectMutation({
     ...subjectRefsFromCsv(formData.owner_user_id, 'user_id'),
     ...subjectRefsFromCsv(formData.owner_system_agent_id, 'system_agent_id'),
   ];
-  if (ownerSubjects.length > 1) {
-    throw new Error('Project owner must be a single user ID or system agent ID.');
-  }
   const editors = [
     ...subjectRefsFromCsv(formData.editor_user_ids, 'user_id'),
     ...subjectRefsFromCsv(formData.editor_system_agent_ids, 'system_agent_id'),
@@ -101,6 +98,7 @@ export function buildProjectMutation({
   };
   if (ownerSubjects.length) {
     payload.owner = ownerSubjects[0];
+    payload.owners = ownerSubjects;
   }
   if (editors.length) {
     payload.editors = editors;
