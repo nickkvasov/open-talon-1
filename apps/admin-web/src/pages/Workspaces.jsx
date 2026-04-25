@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { 
   FolderKanban, 
+  FolderTree,
   AlertTriangle, 
   Users, 
   Edit2, 
@@ -16,12 +17,14 @@ import {
 import { useApi } from '../api/useApi';
 import ConfirmationModal from '../components/Common/ConfirmationModal';
 import { buildAdminActor } from '../config/adminActor';
-import { buildWorkspaceMutation } from '../lib/adminForms';
+import { buildProjectMutation, buildWorkspaceMutation } from '../lib/adminForms';
 
 export default function Workspaces() {
   const api = useApi();
   const [organizations, setOrganizations] = useState([]);
   const [selectedOrganizationId, setSelectedOrganizationId] = useState('');
+  const [projects, setProjects] = useState([]);
+  const [selectedProjectId, setSelectedProjectId] = useState('');
   const [workspaces, setWorkspaces] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -34,10 +37,24 @@ export default function Workspaces() {
   
   // Workspace Edit Modal
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState('create');
+  const [projectFormData, setProjectFormData] = useState({
+    slug: '',
+    name: '',
+    description: '',
+    owner_user_id: '',
+    owner_system_agent_id: '',
+    editor_user_ids: '',
+    editor_system_agent_ids: '',
+    viewer_user_ids: '',
+    viewer_system_agent_ids: '',
+    metadata: '{}',
+  });
   const [workspaceFormData, setWorkspaceFormData] = useState({
     name: '',
     description: '',
+    project_id: '',
     metadata: '{}',
     harness_summary: '',
     methodology_ontology: '',
@@ -58,8 +75,11 @@ export default function Workspaces() {
   const fetchWorkspaces = async () => {
     try {
       setLoading(true);
+      const params = {};
+      if (selectedOrganizationId) params.organization_id = selectedOrganizationId;
+      if (selectedProjectId) params.project_id = selectedProjectId;
       const res = await api.get('/v1/workspaces', {
-        params: selectedOrganizationId ? { organization_id: selectedOrganizationId } : {},
+        params,
       });
       setWorkspaces(res.data);
       setError(null);
@@ -67,6 +87,23 @@ export default function Workspaces() {
       setError(err.message || 'Failed to fetch workspaces');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchProjects = async () => {
+    if (!selectedOrganizationId) {
+      setProjects([]);
+      setSelectedProjectId('');
+      return;
+    }
+    try {
+      const res = await api.get(`/v1/organizations/${selectedOrganizationId}/projects`);
+      setProjects(res.data);
+      setSelectedProjectId((current) => (
+        res.data.some((project) => project.project_id === current) ? current : ''
+      ));
+    } catch (err) {
+      setError(err.message || 'Failed to fetch projects');
     }
   };
 
@@ -87,12 +124,17 @@ export default function Workspaces() {
 
   useEffect(() => {
     fetchWorkspaces();
+  }, [api, selectedOrganizationId, selectedProjectId]);
+
+  useEffect(() => {
+    fetchProjects();
   }, [api, selectedOrganizationId]);
 
   const resetForm = () => {
     setWorkspaceFormData({
       name: '',
       description: '',
+      project_id: selectedProjectId || projects.find((project) => project.slug === 'default')?.project_id || projects[0]?.project_id || '',
       metadata: '{}',
       harness_summary: '',
       methodology_ontology: '',
@@ -117,6 +159,7 @@ export default function Workspaces() {
     setWorkspaceFormData({
       name: ws.name,
       description: ws.description || '',
+      project_id: ws.project_id || '',
       metadata: JSON.stringify(ws.metadata || {}, null, 2),
       harness_summary: ws.harness?.summary || '',
       methodology_ontology: ws.harness?.methodology?.ontology || '',
@@ -170,6 +213,7 @@ export default function Workspaces() {
       const payload = buildWorkspaceMutation({
         actor: buildAdminActor(),
         organizationId: selectedOrganizationId,
+        projectId: workspaceFormData.project_id || selectedProjectId,
         formData: workspaceFormData,
         modalMode,
       });
@@ -184,6 +228,42 @@ export default function Workspaces() {
       fetchWorkspaces();
     } catch (err) {
       alert('Failed to save workspace: ' + err.message);
+    }
+  };
+
+  const handleOpenProjectCreate = () => {
+    setProjectFormData({
+      slug: '',
+      name: '',
+      description: '',
+      owner_user_id: '',
+      owner_system_agent_id: '',
+      editor_user_ids: '',
+      editor_system_agent_ids: '',
+      viewer_user_ids: '',
+      viewer_system_agent_ids: '',
+      metadata: '{}',
+    });
+    setIsProjectModalOpen(true);
+  };
+
+  const handleSaveProject = async (e) => {
+    e.preventDefault();
+    if (!selectedOrganizationId) {
+      alert('Select an organization before creating a project.');
+      return;
+    }
+    try {
+      const payload = buildProjectMutation({
+        actor: buildAdminActor(),
+        formData: projectFormData,
+      });
+      const res = await api.post(`/v1/organizations/${selectedOrganizationId}/projects`, payload);
+      setSelectedProjectId(res.data.project_id);
+      setIsProjectModalOpen(false);
+      fetchProjects();
+    } catch (err) {
+      alert('Failed to save project: ' + err.message);
     }
   };
 
@@ -234,6 +314,8 @@ export default function Workspaces() {
 
   const selectedWorkspaceRecord = selectedWorkspace?.workspace || selectedWorkspace;
   const selectedWorkspaceId = selectedWorkspaceRecord?.workspace_id || '';
+  const selectedProject = projects.find((project) => project.project_id === selectedProjectId);
+  const projectById = Object.fromEntries(projects.map((project) => [project.project_id, project]));
   const selectedRoleDefinitions = Array.isArray(selectedWorkspace?.role_definitions)
     ? Object.fromEntries(
         selectedWorkspace.role_definitions.map((roleDefinition) => [
@@ -261,7 +343,10 @@ export default function Workspaces() {
         <div className="flex items-center gap-3">
           <select
             value={selectedOrganizationId}
-            onChange={(e) => setSelectedOrganizationId(e.target.value)}
+            onChange={(e) => {
+              setSelectedOrganizationId(e.target.value);
+              setSelectedProjectId('');
+            }}
             className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm"
           >
             <option value="">All Organizations</option>
@@ -271,6 +356,28 @@ export default function Workspaces() {
               </option>
             ))}
           </select>
+          <select
+            value={selectedProjectId}
+            onChange={(e) => setSelectedProjectId(e.target.value)}
+            disabled={!selectedOrganizationId}
+            className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm disabled:opacity-50"
+          >
+            <option value="">All Projects</option>
+            {projects.map((project) => (
+              <option key={project.project_id} value={project.project_id}>
+                {project.name}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={handleOpenProjectCreate}
+            disabled={!selectedOrganizationId}
+            className="border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 px-3 py-2 rounded-lg flex items-center gap-2 text-sm font-medium disabled:opacity-50"
+          >
+            <FolderTree className="w-4 h-4" />
+            Project
+          </button>
           <button 
             onClick={handleOpenCreate}
             className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center transition-all shadow-lg shadow-blue-500/20 font-medium"
@@ -322,6 +429,10 @@ export default function Workspaces() {
             <p className="text-sm text-slate-500 dark:text-slate-400 mb-6 line-clamp-2 min-h-[40px]">
               {ws.description || 'No description provided for this cluster.'}
             </p>
+            <div className="mb-4 flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
+              <FolderTree className="w-3.5 h-3.5" />
+              {projectById[ws.project_id]?.name || selectedProject?.name || 'Project'}
+            </div>
             
             <div className="flex items-center justify-between mt-auto pt-4 border-t border-slate-100 dark:border-slate-700/50">
               <div className="flex items-center gap-2">
@@ -348,6 +459,129 @@ export default function Workspaces() {
         </button>
       </div>
 
+      {isProjectModalOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 transition-opacity animate-in fade-in duration-200">
+          <div className="bg-white dark:bg-slate-800 w-full max-w-2xl max-h-[90vh] rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 animate-in zoom-in-95 duration-200 flex flex-col overflow-hidden">
+            <div className="p-6 border-b border-slate-100 dark:border-slate-700 flex justify-between items-center">
+              <div>
+                <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center">
+                  <FolderTree className="w-5 h-5 mr-3 text-blue-500" />
+                  Create Project
+                </h2>
+              </div>
+              <button onClick={() => setIsProjectModalOpen(false)} className="p-2 text-slate-400 hover:text-slate-600 rounded-full">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveProject} className="p-6 space-y-5 overflow-y-auto">
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Project Name</label>
+                <input
+                  required
+                  type="text"
+                  value={projectFormData.name}
+                  onChange={e => setProjectFormData({...projectFormData, name: e.target.value})}
+                  className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Slug</label>
+                <input
+                  required
+                  type="text"
+                  value={projectFormData.slug}
+                  onChange={e => setProjectFormData({...projectFormData, slug: e.target.value})}
+                  className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Description</label>
+                <textarea
+                  value={projectFormData.description}
+                  onChange={e => setProjectFormData({...projectFormData, description: e.target.value})}
+                  rows={3}
+                  className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
+                />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Owner User ID</label>
+                  <input
+                    type="text"
+                    value={projectFormData.owner_user_id}
+                    onChange={e => setProjectFormData({...projectFormData, owner_user_id: e.target.value})}
+                    className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Owner Agent ID</label>
+                  <input
+                    type="text"
+                    value={projectFormData.owner_system_agent_id}
+                    onChange={e => setProjectFormData({...projectFormData, owner_system_agent_id: e.target.value})}
+                    className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Editor User IDs</label>
+                  <input
+                    type="text"
+                    value={projectFormData.editor_user_ids}
+                    onChange={e => setProjectFormData({...projectFormData, editor_user_ids: e.target.value})}
+                    className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Editor Agent IDs</label>
+                  <input
+                    type="text"
+                    value={projectFormData.editor_system_agent_ids}
+                    onChange={e => setProjectFormData({...projectFormData, editor_system_agent_ids: e.target.value})}
+                    className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Viewer User IDs</label>
+                  <input
+                    type="text"
+                    value={projectFormData.viewer_user_ids}
+                    onChange={e => setProjectFormData({...projectFormData, viewer_user_ids: e.target.value})}
+                    className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Viewer Agent IDs</label>
+                  <input
+                    type="text"
+                    value={projectFormData.viewer_system_agent_ids}
+                    onChange={e => setProjectFormData({...projectFormData, viewer_system_agent_ids: e.target.value})}
+                    className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Metadata (JSON)</label>
+                <textarea
+                  value={projectFormData.metadata}
+                  onChange={e => setProjectFormData({...projectFormData, metadata: e.target.value})}
+                  rows={4}
+                  className="w-full bg-slate-900 dark:bg-black border border-slate-700 rounded-lg px-4 py-3 font-mono text-xs text-blue-400 focus:ring-2 focus:ring-blue-500 outline-none resize-none shadow-inner"
+                />
+              </div>
+              <div className="flex justify-end gap-3 pt-2">
+                <button type="button" onClick={() => setIsProjectModalOpen(false)} className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300">
+                  Cancel
+                </button>
+                <button type="submit" className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold flex items-center gap-2">
+                  <Save className="w-4 h-4" />
+                  Save
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Workspace Create/Edit Modal */}
       {isEditModalOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 transition-opacity animate-in fade-in duration-200">
@@ -367,6 +601,22 @@ export default function Workspaces() {
             
             <form onSubmit={handleSaveWorkspace} className="flex min-h-0 flex-1 flex-col">
               <div className="flex-1 overflow-y-auto p-8 space-y-6">
+                {modalMode === 'create' && (
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Project</label>
+                    <select
+                      value={workspaceFormData.project_id}
+                      onChange={e => setWorkspaceFormData({...workspaceFormData, project_id: e.target.value})}
+                      className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white"
+                    >
+                      {projects.map((project) => (
+                        <option key={project.project_id} value={project.project_id}>
+                          {project.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
                 <div>
                   <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Workspace Name</label>
                   <input

@@ -72,9 +72,13 @@ The design proposal therefore argued for moving from `request -> response` to `s
 ### Primary entities
 
 - `Organization`
-  - tenant boundary above workspaces
+  - tenant boundary above projects
+- `Project`
+  - organization-local work grouping that owns workspaces
+  - has typed creator and owner references for either a user or system agent
+  - exposes project structure only to explicit `owner`, `editor`, or `viewer` project access bindings
 - `Workspace`
-  - collaboration boundary inside an organization
+  - collaboration boundary inside a project
 - `Thread`
   - a shared room for users and agents
 - `Participant`

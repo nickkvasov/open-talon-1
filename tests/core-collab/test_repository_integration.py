@@ -33,6 +33,10 @@ from open_talon_contracts.models import (
     AuditEventDraft,
     GitRepository,
     LlmProviderDefinition,
+    Organization,
+    OrganizationMembership,
+    Project,
+    ProjectAccessBinding,
     ResolvedAssetBinding,
     Workspace,
     WorkspaceHarness,
@@ -41,7 +45,7 @@ from open_talon_contracts.models import (
     WorkspaceAssetVersion,
 )
 from core_collab.migrations import apply_pending_migrations
-from core_collab.repository import CollaborationRepository
+from core_collab.repository import CollaborationRepository, UserRecord
 
 
 pytestmark = pytest.mark.integration
@@ -357,6 +361,144 @@ async def test_repository_workspace_and_agent_harness_round_trip():
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM system_agents WHERE agent_id = $1", agent_id)
             await conn.execute("DELETE FROM workspaces WHERE workspace_id = $1", workspace_id)
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_repository_project_access_round_trip_and_filters_workspaces():
+    try:
+        pool = await asyncpg.create_pool(dsn=_postgres_dsn(), min_size=1, max_size=2)
+    except Exception as exc:  # pragma: no cover - integration environment dependent
+        pytest.skip(f"Postgres not available for repository integration test: {exc}")
+
+    repository = CollaborationRepository(pool)
+    await apply_pending_migrations(pool)
+
+    now = datetime.now(timezone.utc)
+    owner_id = uuid4()
+    viewer_id = uuid4()
+    outsider_id = uuid4()
+    organization_id = uuid4()
+    project_id = uuid4()
+    workspace_id = uuid4()
+    organization = Organization(
+        organization_id=organization_id,
+        slug=f"project-access-{organization_id.hex[:8]}",
+        name="Project Access Integration",
+        created_by=owner_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    project = Project(
+        project_id=project_id,
+        organization_id=organization_id,
+        slug="access-project",
+        name="Access Project",
+        created_by=owner_id,
+        creator_user_id=owner_id,
+        owner_user_id=owner_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    workspace = Workspace(
+        workspace_id=workspace_id,
+        organization_id=organization_id,
+        project_id=project_id,
+        name="Project Workspace",
+        description="Workspace visible through project access.",
+        owner_user_id=owner_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                for user_id, display_name in [
+                    (owner_id, "Owner"),
+                    (viewer_id, "Viewer"),
+                    (outsider_id, "Outsider"),
+                ]:
+                    await repository.upsert_user(
+                        conn,
+                        UserRecord(
+                            user_id=user_id,
+                            display_name=display_name,
+                            created_at=now,
+                            updated_at=now,
+                            metadata={},
+                        ),
+                    )
+                await repository.upsert_organization(conn, organization)
+                for user_id in [owner_id, viewer_id, outsider_id]:
+                    await repository.upsert_organization_membership(
+                        conn,
+                        OrganizationMembership(
+                            organization_id=organization_id,
+                            user_id=user_id,
+                            role="member",
+                            joined_at=now,
+                            updated_at=now,
+                            metadata={},
+                        ),
+                    )
+                await repository.upsert_project(conn, project)
+                await repository.upsert_project_access_binding(
+                    conn,
+                    ProjectAccessBinding(
+                        project_id=project_id,
+                        subject_type="user",
+                        user_id=owner_id,
+                        role="owner",
+                        created_at=now,
+                        updated_at=now,
+                        metadata={},
+                    ),
+                )
+                await repository.upsert_project_access_binding(
+                    conn,
+                    ProjectAccessBinding(
+                        project_id=project_id,
+                        subject_type="user",
+                        user_id=viewer_id,
+                        role="viewer",
+                        created_at=now,
+                        updated_at=now,
+                        metadata={},
+                    ),
+                )
+                await repository.upsert_workspace(conn, workspace)
+
+        owner_projects = await repository.list_projects_for_user(
+            organization_id=organization_id,
+            user_id=owner_id,
+        )
+        viewer_workspaces = await repository.list_workspaces_for_user(
+            viewer_id,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+        outsider_projects = await repository.list_projects_for_user(
+            organization_id=organization_id,
+            user_id=outsider_id,
+        )
+        outsider_workspaces = await repository.list_workspaces_for_user(
+            outsider_id,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+
+        assert [item.project_id for item in owner_projects] == [project_id]
+        assert [item.workspace_id for item in viewer_workspaces] == [workspace_id]
+        assert outsider_projects == []
+        assert outsider_workspaces == []
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM organizations WHERE organization_id = $1", organization_id)
+            await conn.execute("DELETE FROM users WHERE user_id = ANY($1::uuid[])", [owner_id, viewer_id, outsider_id])
         await pool.close()
 
 

@@ -20,6 +20,7 @@ from .contracts import (
     Organization,
     OrganizationMembership,
     ParticipantProfile,
+    Project,
     ResolvedAssetBinding,
     RoleDefinition,
     Run,
@@ -55,6 +56,11 @@ class WorkspaceCommandResult(CommandResult):
 @dataclass
 class OrganizationCommandResult(CommandResult):
     organization: Organization | None = None
+
+
+@dataclass
+class ProjectCommandResult(CommandResult):
+    project: Project | None = None
 
 
 @dataclass

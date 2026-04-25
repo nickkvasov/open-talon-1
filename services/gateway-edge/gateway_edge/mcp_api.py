@@ -532,7 +532,7 @@ class McpApiContext:
 
         if not organizations:
             workspaces = await collab_svc.collaboration_service.list_workspaces(
-                user_id=None,
+                system_agent_id=self.auth_context.system_agent_id,
                 organization_id=None,
             )
         else:
@@ -540,7 +540,7 @@ class McpApiContext:
             for organization in organizations:
                 workspaces.extend(
                     await collab_svc.collaboration_service.list_workspaces(
-                        user_id=None,
+                        system_agent_id=self.auth_context.system_agent_id,
                         organization_id=organization.organization_id,
                     )
                 )

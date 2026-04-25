@@ -57,6 +57,8 @@ from .contracts import (
     Organization,
     OrganizationMembership,
     ParticipantProfile,
+    Project,
+    ProjectAccessBinding,
     ResolvedAssetBinding,
     Run,
     RunStep,
@@ -754,14 +756,19 @@ class CollaborationRepository:
         self, conn: asyncpg.Connection, workspace: Workspace
     ) -> None:
         organization_id = workspace.organization_id or await self._default_organization_id(conn)
+        project_id = workspace.project_id or await self._default_project_id(
+            conn,
+            organization_id,
+        )
         await conn.execute(
             """
             INSERT INTO workspaces (
-                workspace_id, organization_id, name, description, owner_user_id, harness, created_at, updated_at, metadata
+                workspace_id, organization_id, project_id, name, description, owner_user_id, harness, created_at, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (workspace_id) DO UPDATE
                 SET organization_id = EXCLUDED.organization_id,
+                    project_id = EXCLUDED.project_id,
                     name = EXCLUDED.name,
                     description = EXCLUDED.description,
                     owner_user_id = EXCLUDED.owner_user_id,
@@ -771,6 +778,7 @@ class CollaborationRepository:
             """,
             workspace.workspace_id,
             organization_id,
+            project_id,
             workspace.name,
             workspace.description,
             workspace.owner_user_id,
@@ -833,6 +841,282 @@ class CollaborationRepository:
             slug,
         )
         return self._organization_from_row(row) if row else None
+
+    async def upsert_project(
+        self,
+        conn: asyncpg.Connection,
+        project: Project,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO projects (
+                project_id, organization_id, slug, name, description, created_by,
+                creator_user_id, creator_system_agent_id, owner_user_id, owner_system_agent_id,
+                created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ON CONFLICT (project_id) DO UPDATE
+                SET organization_id = EXCLUDED.organization_id,
+                    slug = EXCLUDED.slug,
+                    name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    owner_user_id = EXCLUDED.owner_user_id,
+                    owner_system_agent_id = EXCLUDED.owner_system_agent_id,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            project.project_id,
+            project.organization_id,
+            project.slug,
+            project.name,
+            project.description,
+            project.created_by,
+            project.creator_user_id,
+            project.creator_system_agent_id,
+            project.owner_user_id,
+            project.owner_system_agent_id,
+            project.created_at,
+            project.updated_at,
+            self._json_dumps(project.metadata),
+        )
+
+    async def fetch_project(self, project_id: UUID) -> Project | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT project_id, organization_id, slug, name, description, created_by,
+                   creator_user_id, creator_system_agent_id, owner_user_id, owner_system_agent_id,
+                   created_at, updated_at, metadata
+            FROM projects
+            WHERE project_id = $1
+            """,
+            project_id,
+        )
+        return self._project_from_row(row) if row else None
+
+    async def fetch_project_by_slug(
+        self,
+        *,
+        organization_id: UUID,
+        slug: str,
+    ) -> Project | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT project_id, organization_id, slug, name, description, created_by,
+                   creator_user_id, creator_system_agent_id, owner_user_id, owner_system_agent_id,
+                   created_at, updated_at, metadata
+            FROM projects
+            WHERE organization_id = $1
+              AND slug = $2
+            """,
+            organization_id,
+            slug,
+        )
+        return self._project_from_row(row) if row else None
+
+    async def list_projects(self, organization_id: UUID) -> list[Project]:
+        rows = await self._pool.fetch(
+            """
+            SELECT project_id, organization_id, slug, name, description, created_by,
+                   creator_user_id, creator_system_agent_id, owner_user_id, owner_system_agent_id,
+                   created_at, updated_at, metadata
+            FROM projects
+            WHERE organization_id = $1
+            ORDER BY created_at ASC
+            """,
+            organization_id,
+        )
+        return [self._project_from_row(row) for row in rows]
+
+    async def list_projects_for_user(
+        self,
+        *,
+        organization_id: UUID,
+        user_id: UUID,
+    ) -> list[Project]:
+        rows = await self._pool.fetch(
+            """
+            SELECT p.project_id, p.organization_id, p.slug, p.name, p.description, p.created_by,
+                   p.creator_user_id, p.creator_system_agent_id, p.owner_user_id, p.owner_system_agent_id,
+                   p.created_at, p.updated_at, p.metadata
+            FROM projects AS p
+            JOIN project_access_bindings AS access
+              ON access.project_id = p.project_id
+             AND access.subject_type = 'user'
+             AND access.user_id = $2
+            WHERE p.organization_id = $1
+            ORDER BY p.created_at ASC
+            """,
+            organization_id,
+            user_id,
+        )
+        return [self._project_from_row(row) for row in rows]
+
+    async def list_projects_for_agent(
+        self,
+        *,
+        organization_id: UUID,
+        system_agent_id: UUID,
+    ) -> list[Project]:
+        rows = await self._pool.fetch(
+            """
+            SELECT p.project_id, p.organization_id, p.slug, p.name, p.description, p.created_by,
+                   p.creator_user_id, p.creator_system_agent_id, p.owner_user_id, p.owner_system_agent_id,
+                   p.created_at, p.updated_at, p.metadata
+            FROM projects AS p
+            JOIN project_access_bindings AS access
+              ON access.project_id = p.project_id
+             AND access.subject_type = 'agent'
+             AND access.system_agent_id = $2
+            WHERE p.organization_id = $1
+            ORDER BY p.created_at ASC
+            """,
+            organization_id,
+            system_agent_id,
+        )
+        return [self._project_from_row(row) for row in rows]
+
+    async def list_project_access_bindings(
+        self,
+        project_id: UUID,
+    ) -> list[ProjectAccessBinding]:
+        rows = await self._pool.fetch(
+            """
+            SELECT project_id, subject_type, user_id, system_agent_id, role, created_at, updated_at, metadata
+            FROM project_access_bindings
+            WHERE project_id = $1
+            ORDER BY
+                CASE role WHEN 'owner' THEN 0 WHEN 'editor' THEN 1 ELSE 2 END,
+                created_at ASC
+            """,
+            project_id,
+        )
+        return [self._project_access_from_row(row) for row in rows]
+
+    async def fetch_project_access_for_user(
+        self,
+        *,
+        project_id: UUID,
+        user_id: UUID,
+    ) -> ProjectAccessBinding | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT project_id, subject_type, user_id, system_agent_id, role, created_at, updated_at, metadata
+            FROM project_access_bindings
+            WHERE project_id = $1
+              AND subject_type = 'user'
+              AND user_id = $2
+            """,
+            project_id,
+            user_id,
+        )
+        return self._project_access_from_row(row) if row else None
+
+    async def fetch_project_access_for_agent(
+        self,
+        *,
+        project_id: UUID,
+        system_agent_id: UUID,
+    ) -> ProjectAccessBinding | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT project_id, subject_type, user_id, system_agent_id, role, created_at, updated_at, metadata
+            FROM project_access_bindings
+            WHERE project_id = $1
+              AND subject_type = 'agent'
+              AND system_agent_id = $2
+            """,
+            project_id,
+            system_agent_id,
+        )
+        return self._project_access_from_row(row) if row else None
+
+    async def upsert_project_access_binding(
+        self,
+        conn: asyncpg.Connection,
+        binding: ProjectAccessBinding,
+    ) -> None:
+        if binding.subject_type == "agent":
+            await conn.execute(
+                """
+                INSERT INTO project_access_bindings (
+                    project_id, subject_type, user_id, system_agent_id, role, created_at, updated_at, metadata
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (project_id, system_agent_id) WHERE subject_type = 'agent' DO UPDATE
+                    SET role = EXCLUDED.role,
+                        updated_at = EXCLUDED.updated_at,
+                        metadata = project_access_bindings.metadata || EXCLUDED.metadata
+                """,
+                binding.project_id,
+                binding.subject_type,
+                binding.user_id,
+                binding.system_agent_id,
+                binding.role,
+                binding.created_at,
+                binding.updated_at,
+                self._json_dumps(binding.metadata),
+            )
+            return
+        await conn.execute(
+            """
+            INSERT INTO project_access_bindings (
+                project_id, subject_type, user_id, system_agent_id, role, created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (project_id, user_id) WHERE subject_type = 'user' DO UPDATE
+                SET role = EXCLUDED.role,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = project_access_bindings.metadata || EXCLUDED.metadata
+            """,
+            binding.project_id,
+            binding.subject_type,
+            binding.user_id,
+            binding.system_agent_id,
+            binding.role,
+            binding.created_at,
+            binding.updated_at,
+            self._json_dumps(binding.metadata),
+        )
+
+    async def delete_project_access_binding(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        project_id: UUID,
+        user_id: UUID | None = None,
+        system_agent_id: UUID | None = None,
+    ) -> bool:
+        if user_id is not None:
+            result = await conn.execute(
+                """
+                DELETE FROM project_access_bindings
+                WHERE project_id = $1
+                  AND subject_type = 'user'
+                  AND user_id = $2
+                """,
+                project_id,
+                user_id,
+            )
+        elif system_agent_id is not None:
+            result = await conn.execute(
+                """
+                DELETE FROM project_access_bindings
+                WHERE project_id = $1
+                  AND subject_type = 'agent'
+                  AND system_agent_id = $2
+                """,
+                project_id,
+                system_agent_id,
+            )
+        else:
+            raise ValueError("user_id or system_agent_id is required")
+        return result.endswith("1")
+
+    async def fetch_default_project(self, organization_id: UUID) -> Project | None:
+        return await self.fetch_project_by_slug(
+            organization_id=organization_id,
+            slug="default",
+        )
 
     async def list_organizations(self) -> list[Organization]:
         rows = await self._pool.fetch(
@@ -1764,6 +2048,25 @@ class CollaborationRepository:
         if row is None:
             raise ValueError("No organizations configured")
         return row["organization_id"]
+
+    async def _default_project_id(
+        self,
+        conn: asyncpg.Connection | asyncpg.Pool,
+        organization_id: UUID,
+    ) -> UUID:
+        row = await conn.fetchrow(
+            """
+            SELECT project_id
+            FROM projects
+            WHERE organization_id = $1
+            ORDER BY CASE WHEN slug = 'default' THEN 0 ELSE 1 END, created_at ASC
+            LIMIT 1
+            """,
+            organization_id,
+        )
+        if row is None:
+            raise ValueError(f"No projects configured for organization {organization_id}")
+        return row["project_id"]
 
     async def _workspace_organization_id(
         self,
@@ -2805,7 +3108,7 @@ class CollaborationRepository:
     async def fetch_workspace(self, workspace_id: UUID) -> Workspace | None:
         row = await self._pool.fetchrow(
             """
-            SELECT workspace_id, organization_id, name, description, owner_user_id, harness, created_at, updated_at, metadata
+            SELECT workspace_id, organization_id, project_id, name, description, owner_user_id, harness, created_at, updated_at, metadata
             FROM workspaces
             WHERE workspace_id = $1
             """,
@@ -2813,15 +3116,22 @@ class CollaborationRepository:
         )
         return self._workspace_from_row(row) if row else None
 
-    async def list_workspaces(self, *, organization_id: UUID | None = None) -> list[Workspace]:
+    async def list_workspaces(
+        self,
+        *,
+        organization_id: UUID | None = None,
+        project_id: UUID | None = None,
+    ) -> list[Workspace]:
         rows = await self._pool.fetch(
             """
-            SELECT workspace_id, organization_id, name, description, owner_user_id, harness, created_at, updated_at, metadata
+            SELECT workspace_id, organization_id, project_id, name, description, owner_user_id, harness, created_at, updated_at, metadata
             FROM workspaces
             WHERE ($1::uuid IS NULL OR organization_id = $1)
+              AND ($2::uuid IS NULL OR project_id = $2)
             ORDER BY created_at ASC
             """,
             organization_id,
+            project_id,
         )
         return [self._workspace_from_row(row) for row in rows]
 
@@ -2830,27 +3140,56 @@ class CollaborationRepository:
         user_id: UUID,
         *,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
     ) -> list[Workspace]:
         rows = await self._pool.fetch(
             """
-            SELECT w.workspace_id, w.organization_id, w.name, w.description, w.owner_user_id,
+            SELECT w.workspace_id, w.organization_id, w.project_id, w.name, w.description, w.owner_user_id,
                    w.harness, w.created_at, w.updated_at, w.metadata
             FROM workspaces AS w
             JOIN organization_memberships AS membership
               ON membership.organization_id = w.organization_id
              AND membership.user_id = $1
-            WHERE EXISTS (
-                SELECT 1
-                FROM participants AS p
-                WHERE p.workspace_id = w.workspace_id
-                  AND p.participant_type = 'user'
-                  AND p.user_id = $1
-            )
+            JOIN project_access_bindings AS access
+              ON access.project_id = w.project_id
+             AND access.subject_type = 'user'
+             AND access.user_id = $1
+             AND access.role IN ('owner', 'editor', 'viewer')
+            WHERE TRUE
               AND ($2::uuid IS NULL OR w.organization_id = $2)
+              AND ($3::uuid IS NULL OR w.project_id = $3)
             ORDER BY w.created_at ASC
             """,
             user_id,
             organization_id,
+            project_id,
+        )
+        return [self._workspace_from_row(row) for row in rows]
+
+    async def list_workspaces_for_agent(
+        self,
+        system_agent_id: UUID,
+        *,
+        organization_id: UUID | None = None,
+        project_id: UUID | None = None,
+    ) -> list[Workspace]:
+        rows = await self._pool.fetch(
+            """
+            SELECT w.workspace_id, w.organization_id, w.project_id, w.name, w.description, w.owner_user_id,
+                   w.harness, w.created_at, w.updated_at, w.metadata
+            FROM workspaces AS w
+            JOIN project_access_bindings AS access
+              ON access.project_id = w.project_id
+             AND access.subject_type = 'agent'
+             AND access.system_agent_id = $1
+             AND access.role IN ('owner', 'editor', 'viewer')
+            WHERE ($2::uuid IS NULL OR w.organization_id = $2)
+              AND ($3::uuid IS NULL OR w.project_id = $3)
+            ORDER BY w.created_at ASC
+            """,
+            system_agent_id,
+            organization_id,
+            project_id,
         )
         return [self._workspace_from_row(row) for row in rows]
 
@@ -5236,6 +5575,7 @@ class CollaborationRepository:
         return Workspace(
             workspace_id=row["workspace_id"],
             organization_id=row["organization_id"],
+            project_id=row["project_id"],
             name=row["name"],
             description=row["description"],
             owner_user_id=row["owner_user_id"],
@@ -5259,6 +5599,37 @@ class CollaborationRepository:
             name=row["name"],
             description=row["description"],
             created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _project_from_row(row: asyncpg.Record) -> Project:
+        return Project(
+            project_id=row["project_id"],
+            organization_id=row["organization_id"],
+            slug=row["slug"],
+            name=row["name"],
+            description=row["description"],
+            created_by=row["created_by"],
+            creator_user_id=row["creator_user_id"],
+            creator_system_agent_id=row["creator_system_agent_id"],
+            owner_user_id=row["owner_user_id"],
+            owner_system_agent_id=row["owner_system_agent_id"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _project_access_from_row(row: asyncpg.Record) -> ProjectAccessBinding:
+        return ProjectAccessBinding(
+            project_id=row["project_id"],
+            subject_type=row["subject_type"],
+            user_id=row["user_id"],
+            system_agent_id=row["system_agent_id"],
+            role=row["role"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),

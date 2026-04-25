@@ -136,7 +136,7 @@ export default function Organizations() {
             <Building2 className="w-6 h-6 text-blue-500" />
             Organizations
           </h1>
-          <p className="text-slate-500 mt-1">Manage the tenant layer that owns workspaces and org-scoped resources.</p>
+          <p className="text-slate-500 mt-1">Manage the tenant layer that owns projects, workspaces, and org-scoped resources.</p>
         </div>
       </div>
 

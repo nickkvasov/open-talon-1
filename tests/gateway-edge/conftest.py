@@ -41,7 +41,7 @@ async def _null_lifespan(app: FastAPI):  # type: ignore[type-arg]
 
 class MockCollaborationService:
     def __init__(self) -> None:
-        from gateway_edge.models import Organization
+        from gateway_edge.models import Organization, Project, ProjectAccessBinding
 
         now = datetime.now(timezone.utc)
         self.default_organization = Organization(
@@ -54,8 +54,39 @@ class MockCollaborationService:
             updated_at=now,
             metadata={},
         )
+        self.default_project = Project(
+            project_id=UUID("22222222-2222-2222-2222-222222222222"),
+            organization_id=self.default_organization.organization_id,
+            slug="default",
+            name="Default Project",
+            description="Default test project",
+            created_by=self.default_organization.created_by,
+            creator_user_id=self.default_organization.created_by,
+            owner_user_id=self.default_organization.created_by,
+            created_at=now,
+            updated_at=now,
+            metadata={},
+        )
         self.organizations = {
             str(self.default_organization.organization_id): self.default_organization
+        }
+        self.projects = {
+            str(self.default_project.project_id): self.default_project,
+        }
+        self.project_access_bindings = {
+            (
+                str(self.default_project.project_id),
+                "user",
+                str(self.default_organization.created_by),
+            ): ProjectAccessBinding(
+                project_id=self.default_project.project_id,
+                subject_type="user",
+                user_id=self.default_organization.created_by,
+                role="owner",
+                created_at=now,
+                updated_at=now,
+                metadata={},
+            )
         }
         self.organization_memberships = {
             str(self.default_organization.organization_id): {}
@@ -97,10 +128,33 @@ class MockCollaborationService:
 
     async def create_workspace(self, payload, *, allow_platform_admin: bool = False):
         _ = allow_platform_admin
-        from gateway_edge.models import Workspace, WorkspaceDetail, ParticipantProfile
+        from gateway_edge.models import (
+            ParticipantProfile,
+            ProjectAccessBinding,
+            Workspace,
+            WorkspaceDetail,
+        )
         from open_talon_contracts.models import RoleDefinition
 
         organization_id = payload.organization_id or self.default_organization.organization_id
+        project_id = payload.project_id
+        if project_id is None:
+            default_project = next(
+                (
+                    project
+                    for project in self.projects.values()
+                    if project.organization_id == organization_id and project.slug == "default"
+                ),
+                None,
+            )
+            project_id = (
+                default_project.project_id
+                if default_project is not None
+                else self.default_project.project_id
+            )
+        project = self.projects.get(str(project_id))
+        if project is None or project.organization_id != organization_id:
+            raise KeyError(f"Project {project_id} not found in organization {organization_id}")
         now = datetime.now(timezone.utc)
         role_definitions = {
             "admin": RoleDefinition(
@@ -125,6 +179,7 @@ class MockCollaborationService:
         workspace = Workspace(
             workspace_id=uuid4(),
             organization_id=organization_id,
+            project_id=project_id,
             name=payload.name,
             description=payload.description,
             owner_user_id=payload.actor.user_id,
@@ -165,6 +220,31 @@ class MockCollaborationService:
                 "updated_at": now,
                 "metadata": {},
             }
+            self.project_access_bindings.setdefault(
+                (str(project_id), "user", str(payload.actor.user_id)),
+                ProjectAccessBinding(
+                    project_id=project_id,
+                    subject_type="user",
+                    user_id=payload.actor.user_id,
+                    role="owner",
+                    created_at=now,
+                    updated_at=now,
+                    metadata={"source": "workspace_create"},
+                ),
+            )
+        elif payload.actor.participant_type == "agent":
+            self.project_access_bindings.setdefault(
+                (str(project_id), "agent", str(payload.actor.participant_id)),
+                ProjectAccessBinding(
+                    project_id=project_id,
+                    subject_type="agent",
+                    system_agent_id=payload.actor.participant_id,
+                    role="owner",
+                    created_at=now,
+                    updated_at=now,
+                    metadata={"source": "workspace_create"},
+                ),
+            )
         self.participants.setdefault(str(workspace.workspace_id), {})[
             str(participant.participant_id)
         ] = participant
@@ -180,7 +260,14 @@ class MockCollaborationService:
             tools=[],
         )
 
-    async def list_workspaces(self, *, user_id=None, organization_id=None):
+    async def list_workspaces(
+        self,
+        *,
+        user_id=None,
+        system_agent_id=None,
+        organization_id=None,
+        project_id=None,
+    ):
         workspaces = list(self.workspaces.values())
         if organization_id is not None:
             workspaces = [
@@ -188,12 +275,25 @@ class MockCollaborationService:
                 for workspace in workspaces
                 if workspace.organization_id == organization_id
             ]
+        if project_id is not None:
+            workspaces = [
+                workspace
+                for workspace in workspaces
+                if workspace.project_id == project_id
+            ]
         if user_id is None:
-            return workspaces
+            if system_agent_id is None:
+                return workspaces
+            visible_agent: list = []
+            for workspace in workspaces:
+                key = (str(workspace.project_id), "agent", str(system_agent_id))
+                if key in self.project_access_bindings:
+                    visible_agent.append(workspace)
+            return visible_agent
         visible: list = []
         for workspace in workspaces:
-            participants = self.participants.get(str(workspace.workspace_id), {})
-            if any(participant.user_id == user_id for participant in participants.values()):
+            key = (str(workspace.project_id), "user", str(user_id))
+            if key in self.project_access_bindings:
                 visible.append(workspace)
         return visible
 
@@ -209,7 +309,12 @@ class MockCollaborationService:
         return visible
 
     async def create_organization(self, payload):
-        from gateway_edge.models import Organization, OrganizationMembership
+        from gateway_edge.models import (
+            Organization,
+            OrganizationMembership,
+            Project,
+            ProjectAccessBinding,
+        )
 
         if any(organization.slug == payload.slug for organization in self.organizations.values()):
             raise ValueError(f"Organization slug {payload.slug!r} already exists")
@@ -225,6 +330,32 @@ class MockCollaborationService:
             metadata=payload.metadata,
         )
         self.organizations[str(organization.organization_id)] = organization
+        default_project = Project(
+            project_id=uuid4(),
+            organization_id=organization.organization_id,
+            slug="default",
+            name="Default Project",
+            description="Default test project",
+            created_by=organization.created_by,
+            creator_user_id=payload.actor.user_id,
+            owner_user_id=payload.actor.user_id,
+            created_at=now,
+            updated_at=now,
+            metadata={"seeded": True, "managed": True},
+        )
+        self.projects[str(default_project.project_id)] = default_project
+        if payload.actor.user_id is not None:
+            self.project_access_bindings[
+                (str(default_project.project_id), "user", str(payload.actor.user_id))
+            ] = ProjectAccessBinding(
+                project_id=default_project.project_id,
+                subject_type="user",
+                user_id=payload.actor.user_id,
+                role="owner",
+                created_at=now,
+                updated_at=now,
+                metadata={},
+            )
         self.organization_memberships.setdefault(str(organization.organization_id), {})
         if payload.actor.user_id is not None:
             membership = OrganizationMembership(
@@ -252,6 +383,296 @@ class MockCollaborationService:
             if organization.slug == normalized_slug:
                 return organization
         raise KeyError(f"Organization slug {normalized_slug!r} not found")
+
+    async def create_project(
+        self,
+        organization_id: UUID,
+        payload,
+        *,
+        allow_platform_admin: bool = False,
+    ):
+        _ = allow_platform_admin
+        from gateway_edge.models import Project, ProjectAccessBinding
+
+        await self.get_organization(organization_id)
+        if any(
+            project.organization_id == organization_id and project.slug == payload.slug
+            for project in self.projects.values()
+        ):
+            raise ValueError(f"Project slug {payload.slug!r} already exists")
+        now = datetime.now(timezone.utc)
+        actor_user_id = payload.actor.user_id or (
+            payload.actor.participant_id if payload.actor.participant_type == "user" else None
+        )
+        actor_system_agent_id = (
+            payload.actor.participant_id if payload.actor.participant_type == "agent" else None
+        )
+        owner = payload.owner
+        owner_user_id = owner.user_id if owner is not None else actor_user_id
+        owner_system_agent_id = (
+            owner.system_agent_id if owner is not None else actor_system_agent_id
+        )
+        project = Project(
+            project_id=uuid4(),
+            organization_id=organization_id,
+            slug=payload.slug,
+            name=payload.name,
+            description=payload.description,
+            created_by=payload.actor.user_id or payload.actor.participant_id,
+            creator_user_id=actor_user_id,
+            creator_system_agent_id=actor_system_agent_id,
+            owner_user_id=owner_user_id,
+            owner_system_agent_id=owner_system_agent_id,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        self.projects[str(project.project_id)] = project
+        bindings = []
+        if owner_user_id is not None:
+            bindings.append(
+                ProjectAccessBinding(
+                    project_id=project.project_id,
+                    subject_type="user",
+                    user_id=owner_user_id,
+                    role="owner",
+                    created_at=now,
+                    updated_at=now,
+                    metadata={},
+                )
+            )
+        if owner_system_agent_id is not None:
+            bindings.append(
+                ProjectAccessBinding(
+                    project_id=project.project_id,
+                    subject_type="agent",
+                    system_agent_id=owner_system_agent_id,
+                    role="owner",
+                    created_at=now,
+                    updated_at=now,
+                    metadata={},
+                )
+            )
+        if actor_user_id is not None and actor_user_id != owner_user_id:
+            bindings.append(
+                ProjectAccessBinding(
+                    project_id=project.project_id,
+                    subject_type="user",
+                    user_id=actor_user_id,
+                    role="editor",
+                    created_at=now,
+                    updated_at=now,
+                    metadata={},
+                )
+            )
+        if actor_system_agent_id is not None and actor_system_agent_id != owner_system_agent_id:
+            bindings.append(
+                ProjectAccessBinding(
+                    project_id=project.project_id,
+                    subject_type="agent",
+                    system_agent_id=actor_system_agent_id,
+                    role="editor",
+                    created_at=now,
+                    updated_at=now,
+                    metadata={},
+                )
+            )
+        for subject, role in [
+            *[(subject, "editor") for subject in payload.editors],
+            *[(subject, "viewer") for subject in payload.viewers],
+        ]:
+            bindings.append(
+                ProjectAccessBinding(
+                    project_id=project.project_id,
+                    subject_type="agent" if subject.system_agent_id is not None else "user",
+                    user_id=subject.user_id,
+                    system_agent_id=subject.system_agent_id,
+                    role=role,
+                    created_at=now,
+                    updated_at=now,
+                    metadata={},
+                )
+            )
+        for binding in bindings:
+            subject_id = binding.user_id or binding.system_agent_id
+            key = (str(project.project_id), binding.subject_type, str(subject_id))
+            existing = self.project_access_bindings.get(key)
+            role_rank = {"viewer": 0, "editor": 1, "owner": 2}
+            if existing is None or role_rank[binding.role] > role_rank[existing.role]:
+                self.project_access_bindings[key] = binding
+        return project
+
+    async def list_projects(self, organization_id: UUID):
+        await self.get_organization(organization_id)
+        return [
+            project
+            for project in self.projects.values()
+            if project.organization_id == organization_id
+        ]
+
+    async def list_projects_for_principal(
+        self,
+        organization_id: UUID,
+        *,
+        user_id=None,
+        system_agent_id=None,
+        include_all=False,
+    ):
+        projects = await self.list_projects(organization_id)
+        if include_all:
+            return projects
+        if user_id is not None:
+            return [
+                project
+                for project in projects
+                if (str(project.project_id), "user", str(user_id))
+                in self.project_access_bindings
+            ]
+        if system_agent_id is not None:
+            return [
+                project
+                for project in projects
+                if (str(project.project_id), "agent", str(system_agent_id))
+                in self.project_access_bindings
+            ]
+        return []
+
+    async def get_project(self, project_id: UUID):
+        project = self.projects.get(str(project_id))
+        if project is None:
+            raise KeyError(f"Project {project_id} not found")
+        return project
+
+    async def update_project(
+        self,
+        organization_id: UUID,
+        project_id: UUID,
+        payload,
+        *,
+        allow_platform_admin: bool = False,
+    ):
+        _ = allow_platform_admin
+        project = await self.get_project(project_id)
+        if project.organization_id != organization_id:
+            raise KeyError(f"Project {project_id} not found in organization {organization_id}")
+        if payload.slug is not None and any(
+            other.project_id != project_id
+            and other.organization_id == organization_id
+            and other.slug == payload.slug
+            for other in self.projects.values()
+        ):
+            raise ValueError(f"Project slug {payload.slug!r} already exists")
+        updated = project.model_copy(
+            update={
+                "slug": payload.slug or project.slug,
+                "name": payload.name or project.name,
+                "description": (
+                    payload.description
+                    if payload.description is not None
+                    else project.description
+                ),
+                "updated_at": datetime.now(timezone.utc),
+                "metadata": (
+                    {**project.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else project.metadata
+                ),
+            }
+        )
+        self.projects[str(project_id)] = updated
+        return updated
+
+    async def list_project_access(
+        self,
+        organization_id: UUID,
+        project_id: UUID,
+        *,
+        actor=None,
+        allow_platform_admin: bool = False,
+    ):
+        _ = actor, allow_platform_admin
+        project = await self.get_project(project_id)
+        if project.organization_id != organization_id:
+            raise KeyError(f"Project {project_id} not found in organization {organization_id}")
+        return [
+            binding
+            for (binding_project_id, _, _), binding in self.project_access_bindings.items()
+            if binding_project_id == str(project_id)
+        ]
+
+    async def upsert_project_access(
+        self,
+        organization_id: UUID,
+        project_id: UUID,
+        payload,
+        *,
+        allow_platform_admin: bool = False,
+    ):
+        _ = allow_platform_admin
+        from gateway_edge.models import ProjectAccessBinding
+
+        project = await self.get_project(project_id)
+        if project.organization_id != organization_id:
+            raise KeyError(f"Project {project_id} not found in organization {organization_id}")
+        now = datetime.now(timezone.utc)
+        binding = ProjectAccessBinding(
+            project_id=project_id,
+            subject_type="agent" if payload.subject.system_agent_id is not None else "user",
+            user_id=payload.subject.user_id,
+            system_agent_id=payload.subject.system_agent_id,
+            role=payload.role,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        subject_id = binding.user_id or binding.system_agent_id
+        self.project_access_bindings[
+            (str(project_id), binding.subject_type, str(subject_id))
+        ] = binding
+        if payload.role == "owner":
+            for key, existing in list(self.project_access_bindings.items()):
+                if key[0] != str(project_id) or existing.role != "owner":
+                    continue
+                if key == (str(project_id), binding.subject_type, str(subject_id)):
+                    continue
+                self.project_access_bindings[key] = existing.model_copy(
+                    update={"role": "editor", "updated_at": now}
+                )
+            self.projects[str(project_id)] = project.model_copy(
+                update={
+                    "owner_user_id": binding.user_id,
+                    "owner_system_agent_id": binding.system_agent_id,
+                    "updated_at": now,
+                }
+            )
+        return binding
+
+    async def remove_project_access(
+        self,
+        organization_id: UUID,
+        project_id: UUID,
+        payload,
+        *,
+        allow_platform_admin: bool = False,
+    ):
+        _ = allow_platform_admin
+        project = await self.get_project(project_id)
+        if project.organization_id != organization_id:
+            raise KeyError(f"Project {project_id} not found in organization {organization_id}")
+        if (
+            payload.subject.user_id is not None
+            and payload.subject.user_id == project.owner_user_id
+        ) or (
+            payload.subject.system_agent_id == project.owner_system_agent_id
+            and payload.subject.system_agent_id is not None
+        ):
+            raise ValueError("Cannot remove the project owner")
+        subject_type = "agent" if payload.subject.system_agent_id is not None else "user"
+        subject_id = payload.subject.system_agent_id or payload.subject.user_id
+        key = (str(project_id), subject_type, str(subject_id))
+        if self.project_access_bindings.pop(key, None) is None:
+            raise KeyError(f"Project access binding for project {project_id} not found")
+        return {"deleted": True, "project_id": str(project_id)}
 
     async def update_organization(
         self,
@@ -1862,7 +2283,11 @@ class MockCollaborationService:
         return participant
 
     async def create_agent_participant(self, workspace_id: UUID, payload):
-        from gateway_edge.models import AgentConfiguration, ParticipantProfile
+        from gateway_edge.models import (
+            AgentConfiguration,
+            ParticipantProfile,
+            ProjectAccessBinding,
+        )
 
         workspace = self.workspaces.get(str(workspace_id))
         if workspace is None:
@@ -1910,6 +2335,19 @@ class MockCollaborationService:
         self.participants.setdefault(str(workspace_id), {})[
             str(participant.participant_id)
         ] = participant
+        if workspace.project_id is not None:
+            self.project_access_bindings.setdefault(
+                (str(workspace.project_id), "agent", str(system_agent.agent_id)),
+                ProjectAccessBinding(
+                    project_id=workspace.project_id,
+                    subject_type="agent",
+                    system_agent_id=system_agent.agent_id,
+                    role="viewer",
+                    created_at=now,
+                    updated_at=now,
+                    metadata={"source": "workspace_agent_attachment"},
+                ),
+            )
         return participant
 
     async def update_agent_participant(self, workspace_id: UUID, participant_id: UUID, payload):

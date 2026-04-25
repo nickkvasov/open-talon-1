@@ -31,7 +31,7 @@ This reference is written for two audiences:
 
 ## System At A Glance
 
-Open Talon is a local-first collaboration system where humans and agents are first-class participants inside shared organization-owned workspaces.
+Open Talon is a local-first collaboration system where humans and agents are first-class participants inside shared project-owned workspaces under organizations.
 
 The main runtime components are:
 
@@ -42,7 +42,7 @@ The main runtime components are:
 - `services/core-collab`
   - canonical collaboration kernel
   - repository layer over Postgres
-  - source of truth for workspaces, threads, participants, requests, tasks, runs, run steps, tool calls, memory, assets, and audit writes
+  - source of truth for projects, workspaces, threads, participants, requests, tasks, runs, run steps, tool calls, memory, assets, and audit writes
 - `services/agent-runtime`
   - stateless background workers
   - task claiming, agent loop execution, tool execution, and lease reconciliation
@@ -116,7 +116,7 @@ The most important ownership rules are:
 
 - `users` stores global human identity
 - `auth_identities` maps external identity providers to `users`
-- `organizations` and `organization_memberships` store the tenant layer above workspaces
+- `organizations`, `projects`, `project_access_bindings`, and `organization_memberships` store the tenant and work hierarchy above workspaces
 - `system_agents` stores platform-global and organization-scoped agent definitions
 - `participants` stores workspace-local attachment and state for both humans and agents
 - `threads` and `timeline_messages` are the shared collaboration surface
@@ -141,6 +141,9 @@ Open Talon separates identity from workspace presence.
 ### Organization Membership
 
 - Organizations are identified by `organizations.organization_id`
+- Projects are identified by `projects.project_id` and belong to one organization
+- Projects record typed creator and owner references for either a user or system agent
+- Project visibility is controlled by `project_access_bindings` with `owner`, `editor`, and `viewer` roles for users or system agents
 - Human org membership and membership roles live in `organization_memberships`
 - Organization membership roles provide the baseline human permission bundle
 - The external OIDC provider is not the source of truth for org membership or authorization
@@ -323,14 +326,15 @@ For the complete permission list and current behavior, use [iam.md](./iam.md).
 
 ## Collaboration Domain Model
 
-The current collaboration model uses the tenant hierarchy `platform > organization > workspace > thread`.
+The current collaboration model uses the tenant hierarchy `platform > organization > project > workspace > thread`.
 
 ### Core Entities
 
 | Entity | Meaning |
 | --- | --- |
-| `organization` | tenant boundary above workspaces |
-| `workspace` | collaboration boundary inside an organization |
+| `organization` | tenant boundary above projects |
+| `project` | organization-local work grouping that owns workspaces |
+| `workspace` | collaboration boundary inside a project |
 | `participant` | workspace-local user or agent presence |
 | `thread` | shared collaboration stream inside a workspace |
 | `timeline_message` | ordered thread message |
@@ -539,10 +543,19 @@ The `chat` APIs provide a session-based chat surface. Shared collaboration flows
 | `GET` | `/v1/organizations/{organization_id}/members` | list org memberships |
 | `POST` | `/v1/organizations/{organization_id}/members` | add org member |
 | `DELETE` | `/v1/organizations/{organization_id}/members/{user_id}` | remove org member |
+| `GET` | `/v1/organizations/{organization_id}/projects` | list organization projects |
+| `POST` | `/v1/organizations/{organization_id}/projects` | create organization project |
+| `GET` | `/v1/organizations/{organization_id}/projects/{project_id}` | project detail |
+| `PATCH` | `/v1/organizations/{organization_id}/projects/{project_id}` | update project |
+| `GET` | `/v1/organizations/{organization_id}/projects/{project_id}/access` | list project access bindings |
+| `PUT` | `/v1/organizations/{organization_id}/projects/{project_id}/access` | create or update project access |
+| `DELETE` | `/v1/organizations/{organization_id}/projects/{project_id}/access` | remove project access |
 | `POST` | `/v1/workspaces` | create workspace |
 | `GET` | `/v1/workspaces` | list visible workspaces |
 | `POST` | `/v1/organizations/{organization_id}/workspaces` | create workspace in organization |
 | `GET` | `/v1/organizations/{organization_id}/workspaces` | list organization workspaces |
+| `POST` | `/v1/organizations/{organization_id}/projects/{project_id}/workspaces` | create workspace in project |
+| `GET` | `/v1/organizations/{organization_id}/projects/{project_id}/workspaces` | list project workspaces |
 | `GET` | `/v1/organizations/{organization_id}/runtime/overview` | organization runtime overview |
 | `GET` | `/v1/workspaces/{workspace_id}` | workspace detail |
 | `PATCH` | `/v1/workspaces/{workspace_id}` | workspace metadata update |
@@ -771,6 +784,7 @@ curl -X POST http://127.0.0.1:8000/v1/workspaces \
   -H 'Content-Type: application/json' \
   -d '{
     "organization_id": "11111111-1111-1111-1111-111111111111",
+    "project_id": "<optional project_id; omitted uses the organization default project>",
     "name": "Delivery Team",
     "actor": {
       "participant_id": "11111111-1111-1111-1111-111111111111",

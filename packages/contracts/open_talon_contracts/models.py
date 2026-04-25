@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 from .llm_engines import LlmEngineEndpointKind, LlmEngineLocality
 
@@ -108,6 +108,7 @@ def utcnow() -> datetime:
 
 
 _ORGANIZATION_SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_PROJECT_SLUG_PATTERN = _ORGANIZATION_SLUG_PATTERN
 
 
 def normalize_organization_slug(value: str) -> str:
@@ -117,6 +118,17 @@ def normalize_organization_slug(value: str) -> str:
     if not _ORGANIZATION_SLUG_PATTERN.fullmatch(normalized):
         raise ValueError(
             "Organization slug must use lowercase letters, numbers, and single hyphens"
+        )
+    return normalized
+
+
+def normalize_project_slug(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+    if not normalized:
+        raise ValueError("Project slug must contain at least one letter or number")
+    if not _PROJECT_SLUG_PATTERN.fullmatch(normalized):
+        raise ValueError(
+            "Project slug must use lowercase letters, numbers, and single hyphens"
         )
     return normalized
 
@@ -334,6 +346,7 @@ class AgentDefinition(BaseModel):
 class Workspace(BaseModel):
     workspace_id: UUID
     organization_id: UUID | None = None
+    project_id: UUID | None = None
     name: str
     description: str | None = None
     owner_user_id: UUID | None = None
@@ -352,6 +365,58 @@ class Organization(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class Project(BaseModel):
+    project_id: UUID
+    organization_id: UUID
+    slug: str
+    name: str
+    description: str | None = None
+    created_by: UUID
+    creator_user_id: UUID | None = None
+    creator_system_agent_id: UUID | None = None
+    owner_user_id: UUID | None = None
+    owner_system_agent_id: UUID | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+ProjectAccessRole = Literal["owner", "editor", "viewer"]
+ProjectSubjectType = Literal["user", "agent"]
+
+
+class ProjectSubjectRef(BaseModel):
+    user_id: UUID | None = None
+    system_agent_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _validate_single_subject(self) -> "ProjectSubjectRef":
+        if (self.user_id is None) == (self.system_agent_id is None):
+            raise ValueError("Exactly one of user_id or system_agent_id is required")
+        return self
+
+
+class ProjectAccessBinding(BaseModel):
+    project_id: UUID
+    subject_type: ProjectSubjectType
+    user_id: UUID | None = None
+    system_agent_id: UUID | None = None
+    role: ProjectAccessRole
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_subject(self) -> "ProjectAccessBinding":
+        if self.subject_type == "user":
+            if self.user_id is None or self.system_agent_id is not None:
+                raise ValueError("User project access requires user_id only")
+        if self.subject_type == "agent":
+            if self.system_agent_id is None or self.user_id is not None:
+                raise ValueError("Agent project access requires system_agent_id only")
+        return self
 
 
 class OrganizationMembership(BaseModel):
@@ -1425,6 +1490,7 @@ class CreateWorkspaceRequest(BaseModel):
     name: str
     description: str | None = None
     organization_id: UUID | None = None
+    project_id: UUID | None = None
     actor: ParticipantInput
     harness: WorkspaceHarness | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -1456,6 +1522,49 @@ class UpdateOrganizationRequest(BaseModel):
         if value is None:
             return None
         return normalize_organization_slug(value)
+
+
+class CreateProjectRequest(BaseModel):
+    actor: ParticipantInput
+    slug: str
+    name: str
+    description: str | None = None
+    owner: ProjectSubjectRef | None = None
+    editors: list[ProjectSubjectRef] = Field(default_factory=list)
+    viewers: list[ProjectSubjectRef] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("slug", mode="before")
+    @classmethod
+    def _normalize_slug(cls, value: str) -> str:
+        return normalize_project_slug(value)
+
+
+class UpdateProjectRequest(BaseModel):
+    actor: ParticipantInput
+    slug: str | None = None
+    name: str | None = None
+    description: str | None = None
+    metadata: dict[str, Any] | None = None
+
+    @field_validator("slug", mode="before")
+    @classmethod
+    def _normalize_slug(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_project_slug(value)
+
+
+class UpsertProjectAccessRequest(BaseModel):
+    actor: ParticipantInput
+    subject: ProjectSubjectRef
+    role: ProjectAccessRole
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RemoveProjectAccessRequest(BaseModel):
+    actor: ParticipantInput
+    subject: ProjectSubjectRef
 
 
 class AddOrganizationMemberRequest(BaseModel):

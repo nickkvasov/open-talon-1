@@ -202,28 +202,211 @@ async def test_list_workspaces_returns_created_workspace(client, actor_payload):
     assert resp.json()[0]["name"] == "Observability"
 
 
-async def test_list_workspaces_filters_to_authenticated_user_membership_in_oidc_mode(
+async def test_projects_group_workspaces_inside_organization(client, actor_payload):
+    organization_id = "11111111-1111-1111-1111-111111111111"
+    project_resp = await client.post(
+        f"/v1/organizations/{organization_id}/projects",
+        json={
+            "slug": "Platform Core",
+            "name": "Platform Core",
+            "description": "Owns gateway and collaboration workspaces.",
+            "actor": actor_payload,
+        },
+    )
+
+    assert project_resp.status_code == 200
+    project = project_resp.json()
+    assert project["slug"] == "platform-core"
+    assert project["organization_id"] == organization_id
+
+    workspace_resp = await client.post(
+        f"/v1/organizations/{organization_id}/projects/{project['project_id']}/workspaces",
+        json={"name": "Gateway Edge", "actor": actor_payload},
+    )
+
+    assert workspace_resp.status_code == 200
+    workspace = workspace_resp.json()["workspace"]
+    assert workspace["organization_id"] == organization_id
+    assert workspace["project_id"] == project["project_id"]
+
+    project_workspaces_resp = await client.get(
+        f"/v1/organizations/{organization_id}/projects/{project['project_id']}/workspaces"
+    )
+    assert project_workspaces_resp.status_code == 200
+    assert [item["workspace_id"] for item in project_workspaces_resp.json()] == [
+        workspace["workspace_id"]
+    ]
+
+    filtered_resp = await client.get(
+        "/v1/workspaces",
+        params={"project_id": project["project_id"]},
+    )
+    assert filtered_resp.status_code == 200
+    assert [item["workspace_id"] for item in filtered_resp.json()] == [
+        workspace["workspace_id"]
+    ]
+
+
+async def test_project_access_controls_project_and_workspace_structure(
     client,
     actor_payload,
     monkeypatch,
 ):
+    organization_id = "11111111-1111-1111-1111-111111111111"
+    admin_context = _oidc_context(roles=["admin"])
+    owner_context = _oidc_context(roles=["workspace-user"])
+    viewer_context = _oidc_context(roles=["workspace-user"])
+    editor_context = _oidc_context(roles=["workspace-user"])
+    outsider_context = _oidc_context(roles=["workspace-user"])
+    _patch_oidc_tokens(
+        monkeypatch,
+        {
+            "admin-token": admin_context,
+            "owner-token": owner_context,
+            "viewer-token": viewer_context,
+            "editor-token": editor_context,
+            "outsider-token": outsider_context,
+        },
+    )
+
+    for context in [owner_context, viewer_context, editor_context, outsider_context]:
+        membership_response = await client.post(
+            f"/v1/organizations/{organization_id}/members",
+            headers={"Authorization": "Bearer admin-token"},
+            json={
+                "actor": actor_payload,
+                "user_id": str(context.user_id),
+                "role": "member",
+            },
+        )
+        assert membership_response.status_code == 200
+
+    project_response = await client.post(
+        f"/v1/organizations/{organization_id}/projects",
+        headers={"Authorization": "Bearer admin-token"},
+        json={
+            "slug": "Private Project",
+            "name": "Private Project",
+            "actor": actor_payload,
+            "owner": {"user_id": str(owner_context.user_id)},
+            "editors": [{"user_id": str(editor_context.user_id)}],
+            "viewers": [{"user_id": str(viewer_context.user_id)}],
+        },
+    )
+    assert project_response.status_code == 200
+    project = project_response.json()
+    assert project["owner_user_id"] == str(owner_context.user_id)
+
+    workspace_response = await client.post(
+        f"/v1/organizations/{organization_id}/projects/{project['project_id']}/workspaces",
+        headers={"Authorization": "Bearer owner-token"},
+        json={"name": "Private Workspace", "actor": actor_payload},
+    )
+    assert workspace_response.status_code == 200
+    workspace = workspace_response.json()["workspace"]
+
+    outsider_projects = await client.get(
+        f"/v1/organizations/{organization_id}/projects",
+        headers={"Authorization": "Bearer outsider-token"},
+    )
+    assert outsider_projects.status_code == 200
+    assert outsider_projects.json() == []
+
+    outsider_project = await client.get(
+        f"/v1/organizations/{organization_id}/projects/{project['project_id']}",
+        headers={"Authorization": "Bearer outsider-token"},
+    )
+    assert outsider_project.status_code == 404
+
+    outsider_workspaces = await client.get(
+        f"/v1/organizations/{organization_id}/projects/{project['project_id']}/workspaces",
+        headers={"Authorization": "Bearer outsider-token"},
+    )
+    assert outsider_workspaces.status_code == 404
+
+    viewer_workspaces = await client.get(
+        f"/v1/organizations/{organization_id}/projects/{project['project_id']}/workspaces",
+        headers={"Authorization": "Bearer viewer-token"},
+    )
+    assert viewer_workspaces.status_code == 200
+    assert [item["workspace_id"] for item in viewer_workspaces.json()] == [
+        workspace["workspace_id"]
+    ]
+
+    viewer_create = await client.post(
+        f"/v1/organizations/{organization_id}/projects/{project['project_id']}/workspaces",
+        headers={"Authorization": "Bearer viewer-token"},
+        json={"name": "Viewer Workspace", "actor": actor_payload},
+    )
+    assert viewer_create.status_code == 403
+
+    editor_create = await client.post(
+        f"/v1/organizations/{organization_id}/projects/{project['project_id']}/workspaces",
+        headers={"Authorization": "Bearer editor-token"},
+        json={"name": "Editor Workspace", "actor": actor_payload},
+    )
+    assert editor_create.status_code == 200
+
+
+async def test_list_workspaces_filters_to_authenticated_project_access_in_oidc_mode(
+    client,
+    actor_payload,
+    monkeypatch,
+):
+    admin_context = _oidc_context(roles=["admin"])
     first_context = _oidc_context(roles=["workspace-user"])
     second_context = _oidc_context(roles=["workspace-user"])
     _patch_oidc_tokens(
         monkeypatch,
         {
+            "admin-token": admin_context,
             "first-token": first_context,
             "second-token": second_context,
         },
     )
+    organization_id = "11111111-1111-1111-1111-111111111111"
+    for context in [first_context, second_context]:
+        membership_response = await client.post(
+            f"/v1/organizations/{organization_id}/members",
+            headers={"Authorization": "Bearer admin-token"},
+            json={
+                "actor": actor_payload,
+                "user_id": str(context.user_id),
+                "role": "member",
+            },
+        )
+        assert membership_response.status_code == 200
+
+    first_project = await client.post(
+        f"/v1/organizations/{organization_id}/projects",
+        headers={"Authorization": "Bearer admin-token"},
+        json={
+            "slug": "First Private",
+            "name": "First Private",
+            "actor": actor_payload,
+            "owner": {"user_id": str(first_context.user_id)},
+        },
+    )
+    second_project = await client.post(
+        f"/v1/organizations/{organization_id}/projects",
+        headers={"Authorization": "Bearer admin-token"},
+        json={
+            "slug": "Second Private",
+            "name": "Second Private",
+            "actor": actor_payload,
+            "owner": {"user_id": str(second_context.user_id)},
+        },
+    )
+    assert first_project.status_code == 200
+    assert second_project.status_code == 200
 
     first_workspace = await client.post(
-        "/v1/workspaces",
+        f"/v1/organizations/{organization_id}/projects/{first_project.json()['project_id']}/workspaces",
         headers={"Authorization": "Bearer first-token"},
         json={"name": "Visible Workspace", "actor": actor_payload},
     )
     second_workspace = await client.post(
-        "/v1/workspaces",
+        f"/v1/organizations/{organization_id}/projects/{second_project.json()['project_id']}/workspaces",
         headers={"Authorization": "Bearer second-token"},
         json={"name": "Hidden Workspace", "actor": actor_payload},
     )

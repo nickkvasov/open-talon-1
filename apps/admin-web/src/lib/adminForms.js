@@ -55,6 +55,7 @@ export function buildWorkspaceHarness(formData) {
 export function buildWorkspaceMutation({
   actor,
   organizationId,
+  projectId,
   formData,
   modalMode,
 }) {
@@ -64,11 +65,61 @@ export function buildWorkspaceMutation({
   return {
     actor,
     organization_id: organizationId || null,
+    project_id: modalMode === 'create' ? (projectId || null) : undefined,
     name: formData.name,
     description: formData.description,
     metadata: parseJsonInput(formData.metadata, {}, 'Metadata'),
     harness: buildWorkspaceHarness(formData),
   };
+}
+
+export function buildProjectMutation({
+  actor,
+  formData,
+}) {
+  const ownerSubjects = [
+    ...subjectRefsFromCsv(formData.owner_user_id, 'user_id'),
+    ...subjectRefsFromCsv(formData.owner_system_agent_id, 'system_agent_id'),
+  ];
+  if (ownerSubjects.length > 1) {
+    throw new Error('Project owner must be a single user ID or system agent ID.');
+  }
+  const editors = [
+    ...subjectRefsFromCsv(formData.editor_user_ids, 'user_id'),
+    ...subjectRefsFromCsv(formData.editor_system_agent_ids, 'system_agent_id'),
+  ];
+  const viewers = [
+    ...subjectRefsFromCsv(formData.viewer_user_ids, 'user_id'),
+    ...subjectRefsFromCsv(formData.viewer_system_agent_ids, 'system_agent_id'),
+  ];
+  const payload = {
+    actor,
+    slug: formData.slug,
+    name: formData.name,
+    description: formData.description,
+    metadata: parseJsonInput(formData.metadata, {}, 'Metadata'),
+  };
+  if (ownerSubjects.length) {
+    payload.owner = ownerSubjects[0];
+  }
+  if (editors.length) {
+    payload.editors = editors;
+  }
+  if (viewers.length) {
+    payload.viewers = viewers;
+  }
+  return payload;
+}
+
+function subjectRefsFromCsv(raw, key) {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return [];
+  }
+  return raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((value) => ({ [key]: value }));
 }
 
 function parseIntegerInput(raw, label) {

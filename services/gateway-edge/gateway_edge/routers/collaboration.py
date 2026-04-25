@@ -49,6 +49,7 @@ from gateway_edge.models import (
     CreateMemoryProviderRequest,
     CreateMcpServerRequest,
     CreateOrganizationRequest,
+    CreateProjectRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
     ConfirmWorkspaceMemoryRequest,
@@ -88,6 +89,10 @@ from gateway_edge.models import (
     OrganizationMembership,
     ParticipantInput,
     ParticipantProfile,
+    Project,
+    ProjectAccessBinding,
+    ProjectAccessRole,
+    ProjectSubjectRef,
     PublishAssetFromGitRequest,
     PublishAgentBundleFromGitRequest,
     ResolvedAssetBinding,
@@ -109,7 +114,10 @@ from gateway_edge.models import (
     UpdateMcpServerRequest,
     UpdateMemoryEntryRequest,
     UpdateOrganizationRequest,
+    UpdateProjectRequest,
+    UpsertProjectAccessRequest,
     ReviewToolGenerationRevisionRequest,
+    RemoveProjectAccessRequest,
     UpdateWorkspaceToolRequest,
     UpdateWorkspaceMcpServerRequest,
     UpdateWorkspaceRequest,
@@ -432,6 +440,91 @@ def _require_resource_in_organization(
         raise _http_error(
             KeyError(f"{resource_name} {resource_id} not found in organization {organization_id}")
         )
+
+
+async def _load_project(
+    request: Request,
+    project_id: UUID,
+    *,
+    permission: str,
+    organization_id: UUID | None = None,
+    allowed_roles: set[ProjectAccessRole] | None = None,
+) -> Project:
+    project = await collab_svc.collaboration_service.get_project(project_id)
+    if organization_id is not None:
+        _require_resource_in_organization(
+            resource_name="Project",
+            resource_id=project_id,
+            organization_id=organization_id,
+            resource_organization_id=project.organization_id,
+        )
+    await _require_identity_permission(
+        request,
+        permission=permission,
+        organization_id=project.organization_id,
+    )
+    await _require_project_access(
+        request,
+        project,
+        allowed_roles=allowed_roles or {"owner", "editor", "viewer"},
+    )
+    return project
+
+
+def _project_subject_from_auth_context(
+    auth_context: AuthContext | None,
+) -> ProjectSubjectRef | None:
+    if auth_context is None or auth_context.kind == "api_key":
+        return None
+    if auth_context.principal_type == "human" and auth_context.user_id is not None:
+        return ProjectSubjectRef(user_id=auth_context.user_id)
+    if auth_context.principal_type == "agent" and auth_context.system_agent_id is not None:
+        return ProjectSubjectRef(system_agent_id=auth_context.system_agent_id)
+    return None
+
+
+async def _project_access_binding_for_request(
+    request: Request,
+    project: Project,
+) -> ProjectAccessBinding | None:
+    subject = _project_subject_from_auth_context(_oidc_auth_context(request))
+    if subject is None:
+        return None
+    bindings = await collab_svc.collaboration_service.list_project_access(
+        project.organization_id,
+        project.project_id,
+        actor=None,
+        allow_platform_admin=True,
+    )
+    for binding in bindings:
+        if subject.user_id is not None and binding.user_id == subject.user_id:
+            return binding
+        if (
+            subject.system_agent_id is not None
+            and binding.system_agent_id == subject.system_agent_id
+        ):
+            return binding
+    return None
+
+
+async def _require_project_access(
+    request: Request,
+    project: Project,
+    *,
+    allowed_roles: set[ProjectAccessRole],
+) -> ProjectAccessBinding | None:
+    auth_context = _oidc_auth_context(request)
+    if auth_context is None or auth_context.kind == "api_key" or has_admin_access(request):
+        return None
+    binding = await _project_access_binding_for_request(request, project)
+    if binding is None:
+        raise _http_error(KeyError(f"Project {project.project_id} not found"))
+    if binding.role not in allowed_roles:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Project role {sorted(allowed_roles)!r} required",
+        )
+    return binding
 
 
 async def _load_llm_provider(
@@ -896,14 +989,229 @@ async def remove_organization_member(
         raise _http_error(exc) from exc
 
 
+@router.post(
+    "/organizations/{organization_id}/projects",
+    response_model=Project,
+    summary="Create a project inside an organization",
+)
+async def create_organization_project(
+    request: Request,
+    organization_id: UUID,
+    payload: CreateProjectRequest,
+) -> Project:
+    await _require_identity_permission(
+        request,
+        permission="project.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        return await collab_svc.collaboration_service.create_project(
+            organization_id,
+            payload,
+            allow_platform_admin=has_admin_access(request),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/projects",
+    response_model=list[Project],
+    summary="List projects inside an organization",
+)
+async def list_organization_projects(
+    request: Request,
+    organization_id: UUID,
+) -> list[Project]:
+    await _require_identity_permission(
+        request,
+        permission="project.read",
+        organization_id=organization_id,
+    )
+    auth_context = _oidc_auth_context(request)
+    subject = _project_subject_from_auth_context(auth_context)
+    if auth_context is not None and not has_admin_access(request) and subject is None:
+        return []
+    try:
+        return await collab_svc.collaboration_service.list_projects_for_principal(
+            organization_id,
+            user_id=None if has_admin_access(request) else (subject.user_id if subject else None),
+            system_agent_id=None
+            if has_admin_access(request)
+            else (subject.system_agent_id if subject else None),
+            include_all=has_admin_access(request) or auth_context is None,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/projects/{project_id}",
+    response_model=Project,
+    summary="Get project detail",
+)
+async def get_organization_project(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+) -> Project:
+    try:
+        return await _load_project(
+            request,
+            project_id,
+            permission="project.read",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch(
+    "/organizations/{organization_id}/projects/{project_id}",
+    response_model=Project,
+    summary="Update project metadata",
+)
+async def update_organization_project(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+    payload: UpdateProjectRequest,
+) -> Project:
+    await _load_project(
+        request,
+        project_id,
+        permission="project.read",
+        organization_id=organization_id,
+        allowed_roles={"owner", "editor"},
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        return await collab_svc.collaboration_service.update_project(
+            organization_id,
+            project_id,
+            payload,
+            allow_platform_admin=has_admin_access(request),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/projects/{project_id}/access",
+    response_model=list[ProjectAccessBinding],
+    summary="List project access bindings",
+)
+async def list_project_access(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+) -> list[ProjectAccessBinding]:
+    project = await _load_project(
+        request,
+        project_id,
+        permission="project.read",
+        organization_id=organization_id,
+        allowed_roles={"owner", "editor", "viewer"},
+    )
+    try:
+        return await collab_svc.collaboration_service.list_project_access(
+            organization_id,
+            project.project_id,
+            actor=None,
+            allow_platform_admin=True,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.put(
+    "/organizations/{organization_id}/projects/{project_id}/access",
+    response_model=ProjectAccessBinding,
+    summary="Create or update project access",
+)
+async def upsert_project_access(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+    payload: UpsertProjectAccessRequest,
+) -> ProjectAccessBinding:
+    await _load_project(
+        request,
+        project_id,
+        permission="project.read",
+        organization_id=organization_id,
+        allowed_roles={"owner"},
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        return await collab_svc.collaboration_service.upsert_project_access(
+            organization_id,
+            project_id,
+            payload,
+            allow_platform_admin=has_admin_access(request),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/organizations/{organization_id}/projects/{project_id}/access",
+    response_model=dict,
+    summary="Remove project access",
+)
+async def remove_project_access(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+    payload: RemoveProjectAccessRequest = Body(...),
+) -> dict[str, bool | str]:
+    await _load_project(
+        request,
+        project_id,
+        permission="project.read",
+        organization_id=organization_id,
+        allowed_roles={"owner"},
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        return await collab_svc.collaboration_service.remove_project_access(
+            organization_id,
+            project_id,
+            payload,
+            allow_platform_admin=has_admin_access(request),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.post("/workspaces", response_model=WorkspaceDetail, summary="Create a workspace")
 async def create_workspace(request: Request, payload: CreateWorkspaceRequest) -> WorkspaceDetail:
-    if payload.organization_id is not None:
+    project = None
+    if payload.project_id is not None:
+        project = await _load_project(
+            request,
+            payload.project_id,
+            permission="workspace.list",
+            organization_id=payload.organization_id,
+            allowed_roles={"owner", "editor"},
+        )
+    if payload.organization_id is not None and project is None:
         await _require_identity_permission(
             request,
             permission="workspace.list",
             organization_id=payload.organization_id,
         )
+    if project is not None and payload.organization_id is None:
+        payload = payload.model_copy(update={"organization_id": project.organization_id})
     payload = payload.model_copy(
         update={"actor": _resolved_create_workspace_actor(request, payload.actor)}
     )
@@ -926,9 +1234,25 @@ async def create_workspace(request: Request, payload: CreateWorkspaceRequest) ->
 async def list_workspaces(
     request: Request,
     organization_id: UUID | None = Query(default=None),
+    project_id: UUID | None = Query(default=None),
 ) -> list[Workspace]:
-    logger.debug("HTTP list_workspaces organization_id=%s", organization_id)
+    logger.debug(
+        "HTTP list_workspaces organization_id=%s project_id=%s",
+        organization_id,
+        project_id,
+    )
     auth_context = _oidc_auth_context(request)
+    effective_project_id = project_id
+    if project_id is not None:
+        project = await _load_project(
+            request,
+            project_id,
+            permission="workspace.list",
+            organization_id=organization_id,
+            allowed_roles={"owner", "editor", "viewer"},
+        )
+        if organization_id is None:
+            organization_id = project.organization_id
     if auth_context is not None and organization_id is not None:
         await _require_identity_permission(
             request,
@@ -950,15 +1274,22 @@ async def list_workspaces(
                 )
             else:
                 await _require_identity_permission(request, permission="workspace.list")
+        if not has_admin_access(request) and auth_context.system_agent_id is None:
+            return []
         return await collab_svc.collaboration_service.list_workspaces(
             user_id=None,
+            system_agent_id=None
+            if has_admin_access(request)
+            else auth_context.system_agent_id,
             organization_id=effective_organization_id,
+            project_id=effective_project_id,
         )
     user_context = auth_context if auth_context is not None and auth_context.principal_type == "human" else None
     user_id = None if has_admin_access(request) else (user_context.user_id if user_context is not None else None)
     return await collab_svc.collaboration_service.list_workspaces(
         user_id=user_id,
         organization_id=organization_id,
+        project_id=effective_project_id,
     )
 
 
@@ -977,6 +1308,14 @@ async def create_organization_workspace(
         permission="workspace.list",
         organization_id=organization_id,
     )
+    if payload.project_id is not None:
+        await _load_project(
+            request,
+            payload.project_id,
+            permission="workspace.list",
+            organization_id=organization_id,
+            allowed_roles={"owner", "editor"},
+        )
     payload = payload.model_copy(
         update={
             "organization_id": organization_id,
@@ -1000,18 +1339,111 @@ async def create_organization_workspace(
 async def list_organization_workspaces(
     request: Request,
     organization_id: UUID,
+    project_id: UUID | None = Query(default=None),
 ) -> list[Workspace]:
     await _require_identity_permission(
         request,
         permission="workspace.list",
         organization_id=organization_id,
     )
-    auth_context = _user_auth_context(request)
-    user_id = None if has_admin_access(request) else (auth_context.user_id if auth_context else None)
+    if project_id is not None:
+        await _load_project(
+            request,
+            project_id,
+            permission="workspace.list",
+            organization_id=organization_id,
+            allowed_roles={"owner", "editor", "viewer"},
+        )
+    auth_context = _oidc_auth_context(request)
+    user_id = (
+        auth_context.user_id
+        if auth_context is not None and auth_context.principal_type == "human"
+        else None
+    )
+    system_agent_id = (
+        auth_context.system_agent_id
+        if auth_context is not None and auth_context.principal_type == "agent"
+        else None
+    )
     try:
         return await collab_svc.collaboration_service.list_workspaces(
-            user_id=user_id,
+            user_id=None if has_admin_access(request) else user_id,
+            system_agent_id=None if has_admin_access(request) else system_agent_id,
             organization_id=organization_id,
+            project_id=project_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/projects/{project_id}/workspaces",
+    response_model=WorkspaceDetail,
+    summary="Create a workspace inside a project",
+)
+async def create_project_workspace(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+    payload: CreateWorkspaceRequest,
+) -> WorkspaceDetail:
+    await _load_project(
+        request,
+        project_id,
+        permission="workspace.list",
+        organization_id=organization_id,
+        allowed_roles={"owner", "editor"},
+    )
+    payload = payload.model_copy(
+        update={
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "actor": _resolved_create_workspace_actor(request, payload.actor),
+        }
+    )
+    try:
+        return await collab_svc.collaboration_service.create_workspace(
+            payload,
+            allow_platform_admin=has_admin_access(request),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/projects/{project_id}/workspaces",
+    response_model=list[Workspace],
+    summary="List workspaces inside a project",
+)
+async def list_project_workspaces(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+) -> list[Workspace]:
+    await _load_project(
+        request,
+        project_id,
+        permission="workspace.list",
+        organization_id=organization_id,
+        allowed_roles={"owner", "editor", "viewer"},
+    )
+    auth_context = _oidc_auth_context(request)
+    user_id = (
+        auth_context.user_id
+        if auth_context is not None and auth_context.principal_type == "human"
+        else None
+    )
+    system_agent_id = (
+        auth_context.system_agent_id
+        if auth_context is not None and auth_context.principal_type == "agent"
+        else None
+    )
+    try:
+        return await collab_svc.collaboration_service.list_workspaces(
+            user_id=None if has_admin_access(request) else user_id,
+            system_agent_id=None if has_admin_access(request) else system_agent_id,
+            organization_id=organization_id,
+            project_id=project_id,
         )
     except Exception as exc:
         raise _http_error(exc) from exc

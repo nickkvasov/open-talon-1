@@ -56,6 +56,7 @@ from gateway_edge.models import (
     CreateMemoryProviderRequest,
     CreateMcpServerRequest,
     CreateOrganizationRequest,
+    CreateProjectRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
     ConfirmWorkspaceMemoryRequest,
@@ -92,6 +93,7 @@ from gateway_edge.models import (
     OrganizationMembership,
     ParticipantInput,
     ParticipantProfile,
+    Project,
     IamPermission,
     IamRoleDefinition,
     RoleDefinition,
@@ -119,7 +121,10 @@ from gateway_edge.models import (
     UpdateMcpServerRequest,
     UpdateMemoryEntryRequest,
     UpdateOrganizationRequest,
+    UpdateProjectRequest,
+    UpsertProjectAccessRequest,
     ReviewToolGenerationRevisionRequest,
+    RemoveProjectAccessRequest,
     UpdateWorkspaceToolRequest,
     UpdateWorkspaceMcpServerRequest,
     Workspace,
@@ -238,6 +243,107 @@ class CollaborationService:
             raise KeyError(f"Organization slug {slug!r} not found")
         return organization
 
+    async def create_project(
+        self,
+        organization_id: UUID,
+        payload: CreateProjectRequest,
+        *,
+        allow_platform_admin: bool = False,
+    ) -> Project:
+        result = await self._require_kernel().create_project(
+            organization_id,
+            payload,
+            allow_platform_admin=allow_platform_admin,
+        )
+        assert result.project is not None
+        return result.project
+
+    async def list_projects(self, organization_id: UUID) -> list[Project]:
+        return await self._require_kernel().list_projects(organization_id)
+
+    async def list_projects_for_principal(
+        self,
+        organization_id: UUID,
+        *,
+        user_id: UUID | None = None,
+        system_agent_id: UUID | None = None,
+        include_all: bool = False,
+    ) -> list[Project]:
+        return await self._require_kernel().list_projects(
+            organization_id,
+            user_id=user_id,
+            system_agent_id=system_agent_id,
+            include_all=include_all,
+        )
+
+    async def get_project(self, project_id: UUID) -> Project:
+        project = await self._require_kernel().get_project(project_id)
+        if project is None:
+            raise KeyError(f"Project {project_id} not found")
+        return project
+
+    async def update_project(
+        self,
+        organization_id: UUID,
+        project_id: UUID,
+        payload: UpdateProjectRequest,
+        *,
+        allow_platform_admin: bool = False,
+    ) -> Project:
+        result = await self._require_kernel().update_project(
+            organization_id,
+            project_id,
+            payload,
+            allow_platform_admin=allow_platform_admin,
+        )
+        assert result.project is not None
+        return result.project
+
+    async def list_project_access(
+        self,
+        organization_id: UUID,
+        project_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+        allow_platform_admin: bool = False,
+    ):
+        return await self._require_kernel().list_project_access(
+            organization_id,
+            project_id,
+            actor=actor,
+            allow_platform_admin=allow_platform_admin,
+        )
+
+    async def upsert_project_access(
+        self,
+        organization_id: UUID,
+        project_id: UUID,
+        payload: UpsertProjectAccessRequest,
+        *,
+        allow_platform_admin: bool = False,
+    ):
+        return await self._require_kernel().upsert_project_access(
+            organization_id,
+            project_id,
+            payload,
+            allow_platform_admin=allow_platform_admin,
+        )
+
+    async def remove_project_access(
+        self,
+        organization_id: UUID,
+        project_id: UUID,
+        payload: RemoveProjectAccessRequest,
+        *,
+        allow_platform_admin: bool = False,
+    ):
+        return await self._require_kernel().remove_project_access(
+            organization_id,
+            project_id,
+            payload,
+            allow_platform_admin=allow_platform_admin,
+        )
+
     async def update_organization(
         self,
         organization_id: UUID,
@@ -348,11 +454,15 @@ class CollaborationService:
         self,
         *,
         user_id: UUID | None = None,
+        system_agent_id: UUID | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
     ) -> list[Workspace]:
         return await self._require_kernel().list_workspaces(
             user_id=user_id,
+            system_agent_id=system_agent_id,
             organization_id=organization_id,
+            project_id=project_id,
         )
 
     async def delete_workspace(

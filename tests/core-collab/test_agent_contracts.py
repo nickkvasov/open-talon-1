@@ -6,7 +6,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -49,6 +49,8 @@ from open_talon_contracts.models import (  # noqa: E402
     CreateGitRepositoryRequest,
     CreateThreadRequest,
     CreateLlmProviderRequest,
+    CreateOrganizationRequest,
+    CreateProjectRequest,
     CreateWorkspaceRequest,
     CreateSystemToolRequest,
     EventEnvelope,
@@ -74,7 +76,11 @@ from open_talon_contracts.models import (  # noqa: E402
     MemoryEntry,
     MemoryProviderDefinition,
     MemoryProviderRecord,
+    Organization,
     ParticipantProfile,
+    Project,
+    ProjectAccessBinding,
+    ProjectSubjectRef,
     Run,
     RunStep,
     SearchMemoryRequest,
@@ -94,7 +100,10 @@ from open_talon_contracts.models import (  # noqa: E402
     UpdateSystemAgentRequest,
     UpdateInteractionRequestRequest,
     UpdateLlmProviderRequest,
+    UpdateProjectRequest,
+    UpsertProjectAccessRequest,
     ReviewToolGenerationRevisionRequest,
+    RemoveProjectAccessRequest,
     UpdateWorkspaceRequest,
     UpsertRoleDefinitionRequest,
     Workspace,
@@ -187,6 +196,9 @@ class FakeRepository:
         self._tasks = {}
         self._runs = {}
         self._run_steps = {}
+        self._organizations = {}
+        self._projects = {}
+        self._project_access_bindings = {}
         self._workspaces = {}
         self._threads = {}
         self._participants = {}
@@ -228,6 +240,16 @@ class FakeRepository:
         self._interaction_questions = {}
         self._interaction_targets = {}
         self._interaction_answers = {}
+        default_organization = Organization(
+            organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+            slug="default",
+            name="Default Organization",
+            created_by=uuid4(),
+            created_at=now,
+            updated_at=now,
+            metadata={},
+        )
+        self._organizations[default_organization.organization_id] = default_organization
 
     async def setup_schema(self) -> None:
         self.setup_schema_calls += 1
@@ -375,19 +397,129 @@ class FakeRepository:
         self._run_steps[step.step_id] = claimed
         return claimed
 
+    async def upsert_organization(self, conn, organization: Organization) -> None:
+        self._organizations[organization.organization_id] = organization
+
+    async def fetch_organization(self, organization_id):
+        return self._organizations.get(organization_id)
+
+    async def fetch_organization_by_slug(self, slug):
+        for organization in self._organizations.values():
+            if organization.slug == slug:
+                return organization
+        return None
+
+    async def upsert_project(self, conn, project: Project) -> None:
+        self._projects[project.project_id] = project
+
+    async def fetch_project(self, project_id):
+        return self._projects.get(project_id)
+
+    async def fetch_project_by_slug(self, *, organization_id, slug):
+        for project in self._projects.values():
+            if project.organization_id == organization_id and project.slug == slug:
+                return project
+        return None
+
+    async def fetch_default_project(self, organization_id):
+        return await self.fetch_project_by_slug(
+            organization_id=organization_id,
+            slug="default",
+        )
+
+    async def list_projects(self, organization_id):
+        return [
+            project
+            for project in self._projects.values()
+            if project.organization_id == organization_id
+        ]
+
+    async def list_projects_for_user(self, *, organization_id, user_id):
+        return [
+            project
+            for project in self._projects.values()
+            if project.organization_id == organization_id
+            and (project.project_id, "user", user_id) in self._project_access_bindings
+        ]
+
+    async def list_projects_for_agent(self, *, organization_id, system_agent_id):
+        return [
+            project
+            for project in self._projects.values()
+            if project.organization_id == organization_id
+            and (project.project_id, "agent", system_agent_id) in self._project_access_bindings
+        ]
+
+    async def upsert_project_access_binding(self, conn, binding: ProjectAccessBinding):
+        subject_id = binding.user_id or binding.system_agent_id
+        self._project_access_bindings[
+            (binding.project_id, binding.subject_type, subject_id)
+        ] = binding
+
+    async def list_project_access_bindings(self, project_id):
+        return [
+            binding
+            for (binding_project_id, _, _), binding in self._project_access_bindings.items()
+            if binding_project_id == project_id
+        ]
+
+    async def fetch_project_access_for_user(self, *, project_id, user_id):
+        return self._project_access_bindings.get((project_id, "user", user_id))
+
+    async def fetch_project_access_for_agent(self, *, project_id, system_agent_id):
+        return self._project_access_bindings.get((project_id, "agent", system_agent_id))
+
+    async def delete_project_access_binding(
+        self,
+        conn,
+        *,
+        project_id,
+        user_id=None,
+        system_agent_id=None,
+    ):
+        if user_id is not None:
+            key = (project_id, "user", user_id)
+        else:
+            key = (project_id, "agent", system_agent_id)
+        return self._project_access_bindings.pop(key, None) is not None
+
     async def fetch_workspace(self, workspace_id):
         return self._workspaces.get(workspace_id)
 
-    async def list_workspaces(self):
-        return list(self._workspaces.values())
+    async def list_workspaces(self, *, organization_id=None, project_id=None):
+        return [
+            workspace
+            for workspace in self._workspaces.values()
+            if (organization_id is None or workspace.organization_id == organization_id)
+            and (project_id is None or workspace.project_id == project_id)
+        ]
 
-    async def list_workspaces_for_user(self, user_id):
+    async def list_workspaces_for_user(self, user_id, *, organization_id=None, project_id=None):
         visible = []
         for workspace in self._workspaces.values():
-            for participant in self._participants.values():
-                if participant.workspace_id == workspace.workspace_id and participant.user_id == user_id:
-                    visible.append(workspace)
-                    break
+            if organization_id is not None and workspace.organization_id != organization_id:
+                continue
+            if project_id is not None and workspace.project_id != project_id:
+                continue
+            if (workspace.project_id, "user", user_id) in self._project_access_bindings:
+                visible.append(workspace)
+        return visible
+
+    async def list_workspaces_for_agent(
+        self,
+        system_agent_id,
+        *,
+        organization_id=None,
+        project_id=None,
+    ):
+        visible = []
+        for workspace in self._workspaces.values():
+            if organization_id is not None and workspace.organization_id != organization_id:
+                continue
+            if project_id is not None and workspace.project_id != project_id:
+                continue
+            if (workspace.project_id, "agent", system_agent_id) in self._project_access_bindings:
+                visible.append(workspace)
         return visible
 
     async def fetch_thread(self, thread_id):
@@ -1084,6 +1216,239 @@ async def test_kernel_create_workspace_sets_owner_admin_role_and_default_role_ca
 
 
 @pytest.mark.asyncio
+async def test_kernel_creates_project_scoped_workspace_and_filters_by_project():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    actor = ParticipantInput(
+        participant_id=uuid4(),
+        participant_type="user",
+        user_id=uuid4(),
+        display_name="Nikolay",
+    )
+    organization = Organization(
+        organization_id=uuid4(),
+        slug="platform",
+        name="Platform",
+        created_by=actor.user_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    repository._organizations[organization.organization_id] = organization
+
+    project_result = await kernel.create_project(
+        organization.organization_id,
+        CreateProjectRequest(
+            actor=actor,
+            slug="Gateway Edge",
+            name="Gateway Edge",
+        ),
+        allow_platform_admin=True,
+    )
+    assert project_result.project is not None
+
+    workspace_result = await kernel.create_workspace(
+        CreateWorkspaceRequest(
+            organization_id=organization.organization_id,
+            project_id=project_result.project.project_id,
+            name="Gateway Runtime",
+            actor=actor,
+        ),
+        allow_platform_admin=True,
+    )
+
+    assert workspace_result.workspace is not None
+    assert workspace_result.workspace.project_id == project_result.project.project_id
+    assert repository.recorded_events[-2].payload["project_id"] == str(
+        project_result.project.project_id
+    )
+
+    listed = await kernel.list_workspaces(
+        organization_id=organization.organization_id,
+        project_id=project_result.project.project_id,
+    )
+    assert [workspace.workspace_id for workspace in listed] == [
+        workspace_result.workspace.workspace_id
+    ]
+
+
+@pytest.mark.asyncio
+async def test_kernel_project_access_filters_projects_and_project_workspaces():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    owner = ParticipantInput(
+        participant_id=uuid4(),
+        participant_type="user",
+        user_id=uuid4(),
+        display_name="Owner",
+    )
+    viewer_user_id = uuid4()
+    outsider_user_id = uuid4()
+    organization = Organization(
+        organization_id=uuid4(),
+        slug="secure-platform",
+        name="Secure Platform",
+        created_by=owner.user_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    repository._organizations[organization.organization_id] = organization
+
+    project_result = await kernel.create_project(
+        organization.organization_id,
+        CreateProjectRequest(
+            actor=owner,
+            slug="Control Plane",
+            name="Control Plane",
+        ),
+    )
+    project = project_result.project
+    assert project is not None
+    assert project.creator_user_id == owner.user_id
+    assert project.owner_user_id == owner.user_id
+
+    workspace_result = await kernel.create_workspace(
+        CreateWorkspaceRequest(
+            organization_id=organization.organization_id,
+            project_id=project.project_id,
+            name="Gateway",
+            actor=owner,
+        ),
+    )
+    assert workspace_result.workspace is not None
+
+    assert await kernel.list_projects(
+        organization.organization_id,
+        user_id=outsider_user_id,
+    ) == []
+    assert await kernel.list_workspaces(
+        user_id=outsider_user_id,
+        organization_id=organization.organization_id,
+        project_id=project.project_id,
+    ) == []
+
+    visible_projects = await kernel.list_projects(
+        organization.organization_id,
+        user_id=owner.user_id,
+    )
+    assert [item.project_id for item in visible_projects] == [project.project_id]
+    visible_workspaces = await kernel.list_workspaces(
+        user_id=owner.user_id,
+        organization_id=organization.organization_id,
+        project_id=project.project_id,
+    )
+    assert [item.workspace_id for item in visible_workspaces] == [
+        workspace_result.workspace.workspace_id
+    ]
+
+    viewer_binding = await kernel.upsert_project_access(
+        organization.organization_id,
+        project.project_id,
+        UpsertProjectAccessRequest(
+            actor=owner,
+            subject=ProjectSubjectRef(user_id=viewer_user_id),
+            role="viewer",
+        ),
+    )
+    assert viewer_binding.role == "viewer"
+    assert [
+        item.project_id
+        for item in await kernel.list_projects(
+            organization.organization_id,
+            user_id=viewer_user_id,
+        )
+    ] == [project.project_id]
+    assert [
+        item.workspace_id
+        for item in await kernel.list_workspaces(
+            user_id=viewer_user_id,
+            organization_id=organization.organization_id,
+            project_id=project.project_id,
+        )
+    ] == [workspace_result.workspace.workspace_id]
+
+    viewer = ParticipantInput(
+        participant_id=viewer_user_id,
+        participant_type="user",
+        user_id=viewer_user_id,
+        display_name="Viewer",
+    )
+    with pytest.raises(PermissionError):
+        await kernel.create_workspace(
+            CreateWorkspaceRequest(
+                organization_id=organization.organization_id,
+                project_id=project.project_id,
+                name="Viewer Cannot Create",
+                actor=viewer,
+            ),
+        )
+
+    transferred_owner = await kernel.upsert_project_access(
+        organization.organization_id,
+        project.project_id,
+        UpsertProjectAccessRequest(
+            actor=owner,
+            subject=ProjectSubjectRef(user_id=viewer_user_id),
+            role="owner",
+        ),
+    )
+    assert transferred_owner.role == "owner"
+    bindings = await kernel.list_project_access(
+        organization.organization_id,
+        project.project_id,
+        actor=viewer,
+    )
+    roles_by_user = {binding.user_id: binding.role for binding in bindings}
+    assert roles_by_user[viewer_user_id] == "owner"
+    assert roles_by_user[owner.user_id] == "editor"
+
+
+@pytest.mark.asyncio
+async def test_kernel_project_creator_and_owner_can_be_agent_subjects():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    agent_actor = ParticipantInput(
+        participant_id=uuid4(),
+        participant_type="agent",
+        display_name="Planner Agent",
+    )
+    organization = Organization(
+        organization_id=uuid4(),
+        slug="agent-projects",
+        name="Agent Projects",
+        created_by=agent_actor.participant_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    repository._organizations[organization.organization_id] = organization
+
+    project_result = await kernel.create_project(
+        organization.organization_id,
+        CreateProjectRequest(
+            actor=agent_actor,
+            slug="Agent Owned",
+            name="Agent Owned",
+        ),
+    )
+    project = project_result.project
+    assert project is not None
+    assert project.creator_system_agent_id == agent_actor.participant_id
+    assert project.owner_system_agent_id == agent_actor.participant_id
+    assert [
+        item.project_id
+        for item in await kernel.list_projects(
+            organization.organization_id,
+            system_agent_id=agent_actor.participant_id,
+        )
+    ] == [project.project_id]
+
+
+@pytest.mark.asyncio
 async def test_kernel_resolve_authenticated_user_actor_reuses_workspace_participant():
     repository = FakeRepository()
     kernel = CollaborationKernel(repository)
@@ -1109,32 +1474,49 @@ async def test_kernel_resolve_authenticated_user_actor_reuses_workspace_particip
 
 
 @pytest.mark.asyncio
-async def test_kernel_list_workspaces_filters_by_user_membership():
+async def test_kernel_list_workspaces_filters_by_project_access():
     repository = FakeRepository()
     kernel = CollaborationKernel(repository)
     first_user_id = uuid4()
     second_user_id = uuid4()
+    organization_id = UUID("11111111-1111-1111-1111-111111111111")
+    first_actor = ParticipantInput(
+        participant_id=uuid4(),
+        participant_type="user",
+        user_id=first_user_id,
+        display_name="First",
+    )
+    second_actor = ParticipantInput(
+        participant_id=uuid4(),
+        participant_type="user",
+        user_id=second_user_id,
+        display_name="Second",
+    )
+    first_project = await kernel.create_project(
+        organization_id,
+        CreateProjectRequest(actor=first_actor, slug="First", name="First"),
+    )
+    second_project = await kernel.create_project(
+        organization_id,
+        CreateProjectRequest(actor=second_actor, slug="Second", name="Second"),
+    )
+    assert first_project.project is not None
+    assert second_project.project is not None
 
     first = await kernel.create_workspace(
         CreateWorkspaceRequest(
+            organization_id=organization_id,
+            project_id=first_project.project.project_id,
             name="Visible",
-            actor=ParticipantInput(
-                participant_id=uuid4(),
-                participant_type="user",
-                user_id=first_user_id,
-                display_name="First",
-            ),
+            actor=first_actor,
         )
     )
     second = await kernel.create_workspace(
         CreateWorkspaceRequest(
+            organization_id=organization_id,
+            project_id=second_project.project.project_id,
             name="Hidden",
-            actor=ParticipantInput(
-                participant_id=uuid4(),
-                participant_type="user",
-                user_id=second_user_id,
-                display_name="Second",
-            ),
+            actor=second_actor,
         )
     )
 

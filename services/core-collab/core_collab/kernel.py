@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
 import sys
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import asyncpg
 from open_talon_contracts.oci_registry import (
@@ -67,6 +67,7 @@ from .contracts import (
     CreateMemoryProviderRequest,
     CreateMcpServerRequest,
     CreateOrganizationRequest,
+    CreateProjectRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
     ConfirmWorkspaceMemoryRequest,
@@ -114,6 +115,10 @@ from .contracts import (
     ParticipantSelector,
     ParticipantInput,
     ParticipantProfile,
+    Project,
+    ProjectAccessBinding,
+    ProjectAccessRole,
+    ProjectSubjectRef,
     PublishAssetFromGitRequest,
     PresenceState,
     ResolvedAssetBinding,
@@ -147,8 +152,11 @@ from .contracts import (
     UpdateMemoryProviderRequest,
     UpdateMcpServerRequest,
     UpdateOrganizationRequest,
+    UpdateProjectRequest,
+    UpsertProjectAccessRequest,
     UpsertRoleDefinitionRequest,
     RemoveOrganizationMemberRequest,
+    RemoveProjectAccessRequest,
     UpdateSystemToolRequest,
     build_default_interaction_contract,
     interaction_contract_is_empty,
@@ -186,6 +194,7 @@ from .results import (
     OrganizationCommandResult,
     OrganizationMembershipCommandResult,
     ParticipantCommandResult,
+    ProjectCommandResult,
     RoleDefinitionCommandResult,
     RunCommandResult,
     RunStepCommandResult,
@@ -291,6 +300,11 @@ class CollaborationKernel:
             updated_at=now,
             metadata=payload.metadata,
         )
+        default_project = self._default_project_for_organization(
+            organization,
+            actor=payload.actor,
+            now=now,
+        )
         actor_user_id = self._actor_user_id(payload.actor)
         membership = (
             OrganizationMembership(
@@ -318,6 +332,19 @@ class CollaborationKernel:
                         ),
                     )
                 await self._repository.upsert_organization(conn, organization)
+                if hasattr(self._repository, "upsert_project"):
+                    await self._repository.upsert_project(conn, default_project)
+                    if hasattr(self._repository, "upsert_project_access_binding"):
+                        await self._repository.upsert_project_access_binding(
+                            conn,
+                            self._project_access_binding(
+                                default_project.project_id,
+                                self._actor_project_subject(payload.actor),
+                                "owner",
+                                now=now,
+                                metadata={"created_by": str(created_by), "managed": True},
+                            ),
+                        )
                 if membership is not None:
                     await self._repository.upsert_organization_membership(conn, membership)
         return OrganizationCommandResult(organization=organization)
@@ -336,6 +363,263 @@ class CollaborationKernel:
 
     async def get_organization_by_slug(self, slug: str) -> Organization | None:
         return await self._repository.fetch_organization_by_slug(slug)
+
+    async def create_project(
+        self,
+        organization_id: UUID,
+        payload: CreateProjectRequest,
+        *,
+        allow_platform_admin: bool = False,
+    ) -> ProjectCommandResult:
+        organization = await self._repository.fetch_organization(organization_id)
+        if organization is None:
+            raise KeyError(f"Organization {organization_id} not found")
+        actor_user_id = self._actor_user_id(payload.actor)
+        if actor_user_id is not None and not allow_platform_admin:
+            await self._require_organization_permission(
+                organization_id,
+                actor_user_id,
+                "project.write",
+            )
+        now = self._now()
+        creator_subject = self._actor_project_subject(payload.actor)
+        owner_subject = payload.owner or creator_subject
+        project = Project(
+            project_id=uuid4(),
+            organization_id=organization_id,
+            slug=payload.slug,
+            name=payload.name,
+            description=payload.description,
+            created_by=actor_user_id or payload.actor.participant_id,
+            creator_user_id=creator_subject.user_id,
+            creator_system_agent_id=creator_subject.system_agent_id,
+            owner_user_id=owner_subject.user_id,
+            owner_system_agent_id=owner_subject.system_agent_id,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        access_bindings = self._project_access_bindings_for_create(
+            project.project_id,
+            owner=owner_subject,
+            creator=creator_subject,
+            editors=payload.editors,
+            viewers=payload.viewers,
+            now=now,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_project(conn, project)
+                if hasattr(self._repository, "upsert_project_access_binding"):
+                    for binding in access_bindings:
+                        await self._repository.upsert_project_access_binding(conn, binding)
+        return ProjectCommandResult(project=project)
+
+    async def list_projects(
+        self,
+        organization_id: UUID,
+        *,
+        user_id: UUID | None = None,
+        system_agent_id: UUID | None = None,
+        include_all: bool = False,
+    ) -> list[Project]:
+        if await self._repository.fetch_organization(organization_id) is None:
+            raise KeyError(f"Organization {organization_id} not found")
+        if not hasattr(self._repository, "list_projects"):
+            return []
+        if include_all:
+            return await self._repository.list_projects(organization_id)
+        if user_id is not None and hasattr(self._repository, "list_projects_for_user"):
+            return await self._repository.list_projects_for_user(
+                organization_id=organization_id,
+                user_id=user_id,
+            )
+        if system_agent_id is not None and hasattr(self._repository, "list_projects_for_agent"):
+            return await self._repository.list_projects_for_agent(
+                organization_id=organization_id,
+                system_agent_id=system_agent_id,
+            )
+        return await self._repository.list_projects(organization_id)
+
+    async def get_project(self, project_id: UUID) -> Project | None:
+        if not hasattr(self._repository, "fetch_project"):
+            return None
+        return await self._repository.fetch_project(project_id)
+
+    async def update_project(
+        self,
+        organization_id: UUID,
+        project_id: UUID,
+        payload: UpdateProjectRequest,
+        *,
+        allow_platform_admin: bool = False,
+    ) -> ProjectCommandResult:
+        project = await self._repository.fetch_project(project_id)
+        if project is None or project.organization_id != organization_id:
+            raise KeyError(f"Project {project_id} not found in organization {organization_id}")
+        actor_user_id = self._actor_user_id(payload.actor)
+        if not allow_platform_admin:
+            if actor_user_id is not None:
+                await self._require_organization_membership(organization_id, actor_user_id)
+            await self._require_project_role(
+                project_id,
+                payload.actor,
+                allowed_roles={"owner", "editor"},
+            )
+        updated = project.model_copy(
+            update={
+                "slug": payload.slug or project.slug,
+                "name": payload.name or project.name,
+                "description": (
+                    payload.description
+                    if payload.description is not None
+                    else project.description
+                ),
+                "updated_at": self._now(),
+                "metadata": (
+                    {**project.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else project.metadata
+                ),
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_project(conn, updated)
+        return ProjectCommandResult(project=updated)
+
+    async def list_project_access(
+        self,
+        organization_id: UUID,
+        project_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+        allow_platform_admin: bool = False,
+    ) -> list[ProjectAccessBinding]:
+        project = await self._repository.fetch_project(project_id)
+        if project is None or project.organization_id != organization_id:
+            raise KeyError(f"Project {project_id} not found in organization {organization_id}")
+        if actor is not None and not allow_platform_admin:
+            actor_user_id = self._actor_user_id(actor)
+            if actor_user_id is not None:
+                await self._require_organization_membership(organization_id, actor_user_id)
+            await self._require_project_role(
+                project_id,
+                actor,
+                allowed_roles={"owner", "editor", "viewer"},
+            )
+        if not hasattr(self._repository, "list_project_access_bindings"):
+            return []
+        return await self._repository.list_project_access_bindings(project_id)
+
+    async def upsert_project_access(
+        self,
+        organization_id: UUID,
+        project_id: UUID,
+        payload: UpsertProjectAccessRequest,
+        *,
+        allow_platform_admin: bool = False,
+    ) -> ProjectAccessBinding:
+        project = await self._repository.fetch_project(project_id)
+        if project is None or project.organization_id != organization_id:
+            raise KeyError(f"Project {project_id} not found in organization {organization_id}")
+        if not allow_platform_admin:
+            actor_user_id = self._actor_user_id(payload.actor)
+            if actor_user_id is not None:
+                await self._require_organization_membership(organization_id, actor_user_id)
+            await self._require_project_role(
+                project_id,
+                payload.actor,
+                allowed_roles={"owner"},
+            )
+        now = self._now()
+        binding = self._project_access_binding(
+            project_id,
+            payload.subject,
+            payload.role,
+            now=now,
+            metadata=payload.metadata,
+        )
+        owner_demotions: list[ProjectAccessBinding] = []
+        project_update: Project | None = None
+        if payload.role == "owner":
+            project_update = project.model_copy(
+                update={
+                    "owner_user_id": payload.subject.user_id,
+                    "owner_system_agent_id": payload.subject.system_agent_id,
+                    "updated_at": now,
+                }
+            )
+            if hasattr(self._repository, "list_project_access_bindings"):
+                for existing in await self._repository.list_project_access_bindings(project_id):
+                    if existing.role != "owner":
+                        continue
+                    existing_subject = ProjectSubjectRef(
+                        user_id=existing.user_id,
+                        system_agent_id=existing.system_agent_id,
+                    )
+                    if self._project_subject_key(existing_subject) == self._project_subject_key(
+                        payload.subject
+                    ):
+                        continue
+                    owner_demotions.append(
+                        existing.model_copy(
+                            update={
+                                "role": "editor",
+                                "updated_at": now,
+                                "metadata": {
+                                    **existing.metadata,
+                                    "owner_transferred_at": now.isoformat(),
+                                },
+                            }
+                        )
+                    )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                if project_update is not None:
+                    await self._repository.upsert_project(conn, project_update)
+                for demotion in owner_demotions:
+                    await self._repository.upsert_project_access_binding(conn, demotion)
+                await self._repository.upsert_project_access_binding(conn, binding)
+        return binding
+
+    async def remove_project_access(
+        self,
+        organization_id: UUID,
+        project_id: UUID,
+        payload: RemoveProjectAccessRequest,
+        *,
+        allow_platform_admin: bool = False,
+    ) -> dict[str, bool | str]:
+        project = await self._repository.fetch_project(project_id)
+        if project is None or project.organization_id != organization_id:
+            raise KeyError(f"Project {project_id} not found in organization {organization_id}")
+        if self._project_subject_matches(
+            payload.subject,
+            user_id=project.owner_user_id,
+            system_agent_id=project.owner_system_agent_id,
+        ):
+            raise ValueError("Cannot remove the project owner")
+        if not allow_platform_admin:
+            actor_user_id = self._actor_user_id(payload.actor)
+            if actor_user_id is not None:
+                await self._require_organization_membership(organization_id, actor_user_id)
+            await self._require_project_role(
+                project_id,
+                payload.actor,
+                allowed_roles={"owner"},
+            )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                deleted = await self._repository.delete_project_access_binding(
+                    conn,
+                    project_id=project_id,
+                    user_id=payload.subject.user_id,
+                    system_agent_id=payload.subject.system_agent_id,
+                )
+        if not deleted:
+            raise KeyError(f"Project access binding for project {project_id} not found")
+        return {"deleted": True, "project_id": str(project_id)}
 
     async def update_organization(
         self,
@@ -715,8 +999,9 @@ class CollaborationKernel:
             payload.name,
         )
         actor_user_id = self._actor_user_id(payload.actor)
-        organization = await self._resolve_workspace_organization(
+        organization, project, project_requires_upsert = await self._resolve_workspace_location(
             requested_organization_id=payload.organization_id,
+            requested_project_id=payload.project_id,
             actor=payload.actor,
         )
         if actor_user_id is not None and not allow_platform_admin:
@@ -725,11 +1010,18 @@ class CollaborationKernel:
                 actor_user_id,
                 "workspace.list",
             )
+        if not allow_platform_admin and not project_requires_upsert:
+            await self._require_project_role(
+                project.project_id,
+                payload.actor,
+                allowed_roles={"owner", "editor"},
+            )
         workspace_id = uuid4()
         now = self._now()
         workspace = Workspace(
             workspace_id=workspace_id,
             organization_id=organization.organization_id,
+            project_id=project.project_id,
             name=payload.name,
             description=payload.description,
             owner_user_id=actor_user_id,
@@ -751,6 +1043,19 @@ class CollaborationKernel:
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 await self._ensure_participant_identity(conn, participant)
+                if project_requires_upsert and hasattr(self._repository, "upsert_project"):
+                    await self._repository.upsert_project(conn, project)
+                    if hasattr(self._repository, "upsert_project_access_binding"):
+                        await self._repository.upsert_project_access_binding(
+                            conn,
+                            self._project_access_binding(
+                                project.project_id,
+                                self._actor_project_subject(payload.actor),
+                                "owner",
+                                now=now,
+                                metadata={"managed": True, "source": "default_project"},
+                            ),
+                        )
                 await self._repository.upsert_workspace(conn, workspace)
                 await self._repository.upsert_participant(conn, participant)
 
@@ -765,6 +1070,8 @@ class CollaborationKernel:
                             "workspace_id": str(workspace.workspace_id),
                             "name": workspace.name,
                             "description": workspace.description,
+                            "organization_id": str(workspace.organization_id),
+                            "project_id": str(workspace.project_id),
                             "owner_user_id": (
                                 str(workspace.owner_user_id)
                                 if workspace.owner_user_id is not None
@@ -804,18 +1111,33 @@ class CollaborationKernel:
         self,
         *,
         user_id: UUID | None = None,
+        system_agent_id: UUID | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
     ) -> list[Workspace]:
         if user_id is not None:
             try:
                 return await self._repository.list_workspaces_for_user(
                     user_id,
                     organization_id=organization_id,
+                    project_id=project_id,
                 )
             except TypeError:
                 return await self._repository.list_workspaces_for_user(user_id)
+        if system_agent_id is not None and hasattr(self._repository, "list_workspaces_for_agent"):
+            try:
+                return await self._repository.list_workspaces_for_agent(
+                    system_agent_id,
+                    organization_id=organization_id,
+                    project_id=project_id,
+                )
+            except TypeError:
+                return await self._repository.list_workspaces_for_agent(system_agent_id)
         try:
-            return await self._repository.list_workspaces(organization_id=organization_id)
+            return await self._repository.list_workspaces(
+                organization_id=organization_id,
+                project_id=project_id,
+            )
         except TypeError:
             return await self._repository.list_workspaces()
 
@@ -2814,6 +3136,20 @@ class CollaborationKernel:
             async with conn.transaction():
                 await self._ensure_participant_identity(conn, participant)
                 await self._repository.upsert_participant(conn, participant)
+                if workspace.project_id is not None and hasattr(
+                    self._repository,
+                    "upsert_project_access_binding",
+                ):
+                    await self._repository.upsert_project_access_binding(
+                        conn,
+                        self._project_access_binding(
+                            workspace.project_id,
+                            ProjectSubjectRef(system_agent_id=system_agent.agent_id),
+                            "viewer",
+                            now=now,
+                            metadata={"source": "workspace_agent_attachment"},
+                        ),
+                    )
                 event = await self._build_workspace_event(
                     conn,
                     workspace_id,
@@ -7652,6 +7988,134 @@ class CollaborationKernel:
             return actor.participant_id
         return None
 
+    @staticmethod
+    def _actor_system_agent_id(actor: ParticipantInput) -> UUID | None:
+        if actor.participant_type == "agent":
+            return actor.participant_id
+        return None
+
+    @staticmethod
+    def _actor_project_subject(actor: ParticipantInput) -> ProjectSubjectRef:
+        if actor.participant_type == "agent":
+            return ProjectSubjectRef(system_agent_id=actor.participant_id)
+        return ProjectSubjectRef(
+            user_id=CollaborationKernel._actor_user_id(actor) or actor.participant_id
+        )
+
+    @staticmethod
+    def _project_access_binding(
+        project_id: UUID,
+        subject: ProjectSubjectRef,
+        role: ProjectAccessRole,
+        *,
+        now: datetime,
+        metadata: dict[str, object] | None = None,
+    ) -> ProjectAccessBinding:
+        return ProjectAccessBinding(
+            project_id=project_id,
+            subject_type="agent" if subject.system_agent_id is not None else "user",
+            user_id=subject.user_id,
+            system_agent_id=subject.system_agent_id,
+            role=role,
+            created_at=now,
+            updated_at=now,
+            metadata=dict(metadata or {}),
+        )
+
+    @staticmethod
+    def _project_subject_key(subject: ProjectSubjectRef) -> tuple[str, UUID]:
+        if subject.system_agent_id is not None:
+            return ("agent", subject.system_agent_id)
+        assert subject.user_id is not None
+        return ("user", subject.user_id)
+
+    @staticmethod
+    def _project_subject_matches(
+        subject: ProjectSubjectRef,
+        *,
+        user_id: UUID | None,
+        system_agent_id: UUID | None,
+    ) -> bool:
+        return (
+            (subject.user_id is not None and subject.user_id == user_id)
+            or (
+                subject.system_agent_id is not None
+                and subject.system_agent_id == system_agent_id
+            )
+        )
+
+    @staticmethod
+    def _project_access_bindings_for_create(
+        project_id: UUID,
+        *,
+        owner: ProjectSubjectRef,
+        creator: ProjectSubjectRef,
+        editors: list[ProjectSubjectRef],
+        viewers: list[ProjectSubjectRef],
+        now: datetime,
+    ) -> list[ProjectAccessBinding]:
+        role_rank: dict[ProjectAccessRole, int] = {"viewer": 0, "editor": 1, "owner": 2}
+        subjects: dict[tuple[str, UUID], tuple[ProjectSubjectRef, ProjectAccessRole]] = {}
+
+        def add(subject: ProjectSubjectRef, role: ProjectAccessRole) -> None:
+            key = CollaborationKernel._project_subject_key(subject)
+            current = subjects.get(key)
+            if current is None or role_rank[role] > role_rank[current[1]]:
+                subjects[key] = (subject, role)
+
+        for subject in viewers:
+            add(subject, "viewer")
+        for subject in editors:
+            add(subject, "editor")
+        add(creator, "editor")
+        add(owner, "owner")
+        return [
+            CollaborationKernel._project_access_binding(
+                project_id,
+                subject,
+                role,
+                now=now,
+                metadata={"created_with_project": True},
+            )
+            for subject, role in subjects.values()
+        ]
+
+    async def _fetch_project_access_for_actor(
+        self,
+        project_id: UUID,
+        actor: ParticipantInput,
+    ) -> ProjectAccessBinding | None:
+        user_id = self._actor_user_id(actor)
+        if user_id is not None and hasattr(self._repository, "fetch_project_access_for_user"):
+            return await self._repository.fetch_project_access_for_user(
+                project_id=project_id,
+                user_id=user_id,
+            )
+        system_agent_id = self._actor_system_agent_id(actor)
+        if system_agent_id is not None and hasattr(
+            self._repository,
+            "fetch_project_access_for_agent",
+        ):
+            return await self._repository.fetch_project_access_for_agent(
+                project_id=project_id,
+                system_agent_id=system_agent_id,
+            )
+        return None
+
+    async def _require_project_role(
+        self,
+        project_id: UUID,
+        actor: ParticipantInput,
+        *,
+        allowed_roles: set[ProjectAccessRole],
+    ) -> ProjectAccessBinding:
+        binding = await self._fetch_project_access_for_actor(project_id, actor)
+        if binding is None or binding.role not in allowed_roles:
+            raise PermissionError(
+                f"Project {project_id} requires one of roles {sorted(allowed_roles)!r}"
+            )
+        return binding
+
     async def _require_workspace_user_membership(
         self,
         workspace_id: UUID,
@@ -7729,6 +8193,38 @@ class CollaborationKernel:
             return membership
         raise PermissionError(f"Organization permission {permission!r} required")
 
+    async def _resolve_workspace_location(
+        self,
+        *,
+        requested_organization_id: UUID | None,
+        requested_project_id: UUID | None,
+        actor: ParticipantInput,
+    ) -> tuple[Organization, Project, bool]:
+        if requested_project_id is not None:
+            if not hasattr(self._repository, "fetch_project"):
+                raise ValueError("project_id is not supported by this repository")
+            project = await self._repository.fetch_project(requested_project_id)
+            if project is None:
+                raise KeyError(f"Project {requested_project_id} not found")
+            if (
+                requested_organization_id is not None
+                and project.organization_id != requested_organization_id
+            ):
+                raise KeyError(
+                    f"Project {requested_project_id} not found in organization {requested_organization_id}"
+                )
+            organization = await self._repository.fetch_organization(project.organization_id)
+            if organization is None:
+                raise KeyError(f"Organization {project.organization_id} not found")
+            return organization, project, False
+
+        organization = await self._resolve_workspace_organization(
+            requested_organization_id=requested_organization_id,
+            actor=actor,
+        )
+        project, requires_upsert = await self._resolve_default_project(organization, actor)
+        return organization, project, requires_upsert
+
     async def _resolve_workspace_organization(
         self,
         *,
@@ -7760,6 +8256,48 @@ class CollaborationKernel:
         if len(organizations) == 1:
             return organizations[0]
         raise ValueError("organization_id is required when multiple organizations are available")
+
+    async def _resolve_default_project(
+        self,
+        organization: Organization,
+        actor: ParticipantInput,
+    ) -> tuple[Project, bool]:
+        if hasattr(self._repository, "fetch_default_project"):
+            project = await self._repository.fetch_default_project(organization.organization_id)
+            if project is not None:
+                return project, False
+        return self._default_project_for_organization(
+            organization,
+            actor=actor,
+            now=self._now(),
+        ), True
+
+    @staticmethod
+    def _default_project_for_organization(
+        organization: Organization,
+        *,
+        actor: ParticipantInput,
+        now: datetime,
+    ) -> Project:
+        subject = CollaborationKernel._actor_project_subject(actor)
+        return Project(
+            project_id=uuid5(
+                NAMESPACE_URL,
+                f"open-talon-default-project:{organization.organization_id}",
+            ),
+            organization_id=organization.organization_id,
+            slug="default",
+            name="Default Project",
+            description="Default project for workspaces that do not specify a project.",
+            created_by=CollaborationKernel._actor_user_id(actor) or actor.participant_id,
+            creator_user_id=subject.user_id,
+            creator_system_agent_id=subject.system_agent_id,
+            owner_user_id=subject.user_id,
+            owner_system_agent_id=subject.system_agent_id,
+            created_at=now,
+            updated_at=now,
+            metadata={"seeded": True, "managed": True},
+        )
 
     async def _require_workspace_management_role(
         self,

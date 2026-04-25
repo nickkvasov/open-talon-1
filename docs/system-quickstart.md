@@ -184,7 +184,7 @@ See [../apps/admin-web/README.md](../apps/admin-web/README.md) for the full brow
 Current admin-web highlights:
 
 - `Organizations` manages org creation and org memberships
-- `Workspaces` filters by organization and creates workspaces in the selected org
+- `Workspaces` filters by organization and project, creates projects with optional owner/editor/viewer seed bindings, and creates workspaces in the selected project
 - `Providers` switches between `Platform Global` and `Organization` scope
 - `Swarm Resources` switches between `Platform Global` and `Organization` scope
 
@@ -257,8 +257,9 @@ Collaboration roles are not IAM roles. They are workspace-local collaboration an
 Local multi-tenant defaults:
 
 - the migration seeds one organization named `Default Organization` with slug `default`
+- the project migrations seed a `Default Project` in each organization, backfill existing workspaces into it, and backfill project access from project owners and workspace participants
 - organization slugs are normalized to lowercase hyphenated identifiers; `Acme Ops!!!` becomes `acme-ops`
-- every workspace belongs to an organization
+- every workspace belongs to a project, and every project belongs to an organization
 - `tui2`, `user-client`, and the admin web auto-select the org when exactly one organization is visible
 
 Current local hardening defaults:
@@ -276,10 +277,11 @@ For the detailed permission catalog and `/v1/iam/...` API surface, see [iam.md](
 
 ## 6A. Collaboration Domain Model
 
-The running system uses the tenant hierarchy `platform > organization > workspace > thread`:
+The running system uses the tenant hierarchy `platform > organization > project > workspace > thread`:
 
-- `organization` is the tenant boundary above workspaces
-- `workspace` is the collaboration boundary inside an organization
+- `organization` is the tenant boundary above projects
+- `project` is the organization-local work grouping above workspaces
+- `workspace` is the collaboration boundary inside a project
 - `participant` is the workspace-local state for a human or agent
 - `thread` is the shared conversation and event stream inside a workspace
 - `timeline_message` is the ordered thread-visible message record
@@ -290,6 +292,8 @@ Identity and execution boundaries:
 
 - human identity is global in `users` and `auth_identities`
 - organization membership and membership roles live in `organizations` and `organization_memberships`
+- project grouping lives in `projects`; project creator/owner and viewer/editor/owner access live in `project_access_bindings`
+- project and project-workspace listings are project-access-scoped; workspace detail still depends on IAM and workspace participant attachment
 - agent identity/configuration is global in `system_agents`
 - Git-managed agent authoring is versioned in Forgejo and `agent_definition_versions`, but runtime execution still reads the active `system_agents` projection only.
 - workspace-local presence, collaboration roles, capabilities, and visibility live in `participants`
@@ -435,7 +439,7 @@ Important behavior:
 - `user-client` is the recommended entrypoint when one software agent needs to control each human test user separately
 - `user-client --output json` emits machine-readable command results for automation
 - `workspace list` defaults to the selected organization in `tui2` and `user-client`; use `workspace list all` to see every visible workspace
-- `workspace create` requires a selected organization in `tui2` and `user-client`
+- `workspace create` requires a selected organization in `tui2` and `user-client`; those clients create in the organization default project
 - `user-client` accepts direct `workspace use <uuid>` and `thread use <uuid>` commands, which helps multiple profiles join the same shared scenario explicitly
 
 Useful TUI commands:

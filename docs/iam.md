@@ -63,6 +63,8 @@ Examples:
 - `organization.read`
 - `organization.members.read`
 - `organization.members.write`
+- `project.read`
+- `project.write`
 - `workspace.list`
 - `organization.runtime.read`
 - `agent_catalog.read`
@@ -111,6 +113,18 @@ Workspace lifecycle routes are the current exception:
 - `DELETE /v1/workspaces/{workspace_id}`
 
 Those routes are treated as organization control-plane management. They still accept workspace-admin callers, but they also allow organization-admin or platform-admin callers to manage a workspace even when they are not attached as workspace participants.
+
+Project routes are organization control-plane routes:
+
+- `GET /v1/organizations/{organization_id}/projects`
+- `POST /v1/organizations/{organization_id}/projects`
+- `GET /v1/organizations/{organization_id}/projects/{project_id}`
+- `PATCH /v1/organizations/{organization_id}/projects/{project_id}`
+- `GET /v1/organizations/{organization_id}/projects/{project_id}/access`
+- `PUT /v1/organizations/{organization_id}/projects/{project_id}/access`
+- `DELETE /v1/organizations/{organization_id}/projects/{project_id}/access`
+
+Project creation still requires organization-level `project.write`. Project reads require `project.read` plus an explicit project access binding unless the caller is a platform admin or API-key/system path. Project access bindings can target a user or system agent with role `owner`, `editor`, or `viewer`. Owners and editors can update project metadata and create workspaces in the project; viewers can read the project and list workspace structure. Owners manage access bindings. Workspace creation can target a project directly with `/v1/organizations/{organization_id}/projects/{project_id}/workspaces` or with `project_id` on `POST /v1/workspaces`.
 
 ## Baseline human authorization
 

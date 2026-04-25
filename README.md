@@ -83,7 +83,7 @@ Open Talon separates:
 - `auth_identities`: external IdP mappings for authenticated humans
 - `system_agents`: platform-global or organization-scoped agent definitions
 - `agent_identities`, `iam_role_definitions`, `human_role_bindings`, and `agent_role_bindings`: principal IAM state for agent identities and global or organization role bindings
-- `organizations` and `organization_memberships`: organization tenancy, membership, and membership roles stored in Postgres
+- `organizations`, `projects`, `project_access_bindings`, and `organization_memberships`: organization tenancy, project ownership/access, membership, and membership roles stored in Postgres
 - `participants`: workspace-local materializations of a human or agent inside a workspace
 
 Role terminology in this repository:
@@ -108,8 +108,10 @@ Important implications:
 - organization membership and membership roles live in Postgres, not in Keycloak claims
 - humans and agents share one permission catalog, but global and organization IAM roles are stored separately for each subject kind
 - human org membership provides the baseline permission bundle for `owner`, `admin`, and `member`; extra human IAM roles can extend those permissions
-- workspace access is enforced through IAM permissions together with participant attachment; collaboration-role definitions do not grant authorization
-- OIDC workspace listing and workspace-scoped reads are membership-scoped; non-members should see `404` for workspace, thread, memory, and workspace-scoped asset reads
+- project access is explicit: each project records typed creator and owner references, and `owner`, `editor`, or `viewer` bindings for users or system agents
+- OIDC project listings and project workspace listings are project-access-scoped; a principal with no project binding cannot see that project or the workspace structure inside it
+- workspace detail and workspace-scoped operations still require IAM permissions together with participant attachment; collaboration-role definitions do not grant authorization
+- OIDC workspace-scoped reads are membership-scoped; non-members should see `404` for workspace, thread, memory, and workspace-scoped asset reads
 - organization-scoped reads are also membership-scoped; non-members should see `404` there as well
 - out-of-scope reads return `404`; in-scope requests without the required permission return `403`
 - global system-definition, global publish, IAM management, and provider-management routes require matching global IAM permissions or platform-admin bootstrap access
@@ -127,8 +129,9 @@ Open Talon’s collaboration model is organization-aware and thread-native.
 
 Core entities:
 
-- `organization`: the tenant boundary above workspaces
-- `workspace`: the collaboration boundary inside an organization for participants, collaboration roles, attached tools, memory, and execution policy
+- `organization`: the tenant boundary above projects
+- `project`: an organization-local work grouping that owns workspaces
+- `workspace`: the collaboration boundary inside a project for participants, collaboration roles, attached tools, memory, and execution policy
 - `participant`: the workspace-local materialization of a human or system agent, including status, collaboration roles, capabilities, and visibility
 - `thread`: the shared collaboration stream inside a workspace
 - `timeline_message`: an ordered message in a thread, visible to users, agents, or both depending on `visibility`
@@ -137,7 +140,7 @@ Core entities:
 
 Important rules:
 
-- the effective tenant hierarchy is `platform > organization > workspace > thread`
+- the effective tenant hierarchy is `platform > organization > project > workspace > thread`
 - `users` are global human identities, `organization_memberships` hold org-level access, and `participants` remain workspace-local state
 - `system_agents`, `system_tools`, `llm_providers`, and `memory_providers` can be platform-global or organization-scoped
 - `mcp_servers` are separate external MCP integration definitions; they are not Open Talon `system_tools`
@@ -174,7 +177,17 @@ Common collaboration endpoints:
 - `PATCH /v1/organizations/{organization_id}`
 - `GET /v1/organizations/{organization_id}/members`
 - `POST /v1/organizations/{organization_id}/members`
+- `GET /v1/organizations/{organization_id}/projects`
+- `POST /v1/organizations/{organization_id}/projects`
+- `GET /v1/organizations/{organization_id}/projects/{project_id}`
+- `PATCH /v1/organizations/{organization_id}/projects/{project_id}`
+- `GET /v1/organizations/{organization_id}/projects/{project_id}/access`
+- `PUT /v1/organizations/{organization_id}/projects/{project_id}/access`
+- `DELETE /v1/organizations/{organization_id}/projects/{project_id}/access`
 - `POST /v1/workspaces`
+- `GET /v1/workspaces`
+- `POST /v1/organizations/{organization_id}/projects/{project_id}/workspaces`
+- `GET /v1/organizations/{organization_id}/projects/{project_id}/workspaces`
 - `GET /v1/workspaces/{workspace_id}/communication-log`
 - `GET /v1/workspaces/{workspace_id}/participants`
 - `GET /v1/workspaces/{workspace_id}/catalog/agents`
@@ -193,11 +206,12 @@ Common collaboration endpoints:
 The admin web app lives in [apps/admin-web](./apps/admin-web) and is the main browser surface for:
 
 - organization creation and membership management
+- organization project creation and workspace filtering by project
 - runtime overview and operator visibility
 - platform-global and organization-scoped LLM and memory provider management
 - platform-global and organization-scoped system agent and system tool management
 - Tinker tool-generation request review and approve/reject workflows
-- workspace create, update, role override, and delete flows inside the selected organization
+- workspace create, update, role override, and delete flows inside the selected organization and project
 - admin API key management
 
 Local usage:
@@ -210,7 +224,7 @@ npm run dev
 
 With the local stack running, the default browser entrypoint is [http://localhost:5173](http://localhost:5173).
 
-The local stack seeds a single organization named `Default Organization`, so the browser auto-selects it until you create more organizations.
+The local stack seeds a single organization named `Default Organization` with a default project, so the browser auto-selects the organization until you create more organizations.
 
 The app expects:
 

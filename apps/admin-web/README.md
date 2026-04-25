@@ -110,7 +110,7 @@ For a deployed environment, replace the generated `runtime-config.json` with val
 - dashboard load and page-level navigation checks
 - organization page load and membership management surface
 - API key create and revoke flow
-- workspace create and delete flow inside the selected organization
+- project create with optional owner/editor/viewer seed bindings plus workspace create and delete flow inside the selected organization
 - swarm resource `Platform Global` and `Organization` scope switching
 - swarm resource agent create/delete flow
 - swarm resource tool create/delete flow
@@ -124,5 +124,5 @@ Current scope note:
 ## Notes
 
 - The test expects the gateway and Keycloak to already be running.
-- The local stack seeds a single organization named `Default Organization`, so org-aware pages auto-select it until more organizations exist.
+- The local stack seeds a single organization named `Default Organization` and a default project. Project visibility is now scoped by project access bindings, so users and agents only see project/workspace structure for projects where they are owner, editor, or viewer.
 - If the browser closes immediately with auth errors, confirm the gateway is running with OIDC enabled and Keycloak is healthy.
