@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, Clock3, Hammer, Package, XCircle } from 'lucide-react';
 
 import { useApi } from '../api/useApi';
@@ -34,6 +34,7 @@ export default function ToolGenerationRequests() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState('');
   const [reviewReason, setReviewReason] = useState('');
+  const requestLoadSeq = useRef(0);
 
   const selectedRevision = useMemo(() => {
     if (!selectedDetail?.revisions?.length) {
@@ -42,21 +43,35 @@ export default function ToolGenerationRequests() {
     return selectedDetail.revisions[0];
   }, [selectedDetail]);
 
-  const loadRequests = async () => {
+  const loadRequests = async (requestedFilter = filter) => {
+    const loadId = requestLoadSeq.current + 1;
+    requestLoadSeq.current = loadId;
     try {
       setLoading(true);
       const response = await api.get('/v1/tool-generation/requests', {
-        params: filter ? { status: filter } : {},
+        params: requestedFilter ? { status: requestedFilter } : {},
       });
-      setRequests(response.data || []);
-      if (!selectedRequestId && response.data?.length) {
-        setSelectedRequestId(response.data[0].request.request_id);
+      if (loadId !== requestLoadSeq.current) {
+        return;
       }
+      const nextRequests = response.data || [];
+      setRequests(nextRequests);
+      setSelectedRequestId((current) => {
+        if (nextRequests.some(({ request }) => request.request_id === current)) {
+          return current;
+        }
+        return nextRequests[0]?.request.request_id || '';
+      });
       setError('');
     } catch (err) {
+      if (loadId !== requestLoadSeq.current) {
+        return;
+      }
       setError(err.message || 'Failed to load tool-generation requests');
     } finally {
-      setLoading(false);
+      if (loadId === requestLoadSeq.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -78,7 +93,7 @@ export default function ToolGenerationRequests() {
   };
 
   useEffect(() => {
-    loadRequests();
+    loadRequests(filter);
   }, [api, filter]);
 
   useEffect(() => {

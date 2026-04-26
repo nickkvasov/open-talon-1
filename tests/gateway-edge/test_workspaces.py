@@ -115,6 +115,14 @@ async def test_create_and_update_workspace_round_trips_harness(client, actor_pay
                         "scope": "validation",
                     }
                 ],
+                "moderation_policy": {
+                    "enabled": True,
+                    "level": "strict",
+                    "topic": "Gateway runtime work",
+                    "allowed_adjacent_topics": ["developer tooling"],
+                    "blocked_topics": ["consumer marketing"],
+                    "explain_blocked_messages": False,
+                },
             },
         },
     )
@@ -124,6 +132,8 @@ async def test_create_and_update_workspace_round_trips_harness(client, actor_pay
     workspace_id = body["workspace"]["workspace_id"]
     assert body["workspace"]["harness"]["summary"] == "Prefer evidence-backed execution."
     assert body["workspace"]["harness"]["methodology"]["ontology"].startswith("Artifacts and tests")
+    assert body["workspace"]["harness"]["moderation_policy"]["level"] == "strict"
+    assert body["workspace"]["harness"]["moderation_policy"]["topic"] == "Gateway runtime work"
 
     update_resp = await client.patch(
         f"/v1/workspaces/{workspace_id}",
@@ -132,6 +142,14 @@ async def test_create_and_update_workspace_round_trips_harness(client, actor_pay
             "harness": {
                 "version": 1,
                 "summary": "Updated workspace harness.",
+                "moderation_policy": {
+                    "enabled": True,
+                    "level": "open",
+                    "topic": "Gateway runtime work",
+                    "allowed_adjacent_topics": [],
+                    "blocked_topics": [],
+                    "explain_blocked_messages": True,
+                },
                 "methodics": [],
                 "execution_rules": [],
                 "metadata": {},
@@ -142,6 +160,7 @@ async def test_create_and_update_workspace_round_trips_harness(client, actor_pay
     assert update_resp.status_code == 200
     assert update_resp.json()["workspace"]["harness"]["summary"] == "Updated workspace harness."
     assert update_resp.json()["workspace"]["harness"]["methodology"] is None
+    assert update_resp.json()["workspace"]["harness"]["moderation_policy"]["level"] == "open"
 
 
 async def test_update_workspace_preserves_harness_when_omitted_and_clears_with_null(

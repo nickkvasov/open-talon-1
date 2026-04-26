@@ -63,6 +63,12 @@ export default function Workspaces() {
     methodology_principles: '[]',
     methodics: '[]',
     execution_rules: '[]',
+    moderation_enabled: true,
+    moderation_level: 'balanced',
+    moderation_topic: '',
+    moderation_allowed_adjacent_topics: '[]',
+    moderation_blocked_topics: '[]',
+    moderation_explain_blocked_messages: true,
   });
 
   const [confirmModal, setConfirmModal] = useState({ 
@@ -143,6 +149,12 @@ export default function Workspaces() {
       methodology_principles: '[]',
       methodics: '[]',
       execution_rules: '[]',
+      moderation_enabled: true,
+      moderation_level: 'balanced',
+      moderation_topic: '',
+      moderation_allowed_adjacent_topics: '[]',
+      moderation_blocked_topics: '[]',
+      moderation_explain_blocked_messages: true,
     });
     setModalMode('create');
   };
@@ -168,6 +180,12 @@ export default function Workspaces() {
       methodology_principles: JSON.stringify(ws.harness?.methodology?.principles || [], null, 2),
       methodics: JSON.stringify(ws.harness?.methodics || [], null, 2),
       execution_rules: JSON.stringify(ws.harness?.execution_rules || [], null, 2),
+      moderation_enabled: ws.harness?.moderation_policy?.enabled ?? true,
+      moderation_level: ws.harness?.moderation_policy?.level || 'balanced',
+      moderation_topic: ws.harness?.moderation_policy?.topic || '',
+      moderation_allowed_adjacent_topics: JSON.stringify(ws.harness?.moderation_policy?.allowed_adjacent_topics || [], null, 2),
+      moderation_blocked_topics: JSON.stringify(ws.harness?.moderation_policy?.blocked_topics || [], null, 2),
+      moderation_explain_blocked_messages: ws.harness?.moderation_policy?.explain_blocked_messages ?? true,
     });
     setIsEditModalOpen(true);
   };
@@ -664,6 +682,67 @@ export default function Workspaces() {
                     />
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <label className="flex items-center gap-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-4 py-3 text-sm font-semibold text-slate-700 dark:text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={workspaceFormData.moderation_enabled}
+                        onChange={e => setWorkspaceFormData({...workspaceFormData, moderation_enabled: e.target.checked})}
+                        className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      Topic Review
+                    </label>
+                    <div>
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Review Level</label>
+                      <select
+                        value={workspaceFormData.moderation_level}
+                        onChange={e => setWorkspaceFormData({...workspaceFormData, moderation_level: e.target.value})}
+                        className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none text-slate-900 dark:text-white"
+                      >
+                        <option value="strict">Strict</option>
+                        <option value="balanced">Balanced</option>
+                        <option value="open">Open</option>
+                      </select>
+                    </div>
+                    <label className="flex items-center gap-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-4 py-3 text-sm font-semibold text-slate-700 dark:text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={workspaceFormData.moderation_explain_blocked_messages}
+                        onChange={e => setWorkspaceFormData({...workspaceFormData, moderation_explain_blocked_messages: e.target.checked})}
+                        className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      Explain Blocks
+                    </label>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Topic</label>
+                    <textarea
+                      value={workspaceFormData.moderation_topic}
+                      onChange={e => setWorkspaceFormData({...workspaceFormData, moderation_topic: e.target.value})}
+                      rows={2}
+                      className="w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-slate-900 dark:text-white resize-none"
+                    />
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Adjacent Topics (JSON array)</label>
+                      <textarea
+                        value={workspaceFormData.moderation_allowed_adjacent_topics}
+                        onChange={e => setWorkspaceFormData({...workspaceFormData, moderation_allowed_adjacent_topics: e.target.value})}
+                        rows={4}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5 font-mono">Blocked Topics (JSON array)</label>
+                      <textarea
+                        value={workspaceFormData.moderation_blocked_topics}
+                        onChange={e => setWorkspaceFormData({...workspaceFormData, moderation_blocked_topics: e.target.value})}
+                        rows={4}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 font-mono text-xs text-cyan-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div>
                       <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Ontology</label>
                       <textarea
@@ -779,6 +858,23 @@ export default function Workspaces() {
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">Manifest</span>
                     <p className="text-sm text-slate-700 dark:text-slate-300 mt-2 font-medium leading-relaxed">
                       {selectedWorkspaceRecord.description || 'No declarative description provided for this cluster execution boundary.'}
+                    </p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-6">
+                  <div className="p-5 bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-2xl">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">Topic Review</span>
+                    <div className="text-lg font-black text-slate-900 dark:text-white mt-1">
+                      {selectedWorkspaceRecord.harness?.moderation_policy?.enabled === false ? 'Off' : 'On'}
+                    </div>
+                    <span className="text-xs text-slate-500">
+                      {selectedWorkspaceRecord.harness?.moderation_policy?.level || 'balanced'}
+                    </span>
+                  </div>
+                  <div className="p-5 bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-2xl md:col-span-2">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">Topic Boundary</span>
+                    <p className="text-sm text-slate-700 dark:text-slate-300 mt-2 font-medium leading-relaxed">
+                      {selectedWorkspaceRecord.harness?.moderation_policy?.topic || selectedWorkspaceRecord.name}
                     </p>
                   </div>
                 </div>

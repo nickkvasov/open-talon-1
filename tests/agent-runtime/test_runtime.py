@@ -39,6 +39,7 @@ from agent_runtime.runtime import (
     LangfuseRuntimeObserver,
     LocalOllamaExecutor,
     _debug_prompt_payload,
+    _format_thread_message,
     render_prompt,
 )
 from agent_runtime import compaction as compaction_module
@@ -92,6 +93,7 @@ from open_talon_contracts.models import (
     WorkspaceMethodic,
     WorkspaceMethodicStep,
     WorkspaceMethodology,
+    WorkspaceModerationPolicy,
     WorkspaceTool,
 )
 from open_talon_contracts.llm_engines import (
@@ -1569,6 +1571,58 @@ def test_render_prompt_includes_workspace_and_agent_harness_sections():
     assert "strategy: rolling_summary" in prompt
     assert "max run memory entries: 4" in prompt
     assert "repo_search | enabled: yes | Searches the current workspace source tree." in prompt
+
+
+def test_render_prompt_includes_workspace_moderation_policy_and_json_schema():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    kernel.context = kernel.context.model_copy(
+        update={
+            "workspace_harness": WorkspaceHarness(
+                moderation_policy=WorkspaceModerationPolicy(
+                    enabled=True,
+                    level="strict",
+                    topic="Gateway runtime work",
+                    allowed_adjacent_topics=["developer tooling"],
+                    blocked_topics=["consumer marketing"],
+                    explain_blocked_messages=True,
+                )
+            ),
+            "thread_reply_contract": AgentInteractionContract(
+                response_contract=AgentResponseContract(
+                    format="json",
+                    title="Publication decision",
+                    json_schema={
+                        "type": "object",
+                        "required": ["decision"],
+                        "properties": {
+                            "decision": {"type": "string", "enum": ["allow", "suppress"]},
+                        },
+                    },
+                )
+            ),
+        }
+    )
+
+    prompt = render_prompt(kernel.context)
+
+    assert "moderation policy:" in prompt
+    assert "level: strict" in prompt
+    assert "Gateway runtime work" in prompt
+    assert "json schema:" in prompt
+    assert '"decision"' in prompt
+
+
+def test_json_response_contract_suppresses_generic_thread_header():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    kernel.context = kernel.context.model_copy(
+        update={
+            "thread_reply_contract": AgentInteractionContract(
+                response_contract=AgentResponseContract(format="json")
+            )
+        }
+    )
+
+    assert _format_thread_message(kernel.context, '{"decision":"allow"}') == '{"decision":"allow"}'
 
 
 def test_render_prompt_keeps_full_workspace_tool_catalog_with_tool_use_guidance():

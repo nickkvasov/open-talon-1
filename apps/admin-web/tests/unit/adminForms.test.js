@@ -43,7 +43,7 @@ test('buildWorkspaceMutation requires an organization for workspace creation', (
   );
 });
 
-test('buildWorkspaceHarness returns null when no harness fields are set', () => {
+test('buildWorkspaceHarness returns default moderation policy when no harness fields are set', () => {
   const harness = buildWorkspaceHarness({
     harness_summary: '',
     methodology_ontology: '',
@@ -52,8 +52,52 @@ test('buildWorkspaceHarness returns null when no harness fields are set', () => 
     methodology_principles: '[]',
     methodics: '[]',
     execution_rules: '[]',
+    moderation_enabled: true,
+    moderation_level: 'balanced',
+    moderation_topic: '',
+    moderation_allowed_adjacent_topics: '[]',
+    moderation_blocked_topics: '[]',
+    moderation_explain_blocked_messages: true,
   });
-  assert.equal(harness, null);
+  assert.equal(harness.summary, null);
+  assert.equal(harness.methodology, null);
+  assert.deepEqual(harness.methodics, []);
+  assert.deepEqual(harness.execution_rules, []);
+  assert.deepEqual(harness.moderation_policy, {
+    enabled: true,
+    level: 'balanced',
+    topic: null,
+    allowed_adjacent_topics: [],
+    blocked_topics: [],
+    explain_blocked_messages: true,
+  });
+});
+
+test('buildWorkspaceHarness serializes moderation policy controls', () => {
+  const harness = buildWorkspaceHarness({
+    harness_summary: '',
+    methodology_ontology: '',
+    methodology_axiology: '',
+    methodology_epistemology: '',
+    methodology_principles: '[]',
+    methodics: '[]',
+    execution_rules: '[]',
+    moderation_enabled: false,
+    moderation_level: 'strict',
+    moderation_topic: 'Runtime architecture',
+    moderation_allowed_adjacent_topics: '["tests","docs"]',
+    moderation_blocked_topics: '["hiring"]',
+    moderation_explain_blocked_messages: false,
+  });
+
+  assert.deepEqual(harness.moderation_policy, {
+    enabled: false,
+    level: 'strict',
+    topic: 'Runtime architecture',
+    allowed_adjacent_topics: ['tests', 'docs'],
+    blocked_topics: ['hiring'],
+    explain_blocked_messages: false,
+  });
 });
 
 test('buildWorkspaceMutation serializes metadata and harness fields', () => {

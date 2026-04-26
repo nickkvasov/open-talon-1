@@ -19,9 +19,10 @@ Related references:
 
 The protocol covers these managed agents and contexts:
 
-- `Tinker` with `agent_key=tinker`, role `tool generation agent`
-- `Steward` with `agent_key=steward`, role `platform steward`
-- `Curator` with `agent_key=curator`, role `organization curator`
+- `Tinker` with `agent_key=tinker`, role `generated tool authoring and validation agent`
+- `Steward` with `agent_key=steward`, role `platform operations steward`
+- `Curator` with `agent_key=curator`, role `organization operations curator`
+- `Anchor` with `agent_key=anchor`, role `workspace topic alignment reviewer`, using the managed `local-ollama` provider by default
 - `System Base / Administration / System Operations`
 - each non-system organization's `Administration / Organization Operations`
 - the managed control-plane MCP server `open_talon_control_plane`
@@ -178,7 +179,7 @@ Verify:
 - organization slug `system-base` exists
 - project slug `administration` exists inside `system-base`
 - workspace `System Operations` exists under that project
-- `Steward` exists as a global system agent with role `platform steward`
+- `Steward` exists as a global system agent with role `platform operations steward`
 - `Steward` is attached as a participant in `System Operations`
 - `Steward` has an active `agent_identities` record after gateway bootstrap
 
@@ -197,7 +198,7 @@ Verify:
 - project slug `default` exists
 - project slug `administration` exists
 - workspace `Organization Operations` exists under `administration`
-- one organization-scoped `Curator` exists with role `organization curator`
+- one organization-scoped `Curator` exists with role `organization operations curator`
 - the Curator is attached to `Organization Operations`
 - the Curator has project access for the administration project
 - the Curator has the expected organization IAM role binding

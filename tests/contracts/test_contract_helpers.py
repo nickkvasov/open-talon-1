@@ -13,6 +13,9 @@ from open_talon_contracts.oci_registry import (
 from open_talon_contracts.models import (
     CreateOrganizationRequest,
     ExecutionSpec,
+    PublicationReview,
+    WorkspaceHarness,
+    WorkspaceModerationPolicy,
     normalize_organization_slug,
 )
 from open_talon_contracts.secrets import SecretReference, secret_references_from_config
@@ -111,6 +114,54 @@ def test_secret_references_from_config_supports_env_and_openbao_shapes() -> None
             },
         ),
     ]
+
+
+def test_workspace_moderation_policy_defaults_and_normalization() -> None:
+    harness = WorkspaceHarness()
+
+    assert harness.moderation_policy.enabled is True
+    assert harness.moderation_policy.level == "balanced"
+
+    policy = WorkspaceModerationPolicy(
+        topic="  Runtime architecture  ",
+        allowed_adjacent_topics=[" docs ", "", "tests"],
+        blocked_topics=[" hiring  ", ""],
+    )
+
+    assert policy.topic == "Runtime architecture"
+    assert policy.allowed_adjacent_topics == ["docs", "tests"]
+    assert policy.blocked_topics == ["hiring"]
+    assert policy.model_dump(mode="json")["explain_blocked_messages"] is True
+
+
+def test_publication_review_serialization_is_generic() -> None:
+    review_id = uuid4()
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    message_id = uuid4()
+    reviewer_id = uuid4()
+    participant_id = uuid4()
+
+    review = PublicationReview(
+        review_id=review_id,
+        review_kind="workspace_topic_alignment",
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        message_id=message_id,
+        reviewer_system_agent_id=reviewer_id,
+        candidate_actor_participant_id=participant_id,
+        phase="pre_publish",
+        level="strict",
+        status="suppressed",
+        decision="suppress",
+        policy_snapshot={"topic": "Runtime architecture"},
+    )
+
+    payload = review.model_dump(mode="json")
+
+    assert payload["review_kind"] == "workspace_topic_alignment"
+    assert payload["decision"] == "suppress"
+    assert payload["policy_snapshot"]["topic"] == "Runtime architecture"
 
 
 def test_organization_slug_normalization_is_shared_by_request_models() -> None:

@@ -119,7 +119,8 @@ The most important ownership rules are:
 - `organizations`, `projects`, `project_access_bindings`, and `organization_memberships` store the tenant and work hierarchy above workspaces
 - `system_agents` stores platform-global and organization-scoped agent definitions
 - managed operational contexts are seeded as `System Base / Administration / System Operations` plus `Administration / Organization Operations` for each non-system organization
-- operational agents are ordinary system agents: `Tinker` (`tool generation agent`), `Steward` (`platform steward`), and organization-scoped `Curator` (`organization curator`)
+- managed agents are ordinary system agents: `Tinker` (`generated tool authoring and validation agent`), `Steward` (`platform operations steward`), organization-scoped `Curator` (`organization operations curator`), and workspace-attached `Anchor` (`workspace topic alignment reviewer`)
+- the agent runtime is generic and must not branch on `agent_key`, display name, role text, capability text, or metadata tags; specialization belongs in agent definitions, harnesses, interaction contracts, task payloads, bindings, and tool/MCP allowlists
 - `participants` stores workspace-local attachment and state for both humans and agents
 - `threads` and `timeline_messages` are the shared collaboration surface
 - `interaction_requests` and related tables implement tracked, resumable question workflows

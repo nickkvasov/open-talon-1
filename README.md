@@ -86,7 +86,8 @@ Open Talon separates:
 - `agent_identities`, `iam_role_definitions`, `human_role_bindings`, and `agent_role_bindings`: principal IAM state for agent identities and global or organization role bindings
 - `organizations`, `projects`, `project_access_bindings`, and `organization_memberships`: organization tenancy, project ownership/access, membership, and membership roles stored in Postgres
 - `participants`: workspace-local materializations of a human or agent inside a workspace
-- managed operational agents are ordinary `system_agents`: `Tinker` for tool generation, global `Steward` for platform operations, and organization-scoped `Curator` for organization operations
+- managed system agents are ordinary `system_agents`: `Tinker` for generated-tool authoring, global `Steward` for platform operations, organization-scoped `Curator` for organization operations, and workspace-attached `Anchor` for topic-alignment review through the managed `local-ollama` provider
+- agent runtime remains generic: it renders agent definitions, harnesses, response contracts, task metadata, workspace context, tools, MCP, and memory without branching on agent key, display name, role text, capability text, or metadata tags
 
 Role terminology in this repository:
 

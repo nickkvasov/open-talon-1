@@ -4602,8 +4602,11 @@ async def get_thread(request: Request, thread_id: UUID) -> ThreadDetail:
 async def get_thread_timeline(request: Request, thread_id: UUID) -> TimelinePage:
     logger.debug("HTTP get_thread_timeline thread_id=%s", thread_id)
     try:
-        await _require_thread_membership(request, thread_id)
-        return await collab_svc.collaboration_service.get_timeline(thread_id)
+        actor = await _require_thread_membership(request, thread_id)
+        return await collab_svc.collaboration_service.get_timeline(
+            thread_id,
+            viewer=actor,
+        )
     except Exception as exc:
         raise _http_error(exc) from exc
 

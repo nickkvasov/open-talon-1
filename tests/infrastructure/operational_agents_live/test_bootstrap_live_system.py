@@ -88,7 +88,7 @@ def test_operational_agents_bootstrap_on_live_system():
             token=token,
         )
         curator = next(agent for agent in agents if agent["agent_key"] == "curator")
-        assert curator["role"] == "organization curator"
+        assert curator["role"] == "organization operations curator"
         json_request(
             "PATCH",
             f"{gateway}/v1/workspaces/{org_operations['workspace_id']}/participants/{actor['participant_id']}/role",

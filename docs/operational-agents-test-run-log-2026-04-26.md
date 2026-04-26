@@ -246,7 +246,7 @@ The passing live test verified:
 - a fresh organization can be created through the live gateway.
 - the fresh organization receives an `Administration` project.
 - the fresh organization receives an `Organization Operations` workspace.
-- the fresh organization receives an organization-scoped `Curator` with role `organization curator`.
+- the fresh organization receives an organization-scoped `Curator` with role `organization operations curator`.
 - the fresh organization's Curator receives an active live machine identity during organization bootstrap repair.
 - the live admin can be attached to the operations workspace.
 - gateway MCP initializes against the live gateway.

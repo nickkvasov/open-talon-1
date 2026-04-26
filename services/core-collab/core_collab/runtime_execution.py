@@ -664,6 +664,10 @@ class RuntimeExecutionService:
             )
             for draft in result.artifacts
         ]
+        reply_policy = task.metadata.get("thread_reply_policy")
+        suppress_thread_reply = (
+            isinstance(reply_policy, dict) and reply_policy.get("mode") == "suppress"
+        ) or task.metadata.get("suppress_thread_reply") is True
         message = (
             self._agent_message_from_result(
                 result,
@@ -673,6 +677,7 @@ class RuntimeExecutionService:
             )
             if self._stop_reason_returns_to_thread(result.stop_reason)
             and result.message
+            and not suppress_thread_reply
             else None
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001

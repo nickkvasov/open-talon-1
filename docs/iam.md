@@ -154,7 +154,7 @@ Agent permissions come from:
 
 The MCP adapter uses those same agent permissions. It filters visible MCP operations by the current session scope and then rechecks the underlying IAM permission on every call.
 
-Operational agents use this same model. `Tinker`, `Steward`, and `Curator` are normal `system_agents` whose purpose is advertised through `display_name`, `role`, and `capabilities`; their authority comes from IAM bindings, project access, workspace participant attachment, and private MCP/tool allowlists.
+Operational agents use this same model. `Tinker`, `Steward`, `Curator`, and `Anchor` are normal `system_agents` whose purpose is advertised through `display_name`, `role`, and `capabilities`; their authority comes from IAM bindings, project access, workspace participant attachment, task payloads, and private MCP/tool allowlists. Runtime workers stay generic and do not authorize or specialize behavior from agent keys, role text, capability text, or metadata tags.
 
 External MCP server management is separate from the gateway-mounted MCP adapter and from the Open Talon tool catalog. Global and organization MCP server definitions use `provider.mcp.*` permissions. Workspace MCP server attachment uses `workspace.mcp_servers.write` after participant attachment. Do not use `tool_catalog.*` or `workspace.tools.write` to manage external MCP servers.
 

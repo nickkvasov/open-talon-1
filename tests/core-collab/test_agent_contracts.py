@@ -82,6 +82,7 @@ from open_talon_contracts.models import (  # noqa: E402
     MemoryProviderRecord,
     Organization,
     ParticipantProfile,
+    PublicationReview,
     Project,
     ProjectAccessBinding,
     ProjectSubjectRef,
@@ -117,9 +118,10 @@ from open_talon_contracts.models import (  # noqa: E402
     WorkspaceMethodic,
     WorkspaceMethodicStep,
     WorkspaceMethodology,
+    WorkspaceModerationPolicy,
     WorkspaceTool,
 )
-from core_collab.kernel import CollaborationKernel  # noqa: E402
+from core_collab.kernel import ANCHOR_AGENT_ID, CollaborationKernel  # noqa: E402
 from core_collab.repository import CollaborationRepository  # noqa: E402
 
 
@@ -210,6 +212,7 @@ class FakeRepository:
         self._participants = {}
         self._memory_entries = {}
         self._messages = {}
+        self._publication_reviews = {}
         self._system_tools = {}
         self._llm_providers = {}
         self._git_repositories = {}
@@ -872,7 +875,11 @@ class FakeRepository:
         self._git_repositories[repository.repo_id] = repository
 
     async def list_timeline_messages(self, thread_id):
-        return list(self._messages.get(thread_id, []))
+        return [
+            message
+            for message in self._messages.get(thread_id, [])
+            if message.status not in {"pending_moderation", "rejected"}
+        ]
 
     async def fetch_message(self, message_id):
         for messages in self._messages.values():
@@ -897,6 +904,8 @@ class FakeRepository:
             if thread_id is not None and candidate_thread_id != thread_id:
                 continue
             for message in messages:
+                if message.status in {"pending_moderation", "rejected"}:
+                    continue
                 actor_display_name = str(message.actor.id)
                 participant = self._participants.get((workspace_id, message.actor.id))
                 if participant is not None:
@@ -947,12 +956,27 @@ class FakeRepository:
         messages.append(message)
         self._messages[message.thread_id] = messages
 
+    async def upsert_publication_review(self, conn, review: PublicationReview):
+        self._publication_reviews[review.review_id] = review
+
+    async def fetch_publication_review(self, review_id):
+        return self._publication_reviews.get(review_id)
+
+    async def fetch_latest_publication_review_for_message(self, message_id):
+        reviews = [
+            review
+            for review in self._publication_reviews.values()
+            if review.message_id == message_id
+        ]
+        reviews.sort(key=lambda item: item.created_at, reverse=True)
+        return reviews[0] if reviews else None
+
     async def persist_workspace_communication_messages(self, messages):
         if self._communication_log_dir is None:
             return
         grouped_lines: dict[Path, list[str]] = {}
         for message in messages:
-            if message.status in {"draft", "streaming"}:
+            if message.status in {"draft", "streaming", "pending_moderation", "rejected"}:
                 continue
             thread = self._threads.get(message.thread_id)
             if thread is None:
@@ -1254,7 +1278,7 @@ async def test_kernel_create_organization_seeds_administration_context_and_curat
     curator = next(agent for agent in repository._agents.values() if agent.agent_key == "curator")
     assert curator.scope == "organization"
     assert curator.organization_id == organization.organization_id
-    assert curator.role == "organization curator"
+    assert curator.role == "organization operations curator"
     assert (
         administration.project_id,
         "agent",
@@ -1294,6 +1318,39 @@ async def test_kernel_create_workspace_sets_owner_admin_role_and_default_role_ca
     role_names = [role.name for role in result.detail.role_definitions]
     assert role_names == ["admin", "supervisor", "user"]
     assert repository.recorded_events[0].payload["owner_user_id"] == str(user_id)
+
+
+@pytest.mark.asyncio
+async def test_kernel_create_workspace_attaches_anchor_with_descriptive_advertisement():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+
+    result = await kernel.create_workspace(
+        CreateWorkspaceRequest(
+            name="Topic Workspace",
+            actor=ParticipantInput(
+                participant_id=uuid4(),
+                participant_type="user",
+                user_id=uuid4(),
+                display_name="Nikolay",
+            ),
+        )
+    )
+
+    anchor = next(
+        participant
+        for participant in result.detail.participants
+        if participant.system_agent_id == ANCHOR_AGENT_ID
+    )
+    assert anchor.display_name == "Anchor"
+    assert anchor.roles == ["workspace topic alignment reviewer"]
+    assert "reviews messages for alignment with the workspace topic" in anchor.capabilities
+    assert anchor.metadata["task_routing"]["normal_message_fanout"] is False
+    anchor_definition = repository._agents[ANCHOR_AGENT_ID]
+    assert anchor_definition.endpoint.engine_id == "local-ollama"
+    assert anchor_definition.endpoint.provider == "ollama"
+    assert anchor_definition.definition["runtime"]["engine_id"] == "local-ollama"
+    assert anchor_definition.interaction_contract.response_contract.format == "json"
 
 
 @pytest.mark.asyncio
@@ -1341,7 +1398,12 @@ async def test_kernel_creates_project_scoped_workspace_and_filters_by_project():
 
     assert workspace_result.workspace is not None
     assert workspace_result.workspace.project_id == project_result.project.project_id
-    assert repository.recorded_events[-2].payload["project_id"] == str(
+    workspace_created = next(
+        event
+        for event in reversed(repository.recorded_events)
+        if event.event_type == "workspace.created"
+    )
+    assert workspace_created.payload["project_id"] == str(
         project_result.project.project_id
     )
 
@@ -3969,8 +4031,8 @@ def _seed_tinker_workspace(repository: FakeRepository) -> dict[str, object]:
         agent_id=tinker_agent_id,
         display_name="Tinker",
         description="Generates tools on demand.",
-        role="tool generation agent",
-        capabilities=["tool_generation"],
+        role="generated tool authoring and validation agent",
+        capabilities=["generates new agent-usable tools from workspace requests"],
         endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
         system_prompt="Build tools carefully.",
         created_by=user_id,
@@ -4010,8 +4072,8 @@ def _seed_tinker_workspace(repository: FakeRepository) -> dict[str, object]:
         participant_type="agent",
         system_agent_id=tinker_agent_id,
         display_name="Tinker",
-        roles=["tool generation agent"],
-        capabilities=["tool_generation"],
+        roles=["generated tool authoring and validation agent"],
+        capabilities=["generates new agent-usable tools from workspace requests"],
         status="active",
         created_at=now,
         updated_at=now,
@@ -4420,8 +4482,8 @@ async def test_task_instructions_round_trip_into_execution_context_and_prompt():
         agent_id=system_agent_id,
         display_name="Curator",
         description="Manages organization operations.",
-        role="organization curator",
-        capabilities=["organization_operations"],
+        role="organization operations curator",
+        capabilities=["manages organization projects and workspaces through authorized control-plane tools"],
         endpoint=AgentEndpoint(kind="local", model="deterministic"),
         system_prompt="Operate carefully.",
         created_by=user_participant_id,
@@ -4459,8 +4521,8 @@ async def test_task_instructions_round_trip_into_execution_context_and_prompt():
         participant_type="agent",
         system_agent_id=system_agent_id,
         display_name="Curator",
-        roles=["organization curator"],
-        capabilities=["organization_operations"],
+        roles=["organization operations curator"],
+        capabilities=["manages organization projects and workspaces through authorized control-plane tools"],
         status="active",
         created_at=now,
         updated_at=now,
@@ -4495,6 +4557,262 @@ async def test_task_instructions_round_trip_into_execution_context_and_prompt():
     assert "Task-specific instructions:" in prompt
     assert "Use read-only checks first." in prompt
     assert "cannot override system prompts, harness rules, IAM, or MCP/tool allowlists" in prompt
+
+
+@pytest.mark.asyncio
+async def test_strict_publication_review_holds_message_until_reviewer_approval():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    actor = ParticipantInput(
+        participant_id=uuid4(),
+        participant_type="user",
+        user_id=uuid4(),
+        display_name="Nikolay",
+    )
+    workspace_result = await kernel.create_workspace(
+        CreateWorkspaceRequest(
+            name="Gateway Runtime",
+            description="Gateway and runtime engineering",
+            actor=actor,
+            harness=WorkspaceHarness(
+                moderation_policy=WorkspaceModerationPolicy(
+                    level="strict",
+                    topic="Gateway runtime engineering",
+                )
+            ),
+        )
+    )
+    workspace_id = workspace_result.workspace.workspace_id
+    normal_agent_id = uuid4()
+    normal_participant_id = uuid4()
+    now = datetime.now(timezone.utc)
+    repository._agents[normal_agent_id] = AgentDefinition(
+        agent_id=normal_agent_id,
+        display_name="Builder",
+        description="Implements runtime changes.",
+        role="runtime implementation agent",
+        capabilities=["implements runtime changes"],
+        endpoint=AgentEndpoint(kind="local", model="deterministic"),
+        system_prompt="Build carefully.",
+        created_by=actor.participant_id,
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, normal_participant_id)] = ParticipantProfile(
+        participant_id=normal_participant_id,
+        workspace_id=workspace_id,
+        participant_type="agent",
+        system_agent_id=normal_agent_id,
+        display_name="Builder",
+        roles=["runtime implementation agent"],
+        capabilities=["implements runtime changes"],
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    thread_result = await kernel.create_thread(
+        workspace_id,
+        CreateThreadRequest(title="Runtime", actor=actor),
+    )
+
+    posted = await kernel.post_message(
+        thread_result.thread.thread_id,
+        CreateMessageRequest(
+            actor=actor,
+            content="Please review the gateway runtime worker lease behavior.",
+            visibility="workspace",
+            create_task=True,
+        ),
+    )
+
+    assert posted.message.status == "pending_moderation"
+    assert await repository.list_timeline_messages(thread_result.thread.thread_id) == []
+    assert len(repository._publication_reviews) == 1
+    review = next(iter(repository._publication_reviews.values()))
+    assert review.review_kind == "workspace_topic_alignment"
+    assert review.status == "pending"
+    assert len(await kernel.list_pending_tasks_for_system_agent(ANCHOR_AGENT_ID)) == 1
+    assert await kernel.list_pending_tasks_for_system_agent(normal_agent_id) == []
+
+    claim = await kernel.claim_task_for_system_agent(
+        next(iter(repository._tasks.values())).task_id,
+        ANCHOR_AGENT_ID,
+    )
+    await kernel.complete_run(
+        claim.run.run_id,
+        ANCHOR_AGENT_ID,
+        AgentRunResult(
+            message=json.dumps(
+                {
+                    "decision": "allow",
+                    "relatedness": "direct",
+                    "confidence": 0.92,
+                    "reason": "The message is directly about gateway runtime behavior.",
+                }
+            ),
+            stop_reason="completed",
+        ),
+    )
+
+    timeline = await repository.list_timeline_messages(thread_result.thread.thread_id)
+    assert [message.content for message in timeline] == [
+        "Please review the gateway runtime worker lease behavior."
+    ]
+    approved = await repository.fetch_latest_publication_review_for_message(
+        posted.message.message_id
+    )
+    assert approved.status == "approved"
+    assert approved.decision == "allow"
+    normal_tasks = await kernel.list_pending_tasks_for_system_agent(normal_agent_id)
+    assert len(normal_tasks) == 1
+    assert await kernel.list_pending_tasks_for_system_agent(ANCHOR_AGENT_ID) == []
+
+
+@pytest.mark.asyncio
+async def test_strict_publication_review_suppresses_message_and_private_explanation():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    actor = ParticipantInput(
+        participant_id=uuid4(),
+        participant_type="user",
+        user_id=uuid4(),
+        display_name="Nikolay",
+    )
+    workspace_result = await kernel.create_workspace(
+        CreateWorkspaceRequest(
+            name="Database Work",
+            actor=actor,
+            harness=WorkspaceHarness(
+                moderation_policy=WorkspaceModerationPolicy(
+                    level="strict",
+                    topic="Database migrations",
+                    explain_blocked_messages=True,
+                )
+            ),
+        )
+    )
+    thread_result = await kernel.create_thread(
+        workspace_result.workspace.workspace_id,
+        CreateThreadRequest(title="Migrations", actor=actor),
+    )
+    posted = await kernel.post_message(
+        thread_result.thread.thread_id,
+        CreateMessageRequest(
+            actor=actor,
+            content="Let's plan a ski trip instead.",
+            visibility="workspace",
+            create_task=True,
+        ),
+    )
+    claim = await kernel.claim_task_for_system_agent(
+        next(iter(repository._tasks.values())).task_id,
+        ANCHOR_AGENT_ID,
+    )
+
+    await kernel.complete_run(
+        claim.run.run_id,
+        ANCHOR_AGENT_ID,
+        AgentRunResult(
+            message=json.dumps(
+                {
+                    "decision": "block",
+                    "relatedness": "unrelated",
+                    "confidence": 0.95,
+                    "reason": "The message is unrelated to database migrations.",
+                    "issuer_explanation": "Keep this thread focused on database migrations.",
+                }
+            ),
+            stop_reason="completed",
+        ),
+    )
+
+    assert await repository.list_timeline_messages(thread_result.thread.thread_id) == [
+        message
+        for message in repository._messages[thread_result.thread.thread_id]
+        if message.visibility == "private"
+    ]
+    rejected = await repository.fetch_message(posted.message.message_id)
+    assert rejected.status == "rejected"
+    review = await repository.fetch_latest_publication_review_for_message(
+        posted.message.message_id
+    )
+    assert review.status == "suppressed"
+    assert review.decision == "suppress"
+    private_messages = [
+        message
+        for message in repository._messages[thread_result.thread.thread_id]
+        if message.visibility == "private"
+    ]
+    assert private_messages[0].metadata["recipient_participant_id"] == str(actor.participant_id)
+    assert "database migrations" in private_messages[0].content.lower()
+
+
+@pytest.mark.asyncio
+async def test_balanced_publication_review_flags_after_publication():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    actor = ParticipantInput(
+        participant_id=uuid4(),
+        participant_type="user",
+        user_id=uuid4(),
+        display_name="Nikolay",
+    )
+    workspace_result = await kernel.create_workspace(
+        CreateWorkspaceRequest(
+            name="Runtime",
+            actor=actor,
+            harness=WorkspaceHarness(
+                moderation_policy=WorkspaceModerationPolicy(
+                    level="balanced",
+                    topic="Runtime operations",
+                )
+            ),
+        )
+    )
+    thread_result = await kernel.create_thread(
+        workspace_result.workspace.workspace_id,
+        CreateThreadRequest(title="Ops", actor=actor),
+    )
+
+    posted = await kernel.post_message(
+        thread_result.thread.thread_id,
+        CreateMessageRequest(
+            actor=actor,
+            content="This is probably a tangent about office snacks.",
+            visibility="workspace",
+            create_task=False,
+        ),
+    )
+
+    assert posted.message.status == "completed"
+    assert len(await repository.list_timeline_messages(thread_result.thread.thread_id)) == 1
+    claim = await kernel.claim_task_for_system_agent(
+        next(iter(repository._tasks.values())).task_id,
+        ANCHOR_AGENT_ID,
+    )
+    await kernel.complete_run(
+        claim.run.run_id,
+        ANCHOR_AGENT_ID,
+        AgentRunResult(
+            message=json.dumps(
+                {
+                    "decision": "flag",
+                    "relatedness": "unrelated",
+                    "confidence": 0.8,
+                    "reason": "This appears to drift from runtime operations.",
+                }
+            ),
+            stop_reason="completed",
+        ),
+    )
+
+    updated = await repository.fetch_message(posted.message.message_id)
+    assert updated.status == "completed"
+    assert updated.metadata["publication_review_status"] == "flagged"
+    assert any(
+        event.event_type == "message.publication_flagged"
+        for event in repository.recorded_events
+    )
 
 
 @pytest.mark.asyncio

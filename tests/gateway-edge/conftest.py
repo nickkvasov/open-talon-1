@@ -2455,7 +2455,7 @@ class MockCollaborationService:
         memberships = self.memberships.get(str(thread_id), [])
         return ThreadDetail(thread=thread, memberships=memberships)
 
-    async def get_timeline(self, thread_id: UUID):
+    async def get_timeline(self, thread_id: UUID, *, viewer=None):
         from gateway_edge.models import TimelinePage
 
         if str(thread_id) not in self.threads:

@@ -4,7 +4,7 @@ This document describes the current Tinker workflow for generating agent-usable 
 
 ## Current Model
 
-- `Tinker` is a seeded system agent with `agent_key=tinker` and role `tool generation agent`.
+- `Tinker` is a seeded system agent with `agent_key=tinker` and role `generated tool authoring and validation agent`.
 - `Tinker` must be attached to a workspace before users in that workspace can ask it to create a tool.
 - A request may target either the `global` system catalog or the current `organization` catalog.
 - Tinker’s authoring helpers are private internal tools. They are not exposed through `workspace_tools` and are not visible to other agents.

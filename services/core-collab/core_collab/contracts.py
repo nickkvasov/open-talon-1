@@ -138,6 +138,7 @@ from open_talon_contracts.models import (  # noqa: E402
     MemoryProviderRecord,
     MemorySearchHit,
     MemorySearchResponse,
+    PublicationReview,
     McpPromptDefinition,
     McpResourceDefinition,
     McpServerDefinition,
@@ -211,6 +212,7 @@ from open_talon_contracts.models import (  # noqa: E402
     WorkspaceMethodic,
     WorkspaceMethodicStep,
     WorkspaceMethodology,
+    WorkspaceModerationPolicy,
     WorkspaceTool,
 )
 from open_talon_contracts.agent_contracts import (  # noqa: E402
@@ -345,6 +347,7 @@ __all__ = [
     "MemoryProviderRecord",
     "MemorySearchHit",
     "MemorySearchResponse",
+    "PublicationReview",
     "LlmProviderDefinition",
     "LlmProviderHealthCheck",
     "LlmProviderHealthReport",
@@ -407,6 +410,7 @@ __all__ = [
     "WorkspaceMethodic",
     "WorkspaceMethodicStep",
     "WorkspaceMethodology",
+    "WorkspaceModerationPolicy",
     "WorkspaceTool",
     "LlmEngineDescriptor",
     "LlmEngineRegistry",

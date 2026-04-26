@@ -21,6 +21,16 @@ export function buildWorkspaceHarness(formData) {
     [],
     'Execution rules',
   );
+  const allowedAdjacentTopics = parseJsonInput(
+    formData.moderation_allowed_adjacent_topics,
+    [],
+    'Allowed adjacent topics',
+  );
+  const blockedTopics = parseJsonInput(
+    formData.moderation_blocked_topics,
+    [],
+    'Blocked topics',
+  );
   const methodology = {
     ontology: formData.methodology_ontology || null,
     axiology: formData.methodology_axiology || null,
@@ -33,21 +43,20 @@ export function buildWorkspaceHarness(formData) {
     || methodology.epistemology
     || methodology.principles.length,
   );
-  const hasHarness = Boolean(
-    formData.harness_summary.trim()
-    || hasMethodology
-    || methodics.length
-    || executionRules.length,
-  );
-  if (!hasHarness) {
-    return null;
-  }
   return {
     version: 1,
     summary: formData.harness_summary.trim() || null,
     methodology: hasMethodology ? methodology : null,
     methodics,
     execution_rules: executionRules,
+    moderation_policy: {
+      enabled: formData.moderation_enabled !== false,
+      level: formData.moderation_level || 'balanced',
+      topic: (formData.moderation_topic || '').trim() || null,
+      allowed_adjacent_topics: allowedAdjacentTopics,
+      blocked_topics: blockedTopics,
+      explain_blocked_messages: formData.moderation_explain_blocked_messages !== false,
+    },
     metadata: {},
   };
 }

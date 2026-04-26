@@ -1717,9 +1717,17 @@ class CollaborationService:
         logger.debug("Service get_thread thread_id=%s", thread_id)
         return await self._require_kernel().get_thread_detail(thread_id)
 
-    async def get_timeline(self, thread_id: UUID) -> TimelinePage:
+    async def get_timeline(
+        self,
+        thread_id: UUID,
+        *,
+        viewer: ParticipantInput | None = None,
+    ) -> TimelinePage:
         logger.debug("Service get_timeline thread_id=%s", thread_id)
-        return await self._require_kernel().get_thread_timeline(thread_id)
+        return await self._require_kernel().get_thread_timeline(
+            thread_id,
+            viewer=viewer,
+        )
 
     async def list_workspace_communication_log(
         self,

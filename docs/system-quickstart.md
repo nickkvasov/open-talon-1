@@ -296,7 +296,8 @@ Identity and execution boundaries:
 - human identity is global in `users` and `auth_identities`
 - organization membership and membership roles live in `organizations` and `organization_memberships`
 - project grouping lives in `projects`; project creator, owner, editor, and viewer access live in `project_access_bindings`
-- operational agents are normal `system_agents`: `Tinker` advertises `tool generation agent`, `Steward` advertises `platform steward`, and each organization receives a `Curator` advertising `organization curator`
+- managed agents are normal `system_agents`: `Tinker` advertises generated-tool authoring, `Steward` advertises platform operations, each organization receives a `Curator` advertising organization operations, and every workspace receives `Anchor` for topic-alignment review
+- runtime execution is generic: workers do not branch on `agent_key`, display name, role text, capability text, or metadata tags; behavior comes from agent records, harnesses, interaction contracts, task payloads, IAM/project/workspace bindings, and tool/MCP allowlists
 - organization project catalog listing is organization-permission scoped; specific project structure and project-workspace listings are project-access-scoped
 - agent identity/configuration is global in `system_agents`
 - Git-managed agent authoring is versioned in Forgejo and `agent_definition_versions`, but runtime execution still reads the active `system_agents` projection only.
@@ -567,11 +568,14 @@ Current publication rules:
 
 The local schema seeds managed operational agents without adding a separate operational profile field:
 
-- `Tinker` (`agent_key=tinker`) has role `tool generation agent` and owns generated-tool authoring behavior.
-- `Steward` (`agent_key=steward`) has role `platform steward` and is attached to `System Base / Administration / System Operations`.
-- `Curator` (`agent_key=curator`) has role `organization curator`; every non-system organization receives one in its `Administration / Organization Operations` workspace.
+- `Tinker` (`agent_key=tinker`) has role `generated tool authoring and validation agent` and owns generated-tool authoring behavior through its definition, harness, private tools, and task payloads.
+- `Steward` (`agent_key=steward`) has role `platform operations steward` and is attached to `System Base / Administration / System Operations`.
+- `Curator` (`agent_key=curator`) has role `organization operations curator`; every non-system organization receives one in its `Administration / Organization Operations` workspace.
+- `Anchor` (`agent_key=anchor`) has role `workspace topic alignment reviewer`; every workspace receives an Anchor participant whose task-routing metadata disables normal message fanout and accepts only publication-review work. Anchor uses the managed `local-ollama` LLM provider by default.
 
 The operational purpose is advertised through `display_name`, `role`, and `capabilities`. Authorization still comes from IAM role bindings, project access bindings, participant attachment, and MCP/tool allowlists.
+
+Workspace harnesses include `moderation_policy` with `enabled`, `level` (`strict`, `balanced`, or `open`), `topic`, `allowed_adjacent_topics`, `blocked_topics`, and `explain_blocked_messages`. Strict mode creates a generic publication review before a message is published; approval publishes the message, suppression leaves it out of the public timeline and JSONL communication logs, and optional explanation is private to the issuer. Balanced and open mode publish first and may later flag drift.
 
 `Steward` and `Curator` use the managed `open_talon_control_plane` MCP server for gateway control-plane operations. The runtime mints OIDC client-credentials tokens from `agent_identities.secret_ref` when a private control-plane MCP tool is executed.
 

@@ -205,12 +205,13 @@ async def test_repository_migrations_seed_tinker_agent_with_internal_tools():
 
         assert tinker is not None
         assert tinker.display_name == "Tinker"
-        assert tinker.role == "tool generation agent"
+        assert tinker.role == "generated tool authoring and validation agent"
         assert set(tinker.capabilities) == {
-            "tool_generation",
-            "tool_validation",
-            "tool_catalog",
-            "tool_authoring",
+            "generates new agent-usable tools from workspace requests",
+            "checks whether existing tools already satisfy a request",
+            "validates generated tools before approval",
+            "submits generated tool revisions for catalog review",
+            "reports trust network and workspace-access rationale for generated tools",
         }
         assert tinker.metadata["tool_generation_agent"] is True
 
@@ -261,7 +262,7 @@ async def test_repository_migrations_seed_operational_agents_and_contexts_idempo
         )
         assert steward is not None
         assert steward.agent_key == "steward"
-        assert steward.role == "platform steward"
+        assert steward.role == "platform operations steward"
         steward_mcp_tools = await repository.list_agent_internal_mcp_tools(steward.agent_id)
         assert "control_plane__runtime.overview.get" in {
             tool.exposed_name for tool in steward_mcp_tools
@@ -279,11 +280,31 @@ async def test_repository_migrations_seed_operational_agents_and_contexts_idempo
             organization_id=default_org.organization_id,
         )
         curator = next(agent for agent in curators if agent.agent_key == "curator")
-        assert curator.role == "organization curator"
+        assert curator.role == "organization operations curator"
         curator_tools = await repository.list_agent_internal_mcp_tools(curator.agent_id)
         exposed = {tool.exposed_name for tool in curator_tools}
         assert "control_plane__organizations.get" in exposed
         assert "control_plane__organizations.list" not in exposed
+
+        anchor = await repository.fetch_system_agent(
+            UUID("44444444-4444-4444-4444-444444444446")
+        )
+        assert anchor is not None
+        assert anchor.agent_key == "anchor"
+        assert anchor.role == "workspace topic alignment reviewer"
+        assert "reviews messages for alignment with the workspace topic" in anchor.capabilities
+        assert anchor.endpoint.engine_id == "local-ollama"
+        assert anchor.endpoint.provider == "ollama"
+        assert anchor.definition["runtime"]["engine_id"] == "local-ollama"
+        assert anchor.definition["runtime"]["provider"] == "ollama"
+        assert anchor.interaction_contract.response_contract.format == "json"
+        for workspace in await repository.list_workspaces():
+            participant = await repository.fetch_agent_participant(
+                workspace.workspace_id,
+                anchor.agent_id,
+            )
+            assert participant is not None
+            assert participant.metadata["task_routing"]["normal_message_fanout"] is False
     finally:
         await pool.close()
 

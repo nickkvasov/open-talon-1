@@ -50,6 +50,7 @@ from .contracts import (
     MemoryEntry,
     MemoryProviderDefinition,
     MemoryProviderRecord,
+    PublicationReview,
     McpPromptDefinition,
     McpResourceDefinition,
     McpServerDefinition,
@@ -2944,8 +2945,10 @@ class CollaborationRepository:
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             ON CONFLICT (message_id) DO UPDATE
-                SET content = EXCLUDED.content,
+                SET visibility = EXCLUDED.visibility,
+                    content = EXCLUDED.content,
                     status = EXCLUDED.status,
+                    sequence = EXCLUDED.sequence,
                     updated_at = EXCLUDED.updated_at,
                     metadata = EXCLUDED.metadata
             """,
@@ -2964,6 +2967,93 @@ class CollaborationRepository:
             message.updated_at,
             self._json_dumps(message.metadata),
         )
+
+    async def upsert_publication_review(
+        self, conn: asyncpg.Connection, review: PublicationReview
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO publication_reviews (
+                review_id, review_kind, workspace_id, thread_id, message_id,
+                reviewer_system_agent_id, candidate_actor_participant_id,
+                phase, level, status, decision, relatedness, confidence,
+                reason, issuer_explanation, policy_snapshot,
+                created_at, updated_at, completed_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+            )
+            ON CONFLICT (review_id) DO UPDATE
+                SET review_kind = EXCLUDED.review_kind,
+                    status = EXCLUDED.status,
+                    decision = EXCLUDED.decision,
+                    relatedness = EXCLUDED.relatedness,
+                    confidence = EXCLUDED.confidence,
+                    reason = EXCLUDED.reason,
+                    issuer_explanation = EXCLUDED.issuer_explanation,
+                    policy_snapshot = EXCLUDED.policy_snapshot,
+                    updated_at = EXCLUDED.updated_at,
+                    completed_at = EXCLUDED.completed_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            review.review_id,
+            review.review_kind,
+            review.workspace_id,
+            review.thread_id,
+            review.message_id,
+            review.reviewer_system_agent_id,
+            review.candidate_actor_participant_id,
+            review.phase,
+            review.level,
+            review.status,
+            review.decision,
+            review.relatedness,
+            review.confidence,
+            review.reason,
+            review.issuer_explanation,
+            self._json_dumps(review.policy_snapshot),
+            review.created_at,
+            review.updated_at,
+            review.completed_at,
+            self._json_dumps(review.metadata),
+        )
+
+    async def fetch_publication_review(
+        self, review_id: UUID
+    ) -> PublicationReview | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT review_id, review_kind, workspace_id, thread_id, message_id,
+                   reviewer_system_agent_id, candidate_actor_participant_id,
+                   phase, level, status, decision, relatedness, confidence,
+                   reason, issuer_explanation, policy_snapshot,
+                   created_at, updated_at, completed_at, metadata
+            FROM publication_reviews
+            WHERE review_id = $1
+            """,
+            review_id,
+        )
+        return self._publication_review_from_row(row) if row else None
+
+    async def fetch_latest_publication_review_for_message(
+        self, message_id: UUID
+    ) -> PublicationReview | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT review_id, review_kind, workspace_id, thread_id, message_id,
+                   reviewer_system_agent_id, candidate_actor_participant_id,
+                   phase, level, status, decision, relatedness, confidence,
+                   reason, issuer_explanation, policy_snapshot,
+                   created_at, updated_at, completed_at, metadata
+            FROM publication_reviews
+            WHERE message_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            message_id,
+        )
+        return self._publication_review_from_row(row) if row else None
 
     async def upsert_task(self, conn: asyncpg.Connection, task: Task) -> None:
         await conn.execute(
@@ -5510,6 +5600,7 @@ class CollaborationRepository:
                    content, status, correlation_id, causation_id, sequence, created_at, updated_at, metadata
             FROM timeline_messages
             WHERE thread_id = $1
+              AND status NOT IN ('pending_moderation', 'rejected')
             ORDER BY sequence ASC
             """,
             thread_id,
@@ -5530,6 +5621,7 @@ class CollaborationRepository:
             FROM timeline_messages
             WHERE workspace_id = $1
               AND ($2::uuid IS NULL OR thread_id = $2)
+              AND status NOT IN ('pending_moderation', 'rejected')
             """,
             workspace_id,
             thread_id,
@@ -5562,6 +5654,7 @@ class CollaborationRepository:
             LEFT JOIN system_agents AS sa ON sa.agent_id = p.system_agent_id
             WHERE m.workspace_id = $1
               AND ($2::uuid IS NULL OR m.thread_id = $2)
+              AND m.status NOT IN ('pending_moderation', 'rejected')
             ORDER BY m.created_at DESC, m.sequence DESC, m.message_id DESC
             LIMIT $3 OFFSET $4
             """,
@@ -5587,7 +5680,7 @@ class CollaborationRepository:
             return
         entries: list[WorkspaceCommunicationLogEntry] = []
         for message in messages:
-            if message.status in {"draft", "streaming"}:
+            if message.status in {"draft", "streaming", "pending_moderation", "rejected"}:
                 continue
             thread = await self.fetch_thread(message.thread_id)
             if thread is None:
@@ -6672,6 +6765,36 @@ class CollaborationRepository:
             sequence=row["sequence"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _publication_review_from_row(row: asyncpg.Record) -> PublicationReview:
+        return PublicationReview(
+            review_id=row["review_id"],
+            review_kind=row["review_kind"],
+            workspace_id=row["workspace_id"],
+            thread_id=row["thread_id"],
+            message_id=row["message_id"],
+            reviewer_system_agent_id=row["reviewer_system_agent_id"],
+            candidate_actor_participant_id=row["candidate_actor_participant_id"],
+            phase=row["phase"],
+            level=row["level"],
+            status=row["status"],
+            decision=row["decision"],
+            relatedness=row["relatedness"],
+            confidence=(
+                float(row["confidence"]) if row["confidence"] is not None else None
+            ),
+            reason=row["reason"],
+            issuer_explanation=row["issuer_explanation"],
+            policy_snapshot=CollaborationRepository._json_value(
+                row["policy_snapshot"],
+                default={},
+            ),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            completed_at=row["completed_at"],
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),
         )
 

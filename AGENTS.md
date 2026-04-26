@@ -66,6 +66,8 @@ Primary local flow:
 - Global and organization IAM role definitions live in `iam_role_definitions` with separate human and agent bindings.
 - Operational/system-wide agents advertise their purpose through normal agent fields such as `display_name`, `role`, and `capabilities`. Do not add extra operational classification columns unless there is a strict product or authorization need.
 - IAM role bindings, project access, workspace participant attachment, and MCP/tool allowlists are the authority for operational agents; role text is descriptive, not authorization.
+- Runtime execution must stay generic. Do not branch runtime behavior on `agent_key`, display name, role text, capability text, or metadata tags; behavioral specialization belongs in agent definitions, harnesses, interaction contracts, task payloads, IAM/project/workspace bindings, publication-review records, and tool/MCP allowlists.
+- Roles and capabilities are descriptive advertisement plus discovery/routing signals only. They are not an authorization layer and must not be the hidden source of agent-specific runtime behavior.
 - Use `IAM role` only for `iam_role_definitions` and the direct bindings built on top of them.
 - Use `organization membership role` for `organization_memberships.role`.
 - Use `collaboration role` for workspace-local labels in `participants.roles` that humans and agents assume for routing and discovery.
@@ -285,10 +287,11 @@ If a change touches operational agents, managed administration contexts, agent-p
 - inspect `system_agents`, `agent_identities`, IAM bindings, MCP server/binding code, repository workspace visibility, runtime task claiming, and gateway bootstrap together
 - keep agent purpose in `display_name`, `role`, and `capabilities`; avoid new classification fields unless they are strictly required
 - keep managed contexts idempotent and deterministic: `System Base / Administration / System Operations` plus every organization's `Administration / Organization Operations`
-- verify both global `Steward` and organization-scoped `Curator` paths when changing shared operator behavior
+- verify global `Steward`, organization-scoped `Curator`, and workspace-attached `Anchor` paths when changing shared operator or publication-review behavior
 - keep deterministic live harnesses under `tests/infrastructure/operational_agents_live` so new operational agents can add focused test modules instead of growing one monolithic file
 - run `tests/core-collab/test_agent_contracts.py` and relevant gateway IAM/MCP tests
 - run `OPEN_TALON_RUN_OPERATIONAL_AGENTS_LIVE=1 pytest -m integration tests/infrastructure/operational_agents_live -q -s` against the real local stack for end-to-end identity, MCP, runtime, and durable `tool_calls` coverage
+- run `OPEN_TALON_RUN_ANCHOR_LIVE=1 pytest -m integration tests/infrastructure/anchor_live_system -q -s` when publication review, Anchor, or workspace topic-moderation behavior changes
 - live tests may need local-service access to Keycloak, OpenBao, and gateway; if sandboxed execution fails with a local network `Operation not permitted`, rerun the same test command with the required escalation rather than weakening the test
 
 ## Code Change Rules

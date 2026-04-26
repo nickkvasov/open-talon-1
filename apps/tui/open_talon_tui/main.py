@@ -2437,6 +2437,12 @@ class CollaborationApp(App):
             self._render_message(payload)
             if message_id:
                 self._seen_message_ids.add(message_id)
+        elif event_type == "message.publication_flagged":
+            self._write_system("message flagged for topic drift", style="yellow")
+        elif event_type == "message.publication_suppressed":
+            self._write_system("message suppressed by publication review", style="yellow")
+        elif event_type in {"message.publication_review_pending", "message.moderation_pending"}:
+            self._write_system("message pending publication review", style="yellow")
         elif event_type == "task.created":
             self._write_system("agent task created", style="yellow")
         elif event_type == "presence.updated":
@@ -2687,6 +2693,9 @@ class CollaborationApp(App):
                 },
             )
             response.raise_for_status()
+            message = response.json()
+            if message.get("status") == "pending_moderation":
+                self._write_system("message pending publication review", style="yellow")
             logger.debug(
                 "TUI message posted thread_id=%s status=%s",
                 self.state.thread_id,

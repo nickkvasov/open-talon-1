@@ -1002,6 +1002,13 @@ def render_prompt(context: AgentExecutionContext) -> str:
         sections.extend(
             ["- guidance:"] + [f"  - {item}" for item in response_contract.guidance]
         )
+    if response_contract.json_schema:
+        sections.extend(
+            [
+                "- json schema:",
+                json.dumps(response_contract.json_schema, sort_keys=True),
+            ]
+        )
     if contract.completion_criteria:
         sections.extend(
             ["", "Completion criteria:", *[f"- {item}" for item in contract.completion_criteria]]
@@ -1016,6 +1023,29 @@ def _workspace_harness_lines(context: AgentExecutionContext) -> list[str]:
     lines = [f"- version: {harness.version}"]
     if harness.summary:
         lines.append(f"- summary: {harness.summary}")
+    moderation = harness.moderation_policy
+    lines.extend(
+        [
+            "- moderation policy:",
+            f"  - enabled: {'yes' if moderation.enabled else 'no'}",
+            f"  - level: {moderation.level}",
+            f"  - topic: {moderation.topic or 'workspace default'}",
+            "  - allowed adjacent topics: "
+            + (
+                ", ".join(moderation.allowed_adjacent_topics)
+                if moderation.allowed_adjacent_topics
+                else "none"
+            ),
+            "  - blocked topics: "
+            + (
+                ", ".join(moderation.blocked_topics)
+                if moderation.blocked_topics
+                else "none"
+            ),
+            "  - explain blocked messages: "
+            + ("yes" if moderation.explain_blocked_messages else "no"),
+        ]
+    )
 
     methodology = harness.methodology
     if methodology is not None:
@@ -1377,6 +1407,8 @@ def _format_thread_message(
     if context is None:
         return body.strip()
     contract = _interaction_contract(context)
+    if contract.response_contract.format == "json":
+        return body.strip()
     header = f"{context.system_agent.display_name} ({context.system_agent.role})"
     title = contract.response_contract.title
     template = contract.thread_reply_template

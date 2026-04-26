@@ -903,6 +903,9 @@ class ScrollbackTUI2:
             json={"title": title, "actor": self.actor_payload},
         )
         response.raise_for_status()
+        message = response.json()
+        if message.get("status") == "pending_moderation":
+            self._write_system("message pending publication review")
         body = response.json()
         self.state.thread_id = self._extract_thread_id(body)
         memberships = body.get("memberships", [])
@@ -1199,8 +1202,15 @@ class ScrollbackTUI2:
         self.state.last_sequence = max(self.state.last_sequence, sequence)
         save_state(self.profile, self.state)
 
-        if event.get("event_type") == "message.created":
+        event_type = event.get("event_type")
+        if event_type == "message.created":
             self._render_message(event.get("payload", {}))
+        elif event_type == "message.publication_flagged":
+            self._write_system("message flagged for topic drift")
+        elif event_type == "message.publication_suppressed":
+            self._write_system("message suppressed by publication review")
+        elif event_type in {"message.publication_review_pending", "message.moderation_pending"}:
+            self._write_system("message pending publication review")
 
     async def _close_ws(self) -> None:
         if self._ws_task is None:

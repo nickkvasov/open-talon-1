@@ -13,7 +13,14 @@ Visibility = Literal["public", "workspace", "agents_only", "private"]
 ParticipantType = Literal["user", "agent"]
 ParticipantStatus = Literal["active", "idle", "busy", "offline"]
 ThreadState = Literal["active", "paused", "resolved", "archived"]
-MessageStatus = Literal["draft", "streaming", "completed", "failed"]
+MessageStatus = Literal[
+    "draft",
+    "streaming",
+    "pending_moderation",
+    "completed",
+    "rejected",
+    "failed",
+]
 CommunicationLogKind = Literal["message", "interaction_request", "interaction_answer"]
 InteractionRequestStatus = Literal["open", "completed", "cancelled", "timed_out"]
 InteractionTargetStatus = Literal["pending", "acknowledged", "answered", "dismissed"]
@@ -101,6 +108,23 @@ AgentCompactionStrategy = Literal[
     "summary_plus_retrieval",
 ]
 AgentCompactionOverflowBehavior = Literal["auto_fallback"]
+WorkspaceModerationLevel = Literal["strict", "balanced", "open"]
+PublicationReviewPhase = Literal["pre_publish", "post_publish"]
+PublicationReviewStatus = Literal[
+    "pending",
+    "approved",
+    "suppressed",
+    "flagged",
+    "failed",
+]
+PublicationDecision = Literal["allow", "suppress", "flag"]
+ModerationRelatedness = Literal[
+    "direct",
+    "adjacent",
+    "unrelated",
+    "blocked_topic",
+    "unknown",
+]
 
 
 def utcnow() -> datetime:
@@ -208,12 +232,37 @@ class HarnessExecutionRule(BaseModel):
     scope: HarnessRuleScope = "planning"
 
 
+class WorkspaceModerationPolicy(BaseModel):
+    enabled: bool = True
+    level: WorkspaceModerationLevel = "balanced"
+    topic: str | None = None
+    allowed_adjacent_topics: list[str] = Field(default_factory=list)
+    blocked_topics: list[str] = Field(default_factory=list)
+    explain_blocked_messages: bool = True
+
+    @field_validator("topic")
+    @classmethod
+    def _normalize_topic(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("allowed_adjacent_topics", "blocked_topics")
+    @classmethod
+    def _normalize_topic_lists(cls, value: list[str]) -> list[str]:
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
 class WorkspaceHarness(BaseModel):
     version: int = 1
     summary: str | None = None
     methodology: WorkspaceMethodology | None = None
     methodics: list[WorkspaceMethodic] = Field(default_factory=list)
     execution_rules: list[HarnessExecutionRule] = Field(default_factory=list)
+    moderation_policy: WorkspaceModerationPolicy = Field(
+        default_factory=WorkspaceModerationPolicy
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -1175,6 +1224,29 @@ class InteractionRequestDetail(BaseModel):
     questions: list[InteractionQuestion] = Field(default_factory=list)
     targets: list[InteractionRequestTarget] = Field(default_factory=list)
     answers: list[InteractionAnswer] = Field(default_factory=list)
+
+
+class PublicationReview(BaseModel):
+    review_id: UUID
+    review_kind: str
+    workspace_id: UUID
+    thread_id: UUID
+    message_id: UUID
+    reviewer_system_agent_id: UUID
+    candidate_actor_participant_id: UUID
+    phase: PublicationReviewPhase
+    level: str
+    status: PublicationReviewStatus = "pending"
+    decision: PublicationDecision | None = None
+    relatedness: ModerationRelatedness = "unknown"
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    reason: str | None = None
+    issuer_explanation: str | None = None
+    policy_snapshot: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    completed_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class Task(BaseModel):

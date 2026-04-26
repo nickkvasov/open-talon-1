@@ -997,3 +997,30 @@ def test_render_message_marks_interaction_answers(tmp_path, monkeypatch):
     assert len(lines) == 1
     assert "[answer]" in lines[0]
     assert "Backend is blocked on review." in lines[0]
+
+
+def test_handle_event_marks_publication_review_events(tmp_path, monkeypatch):
+    monkeypatch.setattr(tui_main, "_PROFILES_DIR", tmp_path)
+
+    client = tui2.ScrollbackTUI2(
+        gateway="http://127.0.0.1:8000",
+        profile="alice",
+        oidc_issuer_url="http://127.0.0.1:8081/realms/open-talon",
+        oidc_client_id="open-talon-tui",
+        display_name="Alice",
+        workspace_name="Workspace",
+        thread_title="General",
+    )
+    client.state.participant_id = "participant-1"
+    lines: list[str] = []
+    monkeypatch.setattr(client, "_write_system", lambda line: lines.append(line))
+
+    client._handle_event({"event_type": "message.publication_review_pending", "sequence": 1})
+    client._handle_event({"event_type": "message.publication_flagged", "sequence": 2})
+    client._handle_event({"event_type": "message.publication_suppressed", "sequence": 3})
+
+    assert lines == [
+        "message pending publication review",
+        "message flagged for topic drift",
+        "message suppressed by publication review",
+    ]

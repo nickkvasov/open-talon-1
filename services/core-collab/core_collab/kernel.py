@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import logging
 from pathlib import Path
 import sys
@@ -39,13 +41,21 @@ from .contracts import (
     AgentIdentity,
     AgentEndpoint,
     AgentExecutionContext,
+    AgentHarness,
     AgentInternalMcpServer,
     AgentInternalToolBinding,
+    AgentInteractionContract,
+    AgentMemoryPolicy,
+    AgentPlanningPolicy,
+    AgentResponseContract,
     AgentRunResult,
     AgentRoleBinding,
+    AgentStopPolicy,
     CompletionRule,
     AgentToolCallDraft,
     AgentTaskRouting,
+    AgentToolUsePolicy,
+    AgentValidationPolicy,
     AuditChainVerificationResult,
     AuditEvent,
     AuditEventDraft,
@@ -107,6 +117,7 @@ from .contracts import (
     MemoryProviderRecord,
     MemorySearchHit,
     MemorySearchResponse,
+    PublicationReview,
     McpPromptDefinition,
     McpResourceDefinition,
     McpServerDefinition,
@@ -173,6 +184,8 @@ from .contracts import (
     WorkspaceAsset,
     WorkspaceAssetVersion,
     WorkspaceDetail,
+    WorkspaceHarness,
+    WorkspaceModerationPolicy,
     WorkspaceMcpPrompt,
     WorkspaceMcpResource,
     WorkspaceMcpServer,
@@ -216,9 +229,19 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_BASE_ORGANIZATION_ID = UUID("22222222-2222-2222-2222-222222222222")
 STEWARD_AGENT_ID = UUID("44444444-4444-4444-4444-444444444445")
+ANCHOR_AGENT_ID = UUID("44444444-4444-4444-4444-444444444446")
 CONTROL_PLANE_MCP_SERVER_ID = UUID("66666666-6666-6666-6666-666666666666")
 PLATFORM_STEWARD_ROLE_ID = UUID("77777777-7777-7777-7777-777777777771")
 SYSTEM_ACTOR_ID = UUID("00000000-0000-0000-0000-000000000000")
+ANCHOR_TASK_KIND = "workspace_topic_moderation"
+ANCHOR_ROLE = "workspace topic alignment reviewer"
+ANCHOR_CAPABILITIES = [
+    "reviews messages for alignment with the workspace topic",
+    "applies strict balanced or open topic-freedom policy",
+    "blocks off-topic messages before publication in strict workspaces",
+    "flags conversation drift after publication in balanced and open workspaces",
+    "privately explains blocked messages to the issuer when enabled",
+]
 
 _CURATOR_PERMISSIONS = [
     "organization.read",
@@ -1177,7 +1200,7 @@ class CollaborationKernel:
             created_by=actor_user_id or payload.actor.participant_id,
             creator_user_id=creator_subject.user_id,
             creator_system_agent_id=creator_subject.system_agent_id,
-            harness=payload.harness,
+            harness=payload.harness or WorkspaceHarness(),
             created_at=now,
             updated_at=now,
             metadata=self._workspace_metadata_for_create(
@@ -1210,6 +1233,11 @@ class CollaborationKernel:
                         )
                 await self._repository.upsert_workspace(conn, workspace)
                 await self._repository.upsert_participant(conn, participant)
+                anchor_participant = await self._ensure_anchor_attached_for_workspace(
+                    conn,
+                    workspace_id,
+                    now=now,
+                )
 
                 events = [
                     await self._build_workspace_event(
@@ -1242,13 +1270,26 @@ class CollaborationKernel:
                         visibility="workspace",
                         timestamp=now,
                     ),
+                    await self._build_workspace_event(
+                        conn,
+                        workspace_id,
+                        "participant.registered",
+                        actor=actor,
+                        target=TargetRef(
+                            type="participant",
+                            id=anchor_participant.participant_id,
+                        ),
+                        payload=anchor_participant.model_dump(mode="json"),
+                        visibility="workspace",
+                        timestamp=now,
+                    ),
                 ]
                 for event in events:
                     await self._repository.record_event(conn, event)
 
         detail = WorkspaceDetail(
             workspace=workspace,
-            participants=[participant],
+            participants=[participant, anchor_participant],
             role_definitions=self._role_definitions_from_workspace(workspace),
             tools=[],
         )
@@ -3560,12 +3601,28 @@ class CollaborationKernel:
         memberships = await self._repository.list_memberships(thread_id)
         return ThreadDetail(thread=thread, memberships=memberships)
 
-    async def get_thread_timeline(self, thread_id: UUID) -> TimelinePage:
+    async def get_thread_timeline(
+        self,
+        thread_id: UUID,
+        *,
+        viewer: ParticipantInput | None = None,
+    ) -> TimelinePage:
         logger.debug("Kernel get_thread_timeline thread_id=%s", thread_id)
         thread = await self._repository.fetch_thread(thread_id)
         if thread is None:
             raise KeyError(f"Thread {thread_id} not found")
         messages = await self._repository.list_timeline_messages(thread_id)
+        if viewer is not None:
+            participant = await self._repository.fetch_participant(
+                thread.workspace_id,
+                viewer.participant_id,
+            )
+            if participant is not None:
+                messages = self._filter_visible_messages(
+                    messages,
+                    viewer=participant,
+                    sequence_ceiling=None,
+                )
         return TimelinePage(thread_id=thread_id, messages=messages)
 
     async def list_workspace_communication_log(
@@ -4305,6 +4362,17 @@ class CollaborationKernel:
             system_agent_id,
             result,
         )
+        if completion.task is not None and (
+            completion.task.metadata.get("publication_review_id")
+            or completion.task.metadata.get("moderation_review_id")
+        ):
+            review_events, review_messages = await self._apply_publication_review_result(
+                completion,
+                result,
+            )
+            completion.events.extend(review_events)
+            await self._persist_workspace_communication_messages(review_messages)
+            return completion
         rendered_messages: list[TimelineMessage] = []
         if completion.run is not None and completion.task is not None and (
             result.interaction_requests
@@ -4444,6 +4512,9 @@ class CollaborationKernel:
         thread = await self._repository.fetch_thread(thread_id)
         if thread is None:
             raise KeyError(f"Thread {thread_id} not found")
+        workspace = await self._repository.fetch_workspace(thread.workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {thread.workspace_id} not found")
         now = self._now()
         actor = self._actor_from_input(payload.actor)
         participant = await self._participant_profile_for_actor(
@@ -4464,14 +4535,38 @@ class CollaborationKernel:
         ]
         if task_instructions:
             message_metadata["task_instructions"] = task_instructions
-        tool_generation_request = await self._build_tool_generation_request_for_message(
-            thread=thread,
-            actor_input=payload.actor,
-            participant=participant,
-            content=payload.content,
-            metadata=message_metadata,
-            timestamp=now,
+        policy = self._workspace_moderation_policy(workspace)
+        moderation_enabled = bool(policy.enabled) and not bool(
+            message_metadata.get("moderation_bypass")
         )
+        strict_pre_publish = moderation_enabled and policy.level == "strict"
+        if strict_pre_publish:
+            message_metadata.update(
+                {
+                    "moderation_status": "pending",
+                    "moderation_level": policy.level,
+                    "moderation_original_create_task": payload.create_task,
+                    "publication_review_status": "pending",
+                    "publication_original_create_task": payload.create_task,
+                }
+            )
+            if payload.requests:
+                message_metadata["moderation_original_requests"] = [
+                    request.model_dump(mode="json") for request in payload.requests
+                ]
+                message_metadata["publication_original_requests"] = list(
+                    message_metadata["moderation_original_requests"]
+                )
+        tool_generation_request = None
+        if not strict_pre_publish:
+            tool_generation_request = await self._build_tool_generation_request_for_message(
+                thread=thread,
+                actor_input=payload.actor,
+                participant=participant,
+                content=payload.content,
+                metadata=message_metadata,
+                timestamp=now,
+            )
         if tool_generation_request is not None:
             message_metadata["tool_generation_request_id"] = str(
                 tool_generation_request.request_id
@@ -4484,13 +4579,14 @@ class CollaborationKernel:
             actor=actor,
             visibility=payload.visibility,
             content=payload.content,
-            status="completed",
+            status="pending_moderation" if strict_pre_publish else "completed",
             correlation_id=correlation_id,
             sequence=0,
             created_at=now,
             updated_at=now,
             metadata=message_metadata,
         )
+        interaction_result = None
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 await self._ensure_participant_identity(conn, participant)
@@ -4525,106 +4621,175 @@ class CollaborationKernel:
                     )
                 message.sequence = await self._repository.next_thread_sequence(conn, thread_id)
                 await self._repository.upsert_message(conn, message)
-                events = [
-                    EventEnvelope(
-                        event_type="message.created",
-                        workspace_id=thread.workspace_id,
-                        thread_id=thread_id,
-                        actor=actor,
-                        target=TargetRef(type="message", id=message.message_id),
-                        visibility=payload.visibility,
-                        correlation_id=message.correlation_id,
-                        sequence=message.sequence,
-                        timestamp=now,
-                        payload=message.model_dump(mode="json"),
-                    )
-                ]
-                if tool_generation_request is not None:
-                    tool_generation_request = tool_generation_request.model_copy(
-                        update={"requester_message_id": message.message_id}
-                    )
-                    await self._repository.upsert_tool_generation_request(
-                        conn,
-                        tool_generation_request,
-                    )
+                events: list[EventEnvelope] = []
+                if strict_pre_publish:
                     events.append(
                         await self._build_thread_event(
                             conn,
                             thread.workspace_id,
                             thread_id,
-                            "tool_generation_request.created",
+                            "message.publication_review_pending",
                             actor=actor,
-                            target=TargetRef(
-                                type="tool_generation_request",
-                                id=tool_generation_request.request_id,
-                            ),
-                            visibility=payload.visibility,
-                            payload=tool_generation_request.model_dump(mode="json"),
+                            target=TargetRef(type="message", id=message.message_id),
+                            visibility="private",
+                            payload=message.model_dump(mode="json"),
                             timestamp=now,
+                            correlation_id=message.correlation_id,
+                            causation_id=message.message_id,
                         )
                     )
-                if payload.create_task:
-                    for task in await self._build_message_tasks(
-                        thread=thread,
-                        message=message,
-                        actor_input=payload.actor,
-                        visibility=payload.visibility,
-                        timestamp=now,
-                    ):
-                        await self._repository.upsert_task(conn, task)
-                        events.append(
-                            EventEnvelope(
-                                event_type="task.created",
-                                workspace_id=thread.workspace_id,
-                                thread_id=thread_id,
-                                actor=actor,
-                                target=TargetRef(type="task", id=task.task_id),
-                                visibility="agents_only",
-                                correlation_id=correlation_id,
-                                causation_id=message.message_id,
-                                sequence=await self._repository.next_thread_sequence(
-                                    conn,
-                                    thread_id,
-                                ),
-                                timestamp=now,
-                                payload=task.model_dump(mode="json"),
-                            )
+                    if await self._repository.fetch_agent_participant(
+                        thread.workspace_id,
+                        ANCHOR_AGENT_ID,
+                    ) is None:
+                        await self._ensure_anchor_attached_for_workspace(
+                            conn,
+                            thread.workspace_id,
+                            now=now,
                         )
-
-                if payload.requests:
-                    interaction_result = await self._create_interaction_requests_in_transaction(
+                    await self._create_publication_review_and_task_in_transaction(
                         conn,
                         thread=thread,
-                        actor_input=payload.actor,
-                        requests=payload.requests,
+                        message=message,
+                        workspace=workspace,
+                        candidate_participant=participant,
+                        policy=policy,
+                        phase="pre_publish",
+                        review_kind="workspace_topic_alignment",
+                        reviewer_system_agent_id=ANCHOR_AGENT_ID,
+                        task_kind=ANCHOR_TASK_KIND,
                         timestamp=now,
-                        correlation_id=correlation_id,
-                        requester_message=message,
+                        events=events,
                     )
-                    for rendered_message in interaction_result.messages:
-                        await self._repository.upsert_message(conn, rendered_message)
+                else:
+                    events.append(
+                        EventEnvelope(
+                            event_type="message.created",
+                            workspace_id=thread.workspace_id,
+                            thread_id=thread_id,
+                            actor=actor,
+                            target=TargetRef(type="message", id=message.message_id),
+                            visibility=payload.visibility,
+                            correlation_id=message.correlation_id,
+                            sequence=message.sequence,
+                            timestamp=now,
+                            payload=message.model_dump(mode="json"),
+                        )
+                    )
+                    if tool_generation_request is not None:
+                        tool_generation_request = tool_generation_request.model_copy(
+                            update={"requester_message_id": message.message_id}
+                        )
+                        await self._repository.upsert_tool_generation_request(
+                            conn,
+                            tool_generation_request,
+                        )
                         events.append(
-                            EventEnvelope(
-                                event_type="message.created",
-                                workspace_id=rendered_message.workspace_id,
-                                thread_id=rendered_message.thread_id,
-                                actor=rendered_message.actor,
-                                target=TargetRef(type="message", id=rendered_message.message_id),
-                                visibility=rendered_message.visibility,
-                                correlation_id=rendered_message.correlation_id,
-                                causation_id=rendered_message.causation_id,
-                                sequence=rendered_message.sequence,
+                            await self._build_thread_event(
+                                conn,
+                                thread.workspace_id,
+                                thread_id,
+                                "tool_generation_request.created",
+                                actor=actor,
+                                target=TargetRef(
+                                    type="tool_generation_request",
+                                    id=tool_generation_request.request_id,
+                                ),
+                                visibility=payload.visibility,
+                                payload=tool_generation_request.model_dump(mode="json"),
                                 timestamp=now,
-                                payload=rendered_message.model_dump(mode="json"),
                             )
                         )
-                    events.extend(interaction_result.events)
+                    if payload.create_task:
+                        for task in await self._build_message_tasks(
+                            thread=thread,
+                            message=message,
+                            actor_input=payload.actor,
+                            visibility=payload.visibility,
+                            timestamp=now,
+                        ):
+                            await self._repository.upsert_task(conn, task)
+                            events.append(
+                                EventEnvelope(
+                                    event_type="task.created",
+                                    workspace_id=thread.workspace_id,
+                                    thread_id=thread_id,
+                                    actor=actor,
+                                    target=TargetRef(type="task", id=task.task_id),
+                                    visibility="agents_only",
+                                    correlation_id=correlation_id,
+                                    causation_id=message.message_id,
+                                    sequence=await self._repository.next_thread_sequence(
+                                        conn,
+                                        thread_id,
+                                    ),
+                                    timestamp=now,
+                                    payload=task.model_dump(mode="json"),
+                                )
+                            )
+
+                    if payload.requests:
+                        interaction_result = await self._create_interaction_requests_in_transaction(
+                            conn,
+                            thread=thread,
+                            actor_input=payload.actor,
+                            requests=payload.requests,
+                            timestamp=now,
+                            correlation_id=correlation_id,
+                            requester_message=message,
+                        )
+                        for rendered_message in interaction_result.messages:
+                            await self._repository.upsert_message(conn, rendered_message)
+                            events.append(
+                                EventEnvelope(
+                                    event_type="message.created",
+                                    workspace_id=rendered_message.workspace_id,
+                                    thread_id=rendered_message.thread_id,
+                                    actor=rendered_message.actor,
+                                    target=TargetRef(
+                                        type="message",
+                                        id=rendered_message.message_id,
+                                    ),
+                                    visibility=rendered_message.visibility,
+                                    correlation_id=rendered_message.correlation_id,
+                                    causation_id=rendered_message.causation_id,
+                                    sequence=rendered_message.sequence,
+                                    timestamp=now,
+                                    payload=rendered_message.model_dump(mode="json"),
+                                )
+                            )
+                        events.extend(interaction_result.events)
+
+                    if moderation_enabled:
+                        if await self._repository.fetch_agent_participant(
+                            thread.workspace_id,
+                            ANCHOR_AGENT_ID,
+                        ) is None:
+                            await self._ensure_anchor_attached_for_workspace(
+                                conn,
+                                thread.workspace_id,
+                                now=now,
+                            )
+                        await self._create_publication_review_and_task_in_transaction(
+                            conn,
+                            thread=thread,
+                            message=message,
+                            workspace=workspace,
+                        candidate_participant=participant,
+                        policy=policy,
+                        phase="post_publish",
+                        review_kind="workspace_topic_alignment",
+                        reviewer_system_agent_id=ANCHOR_AGENT_ID,
+                        task_kind=ANCHOR_TASK_KIND,
+                        timestamp=now,
+                        events=events,
+                    )
 
                 for event in events:
                     await self._repository.record_event(conn, event)
 
-        persisted_messages = [message]
-        if payload.requests:
+        persisted_messages = [] if strict_pre_publish else [message]
+        if interaction_result is not None:
             persisted_messages.extend(interaction_result.messages)
         await self._persist_workspace_communication_messages(persisted_messages)
 
@@ -6150,6 +6315,12 @@ class CollaborationKernel:
                 for participant in active_agents
                 if participant.participant_id == target_participant_id
             ]
+        if target_system_agent_id is None and target_participant_id is None:
+            active_agents = [
+                participant
+                for participant in active_agents
+                if self._participant_accepts_normal_message_fanout(participant)
+            ]
         tasks: list[Task] = []
         if not active_agents:
             tasks.append(
@@ -7652,7 +7823,14 @@ class CollaborationKernel:
             ):
                 visible.append(message)
                 continue
-            if message.visibility == "private" and message.actor.id == viewer.participant_id:
+            recipient_participant_id = CollaborationKernel._metadata_uuid(
+                message.metadata,
+                "recipient_participant_id",
+            )
+            if message.visibility == "private" and (
+                message.actor.id == viewer.participant_id
+                or recipient_participant_id == viewer.participant_id
+            ):
                 visible.append(message)
         return visible
 
@@ -7679,6 +7857,712 @@ class CollaborationKernel:
         if message_visibility in {"public", "workspace"}:
             return message_visibility
         return "workspace"
+
+    @staticmethod
+    def _workspace_moderation_policy(workspace: Workspace | None) -> WorkspaceModerationPolicy:
+        if workspace is None or workspace.harness is None:
+            return WorkspaceModerationPolicy()
+        return workspace.harness.moderation_policy
+
+    @staticmethod
+    def _workspace_moderation_topic(
+        workspace: Workspace,
+        policy: WorkspaceModerationPolicy,
+    ) -> str:
+        if policy.topic:
+            return policy.topic
+        parts = [workspace.name]
+        if workspace.description:
+            parts.append(workspace.description)
+        if workspace.harness is not None:
+            if workspace.harness.summary:
+                parts.append(workspace.harness.summary)
+            methodology = workspace.harness.methodology
+            if methodology is not None:
+                parts.extend(
+                    item
+                    for item in (
+                        methodology.ontology,
+                        methodology.axiology,
+                        methodology.epistemology,
+                    )
+                    if item
+                )
+                parts.extend(methodology.principles)
+        return " | ".join(item.strip() for item in parts if item and item.strip())
+
+    @classmethod
+    def _moderation_policy_snapshot(
+        cls,
+        workspace: Workspace,
+        policy: WorkspaceModerationPolicy,
+    ) -> dict[str, object]:
+        return {
+            **policy.model_dump(mode="json"),
+            "resolved_topic": cls._workspace_moderation_topic(workspace, policy),
+            "workspace_name": workspace.name,
+            "workspace_description": workspace.description,
+        }
+
+    @staticmethod
+    def _participant_accepts_normal_message_fanout(
+        participant: ParticipantProfile,
+    ) -> bool:
+        routing = participant.metadata.get("task_routing")
+        if isinstance(routing, dict) and routing.get("normal_message_fanout") is False:
+            return False
+        return True
+
+    @staticmethod
+    def _participant_input_from_profile(participant: ParticipantProfile) -> ParticipantInput:
+        return ParticipantInput(
+            participant_id=participant.participant_id,
+            participant_type=participant.participant_type,
+            user_id=participant.user_id,
+            display_name=participant.display_name,
+            description=participant.description,
+            roles=list(participant.roles),
+            capabilities=list(participant.capabilities),
+            visibility_scope=participant.visibility_scope,
+        )
+
+    def _build_publication_review_task(
+        self,
+        *,
+        thread: Thread,
+        workspace: Workspace,
+        message: TimelineMessage,
+        candidate_participant: ParticipantProfile,
+        reviewer_participant: ParticipantProfile,
+        review: PublicationReview,
+        policy: WorkspaceModerationPolicy,
+        task_kind: str,
+        timestamp: datetime,
+    ) -> Task:
+        snapshot = review.policy_snapshot
+        return Task(
+            task_id=uuid4(),
+            workspace_id=thread.workspace_id,
+            thread_id=thread.thread_id,
+            title=f"Review topic fit for message {message.message_id}",
+            description="Review candidate workspace communication for topic alignment.",
+            requested_by=candidate_participant.participant_id,
+            visibility="agents_only",
+            correlation_id=message.correlation_id,
+            causation_id=message.message_id,
+            created_at=timestamp,
+            updated_at=timestamp,
+            metadata={
+                "target_system_agent_id": str(review.reviewer_system_agent_id),
+                "target_participant_id": str(reviewer_participant.participant_id),
+                "trigger_message_id": str(message.message_id),
+                "sequence_ceiling": message.sequence,
+                "response_visibility": "agents_only",
+                "routing_reason": task_kind,
+                "task_kind": task_kind,
+                "publication_review_id": str(review.review_id),
+                "publication_review_reason": "workspace_topic_alignment",
+                "thread_reply_policy": {
+                    "mode": "suppress",
+                    "reason": "publication_review",
+                    "review_id": str(review.review_id),
+                },
+                "review_kind": review.review_kind,
+                "publication_candidate_message_id": str(message.message_id),
+                "publication_review_phase": review.phase,
+                "publication_review_level": policy.level,
+                "moderation_review_id": str(review.review_id),
+                "moderation_candidate_message_id": str(message.message_id),
+                "moderation_phase": review.phase,
+                "moderation_level": policy.level,
+                "task_instructions": [
+                    f"Moderation level: {policy.level}.",
+                    f"Workspace topic: {snapshot.get('resolved_topic') or workspace.name}.",
+                    "Allowed adjacent topics: "
+                    + (
+                        ", ".join(policy.allowed_adjacent_topics)
+                        if policy.allowed_adjacent_topics
+                        else "none"
+                    )
+                    + ".",
+                    "Blocked topics: "
+                    + (
+                        ", ".join(policy.blocked_topics)
+                        if policy.blocked_topics
+                        else "none"
+                    )
+                    + ".",
+                    "Candidate message author: "
+                    f"{candidate_participant.display_name} ({candidate_participant.participant_type}).",
+                    f"Candidate message visibility: {message.visibility}.",
+                    "Candidate message content:",
+                    message.content,
+                ],
+                "moderation_policy": snapshot,
+            },
+        )
+
+    async def _create_publication_review_and_task_in_transaction(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        thread: Thread,
+        workspace: Workspace,
+        message: TimelineMessage,
+        candidate_participant: ParticipantProfile,
+        policy: WorkspaceModerationPolicy,
+        phase: str,
+        review_kind: str,
+        reviewer_system_agent_id: UUID,
+        task_kind: str,
+        timestamp: datetime,
+        events: list[EventEnvelope],
+    ) -> PublicationReview | None:
+        reviewer_participant = await self._repository.fetch_agent_participant(
+            thread.workspace_id,
+            reviewer_system_agent_id,
+        )
+        if reviewer_participant is None or reviewer_participant.status not in {
+            "active",
+            "idle",
+            "busy",
+        }:
+            return None
+        review = PublicationReview(
+            review_id=uuid4(),
+            review_kind=review_kind,
+            workspace_id=thread.workspace_id,
+            thread_id=thread.thread_id,
+            message_id=message.message_id,
+            reviewer_system_agent_id=reviewer_system_agent_id,
+            candidate_actor_participant_id=candidate_participant.participant_id,
+            phase=phase,
+            level=policy.level,
+            status="pending",
+            policy_snapshot=self._moderation_policy_snapshot(workspace, policy),
+            created_at=timestamp,
+            updated_at=timestamp,
+            metadata={
+                "task_kind": task_kind,
+                "review_kind": review_kind,
+            },
+        )
+        task = self._build_publication_review_task(
+            thread=thread,
+            workspace=workspace,
+            message=message,
+            candidate_participant=candidate_participant,
+            reviewer_participant=reviewer_participant,
+            review=review,
+            policy=policy,
+            task_kind=task_kind,
+            timestamp=timestamp,
+        )
+        await self._repository.upsert_publication_review(conn, review)
+        await self._repository.upsert_task(conn, task)
+        events.append(
+            await self._build_thread_event(
+                conn,
+                thread.workspace_id,
+                thread.thread_id,
+                "task.created",
+                actor=message.actor,
+                target=TargetRef(type="task", id=task.task_id),
+                visibility="agents_only",
+                payload=task.model_dump(mode="json"),
+                timestamp=timestamp,
+                correlation_id=task.correlation_id,
+                causation_id=message.message_id,
+            )
+        )
+        return review
+
+    @staticmethod
+    def _extract_json_object(raw: str) -> dict[str, object] | None:
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+        try:
+            payload = json.loads(cleaned)
+        except json.JSONDecodeError:
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start < 0 or end <= start:
+                return None
+            try:
+                payload = json.loads(cleaned[start : end + 1])
+            except json.JSONDecodeError:
+                return None
+        return payload if isinstance(payload, dict) else None
+
+    @classmethod
+    def _publication_review_decision_from_result(
+        cls,
+        result: AgentRunResult,
+    ) -> dict[str, object] | None:
+        if not result.message:
+            return None
+        payload = cls._extract_json_object(result.message)
+        if payload is None:
+            return None
+        decision = payload.get("decision")
+        relatedness = payload.get("relatedness", "unknown")
+        confidence = payload.get("confidence")
+        reason = payload.get("reason")
+        issuer_explanation = payload.get("issuer_explanation")
+        if decision not in {"allow", "block", "suppress", "flag"}:
+            return None
+        if decision == "block":
+            decision = "suppress"
+        if relatedness not in {
+            "direct",
+            "adjacent",
+            "unrelated",
+            "blocked_topic",
+            "unknown",
+        }:
+            relatedness = "unknown"
+        if isinstance(confidence, bool) or not isinstance(confidence, int | float):
+            confidence = None
+        elif confidence < 0 or confidence > 1:
+            confidence = None
+        return {
+            "decision": decision,
+            "relatedness": relatedness,
+            "confidence": float(confidence) if confidence is not None else None,
+            "reason": reason.strip() if isinstance(reason, str) and reason.strip() else None,
+            "issuer_explanation": (
+                issuer_explanation.strip()
+                if isinstance(issuer_explanation, str)
+                and issuer_explanation.strip()
+                else None
+            ),
+        }
+
+    async def _apply_publication_review_result(
+        self,
+        completion: RunCommandResult,
+        result: AgentRunResult,
+    ) -> tuple[list[EventEnvelope], list[TimelineMessage]]:
+        # Publication reviews are intentionally generic: the reviewer may be Anchor
+        # today, but the state transition only depends on the review record,
+        # task metadata, and the response contract result.
+        task = completion.task
+        run = completion.run
+        if task is None or run is None:
+            return [], []
+        review_id = self._metadata_uuid(task.metadata, "publication_review_id")
+        if review_id is None:
+            review_id = self._metadata_uuid(task.metadata, "moderation_review_id")
+        if review_id is None:
+            return [], []
+        review = await self._repository.fetch_publication_review(review_id)
+        if review is None:
+            return [], []
+        message = await self._repository.fetch_message(review.message_id)
+        if message is None:
+            return [], []
+        thread = await self._repository.fetch_thread(review.thread_id)
+        if thread is None:
+            return [], []
+        workspace = await self._repository.fetch_workspace(review.workspace_id)
+        if workspace is None:
+            return [], []
+        candidate_participant = await self._repository.fetch_participant(
+            review.workspace_id,
+            review.candidate_actor_participant_id,
+        )
+        if candidate_participant is None:
+            return [], []
+
+        now = self._now()
+        parsed = self._publication_review_decision_from_result(result)
+        if parsed is None:
+            failed_review = review.model_copy(
+                update={
+                    "status": "failed",
+                    "reason": "Review response did not match the moderation response contract.",
+                    "updated_at": now,
+                    "completed_at": now,
+                    "metadata": {
+                        **review.metadata,
+                        "stop_reason": result.stop_reason,
+                        "contract_error": True,
+                    },
+                }
+            )
+            async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+                async with conn.transaction():
+                    await self._repository.upsert_publication_review(conn, failed_review)
+                    event = await self._build_thread_event(
+                        conn,
+                        review.workspace_id,
+                        review.thread_id,
+                        "message.publication_review_failed",
+                        actor=ActorRef(type="agent", id=run.participant_id),
+                        target=TargetRef(type="message", id=review.message_id),
+                        visibility="agents_only",
+                        payload=failed_review.model_dump(mode="json"),
+                        timestamp=now,
+                        correlation_id=task.correlation_id,
+                        causation_id=task.task_id,
+                    )
+                    await self._repository.record_event(conn, event)
+            return [event], []
+
+        decision = str(parsed["decision"])
+        if review.phase == "post_publish" and decision == "suppress":
+            decision = "flag"
+        if review.phase == "pre_publish" and decision == "flag":
+            decision = "suppress"
+
+        review_status = {
+            "allow": "approved",
+            "suppress": "suppressed",
+            "flag": "flagged",
+        }[decision]
+        completed_review = review.model_copy(
+            update={
+                "status": review_status,
+                "decision": decision,
+                "relatedness": parsed["relatedness"],
+                "confidence": parsed["confidence"],
+                "reason": parsed["reason"],
+                "issuer_explanation": parsed["issuer_explanation"],
+                "updated_at": now,
+                "completed_at": now,
+                "metadata": {
+                    **review.metadata,
+                    "completed_run_id": str(run.run_id),
+                    "stop_reason": result.stop_reason,
+                },
+            }
+        )
+        updated_message_metadata = {
+            **message.metadata,
+            "moderation_status": review_status,
+            "publication_review_status": review_status,
+            "moderation_review_id": str(review.review_id),
+            "publication_review_id": str(review.review_id),
+            "publication_review_kind": review.review_kind,
+            "moderation_decision": decision,
+            "publication_review_decision": decision,
+            "moderation_relatedness": parsed["relatedness"],
+            "moderation_confidence": parsed["confidence"],
+            "moderation_reason": parsed["reason"],
+            "publication_review_reason": parsed["reason"],
+        }
+
+        events: list[EventEnvelope] = []
+        messages_to_persist: list[TimelineMessage] = []
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_publication_review(conn, completed_review)
+                if review.phase == "pre_publish" and decision == "allow":
+                    # Strict pre-publication approval is the first moment this
+                    # message becomes part of the public timeline and JSONL log.
+                    approved_message = message.model_copy(
+                        update={
+                            "status": "completed",
+                            "sequence": await self._repository.next_thread_sequence(
+                                conn,
+                                message.thread_id,
+                            ),
+                            "updated_at": now,
+                            "metadata": updated_message_metadata,
+                        }
+                    )
+                    tool_generation_request = (
+                        await self._build_tool_generation_request_for_message(
+                            thread=thread,
+                            actor_input=self._participant_input_from_profile(
+                                candidate_participant
+                            ),
+                            participant=candidate_participant,
+                            content=approved_message.content,
+                            metadata=dict(approved_message.metadata),
+                            timestamp=now,
+                        )
+                    )
+                    if tool_generation_request is not None:
+                        tool_generation_request = tool_generation_request.model_copy(
+                            update={"requester_message_id": approved_message.message_id}
+                        )
+                        approved_message = approved_message.model_copy(
+                            update={
+                                "metadata": {
+                                    **approved_message.metadata,
+                                    "tool_generation_request_id": str(
+                                        tool_generation_request.request_id
+                                    ),
+                                    "tool_generation_request_status": (
+                                        tool_generation_request.status
+                                    ),
+                                }
+                            }
+                        )
+                        await self._repository.upsert_tool_generation_request(
+                            conn,
+                            tool_generation_request,
+                        )
+                    await self._repository.upsert_message(conn, approved_message)
+                    events.append(
+                        EventEnvelope(
+                            event_type="message.created",
+                            workspace_id=approved_message.workspace_id,
+                            thread_id=approved_message.thread_id,
+                            actor=approved_message.actor,
+                            target=TargetRef(
+                                type="message",
+                                id=approved_message.message_id,
+                            ),
+                            visibility=approved_message.visibility,
+                            correlation_id=approved_message.correlation_id,
+                            causation_id=review.review_id,
+                            sequence=approved_message.sequence,
+                            timestamp=now,
+                            payload=approved_message.model_dump(mode="json"),
+                        )
+                    )
+                    if tool_generation_request is not None:
+                        events.append(
+                            await self._build_thread_event(
+                                conn,
+                                approved_message.workspace_id,
+                                approved_message.thread_id,
+                                "tool_generation_request.created",
+                                actor=approved_message.actor,
+                                target=TargetRef(
+                                    type="tool_generation_request",
+                                    id=tool_generation_request.request_id,
+                                ),
+                                visibility=approved_message.visibility,
+                                payload=tool_generation_request.model_dump(mode="json"),
+                                timestamp=now,
+                                correlation_id=approved_message.correlation_id,
+                                causation_id=approved_message.message_id,
+                            )
+                        )
+                    if approved_message.metadata.get(
+                        "publication_original_create_task",
+                        approved_message.metadata.get("moderation_original_create_task"),
+                    ):
+                        actor_input = self._participant_input_from_profile(
+                            candidate_participant
+                        )
+                        for followup_task in await self._build_message_tasks(
+                            thread=thread,
+                            message=approved_message,
+                            actor_input=actor_input,
+                            visibility=approved_message.visibility,
+                            timestamp=now,
+                        ):
+                            await self._repository.upsert_task(conn, followup_task)
+                            events.append(
+                                EventEnvelope(
+                                    event_type="task.created",
+                                    workspace_id=approved_message.workspace_id,
+                                    thread_id=approved_message.thread_id,
+                                    actor=approved_message.actor,
+                                    target=TargetRef(
+                                        type="task",
+                                        id=followup_task.task_id,
+                                    ),
+                                    visibility="agents_only",
+                                    correlation_id=approved_message.correlation_id,
+                                    causation_id=approved_message.message_id,
+                                    sequence=await self._repository.next_thread_sequence(
+                                        conn,
+                                        approved_message.thread_id,
+                                    ),
+                                    timestamp=now,
+                                    payload=followup_task.model_dump(mode="json"),
+                                )
+                            )
+                    original_requests = approved_message.metadata.get(
+                        "publication_original_requests",
+                        approved_message.metadata.get("moderation_original_requests"),
+                    )
+                    if isinstance(original_requests, list):
+                        request_payloads = [
+                            CreateInteractionRequest.model_validate(item)
+                            for item in original_requests
+                            if isinstance(item, dict)
+                        ]
+                        if request_payloads:
+                            interaction_result = await self._create_interaction_requests_in_transaction(
+                                conn,
+                                thread=thread,
+                                actor_input=self._participant_input_from_profile(
+                                    candidate_participant
+                                ),
+                                requests=request_payloads,
+                                timestamp=now,
+                                correlation_id=approved_message.correlation_id,
+                                requester_message=approved_message,
+                            )
+                            for rendered_message in interaction_result.messages:
+                                await self._repository.upsert_message(conn, rendered_message)
+                                events.append(
+                                    EventEnvelope(
+                                        event_type="message.created",
+                                        workspace_id=rendered_message.workspace_id,
+                                        thread_id=rendered_message.thread_id,
+                                        actor=rendered_message.actor,
+                                        target=TargetRef(
+                                            type="message",
+                                            id=rendered_message.message_id,
+                                        ),
+                                        visibility=rendered_message.visibility,
+                                        correlation_id=rendered_message.correlation_id,
+                                        causation_id=rendered_message.causation_id,
+                                        sequence=rendered_message.sequence,
+                                        timestamp=now,
+                                        payload=rendered_message.model_dump(mode="json"),
+                                    )
+                                )
+                            events.extend(interaction_result.events)
+                            messages_to_persist.extend(interaction_result.messages)
+                    events.append(
+                        await self._build_thread_event(
+                            conn,
+                            approved_message.workspace_id,
+                            approved_message.thread_id,
+                            "message.publication_approved",
+                            actor=ActorRef(type="agent", id=run.participant_id),
+                            target=TargetRef(
+                                type="message",
+                                id=approved_message.message_id,
+                            ),
+                            visibility="agents_only",
+                            payload=completed_review.model_dump(mode="json"),
+                            timestamp=now,
+                            correlation_id=task.correlation_id,
+                            causation_id=task.task_id,
+                        )
+                    )
+                    messages_to_persist.insert(0, approved_message)
+                elif review.phase == "pre_publish":
+                    # Suppressed messages remain durable for audit/review state,
+                    # but stay out of timeline queries and communication logs.
+                    rejected_message = message.model_copy(
+                        update={
+                            "status": "rejected",
+                            "updated_at": now,
+                            "metadata": updated_message_metadata,
+                        }
+                    )
+                    await self._repository.upsert_message(conn, rejected_message)
+                    events.append(
+                        await self._build_thread_event(
+                            conn,
+                            rejected_message.workspace_id,
+                            rejected_message.thread_id,
+                            "message.publication_suppressed",
+                            actor=ActorRef(type="agent", id=run.participant_id),
+                            target=TargetRef(
+                                type="message",
+                                id=rejected_message.message_id,
+                            ),
+                            visibility="agents_only",
+                            payload=completed_review.model_dump(mode="json"),
+                            timestamp=now,
+                            correlation_id=task.correlation_id,
+                            causation_id=task.task_id,
+                        )
+                    )
+                    policy = self._workspace_moderation_policy(workspace)
+                    if policy.explain_blocked_messages:
+                        explanation = (
+                            completed_review.issuer_explanation
+                            or completed_review.reason
+                            or "This message was blocked by the workspace publication policy."
+                        )
+                        explanation_message = TimelineMessage(
+                            message_id=uuid4(),
+                            workspace_id=rejected_message.workspace_id,
+                            thread_id=rejected_message.thread_id,
+                            actor=ActorRef(type="agent", id=run.participant_id),
+                            visibility="private",
+                            content=explanation,
+                            status="completed",
+                            correlation_id=rejected_message.correlation_id,
+                            causation_id=rejected_message.message_id,
+                            sequence=await self._repository.next_thread_sequence(
+                                conn,
+                                rejected_message.thread_id,
+                            ),
+                            created_at=now,
+                            updated_at=now,
+                            metadata={
+                                "publication_review_id": str(review.review_id),
+                                "publication_suppression_reason": "workspace_topic_alignment",
+                                "recipient_participant_id": str(
+                                    candidate_participant.participant_id
+                                ),
+                                "moderation_review_id": str(review.review_id),
+                            },
+                        )
+                        await self._repository.upsert_message(conn, explanation_message)
+                        events.append(
+                            EventEnvelope(
+                                event_type="message.created",
+                                workspace_id=explanation_message.workspace_id,
+                                thread_id=explanation_message.thread_id,
+                                actor=explanation_message.actor,
+                                target=TargetRef(
+                                    type="participant",
+                                    id=candidate_participant.participant_id,
+                                ),
+                                visibility="private",
+                                correlation_id=explanation_message.correlation_id,
+                                causation_id=explanation_message.causation_id,
+                                sequence=explanation_message.sequence,
+                                timestamp=now,
+                                payload=explanation_message.model_dump(mode="json"),
+                            )
+                        )
+                else:
+                    # Post-publication reviews never retract the message. They
+                    # annotate it and fan out a flag/approval event instead.
+                    flagged_message = message.model_copy(
+                        update={
+                            "status": "completed",
+                            "updated_at": now,
+                            "metadata": updated_message_metadata,
+                        }
+                    )
+                    await self._repository.upsert_message(conn, flagged_message)
+                    events.append(
+                        await self._build_thread_event(
+                            conn,
+                            flagged_message.workspace_id,
+                            flagged_message.thread_id,
+                            (
+                                "message.publication_flagged"
+                                if decision == "flag"
+                                else "message.publication_approved"
+                            ),
+                            actor=ActorRef(type="agent", id=run.participant_id),
+                            target=TargetRef(
+                                type="message",
+                                id=flagged_message.message_id,
+                            ),
+                            visibility="workspace" if decision == "flag" else "agents_only",
+                            payload=completed_review.model_dump(mode="json"),
+                            timestamp=now,
+                            correlation_id=task.correlation_id,
+                            causation_id=task.task_id,
+                        )
+                    )
+                for event in events:
+                    await self._repository.record_event(conn, event)
+        return events, messages_to_persist
 
     @classmethod
     def _run_output_from_result(cls, result: AgentRunResult) -> dict[str, object]:
@@ -8573,6 +9457,218 @@ class CollaborationKernel:
         )
 
     @staticmethod
+    def _anchor_agent_definition(*, now: datetime) -> AgentDefinition:
+        return AgentDefinition(
+            agent_id=ANCHOR_AGENT_ID,
+            agent_key="anchor",
+            scope="global",
+            organization_id=None,
+            display_name="Anchor",
+            description=(
+                "Reviews workspace communication for topic fit, applies the workspace "
+                "topic-freedom policy, and explains blocked messages when configured."
+            ),
+            role=ANCHOR_ROLE,
+            capabilities=list(ANCHOR_CAPABILITIES),
+            endpoint=AgentEndpoint(
+                kind="system",
+                engine_id="local-ollama",
+                provider="ollama",
+            ),
+            system_prompt=(
+                "You are Anchor. Review the supplied candidate workspace communication "
+                "only for fit with the workspace topic and moderation policy. Do not "
+                "provide general safety review, style review, or task assistance. "
+                "Return only the JSON object required by your response contract."
+            ),
+            harness=AgentHarness(
+                summary="Reviews candidate workspace communication for topic fit using the workspace moderation policy.",
+                operating_principles=[
+                    "Judge topic relevance, not general quality or style.",
+                    "Use the workspace topic, description, harness, and configured policy as the authority.",
+                    "Prefer allowing messages when relevance is plausible outside strict mode.",
+                    "Give concise, actionable issuer guidance when a strict-mode message is blocked.",
+                ],
+                planning=AgentPlanningPolicy(
+                    plan_before_act=False,
+                    incremental_execution=False,
+                    one_goal_at_a_time=True,
+                    explicit_uncertainty=True,
+                ),
+                tool_use_policy=AgentToolUsePolicy(
+                    prefer_existing_workspace_tools=False,
+                    read_before_write=False,
+                    inspect_schema_before_use=False,
+                    cite_tool_results_in_reasoning=False,
+                    verify_side_effects_after_mutation=False,
+                    selection_principles=[
+                        "Do not call workspace tools during ordinary topic review.",
+                        "Use only the moderation context supplied with the task.",
+                    ],
+                    fallback_when_no_tool_fits=(
+                        "Return a structured moderation decision from the supplied context."
+                    ),
+                ),
+                memory_policy=AgentMemoryPolicy(
+                    use_run_memory=False,
+                    use_thread_memory=True,
+                    use_workspace_memory=False,
+                ),
+                validation_policy=AgentValidationPolicy(
+                    require_evidence_for_claims=True,
+                    require_tool_results_for_completion=False,
+                    require_tests_before_done=False,
+                ),
+                stop_policy=AgentStopPolicy(
+                    completion_conditions=[
+                        "Return one structured moderation decision for the candidate message."
+                    ],
+                    stop_conditions=[
+                        "Do not continue into conversation or task assistance."
+                    ],
+                    max_turns=1,
+                ),
+                metadata={
+                    "managed": True,
+                    "agent_key": "anchor",
+                    "moderation_agent": True,
+                },
+            ),
+            interaction_contract=AgentInteractionContract(
+                instructions=[
+                    "Review only the supplied candidate message for workspace-topic fit.",
+                    "Apply the workspace moderation policy supplied in task instructions.",
+                    "Return only a JSON moderation decision.",
+                ],
+                response_contract=AgentResponseContract(
+                    format="json",
+                    title="Topic moderation decision",
+                    guidance=[
+                        "Use decision=allow when the message fits the topic policy.",
+                        "Use decision=block for strict-mode messages that must not be published.",
+                        "Use decision=flag for balanced or open mode messages that should remain visible but be marked as drift.",
+                    ],
+                    json_schema={
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "decision",
+                            "relatedness",
+                            "confidence",
+                            "reason",
+                        ],
+                        "properties": {
+                            "decision": {
+                                "type": "string",
+                                "enum": ["allow", "block", "flag"],
+                            },
+                            "relatedness": {
+                                "type": "string",
+                                "enum": [
+                                    "direct",
+                                    "adjacent",
+                                    "unrelated",
+                                    "blocked_topic",
+                                    "unknown",
+                                ],
+                            },
+                            "confidence": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1,
+                            },
+                            "reason": {"type": "string"},
+                            "issuer_explanation": {"type": "string"},
+                        },
+                    },
+                ),
+                completion_criteria=[
+                    "The decision matches the supplied workspace topic-freedom policy.",
+                    "The reason cites concrete topic fit or topic drift without exposing hidden policy data.",
+                ],
+                metadata={
+                    "contract_version": 1,
+                    "seeded": True,
+                    "agent_key": "anchor",
+                },
+            ),
+            definition={
+                "runtime": {
+                    "engine_id": "local-ollama",
+                    "provider": "ollama",
+                    "preferred_capabilities": ["local", "ollama"],
+                    "preferred_locality": "host",
+                },
+                "seeded": True,
+                "managed": True,
+                "agent_key": "anchor",
+                "moderation_agent": True,
+                "task_routing": {
+                    "normal_message_fanout": False,
+                    "accepted_task_kinds": [ANCHOR_TASK_KIND],
+                },
+            },
+            created_by=SYSTEM_ACTOR_ID,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "managed": True,
+                "seeded": True,
+                "agent_key": "anchor",
+                "moderation_agent": True,
+            },
+        )
+
+    @staticmethod
+    def _anchor_participant_for_workspace(
+        workspace_id: UUID,
+        *,
+        now: datetime,
+    ) -> ParticipantProfile:
+        participant_digest = hashlib.md5(  # noqa: S324 - deterministic identifier, not security.
+            f"open-talon-anchor-participant:{workspace_id}".encode("utf-8")
+        ).hexdigest()
+        return ParticipantProfile(
+            participant_id=UUID(hex=participant_digest),
+            workspace_id=workspace_id,
+            participant_type="agent",
+            system_agent_id=ANCHOR_AGENT_ID,
+            display_name="Anchor",
+            description=(
+                "Reviews workspace communication for topic fit, applies the workspace "
+                "topic-freedom policy, and explains blocked messages when configured."
+            ),
+            roles=[ANCHOR_ROLE],
+            capabilities=list(ANCHOR_CAPABILITIES),
+            status="active",
+            visibility_scope="workspace",
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "seeded": True,
+                "managed": True,
+                "agent_key": "anchor",
+                "task_routing": {
+                    "normal_message_fanout": False,
+                    "accepted_task_kinds": [ANCHOR_TASK_KIND],
+                },
+            },
+        )
+
+    async def _ensure_anchor_attached_for_workspace(
+        self,
+        conn: asyncpg.Connection,
+        workspace_id: UUID,
+        *,
+        now: datetime,
+    ) -> ParticipantProfile:
+        agent = self._anchor_agent_definition(now=now)
+        participant = self._anchor_participant_for_workspace(workspace_id, now=now)
+        await self._repository.upsert_system_agent(conn, agent)
+        await self._repository.upsert_participant(conn, participant)
+        return participant
+
+    @staticmethod
     def _curator_agent_for_organization(
         organization: Organization,
         *,
@@ -8591,14 +9687,13 @@ class CollaborationKernel:
                 "Manages organization, project, and workspace operations through "
                 "authorized control-plane APIs."
             ),
-            role="organization curator",
+            role="organization operations curator",
             capabilities=[
-                "organization_operations",
-                "project_administration",
-                "workspace_administration",
-                "workspace_agent_management",
-                "workspace_tool_management",
-                "audit_verification",
+                "manages organization projects and workspaces through authorized control-plane tools",
+                "coordinates organization-scoped workspace administration",
+                "reviews organization audit and runtime health",
+                "keeps organization resources inside tenant boundaries",
+                "maintains managed organization operations contexts",
             ],
             endpoint=AgentEndpoint(
                 kind="system",
