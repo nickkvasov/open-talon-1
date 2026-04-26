@@ -86,6 +86,11 @@ class Settings(BaseSettings):
     # Falls back to cors_origins when left empty.
     mcp_allowed_origins: str = ""
 
+    # ── Operational agent bootstrap ──────────────────────────────────────────
+    operational_agents_bootstrap_enabled: bool = True
+    operational_agents_bootstrap_attempts: int = 30
+    operational_agents_bootstrap_interval_seconds: float = 2.0
+
     @property
     def valkey_url(self) -> str:
         auth = f":{self.valkey_password}@" if self.valkey_password else ""

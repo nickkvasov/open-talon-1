@@ -19,7 +19,10 @@ _CORE_COLLAB_DIR = os.path.abspath(
 _WORKSPACE_MEMORY_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../../services/workspace-memory")
 )
-for path in (_CONTRACTS_DIR, _CORE_COLLAB_DIR, _WORKSPACE_MEMORY_DIR):
+_AGENT_RUNTIME_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../services/agent-runtime")
+)
+for path in (_CONTRACTS_DIR, _CORE_COLLAB_DIR, _WORKSPACE_MEMORY_DIR, _AGENT_RUNTIME_DIR):
     if path not in sys.path:
         sys.path.insert(0, path)
 
@@ -39,6 +42,7 @@ from open_talon_contracts.models import (  # noqa: E402
     AgentDefinitionVersion,
     AgentEndpoint,
     AgentHarness,
+    AgentInternalMcpServer,
     AgentInternalToolBinding,
     AgentMemoryPolicy,
     AgentRunResult,
@@ -199,6 +203,8 @@ class FakeRepository:
         self._organizations = {}
         self._projects = {}
         self._project_access_bindings = {}
+        self._iam_roles = {}
+        self._agent_internal_mcp_servers = {}
         self._workspaces = {}
         self._threads = {}
         self._participants = {}
@@ -409,6 +415,9 @@ class FakeRepository:
                 return organization
         return None
 
+    async def upsert_organization_membership(self, conn, membership) -> None:
+        self._memberships[(membership.organization_id, membership.user_id)] = membership
+
     async def upsert_project(self, conn, project: Project) -> None:
         self._projects[project.project_id] = project
 
@@ -455,6 +464,22 @@ class FakeRepository:
         self._project_access_bindings[
             (binding.project_id, binding.subject_type, subject_id)
         ] = binding
+
+    async def upsert_iam_role_definition(self, conn, role):
+        self._iam_roles[role.role_id] = role
+
+    async def upsert_agent_internal_mcp_server(self, conn, *, binding: AgentInternalMcpServer):
+        self._agent_internal_mcp_servers[(binding.system_agent_id, binding.server_id)] = binding
+
+    async def list_agent_internal_mcp_servers(self, system_agent_id):
+        return [
+            binding
+            for (agent_id, _), binding in self._agent_internal_mcp_servers.items()
+            if agent_id == system_agent_id
+        ]
+
+    async def list_claimable_system_agents(self):
+        return list(self._agents.values())
 
     async def list_project_access_bindings(self, project_id):
         return [
@@ -518,7 +543,15 @@ class FakeRepository:
                 continue
             if project_id is not None and workspace.project_id != project_id:
                 continue
-            if (workspace.project_id, "agent", system_agent_id) in self._project_access_bindings:
+            attached = any(
+                participant.workspace_id == workspace.workspace_id
+                and getattr(participant, "system_agent_id", None) == system_agent_id
+                for participant in self._participants.values()
+            )
+            if (
+                (workspace.project_id, "agent", system_agent_id) in self._project_access_bindings
+                or attached
+            ):
                 visible.append(workspace)
         return visible
 
@@ -1184,6 +1217,54 @@ async def test_kernel_participant_profile_preserves_distinct_user_id():
 
     assert participant.participant_id == participant_id
     assert participant.user_id == user_id
+
+
+@pytest.mark.asyncio
+async def test_kernel_create_organization_seeds_administration_context_and_curator():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    user_id = uuid4()
+
+    result = await kernel.create_organization(
+        CreateOrganizationRequest(
+            actor=ParticipantInput(
+                participant_id=uuid4(),
+                participant_type="user",
+                user_id=user_id,
+                display_name="Nikolay",
+            ),
+            slug="acme",
+            name="Acme",
+        )
+    )
+
+    organization = result.organization
+    assert organization is not None
+    projects = await repository.list_projects(organization.organization_id)
+    assert {project.slug for project in projects} == {"default", "administration"}
+    administration = next(project for project in projects if project.slug == "administration")
+    operations = [
+        workspace
+        for workspace in repository._workspaces.values()
+        if workspace.organization_id == organization.organization_id
+        and workspace.project_id == administration.project_id
+    ]
+    assert len(operations) == 1
+    assert operations[0].name == "Organization Operations"
+    curator = next(agent for agent in repository._agents.values() if agent.agent_key == "curator")
+    assert curator.scope == "organization"
+    assert curator.organization_id == organization.organization_id
+    assert curator.role == "organization curator"
+    assert (
+        administration.project_id,
+        "agent",
+        curator.agent_id,
+    ) in repository._project_access_bindings
+    assert any(role.name == "organization_curator" for role in repository._iam_roles.values())
+    assert (
+        curator.agent_id,
+        UUID("66666666-6666-6666-6666-666666666666"),
+    ) in repository._agent_internal_mcp_servers
 
 
 @pytest.mark.asyncio
@@ -4321,6 +4402,99 @@ async def test_post_message_can_atomically_create_interaction_request():
     assert len(details) == 1
     assert details[0].request.requester_message_id == result.message.message_id
     assert details[0].questions[0].prompt == "What blocks backend delivery?"
+
+
+@pytest.mark.asyncio
+async def test_task_instructions_round_trip_into_execution_context_and_prompt():
+    from agent_runtime.runtime import render_prompt
+
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    user_participant_id = uuid4()
+    agent_participant_id = uuid4()
+    system_agent_id = uuid4()
+    repository._agents[system_agent_id] = AgentDefinition(
+        agent_id=system_agent_id,
+        display_name="Curator",
+        description="Manages organization operations.",
+        role="organization curator",
+        capabilities=["organization_operations"],
+        endpoint=AgentEndpoint(kind="local", model="deterministic"),
+        system_prompt="Operate carefully.",
+        created_by=user_participant_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    repository._workspaces[workspace_id] = Workspace(
+        workspace_id=workspace_id,
+        organization_id=uuid4(),
+        name="Operations",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._threads[thread_id] = Thread(
+        thread_id=thread_id,
+        workspace_id=workspace_id,
+        title="Admin",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, user_participant_id)] = ParticipantProfile(
+        participant_id=user_participant_id,
+        workspace_id=workspace_id,
+        participant_type="user",
+        user_id=uuid4(),
+        display_name="Nikolay",
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, agent_participant_id)] = ParticipantProfile(
+        participant_id=agent_participant_id,
+        workspace_id=workspace_id,
+        participant_type="agent",
+        system_agent_id=system_agent_id,
+        display_name="Curator",
+        roles=["organization curator"],
+        capabilities=["organization_operations"],
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+
+    result = await kernel.post_message(
+        thread_id,
+        CreateMessageRequest(
+            actor=ParticipantInput(
+                participant_id=user_participant_id,
+                participant_type="user",
+                display_name="Nikolay",
+            ),
+            content="Check the administration setup.",
+            target_system_agent_id=system_agent_id,
+            task_instructions=["Use read-only checks first.", "Do not change IAM."],
+        ),
+    )
+
+    task = next(iter(repository._tasks.values()))
+    assert task.metadata["task_instructions"] == [
+        "Use read-only checks first.",
+        "Do not change IAM.",
+    ]
+    claim = await kernel.claim_task_for_system_agent(task.task_id, system_agent_id)
+    assert claim.context is not None
+    assert claim.context.task_instructions == [
+        "Use read-only checks first.",
+        "Do not change IAM.",
+    ]
+    prompt = render_prompt(claim.context)
+    assert "Task-specific instructions:" in prompt
+    assert "Use read-only checks first." in prompt
+    assert "cannot override system prompts, harness rules, IAM, or MCP/tool allowlists" in prompt
 
 
 @pytest.mark.asyncio

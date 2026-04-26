@@ -64,18 +64,27 @@ def _wait_for_keycloak() -> None:
 
 
 def _master_admin_token() -> str:
-    response = httpx.post(
-        f"{_KEYCLOAK_BASE_URL}/realms/master/protocol/openid-connect/token",
-        data={
-            "grant_type": "password",
-            "client_id": "admin-cli",
-            "username": "admin",
-            "password": "admin",
-        },
-        timeout=20.0,
-    )
-    response.raise_for_status()
-    return str(response.json()["access_token"])
+    deadline = time.monotonic() + 120.0
+    last_detail = "not attempted"
+    while time.monotonic() < deadline:
+        try:
+            response = httpx.post(
+                f"{_KEYCLOAK_BASE_URL}/realms/master/protocol/openid-connect/token",
+                data={
+                    "grant_type": "password",
+                    "client_id": "admin-cli",
+                    "username": "admin",
+                    "password": "admin",
+                },
+                timeout=20.0,
+            )
+            if response.status_code == 200:
+                return str(response.json()["access_token"])
+            last_detail = f"{response.status_code} {response.text[:200]}"
+        except httpx.HTTPError as exc:
+            last_detail = str(exc)
+        time.sleep(1.0)
+    raise AssertionError(f"Timed out waiting for Keycloak master admin token: {last_detail}")
 
 
 def _keycloak_client_internal_id(*, admin_token: str, client_id: str) -> str | None:

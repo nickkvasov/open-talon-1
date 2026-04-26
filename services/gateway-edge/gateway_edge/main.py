@@ -17,6 +17,7 @@ from gateway_edge.routers import admin, auth, chat, collaboration, health, iam, 
 from gateway_edge.services.audit import audit_service
 from gateway_edge.services.collaboration import collaboration_service
 from gateway_edge.services.events import event_service
+from gateway_edge.services.operational_bootstrap import operational_bootstrap_service
 from gateway_edge.services.session import setup_valkey, teardown_valkey
 
 logging.basicConfig(
@@ -37,10 +38,12 @@ async def lifespan(app: FastAPI):
     await event_service.start()
     await collaboration_service.start()
     await audit_service.start()
+    await operational_bootstrap_service.start()
     logger.info("Gateway ready — auth_mode=%s", settings.auth_mode)
     yield
     # ── Shutdown ─────────────────────────────────────────────────────────────
     logger.info("Shutting down …")
+    await operational_bootstrap_service.stop()
     await audit_service.stop()
     await collaboration_service.stop()
     await event_service.stop()

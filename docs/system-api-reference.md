@@ -118,6 +118,8 @@ The most important ownership rules are:
 - `auth_identities` maps external identity providers to `users`
 - `organizations`, `projects`, `project_access_bindings`, and `organization_memberships` store the tenant and work hierarchy above workspaces
 - `system_agents` stores platform-global and organization-scoped agent definitions
+- managed operational contexts are seeded as `System Base / Administration / System Operations` plus `Administration / Organization Operations` for each non-system organization
+- operational agents are ordinary system agents: `Tinker` (`tool generation agent`), `Steward` (`platform steward`), and organization-scoped `Curator` (`organization curator`)
 - `participants` stores workspace-local attachment and state for both humans and agents
 - `threads` and `timeline_messages` are the shared collaboration surface
 - `interaction_requests` and related tables implement tracked, resumable question workflows
@@ -149,6 +151,7 @@ Open Talon separates identity from workspace presence.
 - Human org membership and membership roles live in `organization_memberships`
 - Organization membership roles provide the baseline human permission bundle
 - The external OIDC provider is not the source of truth for org membership or authorization
+- New organizations receive both `Default Project` for ordinary workspace placement and `Administration` for managed operations.
 
 ### Workspace Presence
 
@@ -276,8 +279,16 @@ Current MCP system API operations:
 - `memory.workspace.list`
 - `memory.workspace.create`
 - `memory.thread.search`
+- `agent_catalog.list`
 - `agent_catalog.bundle.validate`
 - `agent_catalog.bundle.publish`
+- `tool_catalog.list`
+- `llm_providers.list`
+- `memory_providers.list`
+- `mcp_servers.list`
+- `runtime.overview.get`
+- `audit.events.list`
+- `audit.chains.verify`
 - `agent_git.repo.ensure`
 - `agent_git.worktree.create`
 - `agent_git.file.read`
@@ -590,6 +601,8 @@ The `chat` APIs provide a session-based chat surface. Shared collaboration flows
 | `PUT` | `/v1/workspaces/{workspace_id}/roles/{role_name}` | create/update role definition |
 | `DELETE` | `/v1/workspaces/{workspace_id}/roles/{role_name}` | delete role definition |
 
+Workspace responses include `created_by`, `creator_user_id`, and `creator_system_agent_id` so human-created and agent-created workspaces can be attributed without relying on metadata.
+
 ### System Definitions
 
 Global system-definition APIs are operator/admin APIs.
@@ -755,6 +768,7 @@ Important request behavior:
 - `POST /v1/threads/{thread_id}/messages`
   - can create a plain timeline message
   - can also atomically create tracked interaction requests through `CreateMessageRequest.requests`
+  - can include `task_instructions`, which are persisted into the created task metadata and rendered as run-local instructions without expanding IAM or MCP/tool allowlists
 - `POST /v1/threads/{thread_id}/requests`
   - directly creates tracked requests
 - `POST /v1/requests/{request_id}/answers`
@@ -839,6 +853,7 @@ Important fields:
 - `content`
 - `visibility`
 - `create_task`
+- `task_instructions`
 - `requests`
 - `metadata`
 

@@ -29,6 +29,7 @@ from open_talon_contracts.models import (
     AgentDefinition,
     AgentEndpoint,
     AgentExecutionContext,
+    AgentIdentity,
     AgentTaskRouting,
     ExecutionSpec,
     McpServerDefinition,
@@ -128,6 +129,89 @@ async def test_mcp_execution_backend_calls_full_featured_server_tool():
     assert test_server.state.tool_calls == [
         {"name": "echo", "arguments": {"text": "hello"}}
     ]
+
+
+@pytest.mark.asyncio
+async def test_mcp_execution_backend_mints_agent_identity_token(monkeypatch):
+    now = datetime.now(timezone.utc)
+    server_id = uuid4()
+    system_agent_id = uuid4()
+    identity = AgentIdentity(
+        agent_identity_id=uuid4(),
+        system_agent_id=system_agent_id,
+        scope="global",
+        provider_key="keycloak",
+        issuer="http://issuer.test/realms/open-talon",
+        external_subject="service-account-steward",
+        client_id="open-talon-agent-steward",
+        secret_ref={"openbao": {"path": "open-talon/test", "field": "client_secret"}},
+        created_at=now,
+        updated_at=now,
+        metadata={"token_endpoint": "http://issuer.test/token"},
+    )
+    posted: dict[str, object] = {}
+
+    class FakeKernel:
+        async def get_active_agent_identity_for_system_agent(self, requested_system_agent_id):
+            assert requested_system_agent_id == system_agent_id
+            return identity
+
+    class FakeResolver:
+        async def resolve(self, references, *, label, required=True):
+            assert references[0].provider == "openbao"
+            assert "client secret" in label
+            assert required is True
+            return "client-secret"
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"access_token": "agent-token", "expires_in": 300}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, *, data=None, headers=None, **kwargs):
+            posted["url"] = url
+            posted["data"] = data
+            posted["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr("agent_runtime.execution.mcp.httpx.AsyncClient", FakeAsyncClient)
+    backend = McpExecutionBackend(kernel=FakeKernel(), secret_resolver=FakeResolver())
+    server = McpServerDefinition(
+        server_id=server_id,
+        server_key="open_talon_control_plane",
+        display_name="Open Talon Control Plane",
+        description="Gateway MCP",
+        transport_kind="streamable_http",
+        config={"url": "http://gateway.test/v1/mcp", "auth": {"kind": "open_talon_agent_identity"}},
+        created_by=uuid4(),
+        created_at=now,
+        updated_by=uuid4(),
+        updated_at=now,
+    )
+    spec = ExecutionSpec(
+        invocation_id=uuid4(),
+        handler_ref="organizations.get",
+        inline_payload={},
+        metadata={"mcp_server_id": str(server_id), "system_agent_id": str(system_agent_id)},
+    )
+
+    headers = await backend._headers_for_server(server, spec)  # noqa: SLF001
+
+    assert headers["Authorization"] == "Bearer agent-token"
+    assert posted["url"] == "http://issuer.test/token"
+    assert posted["data"]["client_id"] == "open-talon-agent-steward"
 
 
 def test_agent_prompt_keeps_mcp_capabilities_separate_from_open_talon_tools():

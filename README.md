@@ -11,6 +11,7 @@ For coding-agent-specific project guidance, see [`AGENTS.md`](./AGENTS.md).
 - [docs/iam.md](./docs/iam.md): provider-neutral principal IAM model, permission catalog, and IAM APIs
 - [docs/agent-operations-guide.md](./docs/agent-operations-guide.md): operating guide for software development agents and scripted test users
 - [docs/tinker-tool-generation.md](./docs/tinker-tool-generation.md): Tinker request, approval, catalog, and live-test workflow
+- [docs/operational-agents-real-life-test-protocol.md](./docs/operational-agents-real-life-test-protocol.md): real local-stack test protocol for Tinker, Steward, Curator, and managed administration contexts
 - [docs/db-migrations.md](./docs/db-migrations.md): migration workflow and schema rules
 - [docs/collaboration-system-design.md](./docs/collaboration-system-design.md): historical design background from before the current collaboration implementation
 - [docs/research-comparison.md](./docs/research-comparison.md): external ecosystem comparison for multi-agent research and enterprise platforms
@@ -85,6 +86,7 @@ Open Talon separates:
 - `agent_identities`, `iam_role_definitions`, `human_role_bindings`, and `agent_role_bindings`: principal IAM state for agent identities and global or organization role bindings
 - `organizations`, `projects`, `project_access_bindings`, and `organization_memberships`: organization tenancy, project ownership/access, membership, and membership roles stored in Postgres
 - `participants`: workspace-local materializations of a human or agent inside a workspace
+- managed operational agents are ordinary `system_agents`: `Tinker` for tool generation, global `Steward` for platform operations, and organization-scoped `Curator` for organization operations
 
 Role terminology in this repository:
 
@@ -103,7 +105,8 @@ Important implications:
 - client apps should not treat `participant_id` as a global human identity
 - authenticated human requests may include an `actor` object for compatibility, but the gateway derives the effective human actor from the bearer token
 - agent identities authenticate with client credentials issued by the configured OIDC provider and are linked back to `system_agents` through `agent_identities`
-- when `MCP_ENABLED=true`, the gateway-mounted MCP server at `/v1/mcp` is OIDC-only and exposes permission-scoped system API operations across organization, project, workspace, thread, memory, IAM lookup, and agent authoring surfaces, not Open Talon catalog/runtime tools
+- when `MCP_ENABLED=true`, the gateway-mounted MCP server at `/v1/mcp` is OIDC-only and exposes permission-scoped system API operations across organization, project, workspace, thread, memory, runtime overview, audit read/verify, catalog/provider lookup, IAM lookup, and agent authoring surfaces, not Open Talon catalog/runtime tools
+- the managed `open_talon_control_plane` MCP server uses agent identity client credentials so operational agents can call allowlisted gateway MCP operations through runtime tool execution
 - the current MCP slice exposes read-only session resources at `ot://session/identity`, `ot://session/permissions`, and `ot://session/scope`
 - organization membership and membership roles live in Postgres, not in Keycloak claims
 - humans and agents share one permission catalog, but global and organization IAM roles are stored separately for each subject kind

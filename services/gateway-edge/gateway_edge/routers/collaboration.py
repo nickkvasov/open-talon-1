@@ -139,6 +139,7 @@ from gateway_edge.services.audit import audit_service
 from gateway_edge.services.llm_provider_health import check_llm_provider_health
 from gateway_edge.services.memory_provider_health import check_memory_provider_health
 from gateway_edge.services.llm_registry import list_registered_llm_engines
+from gateway_edge.services.operational_bootstrap import operational_bootstrap_service
 
 router = APIRouter(prefix="/v1", tags=["collaboration"])
 logger = logging.getLogger(__name__)
@@ -822,7 +823,19 @@ async def create_organization(
         update={"actor": _resolve_organization_actor(request, payload.actor)}
     )
     try:
-        return await collab_svc.collaboration_service.create_organization(payload)
+        organization = await collab_svc.collaboration_service.create_organization(payload)
+        if settings.operational_agents_bootstrap_enabled:
+            try:
+                await operational_bootstrap_service.ensure_for_organization(
+                    organization.organization_id
+                )
+            except Exception:
+                logger.warning(
+                    "Operational agent bootstrap repair failed for organization_id=%s",
+                    organization.organization_id,
+                    exc_info=True,
+                )
+        return organization
     except Exception as exc:
         raise _http_error(exc) from exc
 
