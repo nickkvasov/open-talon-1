@@ -11,6 +11,7 @@ Related references:
 - [iam.md](./iam.md)
 - [agent-operations-guide.md](./agent-operations-guide.md)
 - [tinker-tool-generation.md](./tinker-tool-generation.md)
+- [live-tests-short-stories.md](./live-tests-short-stories.md)
 - [operational-agents-test-run-log-2026-04-26.md](./operational-agents-test-run-log-2026-04-26.md)
 - [tests/infrastructure/operational_agents_live](../tests/infrastructure/operational_agents_live)
 - [tests/infrastructure/test_tinker_live_system.py](../tests/infrastructure/test_tinker_live_system.py)
