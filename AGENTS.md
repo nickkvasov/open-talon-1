@@ -64,6 +64,8 @@ Primary local flow:
 - Agent identity/configuration lives in `system_agents`.
 - Machine principal linkage lives in `agent_identities`.
 - Global and organization IAM role definitions live in `iam_role_definitions` with separate human and agent bindings.
+- Operational/system-wide agents advertise their purpose through normal agent fields such as `display_name`, `role`, and `capabilities`. Do not add extra operational classification columns unless there is a strict product or authorization need.
+- IAM role bindings, project access, workspace participant attachment, and MCP/tool allowlists are the authority for operational agents; role text is descriptive, not authorization.
 - Use `IAM role` only for `iam_role_definitions` and the direct bindings built on top of them.
 - Use `organization membership role` for `organization_memberships.role`.
 - Use `collaboration role` for workspace-local labels in `participants.roles` that humans and agents assume for routing and discovery.
@@ -85,7 +87,10 @@ Primary local flow:
 - Global system-definition, global publish, provider-management, and IAM-management routes require the matching global IAM permission unless the request is coming through an existing operator/system-auth path or bootstrap platform-admin access.
 - Organization CRUD and organization-scoped management routes require the relevant organization permission from baseline membership roles or explicit IAM role bindings, unless the caller is a platform admin.
 - Workspace role-definition changes, workspace participant-management, workspace tool management, workspace Git repository creation, and workspace asset publishing require the matching workspace-scoped IAM permission plus participant attachment.
+- Agent workspace visibility and runtime claimability must account for workspace participant attachment, not only project access bindings. `participants` is the workspace-local attachment/state record for humans and agents.
 - Organization-scoped agents, tools, providers, repositories, and assets must stay inside the same organization as the consuming workspace.
+- Managed operational contexts must be seeded and repaired idempotently: `System Base / Administration / System Operations` for platform operations, and each non-system organization's `Administration / Organization Operations` context for organization operations.
+- Managed operational-agent identity bootstrap must validate live OIDC client-credentials authentication and repair stale or missing Keycloak clients/OpenBao secrets after local stack restarts or upgrades.
 - Tinker-generated tools may publish to `global` or `organization` scope, but approval publishes into the system catalog only.
 - Tinker revision approval requires `tool_generation.review` plus `tool_catalog.write` in the target publication scope.
 - Tinker-generated tools must not be auto-attached to a workspace as part of approval; manual workspace attachment is a separate action.
@@ -275,6 +280,17 @@ If a change touches Tinker, tool generation, generated-tool approval, or interna
 - run `tests/agent-runtime/test_execution.py` when local helper execution or execution backends changed
 - run `pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s` when the end-to-end Tinker/runtime path changes and the local machine has `gemma4:latest`
 
+If a change touches operational agents, managed administration contexts, agent-private MCP bindings, or control-plane MCP operations:
+
+- inspect `system_agents`, `agent_identities`, IAM bindings, MCP server/binding code, repository workspace visibility, runtime task claiming, and gateway bootstrap together
+- keep agent purpose in `display_name`, `role`, and `capabilities`; avoid new classification fields unless they are strictly required
+- keep managed contexts idempotent and deterministic: `System Base / Administration / System Operations` plus every organization's `Administration / Organization Operations`
+- verify both global `Steward` and organization-scoped `Curator` paths when changing shared operator behavior
+- keep deterministic live harnesses under `tests/infrastructure/operational_agents_live` so new operational agents can add focused test modules instead of growing one monolithic file
+- run `tests/core-collab/test_agent_contracts.py` and relevant gateway IAM/MCP tests
+- run `OPEN_TALON_RUN_OPERATIONAL_AGENTS_LIVE=1 pytest -m integration tests/infrastructure/operational_agents_live -q -s` against the real local stack for end-to-end identity, MCP, runtime, and durable `tool_calls` coverage
+- live tests may need local-service access to Keycloak, OpenBao, and gateway; if sandboxed execution fails with a local network `Operation not permitted`, rerun the same test command with the required escalation rather than weakening the test
+
 ## Code Change Rules
 
 - Preserve the normalized participant model.
@@ -332,9 +348,10 @@ If a change touches Tinker, tool generation, generated-tool approval, or interna
 5. If execution behavior changes, inspect `services/agent-runtime`, `services/core-collab`, and gateway event fanout together.
 6. If memory behavior changes, inspect `db/migrations`, `services/workspace-memory`, `services/core-collab`, `services/gateway-edge`, and memory-related contracts together.
 7. If LLM provider or secret behavior changes, inspect `llm_providers` migrations, gateway provider routes, runtime secret resolution, and local OpenBao wiring together.
-8. Update code to match the migrated schema.
-9. Run targeted tests.
-10. Run broader tests if the change affects shared contracts or persistence.
+8. If operational-agent behavior changes, inspect gateway bootstrap, IAM bindings, MCP allowlists, `agent_identities`, workspace participant attachment, and runtime task claiming together.
+9. Update code to match the migrated schema.
+10. Run targeted tests.
+11. Run broader tests if the change affects shared contracts or persistence.
 
 ## Key Files
 
@@ -345,6 +362,7 @@ If a change touches Tinker, tool generation, generated-tool approval, or interna
 - `apps/admin-web/src/providers/AuthProvider.jsx`
 - `docs/db-migrations.md`
 - `docs/system-quickstart.md`
+- `docs/operational-agents-real-life-test-protocol.md`
 - `docs/tinker-tool-generation.md`
 - `services/core-collab/core_collab/migrations.py`
 - `services/core-collab/core_collab/repository.py`
@@ -374,6 +392,7 @@ If a change touches Tinker, tool generation, generated-tool approval, or interna
 - `apps/tui/open_talon_tui/main.py`
 - `apps/tui/open_talon_tui/tui2.py`
 - `tests/infrastructure/test_tinker_live_system.py`
+- `tests/infrastructure/operational_agents_live/`
 
 ## When In Doubt
 

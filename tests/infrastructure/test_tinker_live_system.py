@@ -37,6 +37,11 @@ _OPENBAO_KV_MOUNT = "secret"
 _OPENBAO_ROOT_TOKEN = os.getenv("BAO_ROOT_TOKEN", "root")
 _SEEDED_TINKER_AGENT_ID = "44444444-4444-4444-4444-444444444444"
 _EXECUTOR_MODEL = "gemma4:latest"
+_MANAGED_TINKER_ENDPOINT = {
+    "kind": "system",
+    "engine_id": "openai-responses",
+    "provider": "openai",
+}
 
 
 def _postgres_dsn() -> str:
@@ -78,6 +83,12 @@ def _json_request(
             f"{method} {path} returned {response.status_code}: {response.text}"
         )
     return response.json()
+
+
+def _managed_tinker_restore_endpoint(endpoint: dict[str, Any]) -> dict[str, Any]:
+    if endpoint.get("provider") == "system-test-harness":
+        return dict(_MANAGED_TINKER_ENDPOINT)
+    return endpoint
 
 
 def _wait_for(
@@ -917,7 +928,7 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
                 for agent in agents
                 if agent["agent_id"] == _SEEDED_TINKER_AGENT_ID
             )
-            original_tinker_endpoint = tinker["endpoint"]
+            original_tinker_endpoint = _managed_tinker_restore_endpoint(tinker["endpoint"])
 
             _json_request(
                 client,
