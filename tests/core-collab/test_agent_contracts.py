@@ -2872,18 +2872,31 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
 
     default_organization = await repository.fetch_organization_by_slug("default")
     system_base = await repository.fetch_organization_by_slug("system-base")
-    assert await repository.fetch_project_by_slug(
+    default_project = await repository.fetch_project_by_slug(
         organization_id=default_organization.organization_id,
         slug="default",
     )
-    assert await repository.fetch_project_by_slug(
+    default_administration = await repository.fetch_project_by_slug(
         organization_id=default_organization.organization_id,
         slug="administration",
     )
-    assert await repository.fetch_project_by_slug(
+    system_administration = await repository.fetch_project_by_slug(
         organization_id=system_base.organization_id,
         slug="administration",
     )
+    assert default_project is not None
+    assert default_administration is not None
+    assert system_administration is not None
+    assert (
+        default_project.project_id,
+        "user",
+        default_project.creator_user_id,
+    ) in repository._project_access_bindings
+    assert (
+        default_administration.project_id,
+        "user",
+        default_administration.creator_user_id,
+    ) in repository._project_access_bindings
 
     agent_keys = {agent.agent_key for agent in repository._agents.values()}
     assert {"tinker", "steward", "curator", "anchor"}.issubset(agent_keys)
@@ -2908,14 +2921,47 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
     assert control_plane.server_key == "open_talon_control_plane"
     assert {
         "organizations.list",
+        "organizations.create",
         "workspaces.create",
         "iam.agent_identities.list",
     }.issubset({tool.tool_name for tool in repository._mcp_server_tools[control_plane.server_id]})
 
     steward = next(agent for agent in repository._agents.values() if agent.agent_key == "steward")
-    assert (steward.agent_id, control_plane.server_id) in repository._agent_internal_mcp_servers
+    steward_binding = repository._agent_internal_mcp_servers[
+        (steward.agent_id, control_plane.server_id)
+    ]
+    assert "organizations.create" in steward_binding.tool_allowlist
+    steward_role = next(role for role in repository._iam_roles.values() if role.name == "platform_steward")
+    assert "organization.write" in steward_role.permissions
+    system_operations = next(
+        workspace
+        for workspace in repository._workspaces.values()
+        if workspace.organization_id == system_base.organization_id
+        and workspace.metadata.get("operations_level") == "system"
+    )
+    assert any(
+        participant.workspace_id == system_operations.workspace_id
+        and participant.system_agent_id == steward.agent_id
+        for participant in repository._participants.values()
+    )
+    assert (
+        system_administration.project_id,
+        "agent",
+        steward.agent_id,
+    ) in repository._project_access_bindings
+
     curator = next(agent for agent in repository._agents.values() if agent.agent_key == "curator")
-    assert (curator.agent_id, control_plane.server_id) in repository._agent_internal_mcp_servers
+    curator_binding = repository._agent_internal_mcp_servers[
+        (curator.agent_id, control_plane.server_id)
+    ]
+    assert "organizations.list" in curator_binding.tool_denylist
+    curator_role = next(role for role in repository._iam_roles.values() if role.name == "organization_curator")
+    assert "organization.write" not in curator_role.permissions
+    assert (
+        default_administration.project_id,
+        "agent",
+        curator.agent_id,
+    ) in repository._project_access_bindings
 
 
 def test_kernel_run_output_includes_standardized_usage_payload():

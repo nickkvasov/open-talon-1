@@ -86,6 +86,10 @@ _OPERATIONAL_AGENT_PERMISSIONS = [
     "audit.read",
     "audit.verify",
 ]
+_STEWARD_AGENT_PERMISSIONS = list(
+    dict.fromkeys([*_OPERATIONAL_AGENT_PERMISSIONS, "organization.write"])
+)
+_CURATOR_AGENT_PERMISSIONS = list(_OPERATIONAL_AGENT_PERMISSIONS)
 
 _CURATOR_CONTROL_PLANE_ALLOWLIST = [
     "session.get_identity",
@@ -131,6 +135,7 @@ _CURATOR_CONTROL_PLANE_ALLOWLIST = [
 ]
 _STEWARD_CONTROL_PLANE_ALLOWLIST = [
     "organizations.list",
+    "organizations.create",
     *_CURATOR_CONTROL_PLANE_ALLOWLIST,
 ]
 _CONTROL_PLANE_TOOL_NAMES = list(dict.fromkeys(_STEWARD_CONTROL_PLANE_ALLOWLIST))
@@ -232,12 +237,13 @@ class ManagedSystemDefaultsRepairer:
             "mcp_tools": 0,
             "participants": 0,
             "iam_roles": 0,
+            "project_access_bindings": 0,
             "internal_tool_bindings": 0,
             "internal_mcp_bindings": 0,
         }
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
-                control_plane = await self._repair_global_defaults(
+                control_plane, global_agents_by_key = await self._repair_global_defaults(
                     conn,
                     now=now,
                     summary=summary,
@@ -283,6 +289,7 @@ class ManagedSystemDefaultsRepairer:
                         conn,
                         organization=organization,
                         control_plane=control_plane,
+                        global_agents_by_key=global_agents_by_key,
                         now=now,
                         summary=summary,
                     )
@@ -321,7 +328,7 @@ class ManagedSystemDefaultsRepairer:
         *,
         now: datetime,
         summary: dict[str, int],
-    ) -> McpServerDefinition:
+    ) -> tuple[McpServerDefinition, dict[str, AgentDefinition]]:
         for provider in await self._default_llm_providers(now=now):
             await self._repository.upsert_llm_provider(conn, provider)
             summary["llm_providers"] += 1
@@ -398,7 +405,11 @@ class ManagedSystemDefaultsRepairer:
         )
         summary["iam_roles"] += 1
         summary["internal_mcp_bindings"] += 1
-        return control_plane
+        return control_plane, {
+            agent.agent_key: agent
+            for agent in global_agents
+            if agent.agent_key is not None
+        }
 
     async def _repair_organization_context(
         self,
@@ -406,6 +417,7 @@ class ManagedSystemDefaultsRepairer:
         *,
         organization: Organization,
         control_plane: McpServerDefinition,
+        global_agents_by_key: dict[str, AgentDefinition],
         now: datetime,
         summary: dict[str, int],
     ) -> None:
@@ -414,13 +426,24 @@ class ManagedSystemDefaultsRepairer:
             desired=self._default_project_for_organization(organization, now=now),
             summary=summary,
         )
-        _ = default_project
+        await self._repair_project_subject_access(
+            conn,
+            project=default_project,
+            now=now,
+            summary=summary,
+        )
         administration_project = await self._repair_project(
             conn,
             desired=self._administration_project_for_organization(
                 organization,
                 now=now,
             ),
+            summary=summary,
+        )
+        await self._repair_project_subject_access(
+            conn,
+            project=administration_project,
+            now=now,
             summary=summary,
         )
         operations_workspace = self._operations_workspace_for_organization(
@@ -440,6 +463,24 @@ class ManagedSystemDefaultsRepairer:
             organization.organization_id == SYSTEM_BASE_ORGANIZATION_ID
             or organization.slug == "system-base"
         ):
+            steward_agent = global_agents_by_key.get("steward")
+            if steward_agent is not None:
+                await self._repository.upsert_participant(
+                    conn,
+                    self._operations_participant_for_agent(
+                        workspace=operations_workspace,
+                        agent=steward_agent,
+                        now=now,
+                    ),
+                )
+                summary["participants"] += 1
+                await self._repair_agent_project_access(
+                    conn,
+                    project_id=administration_project.project_id,
+                    system_agent_id=steward_agent.agent_id,
+                    now=now,
+                    summary=summary,
+                )
             return
 
         curator_agent = self._curator_agent_for_organization(organization, now=now)
@@ -468,17 +509,12 @@ class ManagedSystemDefaultsRepairer:
             ),
         )
         summary["internal_mcp_bindings"] += 1
-        await self._repository.upsert_project_access_binding(
+        await self._repair_agent_project_access(
             conn,
-            ProjectAccessBinding(
-                project_id=administration_project.project_id,
-                subject_type="agent",
-                system_agent_id=curator_agent.agent_id,
-                role="creator",
-                created_at=now,
-                updated_at=now,
-                metadata={"managed": True, "source": "operational_agent"},
-            ),
+            project_id=administration_project.project_id,
+            system_agent_id=curator_agent.agent_id,
+            now=now,
+            summary=summary,
         )
         summary["system_agents"] += 1
         summary["iam_roles"] += 1
@@ -509,6 +545,45 @@ class ManagedSystemDefaultsRepairer:
         await self._repository.upsert_project(conn, desired)
         summary["projects"] += 1
         return desired
+
+    async def _repair_project_subject_access(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        project: Project,
+        now: datetime,
+        summary: dict[str, int],
+    ) -> None:
+        for binding in _project_subject_access_bindings(project, now=now):
+            await self._repository.upsert_project_access_binding(conn, binding)
+            summary["project_access_bindings"] += 1
+
+    async def _repair_agent_project_access(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        project_id: UUID,
+        system_agent_id: UUID,
+        now: datetime,
+        summary: dict[str, int],
+    ) -> None:
+        await self._repository.upsert_project_access_binding(
+            conn,
+            ProjectAccessBinding(
+                project_id=project_id,
+                subject_type="agent",
+                system_agent_id=system_agent_id,
+                role="creator",
+                created_at=now,
+                updated_at=now,
+                metadata={
+                    "seeded": True,
+                    "managed": True,
+                    "source": "operational_agent",
+                },
+            ),
+        )
+        summary["project_access_bindings"] += 1
 
     async def _find_system_agent_by_key(
         self,
@@ -1130,7 +1205,7 @@ class ManagedSystemDefaultsRepairer:
             organization_id=None,
             name="platform_steward",
             description="Least-privilege platform operations permissions for Steward.",
-            permissions=list(_OPERATIONAL_AGENT_PERMISSIONS),
+            permissions=list(_STEWARD_AGENT_PERMISSIONS),
             created_at=now,
             updated_at=now,
             metadata={"seeded": True, "managed": True, "agent_key": "steward"},
@@ -1363,6 +1438,53 @@ class ManagedSystemDefaultsRepairer:
             server_id=server_id,
             now=now,
         )
+
+
+def _project_subject_access_bindings(
+    project: Project,
+    *,
+    now: datetime,
+) -> list[ProjectAccessBinding]:
+    bindings: list[ProjectAccessBinding] = []
+    owner_subject = (project.owner_user_id, project.owner_system_agent_id)
+    creator_subject = (project.creator_user_id, project.creator_system_agent_id)
+
+    def append_binding(
+        *,
+        role: str,
+        user_id: UUID | None,
+        system_agent_id: UUID | None,
+        source: str,
+    ) -> None:
+        if user_id is None and system_agent_id is None:
+            return
+        bindings.append(
+            ProjectAccessBinding(
+                project_id=project.project_id,
+                subject_type="agent" if system_agent_id is not None else "user",
+                user_id=user_id,
+                system_agent_id=system_agent_id,
+                role=role,
+                created_at=project.created_at,
+                updated_at=now,
+                metadata={"seeded": True, "managed": True, "source": source},
+            )
+        )
+
+    if owner_subject != creator_subject:
+        append_binding(
+            role="owner",
+            user_id=project.owner_user_id,
+            system_agent_id=project.owner_system_agent_id,
+            source="project_owner",
+        )
+    append_binding(
+        role="creator",
+        user_id=project.creator_user_id,
+        system_agent_id=project.creator_system_agent_id,
+        source="project_creator",
+    )
+    return bindings
 
 
 def default_project_for_organization(
@@ -1604,7 +1726,7 @@ def curator_iam_role_for_organization(
         organization_id=organization_id,
         name="organization_curator",
         description="Least-privilege organization operations permissions for Curator.",
-        permissions=list(_OPERATIONAL_AGENT_PERMISSIONS),
+        permissions=list(_CURATOR_AGENT_PERMISSIONS),
         created_at=now,
         updated_at=now,
         metadata={
