@@ -80,6 +80,8 @@ from open_talon_contracts.models import (  # noqa: E402
     MemoryEntry,
     MemoryProviderDefinition,
     MemoryProviderRecord,
+    McpServerDefinition,
+    McpToolDefinition,
     Organization,
     ParticipantProfile,
     PublicationReview,
@@ -123,6 +125,7 @@ from open_talon_contracts.models import (  # noqa: E402
 )
 from core_collab.kernel import ANCHOR_AGENT_ID, CollaborationKernel  # noqa: E402
 from core_collab.repository import CollaborationRepository  # noqa: E402
+from core_collab.system_defaults import ManagedSystemDefaultsRepairer  # noqa: E402
 
 
 class _FakeTransaction:
@@ -215,6 +218,8 @@ class FakeRepository:
         self._publication_reviews = {}
         self._system_tools = {}
         self._llm_providers = {}
+        self._mcp_servers = {}
+        self._mcp_server_tools = {}
         self._git_repositories = {}
         self._workspace_sequences = {}
         self._thread_sequences = {}
@@ -408,6 +413,9 @@ class FakeRepository:
 
     async def upsert_organization(self, conn, organization: Organization) -> None:
         self._organizations[organization.organization_id] = organization
+
+    async def list_organizations(self):
+        return list(self._organizations.values())
 
     async def fetch_organization(self, organization_id):
         return self._organizations.get(organization_id)
@@ -739,8 +747,12 @@ class FakeRepository:
         else:
             workspace_entries.append(entry)
 
-    async def list_system_tools(self):
-        return list(self._system_tools.values())
+    async def list_system_tools(self, *, scope="global", organization_id=None):
+        return [
+            tool
+            for tool in self._system_tools.values()
+            if tool.scope == scope and tool.organization_id == organization_id
+        ]
 
     async def fetch_system_tool(self, tool_id):
         return self._system_tools.get(tool_id)
@@ -748,14 +760,22 @@ class FakeRepository:
     async def upsert_system_tool(self, conn, tool: SystemToolDefinition) -> None:
         self._system_tools[tool.tool_id] = tool
 
-    async def list_llm_providers(self):
-        return list(self._llm_providers.values())
+    async def list_llm_providers(self, *, scope="global", organization_id=None):
+        return [
+            provider
+            for provider in self._llm_providers.values()
+            if provider.scope == scope and provider.organization_id == organization_id
+        ]
 
     async def fetch_llm_provider(self, provider_id):
         return self._llm_providers.get(provider_id)
 
-    async def list_memory_providers(self):
-        return list(self._memory_providers.values())
+    async def list_memory_providers(self, *, scope="global", organization_id=None):
+        return [
+            provider
+            for provider in self._memory_providers.values()
+            if provider.scope == scope and provider.organization_id == organization_id
+        ]
 
     async def list_enabled_memory_providers(self):
         return [provider for provider in self._memory_providers.values() if provider.enabled]
@@ -763,14 +783,45 @@ class FakeRepository:
     async def fetch_memory_provider(self, provider_id):
         return self._memory_providers.get(provider_id)
 
-    async def fetch_memory_provider_by_key(self, provider_key):
+    async def fetch_memory_provider_by_key(
+        self,
+        provider_key,
+        *,
+        scope="global",
+        organization_id=None,
+    ):
         for provider in self._memory_providers.values():
-            if provider.provider_key == provider_key:
+            if (
+                provider.provider_key == provider_key
+                and provider.scope == scope
+                and provider.organization_id == organization_id
+            ):
                 return provider
         return None
 
     async def upsert_memory_provider(self, conn, provider: MemoryProviderDefinition) -> None:
         self._memory_providers[provider.provider_id] = provider
+
+    async def list_mcp_servers(self, *, scope="global", organization_id=None):
+        return [
+            server
+            for server in self._mcp_servers.values()
+            if server.scope == scope and server.organization_id == organization_id
+        ]
+
+    async def upsert_mcp_server(self, conn, server: McpServerDefinition) -> None:
+        self._mcp_servers[server.server_id] = server
+
+    async def replace_mcp_server_capabilities(
+        self,
+        conn,
+        *,
+        server_id,
+        tools: list[McpToolDefinition],
+        resources,
+        prompts,
+    ):
+        self._mcp_server_tools[server_id] = list(tools)
 
     async def delete_memory_provider(self, conn, *, provider_id):
         return self._memory_providers.pop(provider_id, None) is not None
@@ -2804,6 +2855,67 @@ async def test_kernel_setup_schema_backfills_existing_agents_without_contracts()
         "Open questions",
         "Next action",
     ]
+
+
+@pytest.mark.asyncio
+async def test_managed_system_defaults_repairer_recreates_managed_records():
+    repository = FakeRepository()
+    repository._agents.clear()
+    repository._llm_providers.clear()
+    repository._memory_providers.clear()
+
+    summary = await ManagedSystemDefaultsRepairer(repository).repair()
+
+    assert summary["organizations"] >= 2
+    assert await repository.fetch_organization_by_slug("default") is not None
+    assert await repository.fetch_organization_by_slug("system-base") is not None
+
+    default_organization = await repository.fetch_organization_by_slug("default")
+    system_base = await repository.fetch_organization_by_slug("system-base")
+    assert await repository.fetch_project_by_slug(
+        organization_id=default_organization.organization_id,
+        slug="default",
+    )
+    assert await repository.fetch_project_by_slug(
+        organization_id=default_organization.organization_id,
+        slug="administration",
+    )
+    assert await repository.fetch_project_by_slug(
+        organization_id=system_base.organization_id,
+        slug="administration",
+    )
+
+    agent_keys = {agent.agent_key for agent in repository._agents.values()}
+    assert {"tinker", "steward", "curator", "anchor"}.issubset(agent_keys)
+    assert any(agent.display_name == "Reasoning Planner" for agent in repository._agents.values())
+
+    provider_keys = {provider.engine_id for provider in repository._llm_providers.values()}
+    assert {"local-ollama", "openai-responses"}.issubset(provider_keys)
+    memory_keys = {provider.provider_key for provider in repository._memory_providers.values()}
+    assert {"postgres", "mem0"}.issubset(memory_keys)
+
+    tool_names = {tool.name for tool in repository._system_tools.values()}
+    assert "generated_tool_repo_bootstrap" in tool_names
+    assert "generated_tool_registry_pull_verify" in tool_names
+    tinker = next(agent for agent in repository._agents.values() if agent.agent_key == "tinker")
+    tinker_internal_tools = {
+        tool.name for tool in repository._agent_internal_tools[tinker.agent_id]
+    }
+    assert "generated_tool_repo_bootstrap" in tinker_internal_tools
+    assert "generated_tool_registry_pull_verify" in tinker_internal_tools
+
+    control_plane = next(iter(repository._mcp_servers.values()))
+    assert control_plane.server_key == "open_talon_control_plane"
+    assert {
+        "organizations.list",
+        "workspaces.create",
+        "iam.agent_identities.list",
+    }.issubset({tool.tool_name for tool in repository._mcp_server_tools[control_plane.server_id]})
+
+    steward = next(agent for agent in repository._agents.values() if agent.agent_key == "steward")
+    assert (steward.agent_id, control_plane.server_id) in repository._agent_internal_mcp_servers
+    curator = next(agent for agent in repository._agents.values() if agent.agent_key == "curator")
+    assert (curator.agent_id, control_plane.server_id) in repository._agent_internal_mcp_servers
 
 
 def test_kernel_run_output_includes_standardized_usage_payload():

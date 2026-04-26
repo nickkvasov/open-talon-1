@@ -702,6 +702,9 @@ That means:
 - `./open-talon stop` and `docker compose down` stop containers without wiping local data
 - `docker compose down -v` only removes Docker-managed volumes; it does not remove these bind-mounted directories
 - OpenBao secrets, Postgres state, Forgejo repositories, Ollama model data, and other local payloads survive normal restarts until you remove the matching `infrastructure/data/...` directory yourself
+- `./open-talon repair` starts the local stack and idempotently restores missing managed defaults and operational-agent machine identities in an existing local system
+- `./open-talon reset --yes --init` stops the stack, removes local runtime data under `infrastructure/data`, preserves the Ollama model cache by default, and starts a fresh system initialized with the checked-in defaults
+- pass `--include-models` to `./open-talon reset` only when you also want to discard the local Ollama model cache
 
 > **Note**: Do not commit `infrastructure/data/`. It contains local databases, secret storage, model artifacts, and other large runtime data already excluded by `.gitignore`.
 
@@ -761,7 +764,7 @@ curl -X POST http://127.0.0.1:8200/v1/secret/data/open-talon/llm/openai \
   -d '{"data":{"api_key":"sk-..."}}'
 ```
 
-The local OpenBao container uses persistent file storage, so secrets survive `./open-talon stop` and `docker compose down`. To fully reset the local secret store, remove `infrastructure/data/openbao` before starting the stack again.
+The local OpenBao container uses persistent file storage, so secrets survive `./open-talon stop` and `docker compose down`. To fully reset the local secret store together with the rest of the local runtime state, use `./open-talon reset --yes --init`; for a narrower manual reset, remove `infrastructure/data/openbao` before starting the stack again.
 
 The runtime secret provider will then try `env` first and `openbao` second by default.
 

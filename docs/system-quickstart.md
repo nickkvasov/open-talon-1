@@ -49,6 +49,28 @@ Launch the local infrastructure and the supported Python processes:
 
 The launcher waits for both the gateway readiness endpoint and the configured OIDC discovery document before it exits successfully. In local development that means the Keycloak browser, device-flow, and machine-credential auth surfaces should be ready when the command returns.
 
+For a fresh local system with the seeded defaults, use:
+
+```bash
+./open-talon init
+```
+
+That command delegates to the normal launcher, then waits until the migration-seeded defaults and managed operational-agent identities are present. To wipe local runtime state and then initialize a fresh system, run:
+
+```bash
+./open-talon reset --yes --init
+```
+
+Reset removes local service state under `infrastructure/data` while preserving the Ollama model cache by default. Add `--include-models` only when you want to remove downloaded local models too.
+
+If an existing local system is missing managed defaults after a restart, migration, or partial reset, run:
+
+```bash
+./open-talon repair
+```
+
+Repair starts the stack by default, restores the managed seed records, and refreshes the operational-agent machine identities.
+
 This starts:
 
 - `gateway-edge`
@@ -212,7 +234,7 @@ Current admin-web highlights:
 
 All local defaults come from [`infrastructure/.env.example`](../infrastructure/.env.example).
 
-OpenBao local data is persistent. Secrets survive `./open-talon stop` and `docker compose down` until you remove `infrastructure/data/openbao`.
+OpenBao local data is persistent. Secrets survive `./open-talon stop` and `docker compose down` until you run `./open-talon reset --yes --init` or remove `infrastructure/data/openbao` manually.
 
 Relevant layered-memory defaults from [`infrastructure/.env.example`](../infrastructure/.env.example):
 

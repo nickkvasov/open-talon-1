@@ -399,6 +399,9 @@ user_client_cmd() {
 usage() {
   cat <<EOF
 Usage:
+  ./open-talon init [--memgraph] [--wait-seconds seconds]
+  ./open-talon repair [--no-start] [--memgraph] [--skip-identities]
+  ./open-talon reset --yes [--init] [--include-models] [--memgraph]
   ./open-talon start [--memgraph]
   ./open-talon stop
   ./open-talon tui [extra tui args]
@@ -411,6 +414,18 @@ EOF
 }
 
 case "${1:-}" in
+  init)
+    shift
+    exec "${ROOT_DIR}/scripts/system-init.sh" "$@"
+    ;;
+  repair)
+    shift
+    exec "${ROOT_DIR}/scripts/system-repair.sh" "$@"
+    ;;
+  reset)
+    shift
+    exec "${ROOT_DIR}/scripts/system-reset.sh" "$@"
+    ;;
   start)
     shift
     start_cmd "$@"

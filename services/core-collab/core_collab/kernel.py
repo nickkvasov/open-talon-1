@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import hashlib
 import json
 import logging
 from pathlib import Path
@@ -41,21 +40,13 @@ from .contracts import (
     AgentIdentity,
     AgentEndpoint,
     AgentExecutionContext,
-    AgentHarness,
     AgentInternalMcpServer,
     AgentInternalToolBinding,
-    AgentInteractionContract,
-    AgentMemoryPolicy,
-    AgentPlanningPolicy,
-    AgentResponseContract,
     AgentRunResult,
     AgentRoleBinding,
-    AgentStopPolicy,
     CompletionRule,
     AgentToolCallDraft,
     AgentTaskRouting,
-    AgentToolUsePolicy,
-    AgentValidationPolicy,
     AuditChainVerificationResult,
     AuditEvent,
     AuditEventDraft,
@@ -224,100 +215,24 @@ from .results import (
     WorkspaceToolCommandResult,
 )
 from .runtime_execution import RuntimeExecutionService
+from .system_defaults import (
+    ANCHOR_AGENT_ID,
+    ANCHOR_TASK_KIND,
+    CONTROL_PLANE_MCP_SERVER_ID,
+    SYSTEM_BASE_ORGANIZATION_ID,
+    administration_project_for_organization as managed_administration_project_for_organization,
+    anchor_agent_definition as managed_anchor_agent_definition,
+    anchor_participant_for_workspace as managed_anchor_participant_for_workspace,
+    curator_agent_for_organization as managed_curator_agent_for_organization,
+    curator_iam_role_for_organization as managed_curator_iam_role_for_organization,
+    curator_internal_mcp_binding as managed_curator_internal_mcp_binding,
+    default_project_for_organization as managed_default_project_for_organization,
+    ensure_anchor_attached_for_workspace as managed_ensure_anchor_attached_for_workspace,
+    operations_participant_for_agent as managed_operations_participant_for_agent,
+    operations_workspace_for_organization as managed_operations_workspace_for_organization,
+)
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_BASE_ORGANIZATION_ID = UUID("22222222-2222-2222-2222-222222222222")
-STEWARD_AGENT_ID = UUID("44444444-4444-4444-4444-444444444445")
-ANCHOR_AGENT_ID = UUID("44444444-4444-4444-4444-444444444446")
-CONTROL_PLANE_MCP_SERVER_ID = UUID("66666666-6666-6666-6666-666666666666")
-PLATFORM_STEWARD_ROLE_ID = UUID("77777777-7777-7777-7777-777777777771")
-SYSTEM_ACTOR_ID = UUID("00000000-0000-0000-0000-000000000000")
-ANCHOR_TASK_KIND = "workspace_topic_moderation"
-ANCHOR_ROLE = "workspace topic alignment reviewer"
-ANCHOR_CAPABILITIES = [
-    "reviews messages for alignment with the workspace topic",
-    "applies strict balanced or open topic-freedom policy",
-    "blocks off-topic messages before publication in strict workspaces",
-    "flags conversation drift after publication in balanced and open workspaces",
-    "privately explains blocked messages to the issuer when enabled",
-]
-
-_CURATOR_PERMISSIONS = [
-    "organization.read",
-    "organization.members.read",
-    "project.read",
-    "project.write",
-    "workspace.list",
-    "workspace.read",
-    "organization.runtime.read",
-    "agent_catalog.read",
-    "agent_catalog.write",
-    "tool_catalog.read",
-    "tool_catalog.write",
-    "provider.llm.read",
-    "provider.llm.write",
-    "provider.llm.validate",
-    "provider.memory.read",
-    "provider.memory.write",
-    "provider.memory.validate",
-    "provider.mcp.read",
-    "provider.mcp.write",
-    "provider.mcp.validate",
-    "git_registry.read",
-    "git_registry.write",
-    "asset_catalog.read",
-    "asset_catalog.publish",
-    "asset_catalog.link",
-    "asset_catalog.activate",
-    "tool_generation.read",
-    "tool_generation.review",
-    "audit.read",
-    "audit.verify",
-]
-
-_CURATOR_CONTROL_PLANE_ALLOWLIST = [
-    "session.get_identity",
-    "session.get_permissions",
-    "session.list_scopes",
-    "session.set_scope",
-    "organizations.get",
-    "organizations.members.list",
-    "projects.list",
-    "projects.create",
-    "projects.get",
-    "projects.update",
-    "projects.access.list",
-    "projects.access.upsert",
-    "workspaces.list",
-    "workspaces.create",
-    "workspaces.get",
-    "threads.create",
-    "threads.list",
-    "threads.get",
-    "threads.timeline.get",
-    "threads.messages.create",
-    "memory.workspace.list",
-    "memory.workspace.create",
-    "memory.thread.search",
-    "agent_catalog.list",
-    "agent_catalog.bundle.validate",
-    "agent_catalog.bundle.publish",
-    "tool_catalog.list",
-    "llm_providers.list",
-    "memory_providers.list",
-    "mcp_servers.list",
-    "runtime.overview.get",
-    "audit.events.list",
-    "audit.chains.verify",
-    "agent_git.repo.ensure",
-    "agent_git.worktree.create",
-    "agent_git.file.read",
-    "agent_git.file.write",
-    "agent_git.diff.preview",
-    "agent_git.commit.push",
-    "iam.agent_identities.list",
-]
 
 _DEFAULT_WORKSPACE_ROLE_DEFINITIONS = {
     "admin": "Manages the workspace, participants, tools, and provider configuration.",
@@ -9374,23 +9289,14 @@ class CollaborationKernel:
         now: datetime,
     ) -> Project:
         subject = CollaborationKernel._actor_project_subject(actor)
-        return Project(
-            project_id=uuid5(
-                NAMESPACE_URL,
-                f"open-talon-default-project:{organization.organization_id}",
-            ),
-            organization_id=organization.organization_id,
-            slug="default",
-            name="Default Project",
-            description="Default project for workspaces that do not specify a project.",
+        return managed_default_project_for_organization(
+            organization,
             created_by=CollaborationKernel._actor_user_id(actor) or actor.participant_id,
             creator_user_id=subject.user_id,
             creator_system_agent_id=subject.system_agent_id,
             owner_user_id=subject.user_id,
             owner_system_agent_id=subject.system_agent_id,
-            created_at=now,
-            updated_at=now,
-            metadata={"seeded": True, "managed": True},
+            now=now,
         )
 
     @staticmethod
@@ -9401,23 +9307,14 @@ class CollaborationKernel:
         now: datetime,
     ) -> Project:
         subject = CollaborationKernel._actor_project_subject(actor)
-        return Project(
-            project_id=uuid5(
-                NAMESPACE_URL,
-                f"open-talon-administration-project:{organization.organization_id}",
-            ),
-            organization_id=organization.organization_id,
-            slug="administration",
-            name="Administration",
-            description="Managed project for operational agents and administrative workspaces.",
+        return managed_administration_project_for_organization(
+            organization,
             created_by=CollaborationKernel._actor_user_id(actor) or actor.participant_id,
             creator_user_id=subject.user_id,
             creator_system_agent_id=subject.system_agent_id,
             owner_user_id=subject.user_id,
             owner_system_agent_id=subject.system_agent_id,
-            created_at=now,
-            updated_at=now,
-            metadata={"seeded": True, "managed": True, "administration": True},
+            now=now,
         )
 
     @staticmethod
@@ -9427,197 +9324,15 @@ class CollaborationKernel:
         *,
         now: datetime,
     ) -> Workspace:
-        is_system_base = organization.organization_id == SYSTEM_BASE_ORGANIZATION_ID
-        return Workspace(
-            workspace_id=uuid5(
-                NAMESPACE_URL,
-                f"open-talon-operations-workspace:{organization.organization_id}",
-            ),
-            organization_id=organization.organization_id,
-            project_id=project.project_id,
-            name="System Operations" if is_system_base else "Organization Operations",
-            description=(
-                "Managed workspace for platform operations."
-                if is_system_base
-                else "Managed workspace for organization operations."
-            ),
-            owner_user_id=None,
-            created_by=project.created_by,
-            creator_user_id=project.creator_user_id,
-            creator_system_agent_id=project.creator_system_agent_id,
-            created_at=now,
-            updated_at=now,
-            metadata={
-                "seeded": True,
-                "managed": True,
-                "administration": True,
-                "operations_workspace": True,
-                "operations_level": "system" if is_system_base else "organization",
-            },
+        return managed_operations_workspace_for_organization(
+            organization,
+            project,
+            now=now,
         )
 
     @staticmethod
     def _anchor_agent_definition(*, now: datetime) -> AgentDefinition:
-        return AgentDefinition(
-            agent_id=ANCHOR_AGENT_ID,
-            agent_key="anchor",
-            scope="global",
-            organization_id=None,
-            display_name="Anchor",
-            description=(
-                "Reviews workspace communication for topic fit, applies the workspace "
-                "topic-freedom policy, and explains blocked messages when configured."
-            ),
-            role=ANCHOR_ROLE,
-            capabilities=list(ANCHOR_CAPABILITIES),
-            endpoint=AgentEndpoint(
-                kind="system",
-                engine_id="local-ollama",
-                provider="ollama",
-            ),
-            system_prompt=(
-                "You are Anchor. Review the supplied candidate workspace communication "
-                "only for fit with the workspace topic and moderation policy. Do not "
-                "provide general safety review, style review, or task assistance. "
-                "Return only the JSON object required by your response contract."
-            ),
-            harness=AgentHarness(
-                summary="Reviews candidate workspace communication for topic fit using the workspace moderation policy.",
-                operating_principles=[
-                    "Judge topic relevance, not general quality or style.",
-                    "Use the workspace topic, description, harness, and configured policy as the authority.",
-                    "Prefer allowing messages when relevance is plausible outside strict mode.",
-                    "Give concise, actionable issuer guidance when a strict-mode message is blocked.",
-                ],
-                planning=AgentPlanningPolicy(
-                    plan_before_act=False,
-                    incremental_execution=False,
-                    one_goal_at_a_time=True,
-                    explicit_uncertainty=True,
-                ),
-                tool_use_policy=AgentToolUsePolicy(
-                    prefer_existing_workspace_tools=False,
-                    read_before_write=False,
-                    inspect_schema_before_use=False,
-                    cite_tool_results_in_reasoning=False,
-                    verify_side_effects_after_mutation=False,
-                    selection_principles=[
-                        "Do not call workspace tools during ordinary topic review.",
-                        "Use only the moderation context supplied with the task.",
-                    ],
-                    fallback_when_no_tool_fits=(
-                        "Return a structured moderation decision from the supplied context."
-                    ),
-                ),
-                memory_policy=AgentMemoryPolicy(
-                    use_run_memory=False,
-                    use_thread_memory=True,
-                    use_workspace_memory=False,
-                ),
-                validation_policy=AgentValidationPolicy(
-                    require_evidence_for_claims=True,
-                    require_tool_results_for_completion=False,
-                    require_tests_before_done=False,
-                ),
-                stop_policy=AgentStopPolicy(
-                    completion_conditions=[
-                        "Return one structured moderation decision for the candidate message."
-                    ],
-                    stop_conditions=[
-                        "Do not continue into conversation or task assistance."
-                    ],
-                    max_turns=1,
-                ),
-                metadata={
-                    "managed": True,
-                    "agent_key": "anchor",
-                    "moderation_agent": True,
-                },
-            ),
-            interaction_contract=AgentInteractionContract(
-                instructions=[
-                    "Review only the supplied candidate message for workspace-topic fit.",
-                    "Apply the workspace moderation policy supplied in task instructions.",
-                    "Return only a JSON moderation decision.",
-                ],
-                response_contract=AgentResponseContract(
-                    format="json",
-                    title="Topic moderation decision",
-                    guidance=[
-                        "Use decision=allow when the message fits the topic policy.",
-                        "Use decision=block for strict-mode messages that must not be published.",
-                        "Use decision=flag for balanced or open mode messages that should remain visible but be marked as drift.",
-                    ],
-                    json_schema={
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": [
-                            "decision",
-                            "relatedness",
-                            "confidence",
-                            "reason",
-                        ],
-                        "properties": {
-                            "decision": {
-                                "type": "string",
-                                "enum": ["allow", "block", "flag"],
-                            },
-                            "relatedness": {
-                                "type": "string",
-                                "enum": [
-                                    "direct",
-                                    "adjacent",
-                                    "unrelated",
-                                    "blocked_topic",
-                                    "unknown",
-                                ],
-                            },
-                            "confidence": {
-                                "type": "number",
-                                "minimum": 0,
-                                "maximum": 1,
-                            },
-                            "reason": {"type": "string"},
-                            "issuer_explanation": {"type": "string"},
-                        },
-                    },
-                ),
-                completion_criteria=[
-                    "The decision matches the supplied workspace topic-freedom policy.",
-                    "The reason cites concrete topic fit or topic drift without exposing hidden policy data.",
-                ],
-                metadata={
-                    "contract_version": 1,
-                    "seeded": True,
-                    "agent_key": "anchor",
-                },
-            ),
-            definition={
-                "runtime": {
-                    "engine_id": "local-ollama",
-                    "provider": "ollama",
-                    "preferred_capabilities": ["local", "ollama"],
-                    "preferred_locality": "host",
-                },
-                "seeded": True,
-                "managed": True,
-                "agent_key": "anchor",
-                "moderation_agent": True,
-                "task_routing": {
-                    "normal_message_fanout": False,
-                    "accepted_task_kinds": [ANCHOR_TASK_KIND],
-                },
-            },
-            created_by=SYSTEM_ACTOR_ID,
-            created_at=now,
-            updated_at=now,
-            metadata={
-                "managed": True,
-                "seeded": True,
-                "agent_key": "anchor",
-                "moderation_agent": True,
-            },
-        )
+        return managed_anchor_agent_definition(now=now)
 
     @staticmethod
     def _anchor_participant_for_workspace(
@@ -9625,35 +9340,7 @@ class CollaborationKernel:
         *,
         now: datetime,
     ) -> ParticipantProfile:
-        participant_digest = hashlib.md5(  # noqa: S324 - deterministic identifier, not security.
-            f"open-talon-anchor-participant:{workspace_id}".encode("utf-8")
-        ).hexdigest()
-        return ParticipantProfile(
-            participant_id=UUID(hex=participant_digest),
-            workspace_id=workspace_id,
-            participant_type="agent",
-            system_agent_id=ANCHOR_AGENT_ID,
-            display_name="Anchor",
-            description=(
-                "Reviews workspace communication for topic fit, applies the workspace "
-                "topic-freedom policy, and explains blocked messages when configured."
-            ),
-            roles=[ANCHOR_ROLE],
-            capabilities=list(ANCHOR_CAPABILITIES),
-            status="active",
-            visibility_scope="workspace",
-            created_at=now,
-            updated_at=now,
-            metadata={
-                "seeded": True,
-                "managed": True,
-                "agent_key": "anchor",
-                "task_routing": {
-                    "normal_message_fanout": False,
-                    "accepted_task_kinds": [ANCHOR_TASK_KIND],
-                },
-            },
-        )
+        return managed_anchor_participant_for_workspace(workspace_id, now=now)
 
     async def _ensure_anchor_attached_for_workspace(
         self,
@@ -9662,11 +9349,12 @@ class CollaborationKernel:
         *,
         now: datetime,
     ) -> ParticipantProfile:
-        agent = self._anchor_agent_definition(now=now)
-        participant = self._anchor_participant_for_workspace(workspace_id, now=now)
-        await self._repository.upsert_system_agent(conn, agent)
-        await self._repository.upsert_participant(conn, participant)
-        return participant
+        return await managed_ensure_anchor_attached_for_workspace(
+            self._repository,
+            conn,
+            workspace_id,
+            now=now,
+        )
 
     @staticmethod
     def _curator_agent_for_organization(
@@ -9674,48 +9362,7 @@ class CollaborationKernel:
         *,
         now: datetime,
     ) -> AgentDefinition:
-        return AgentDefinition(
-            agent_id=uuid5(
-                NAMESPACE_URL,
-                f"open-talon-curator-agent:{organization.organization_id}",
-            ),
-            agent_key="curator",
-            scope="organization",
-            organization_id=organization.organization_id,
-            display_name="Curator",
-            description=(
-                "Manages organization, project, and workspace operations through "
-                "authorized control-plane APIs."
-            ),
-            role="organization operations curator",
-            capabilities=[
-                "manages organization projects and workspaces through authorized control-plane tools",
-                "coordinates organization-scoped workspace administration",
-                "reviews organization audit and runtime health",
-                "keeps organization resources inside tenant boundaries",
-                "maintains managed organization operations contexts",
-            ],
-            endpoint=AgentEndpoint(
-                kind="system",
-                engine_id="openai-responses",
-                provider="openai",
-            ),
-            system_prompt=(
-                "You are Curator, the organization operations agent. Operate only "
-                "inside your organization through authorized APIs and MCP tools. "
-                "Respect organization boundaries and use the Administration project "
-                "for operational work."
-            ),
-            created_by=organization.created_by,
-            created_at=now,
-            updated_at=now,
-            metadata={
-                "managed": True,
-                "seeded": True,
-                "agent_key": "curator",
-                "organization_id": str(organization.organization_id),
-            },
-        )
+        return managed_curator_agent_for_organization(organization, now=now)
 
     @staticmethod
     def _curator_iam_role_for_organization(
@@ -9723,26 +9370,7 @@ class CollaborationKernel:
         *,
         now: datetime,
     ) -> IamRoleDefinition:
-        return IamRoleDefinition(
-            role_id=uuid5(
-                NAMESPACE_URL,
-                f"open-talon-curator-iam-role:{organization_id}",
-            ),
-            scope="organization",
-            subject_kind="agent",
-            organization_id=organization_id,
-            name="organization_curator",
-            description="Least-privilege organization operations permissions for Curator.",
-            permissions=list(_CURATOR_PERMISSIONS),
-            created_at=now,
-            updated_at=now,
-            metadata={
-                "seeded": True,
-                "managed": True,
-                "agent_key": "curator",
-                "organization_id": str(organization_id),
-            },
-        )
+        return managed_curator_iam_role_for_organization(organization_id, now=now)
 
     @staticmethod
     def _operations_participant_for_agent(
@@ -9751,23 +9379,10 @@ class CollaborationKernel:
         agent: AgentDefinition,
         now: datetime,
     ) -> ParticipantProfile:
-        return ParticipantProfile(
-            participant_id=uuid5(
-                NAMESPACE_URL,
-                f"open-talon-operations-participant:{workspace.workspace_id}:{agent.agent_id}",
-            ),
-            workspace_id=workspace.workspace_id,
-            participant_type="agent",
-            system_agent_id=agent.agent_id,
-            display_name=agent.display_name,
-            description=f"{agent.display_name} attached to the managed operations workspace.",
-            roles=[agent.role],
-            capabilities=list(agent.capabilities),
-            status="active",
-            visibility_scope="workspace",
-            created_at=now,
-            updated_at=now,
-            metadata={"seeded": True, "managed": True, "operations_participant": True},
+        return managed_operations_participant_for_agent(
+            workspace=workspace,
+            agent=agent,
+            now=now,
         )
 
     @staticmethod
@@ -9776,26 +9391,10 @@ class CollaborationKernel:
         agent_id: UUID,
         now: datetime,
     ) -> AgentInternalMcpServer:
-        return AgentInternalMcpServer(
-            system_agent_id=agent_id,
+        return managed_curator_internal_mcp_binding(
+            agent_id=agent_id,
             server_id=CONTROL_PLANE_MCP_SERVER_ID,
-            server_key="open_talon_control_plane",
-            display_name="Open Talon Control Plane",
-            description="Managed MCP server exposing authorized Open Talon control-plane APIs.",
-            transport_kind="streamable_http",
-            trust_level="trusted",
-            name_prefix="control_plane__",
-            tool_allowlist=list(_CURATOR_CONTROL_PLANE_ALLOWLIST),
-            tool_denylist=[
-                "organizations.list",
-                "agent_git.file.delete",
-                "agent_git.worktree.discard",
-                "projects.access.remove",
-            ],
-            attached_by=SYSTEM_ACTOR_ID,
-            attached_at=now,
-            updated_at=now,
-            metadata={"seeded": True, "managed": True, "agent_key": "curator"},
+            now=now,
         )
 
     async def _require_workspace_management_role(
