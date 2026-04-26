@@ -258,6 +258,8 @@ Local multi-tenant defaults:
 
 - the migration seeds one organization named `Default Organization` with slug `default`
 - the project migrations seed a `Default Project` in each organization, backfill existing workspaces into it, and backfill project access from project owners and workspace participants
+- operational-agent migrations also seed `System Base / Administration / System Operations` plus an `Administration / Organization Operations` context in every non-system organization
+- new organizations receive both `Default Project` for ordinary workspaces and `Administration` for managed operational workspaces
 - organization slugs are normalized to lowercase hyphenated identifiers; `Acme Ops!!!` becomes `acme-ops`
 - every workspace belongs to a project, and every project belongs to an organization
 - `tui2`, `user-client`, and the admin web auto-select the org when exactly one organization is visible
@@ -293,6 +295,7 @@ Identity and execution boundaries:
 - human identity is global in `users` and `auth_identities`
 - organization membership and membership roles live in `organizations` and `organization_memberships`
 - project grouping lives in `projects`; project creator, owner, editor, and viewer access live in `project_access_bindings`
+- operational agents are normal `system_agents`: `Tinker` advertises `tool generation agent`, `Steward` advertises `platform steward`, and each organization receives a `Curator` advertising `organization curator`
 - organization project catalog listing is organization-permission scoped; specific project structure and project-workspace listings are project-access-scoped
 - agent identity/configuration is global in `system_agents`
 - Git-managed agent authoring is versioned in Forgejo and `agent_definition_versions`, but runtime execution still reads the active `system_agents` projection only.
@@ -559,6 +562,18 @@ Current publication rules:
 - approval requires `tool_generation.review` and `tool_catalog.write`
 - workspace participants with `workspace.tools.write` attach it later with `PUT /v1/workspaces/{workspace_id}/tools/{tool_id}`
 
+## 8B. Operational Agents
+
+The local schema seeds managed operational agents without adding a separate operational profile field:
+
+- `Tinker` (`agent_key=tinker`) has role `tool generation agent` and owns generated-tool authoring behavior.
+- `Steward` (`agent_key=steward`) has role `platform steward` and is attached to `System Base / Administration / System Operations`.
+- `Curator` (`agent_key=curator`) has role `organization curator`; every non-system organization receives one in its `Administration / Organization Operations` workspace.
+
+The operational purpose is advertised through `display_name`, `role`, and `capabilities`. Authorization still comes from IAM role bindings, project access bindings, participant attachment, and MCP/tool allowlists.
+
+`Steward` and `Curator` use the managed `open_talon_control_plane` MCP server for gateway control-plane operations. The runtime mints OIDC client-credentials tokens from `agent_identities.secret_ref` when a private control-plane MCP tool is executed.
+
 External MCP servers are managed separately from Open Talon tools. Register global or organization-scoped MCP servers with `/v1/mcp-servers` or `/v1/organizations/{organization_id}/mcp-servers`, then attach them to a workspace with `PUT /v1/workspaces/{workspace_id}/mcp-servers/{server_id}`. MCP tools, resources, and prompts are rendered in separate agent context sections and are not inserted into `system_tools` or `workspace_tools`.
 
 Useful routes:
@@ -617,6 +632,13 @@ pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s
 ```
 
 The live Tinker system test is marked `integration`, so it is excluded from the default `pytest -q` run by `pytest.ini`. It expects `gemma4:latest` to be available in the local Ollama instance.
+
+Operational-agent live wiring is also behind an explicit env gate:
+
+```bash
+OPEN_TALON_RUN_OPERATIONAL_AGENTS_LIVE=1 \
+  pytest -m integration tests/infrastructure/test_operational_agents_live_system.py -q -s
+```
 
 If you changed schema, auth, routing, or participant identity behavior, run:
 

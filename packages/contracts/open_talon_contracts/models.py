@@ -747,6 +747,31 @@ class WorkspaceMcpServer(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class AgentInternalMcpServer(BaseModel):
+    system_agent_id: UUID
+    server_id: UUID
+    server_key: str
+    display_name: str
+    description: str
+    transport_kind: McpTransportKind = "streamable_http"
+    trust_level: ToolTrustLevel = "sandboxed"
+    server_enabled: bool = True
+    enabled: bool = True
+    tools_enabled: bool = True
+    resources_enabled: bool = False
+    prompts_enabled: bool = False
+    sampling_enabled: bool = False
+    name_prefix: str = ""
+    tool_allowlist: list[str] = Field(default_factory=list)
+    tool_denylist: list[str] = Field(default_factory=list)
+    resource_allowlist: list[str] = Field(default_factory=list)
+    prompt_allowlist: list[str] = Field(default_factory=list)
+    attached_by: UUID
+    attached_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class WorkspaceMcpCapability(BaseModel):
     server_id: UUID
     server_key: str
@@ -2068,6 +2093,7 @@ class CreateMessageRequest(BaseModel):
     target_system_agent_id: UUID | None = None
     target_tool_scope: RegistryScope | None = None
     create_task: bool = True
+    task_instructions: list[str] = Field(default_factory=list)
     requests: list["CreateInteractionRequest"] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -2241,6 +2267,9 @@ class AgentExecutionContext(BaseModel):
     workspace_mcp_resources: list[WorkspaceMcpResource] = Field(default_factory=list)
     workspace_mcp_prompts: list[WorkspaceMcpPrompt] = Field(default_factory=list)
     internal_tools: list[AgentInternalToolBinding] = Field(default_factory=list)
+    internal_mcp_servers: list[AgentInternalMcpServer] = Field(default_factory=list)
+    internal_mcp_tools: list[WorkspaceMcpTool] = Field(default_factory=list)
+    task_instructions: list[str] = Field(default_factory=list)
     messages: list[TimelineMessage] = Field(default_factory=list)
     interaction_requests: list[InteractionRequestDetail] = Field(default_factory=list)
     tool_generation_request: ToolGenerationRequestDetail | None = None

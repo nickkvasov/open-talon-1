@@ -37,7 +37,9 @@ from .contracts import (
     AgentDefinition,
     AgentDefinitionVersion,
     AgentIdentity,
+    AgentEndpoint,
     AgentExecutionContext,
+    AgentInternalMcpServer,
     AgentInternalToolBinding,
     AgentRunResult,
     AgentRoleBinding,
@@ -212,6 +214,88 @@ from .runtime_execution import RuntimeExecutionService
 
 logger = logging.getLogger(__name__)
 
+SYSTEM_BASE_ORGANIZATION_ID = UUID("22222222-2222-2222-2222-222222222222")
+STEWARD_AGENT_ID = UUID("44444444-4444-4444-4444-444444444445")
+CONTROL_PLANE_MCP_SERVER_ID = UUID("66666666-6666-6666-6666-666666666666")
+PLATFORM_STEWARD_ROLE_ID = UUID("77777777-7777-7777-7777-777777777771")
+SYSTEM_ACTOR_ID = UUID("00000000-0000-0000-0000-000000000000")
+
+_CURATOR_PERMISSIONS = [
+    "organization.read",
+    "organization.members.read",
+    "project.read",
+    "project.write",
+    "workspace.list",
+    "workspace.read",
+    "organization.runtime.read",
+    "agent_catalog.read",
+    "agent_catalog.write",
+    "tool_catalog.read",
+    "tool_catalog.write",
+    "provider.llm.read",
+    "provider.llm.write",
+    "provider.llm.validate",
+    "provider.memory.read",
+    "provider.memory.write",
+    "provider.memory.validate",
+    "provider.mcp.read",
+    "provider.mcp.write",
+    "provider.mcp.validate",
+    "git_registry.read",
+    "git_registry.write",
+    "asset_catalog.read",
+    "asset_catalog.publish",
+    "asset_catalog.link",
+    "asset_catalog.activate",
+    "tool_generation.read",
+    "tool_generation.review",
+    "audit.read",
+    "audit.verify",
+]
+
+_CURATOR_CONTROL_PLANE_ALLOWLIST = [
+    "session.get_identity",
+    "session.get_permissions",
+    "session.list_scopes",
+    "session.set_scope",
+    "organizations.get",
+    "organizations.members.list",
+    "projects.list",
+    "projects.create",
+    "projects.get",
+    "projects.update",
+    "projects.access.list",
+    "projects.access.upsert",
+    "workspaces.list",
+    "workspaces.create",
+    "workspaces.get",
+    "threads.create",
+    "threads.list",
+    "threads.get",
+    "threads.timeline.get",
+    "threads.messages.create",
+    "memory.workspace.list",
+    "memory.workspace.create",
+    "memory.thread.search",
+    "agent_catalog.list",
+    "agent_catalog.bundle.validate",
+    "agent_catalog.bundle.publish",
+    "tool_catalog.list",
+    "llm_providers.list",
+    "memory_providers.list",
+    "mcp_servers.list",
+    "runtime.overview.get",
+    "audit.events.list",
+    "audit.chains.verify",
+    "agent_git.repo.ensure",
+    "agent_git.worktree.create",
+    "agent_git.file.read",
+    "agent_git.file.write",
+    "agent_git.diff.preview",
+    "agent_git.commit.push",
+    "iam.agent_identities.list",
+]
+
 _DEFAULT_WORKSPACE_ROLE_DEFINITIONS = {
     "admin": "Manages the workspace, participants, tools, and provider configuration.",
     "supervisor": "Coordinates delivery, reviews work, and guides workspace members without full administrative control.",
@@ -306,6 +390,43 @@ class CollaborationKernel:
             actor=payload.actor,
             now=now,
         )
+        administration_project = self._administration_project_for_organization(
+            organization,
+            actor=payload.actor,
+            now=now,
+        )
+        operations_workspace = self._operations_workspace_for_organization(
+            organization,
+            administration_project,
+            now=now,
+        )
+        curator_agent = (
+            self._curator_agent_for_organization(organization, now=now)
+            if organization.organization_id != SYSTEM_BASE_ORGANIZATION_ID
+            else None
+        )
+        curator_role = (
+            self._curator_iam_role_for_organization(
+                organization.organization_id,
+                now=now,
+            )
+            if curator_agent is not None
+            else None
+        )
+        curator_participant = (
+            self._operations_participant_for_agent(
+                workspace=operations_workspace,
+                agent=curator_agent,
+                now=now,
+            )
+            if curator_agent is not None
+            else None
+        )
+        curator_mcp_binding = (
+            self._curator_internal_mcp_binding(agent_id=curator_agent.agent_id, now=now)
+            if curator_agent is not None
+            else None
+        )
         actor_user_id = self._actor_user_id(payload.actor)
         membership = (
             OrganizationMembership(
@@ -335,6 +456,7 @@ class CollaborationKernel:
                 await self._repository.upsert_organization(conn, organization)
                 if hasattr(self._repository, "upsert_project"):
                     await self._repository.upsert_project(conn, default_project)
+                    await self._repository.upsert_project(conn, administration_project)
                     if hasattr(self._repository, "upsert_project_access_binding"):
                         await self._repository.upsert_project_access_binding(
                             conn,
@@ -346,6 +468,45 @@ class CollaborationKernel:
                                 metadata={"created_by": str(created_by), "managed": True},
                             ),
                         )
+                        await self._repository.upsert_project_access_binding(
+                            conn,
+                            self._project_access_binding(
+                                administration_project.project_id,
+                                self._actor_project_subject(payload.actor),
+                                "creator",
+                                now=now,
+                                metadata={"created_by": str(created_by), "managed": True},
+                            ),
+                        )
+                await self._repository.upsert_workspace(conn, operations_workspace)
+                if curator_agent is not None:
+                    await self._repository.upsert_system_agent(conn, curator_agent)
+                if curator_role is not None and hasattr(
+                    self._repository,
+                    "upsert_iam_role_definition",
+                ):
+                    await self._repository.upsert_iam_role_definition(conn, curator_role)
+                if curator_participant is not None:
+                    await self._repository.upsert_participant(conn, curator_participant)
+                    if hasattr(self._repository, "upsert_project_access_binding"):
+                        await self._repository.upsert_project_access_binding(
+                            conn,
+                            self._project_access_binding(
+                                administration_project.project_id,
+                                ProjectSubjectRef(system_agent_id=curator_agent.agent_id),
+                                "creator",
+                                now=now,
+                                metadata={"managed": True, "source": "operational_agent"},
+                            ),
+                        )
+                if curator_mcp_binding is not None and hasattr(
+                    self._repository,
+                    "upsert_agent_internal_mcp_server",
+                ):
+                    await self._repository.upsert_agent_internal_mcp_server(
+                        conn,
+                        binding=curator_mcp_binding,
+                    )
                 if membership is not None:
                     await self._repository.upsert_organization_membership(conn, membership)
         return OrganizationCommandResult(organization=organization)
@@ -892,6 +1053,16 @@ class CollaborationKernel:
     async def get_agent_identity(self, agent_identity_id: UUID) -> AgentIdentity | None:
         return await self._repository.fetch_agent_identity(agent_identity_id)
 
+    async def get_active_agent_identity_for_system_agent(
+        self,
+        system_agent_id: UUID,
+    ) -> AgentIdentity | None:
+        if hasattr(self._repository, "fetch_active_agent_identity_for_system_agent"):
+            return await self._repository.fetch_active_agent_identity_for_system_agent(
+                system_agent_id
+            )
+        return None
+
     async def store_agent_identity(
         self,
         identity: AgentIdentity,
@@ -1341,6 +1512,11 @@ class CollaborationKernel:
             )
         except TypeError:
             return await self._repository.list_system_agents()
+
+    async def list_claimable_system_agents(self) -> list[AgentDefinition]:
+        if hasattr(self._repository, "list_claimable_system_agents"):
+            return await self._repository.list_claimable_system_agents()
+        return await self.list_system_agents()
 
     async def list_workspace_catalog_agents(
         self,
@@ -3557,17 +3733,31 @@ class CollaborationKernel:
                         step.system_agent_id,
                         draft.tool_name,
                     )
+                    mcp_tool = None
+                    mcp_source = None
+                    if tool is None and hasattr(
+                        self._repository,
+                        "fetch_agent_internal_mcp_tool_by_name",
+                    ):
+                        mcp_tool = await self._repository.fetch_agent_internal_mcp_tool_by_name(
+                            step.system_agent_id,
+                            draft.tool_name,
+                        )
+                        if mcp_tool is not None:
+                            mcp_source = "agent_internal_mcp_server"
                     if tool is None:
                         tool = await self._repository.fetch_workspace_tool_by_name(
                             task.workspace_id,
                             draft.tool_name,
                         )
-                    mcp_tool = None
                     if tool is None:
-                        mcp_tool = await self._repository.fetch_workspace_mcp_tool_by_name(
-                            task.workspace_id,
-                            draft.tool_name,
-                        )
+                        if mcp_tool is None:
+                            mcp_tool = await self._repository.fetch_workspace_mcp_tool_by_name(
+                                task.workspace_id,
+                                draft.tool_name,
+                            )
+                            if mcp_tool is not None:
+                                mcp_source = "mcp_server"
                     if tool is None and mcp_tool is None:
                         raise KeyError(
                             f"Tool {draft.tool_name!r} not found for system agent {step.system_agent_id} in workspace {task.workspace_id}"
@@ -3583,6 +3773,8 @@ class CollaborationKernel:
                             tool=mcp_tool,
                             draft=draft,
                             workspace_id=task.workspace_id,
+                            system_agent_id=step.system_agent_id,
+                            source=mcp_source or "mcp_server",
                         )
                     )
                     tool_call = ToolCall(
@@ -3607,7 +3799,7 @@ class CollaborationKernel:
                                 {}
                                 if mcp_tool is None
                                 else {
-                                    "tool_source": "mcp_server",
+                                    "tool_source": mcp_source or "mcp_server",
                                     "mcp_server_id": str(mcp_tool.server_id),
                                     "mcp_server_key": mcp_tool.server_key,
                                     "mcp_tool_name": mcp_tool.remote_name,
@@ -4261,6 +4453,13 @@ class CollaborationKernel:
             message_metadata["target_system_agent_id"] = str(payload.target_system_agent_id)
         if payload.target_tool_scope is not None:
             message_metadata["target_tool_scope"] = payload.target_tool_scope
+        task_instructions = [
+            item.strip()
+            for item in payload.task_instructions
+            if isinstance(item, str) and item.strip()
+        ]
+        if task_instructions:
+            message_metadata["task_instructions"] = task_instructions
         tool_generation_request = await self._build_tool_generation_request_for_message(
             thread=thread,
             actor_input=payload.actor,
@@ -5930,6 +6129,11 @@ class CollaborationKernel:
             message.metadata,
             "tool_generation_request_id",
         )
+        task_instructions = message.metadata.get("task_instructions")
+        if not isinstance(task_instructions, list) or not all(
+            isinstance(item, str) for item in task_instructions
+        ):
+            task_instructions = []
         if target_system_agent_id is not None:
             active_agents = [
                 participant
@@ -5971,6 +6175,11 @@ class CollaborationKernel:
                             if tool_generation_request_id is not None
                             else {}
                         ),
+                        **(
+                            {"task_instructions": task_instructions}
+                            if task_instructions
+                            else {}
+                        ),
                     },
                 )
             )
@@ -6004,6 +6213,11 @@ class CollaborationKernel:
                                 ),
                             }
                             if tool_generation_request_id is not None
+                            else {}
+                        ),
+                        **(
+                            {"task_instructions": task_instructions}
+                            if task_instructions
                             else {}
                         ),
                     },
@@ -7688,6 +7902,8 @@ class CollaborationKernel:
         tool: WorkspaceMcpTool,
         draft: AgentToolCallDraft,
         workspace_id: UUID,
+        system_agent_id: UUID,
+        source: str = "mcp_server",
     ) -> ExecutionSpec:
         return ExecutionSpec(
             invocation_id=uuid4(),
@@ -7704,12 +7920,14 @@ class CollaborationKernel:
             result_sink=draft.result_sink,
             profile={"workspace_access": "none", "network": "full"},
             metadata={
-                "tool_source": "mcp_server",
+                "tool_source": source,
                 "backend_kind": "mcp",
                 "mcp_server_id": str(tool.server_id),
                 "mcp_server_key": tool.server_key,
                 "mcp_tool_name": tool.remote_name,
                 "tool_name": tool.exposed_name,
+                "system_agent_id": str(system_agent_id),
+                "workspace_id": str(workspace_id),
             },
         )
 
@@ -8285,6 +8503,197 @@ class CollaborationKernel:
             created_at=now,
             updated_at=now,
             metadata={"seeded": True, "managed": True},
+        )
+
+    @staticmethod
+    def _administration_project_for_organization(
+        organization: Organization,
+        *,
+        actor: ParticipantInput,
+        now: datetime,
+    ) -> Project:
+        subject = CollaborationKernel._actor_project_subject(actor)
+        return Project(
+            project_id=uuid5(
+                NAMESPACE_URL,
+                f"open-talon-administration-project:{organization.organization_id}",
+            ),
+            organization_id=organization.organization_id,
+            slug="administration",
+            name="Administration",
+            description="Managed project for operational agents and administrative workspaces.",
+            created_by=CollaborationKernel._actor_user_id(actor) or actor.participant_id,
+            creator_user_id=subject.user_id,
+            creator_system_agent_id=subject.system_agent_id,
+            owner_user_id=subject.user_id,
+            owner_system_agent_id=subject.system_agent_id,
+            created_at=now,
+            updated_at=now,
+            metadata={"seeded": True, "managed": True, "administration": True},
+        )
+
+    @staticmethod
+    def _operations_workspace_for_organization(
+        organization: Organization,
+        project: Project,
+        *,
+        now: datetime,
+    ) -> Workspace:
+        is_system_base = organization.organization_id == SYSTEM_BASE_ORGANIZATION_ID
+        return Workspace(
+            workspace_id=uuid5(
+                NAMESPACE_URL,
+                f"open-talon-operations-workspace:{organization.organization_id}",
+            ),
+            organization_id=organization.organization_id,
+            project_id=project.project_id,
+            name="System Operations" if is_system_base else "Organization Operations",
+            description=(
+                "Managed workspace for platform operations."
+                if is_system_base
+                else "Managed workspace for organization operations."
+            ),
+            owner_user_id=None,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "seeded": True,
+                "managed": True,
+                "administration": True,
+                "operations_workspace": True,
+                "operations_level": "system" if is_system_base else "organization",
+            },
+        )
+
+    @staticmethod
+    def _curator_agent_for_organization(
+        organization: Organization,
+        *,
+        now: datetime,
+    ) -> AgentDefinition:
+        return AgentDefinition(
+            agent_id=uuid5(
+                NAMESPACE_URL,
+                f"open-talon-curator-agent:{organization.organization_id}",
+            ),
+            agent_key="curator",
+            scope="organization",
+            organization_id=organization.organization_id,
+            display_name="Curator",
+            description=(
+                "Manages organization, project, and workspace operations through "
+                "authorized control-plane APIs."
+            ),
+            role="organization curator",
+            capabilities=[
+                "organization_operations",
+                "project_administration",
+                "workspace_administration",
+                "workspace_agent_management",
+                "workspace_tool_management",
+                "audit_verification",
+            ],
+            endpoint=AgentEndpoint(
+                kind="system",
+                engine_id="openai-responses",
+                provider="openai",
+            ),
+            system_prompt=(
+                "You are Curator, the organization operations agent. Operate only "
+                "inside your organization through authorized APIs and MCP tools. "
+                "Respect organization boundaries and use the Administration project "
+                "for operational work."
+            ),
+            created_by=organization.created_by,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "managed": True,
+                "seeded": True,
+                "agent_key": "curator",
+                "organization_id": str(organization.organization_id),
+            },
+        )
+
+    @staticmethod
+    def _curator_iam_role_for_organization(
+        organization_id: UUID,
+        *,
+        now: datetime,
+    ) -> IamRoleDefinition:
+        return IamRoleDefinition(
+            role_id=uuid5(
+                NAMESPACE_URL,
+                f"open-talon-curator-iam-role:{organization_id}",
+            ),
+            scope="organization",
+            subject_kind="agent",
+            organization_id=organization_id,
+            name="organization_curator",
+            description="Least-privilege organization operations permissions for Curator.",
+            permissions=list(_CURATOR_PERMISSIONS),
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "seeded": True,
+                "managed": True,
+                "agent_key": "curator",
+                "organization_id": str(organization_id),
+            },
+        )
+
+    @staticmethod
+    def _operations_participant_for_agent(
+        *,
+        workspace: Workspace,
+        agent: AgentDefinition,
+        now: datetime,
+    ) -> ParticipantProfile:
+        return ParticipantProfile(
+            participant_id=uuid5(
+                NAMESPACE_URL,
+                f"open-talon-operations-participant:{workspace.workspace_id}:{agent.agent_id}",
+            ),
+            workspace_id=workspace.workspace_id,
+            participant_type="agent",
+            system_agent_id=agent.agent_id,
+            display_name=agent.display_name,
+            description=f"{agent.display_name} attached to the managed operations workspace.",
+            roles=[agent.role],
+            capabilities=list(agent.capabilities),
+            status="active",
+            visibility_scope="workspace",
+            created_at=now,
+            updated_at=now,
+            metadata={"seeded": True, "managed": True, "operations_participant": True},
+        )
+
+    @staticmethod
+    def _curator_internal_mcp_binding(
+        *,
+        agent_id: UUID,
+        now: datetime,
+    ) -> AgentInternalMcpServer:
+        return AgentInternalMcpServer(
+            system_agent_id=agent_id,
+            server_id=CONTROL_PLANE_MCP_SERVER_ID,
+            server_key="open_talon_control_plane",
+            display_name="Open Talon Control Plane",
+            description="Managed MCP server exposing authorized Open Talon control-plane APIs.",
+            transport_kind="streamable_http",
+            trust_level="trusted",
+            name_prefix="control_plane__",
+            tool_allowlist=list(_CURATOR_CONTROL_PLANE_ALLOWLIST),
+            tool_denylist=[
+                "organizations.list",
+                "agent_git.file.delete",
+                "agent_git.worktree.discard",
+                "projects.access.remove",
+            ],
+            attached_by=SYSTEM_ACTOR_ID,
+            attached_at=now,
+            updated_at=now,
+            metadata={"seeded": True, "managed": True, "agent_key": "curator"},
         )
 
     async def _require_workspace_management_role(

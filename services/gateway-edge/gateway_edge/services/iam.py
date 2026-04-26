@@ -163,7 +163,11 @@ class IamService:
             secret_ref=self._normalized_secret_ref(secret_ref),
             created_at=self._now(),
             updated_at=self._now(),
-            metadata={**payload.metadata, **provisioned.metadata},
+            metadata={
+                **payload.metadata,
+                **provisioned.metadata,
+                "token_endpoint": provisioned.token_endpoint,
+            },
         )
         stored = await collaboration_service.store_agent_identity(identity)
         return AgentIdentityProvisioningResult(
@@ -192,7 +196,12 @@ class IamService:
                 "external_subject": provisioned.external_subject or identity.external_subject,
                 "secret_ref": self._normalized_secret_ref(secret_ref),
                 "updated_at": self._now(),
-                "metadata": {**identity.metadata, **payload.metadata, **provisioned.metadata},
+                "metadata": {
+                    **identity.metadata,
+                    **payload.metadata,
+                    **provisioned.metadata,
+                    "token_endpoint": provisioned.token_endpoint,
+                },
             }
         )
         stored = await collaboration_service.store_agent_identity(updated)

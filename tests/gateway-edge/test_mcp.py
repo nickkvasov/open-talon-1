@@ -866,6 +866,61 @@ async def test_mcp_workspace_scope_requires_attachment(
     assert "not available" in hidden_call.json()["result"]["content"][0]["text"]
 
 
+async def test_mcp_threads_messages_create_accepts_task_instructions(
+    client,
+    monkeypatch,
+):
+    organization_id = "11111111-1111-1111-1111-111111111111"
+    admin = _oidc_context(roles=["admin"])
+    actor_payload = {
+        "participant_id": str(uuid4()),
+        "participant_type": "user",
+        "user_id": str(admin.user_id),
+        "display_name": "Nikolay",
+    }
+    _patch_oidc_tokens(monkeypatch, {"admin-token": admin})
+    workspace_id = await _create_workspace(
+        client,
+        token="admin-token",
+        organization_id=organization_id,
+        actor_payload=actor_payload,
+        name="MCP Task Instructions",
+    )
+    session_id = await _mcp_initialize(client, token="admin-token")
+    scope = await _mcp_tool_call(
+        client,
+        token="admin-token",
+        session_id=session_id,
+        name="session.set_scope",
+        arguments={"scope": "workspace", "workspace_id": workspace_id},
+    )
+    assert scope.json()["result"]["isError"] is False
+    thread_response = await _mcp_tool_call(
+        client,
+        token="admin-token",
+        session_id=session_id,
+        name="threads.create",
+        arguments={"title": "Operational request"},
+    )
+    assert thread_response.json()["result"]["isError"] is False
+    thread_id = thread_response.json()["result"]["structuredContent"]["thread"]["thread_id"]
+    message_response = await _mcp_tool_call(
+        client,
+        token="admin-token",
+        session_id=session_id,
+        name="threads.messages.create",
+        arguments={
+            "thread_id": thread_id,
+            "content": "Check this once.",
+            "task_instructions": ["Use read-only checks first."],
+        },
+    )
+
+    assert message_response.json()["result"]["isError"] is False
+    message = message_response.json()["result"]["structuredContent"]
+    assert message["metadata"]["task_instructions"] == ["Use read-only checks first."]
+
+
 async def test_mcp_project_scope_harmonizes_project_and_workspace_operations(
     client,
     actor_payload,

@@ -127,8 +127,13 @@ class FakeKernel:
         )
         self.upserted_run_scratch: list[MemoryEntry] = []
         self._claimed = False
+        self.list_claimable_called = False
 
     async def list_system_agents(self) -> list[AgentDefinition]:
+        return [self.system_agent]
+
+    async def list_claimable_system_agents(self) -> list[AgentDefinition]:
+        self.list_claimable_called = True
         return [self.system_agent]
 
     async def list_llm_providers(self) -> list[object]:
@@ -703,6 +708,41 @@ async def test_agent_runtime_processes_system_agent_task_end_to_end():
         "run.completed",
     ]
     assert kernel.failed_errors == []
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_uses_claimable_agent_discovery_for_organization_agents():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    kernel.system_agent = kernel.system_agent.model_copy(
+        update={"scope": "organization", "organization_id": uuid4()}
+    )
+    kernel.context = kernel.context.model_copy(update={"system_agent": kernel.system_agent})
+    published: list[list[EventEnvelope]] = []
+
+    class SuccessfulExecutor:
+        async def execute(self, context: AgentExecutionContext) -> AgentRunResult:
+            return AgentRunResult(stop_reason="completed", message="Done", summary="Done")
+
+    async def publish(events: list[EventEnvelope]) -> None:
+        published.append(events)
+
+    runtime = AgentTaskRuntime(
+        kernel=kernel,
+        publish_events=publish,
+        poll_interval_seconds=0.01,
+        executors={"system": SuccessfulExecutor()},
+    )
+
+    await runtime._run_iteration()
+    await asyncio.gather(*kernel_safe_processing_tasks(runtime))
+
+    assert kernel.list_claimable_called is True
+    assert len(kernel.completed_results) == 1
+    assert [events[0].event_type for events in published] == [
+        "task.claimed",
+        "run.progressed",
+        "run.completed",
+    ]
 
 
 @pytest.mark.asyncio

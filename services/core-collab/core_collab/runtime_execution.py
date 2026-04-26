@@ -267,6 +267,14 @@ class RuntimeExecutionService:
             task.workspace_id,
         )
         internal_tools = await self._repository.list_agent_internal_tools(system_agent_id)
+        internal_mcp_servers = await self._optional_repository_list(
+            "list_agent_internal_mcp_servers",
+            system_agent_id,
+        )
+        internal_mcp_tools = await self._optional_repository_list(
+            "list_agent_internal_mcp_tools",
+            system_agent_id,
+        )
         participants = [
             self._advertise_workspace_tools(item, workspace_tools)
             for item in await self._repository.list_participants(task.workspace_id)
@@ -338,6 +346,11 @@ class RuntimeExecutionService:
                     request=request,
                     revisions=revisions,
                 )
+        task_instructions = task.metadata.get("task_instructions")
+        if not isinstance(task_instructions, list) or not all(
+            isinstance(item, str) for item in task_instructions
+        ):
+            task_instructions = []
         return AgentExecutionContext(
             workspace=workspace,
             workspace_harness=workspace.harness,
@@ -356,6 +369,9 @@ class RuntimeExecutionService:
             workspace_mcp_resources=workspace_mcp_resources,
             workspace_mcp_prompts=workspace_mcp_prompts,
             internal_tools=internal_tools,
+            internal_mcp_servers=internal_mcp_servers,
+            internal_mcp_tools=internal_mcp_tools,
+            task_instructions=task_instructions,
             messages=visible_messages,
             interaction_requests=interaction_requests,
             tool_generation_request=tool_generation_request,

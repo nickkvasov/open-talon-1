@@ -232,6 +232,63 @@ async def test_repository_migrations_seed_tinker_agent_with_internal_tools():
 
 
 @pytest.mark.asyncio
+async def test_repository_migrations_seed_operational_agents_and_contexts_idempotently():
+    try:
+        pool = await asyncpg.create_pool(dsn=_postgres_dsn(), min_size=1, max_size=2)
+    except Exception as exc:  # pragma: no cover - integration environment dependent
+        pytest.skip(f"Postgres not available for repository integration test: {exc}")
+
+    repository = CollaborationRepository(pool)
+    await apply_pending_migrations(pool)
+    await apply_pending_migrations(pool)
+
+    try:
+        system_base = await repository.fetch_organization_by_slug("system-base")
+        assert system_base is not None
+        admin_project = await repository.fetch_project_by_slug(
+            organization_id=system_base.organization_id,
+            slug="administration",
+        )
+        assert admin_project is not None
+        operations = await repository.list_workspaces(
+            organization_id=system_base.organization_id,
+            project_id=admin_project.project_id,
+        )
+        assert any(workspace.name == "System Operations" for workspace in operations)
+
+        steward = await repository.fetch_system_agent(
+            UUID("44444444-4444-4444-4444-444444444445")
+        )
+        assert steward is not None
+        assert steward.agent_key == "steward"
+        assert steward.role == "platform steward"
+        steward_mcp_tools = await repository.list_agent_internal_mcp_tools(steward.agent_id)
+        assert "control_plane__runtime.overview.get" in {
+            tool.exposed_name for tool in steward_mcp_tools
+        }
+
+        default_org = await repository.fetch_organization_by_slug("default")
+        assert default_org is not None
+        default_admin = await repository.fetch_project_by_slug(
+            organization_id=default_org.organization_id,
+            slug="administration",
+        )
+        assert default_admin is not None
+        curators = await repository.list_system_agents(
+            scope="organization",
+            organization_id=default_org.organization_id,
+        )
+        curator = next(agent for agent in curators if agent.agent_key == "curator")
+        assert curator.role == "organization curator"
+        curator_tools = await repository.list_agent_internal_mcp_tools(curator.agent_id)
+        exposed = {tool.exposed_name for tool in curator_tools}
+        assert "control_plane__organizations.get" in exposed
+        assert "control_plane__organizations.list" not in exposed
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
 async def test_repository_runtime_queue_stats_query_executes_with_org_filter():
     try:
         pool = await asyncpg.create_pool(dsn=_postgres_dsn(), min_size=1, max_size=2)

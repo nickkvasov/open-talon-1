@@ -2550,6 +2550,9 @@ class MockCollaborationService:
         target_tool_scope = getattr(payload, "target_tool_scope", None)
         if target_tool_scope is not None:
             metadata["target_tool_scope"] = target_tool_scope
+        task_instructions = getattr(payload, "task_instructions", None)
+        if task_instructions:
+            metadata["task_instructions"] = list(task_instructions)
         message_id = uuid4()
         if (
             target_system_agent_id is not None

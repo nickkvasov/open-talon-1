@@ -18,12 +18,16 @@ from gateway_edge.models import (
     AuthContext,
     AgentBundlePublishResult,
     AgentBundleValidationResult,
+    AgentDefinition,
     AgentGitCommitRequest,
     AgentGitCommitResult,
     AgentGitDiffResult,
     AgentGitFileContent,
     AgentGitFileMutationRequest,
     AgentGitWorktreeSession,
+    AuditChainVerificationResult,
+    AuditEventPage,
+    AuditExportRequest,
     CreateAgentGitWorktreeSessionRequest,
     CreateGitRepositoryRequest,
     CreateInteractionRequest,
@@ -34,7 +38,10 @@ from gateway_edge.models import (
     CreateWorkspaceRequest,
     GitRepository,
     MemoryEntry,
+    LlmProviderDefinition,
+    MemoryProviderDefinition,
     MemorySearchResponse,
+    McpServerDefinition,
     Organization,
     OrganizationMembership,
     ParticipantInput,
@@ -44,6 +51,7 @@ from gateway_edge.models import (
     ProjectSubjectRef,
     PublishAgentBundleFromGitRequest,
     RemoveProjectAccessRequest,
+    SystemToolDefinition,
     Thread,
     ThreadDetail,
     TimelineMessage,
@@ -55,6 +63,7 @@ from gateway_edge.models import (
     ValidateAgentBundleFromGitRequest,
 )
 from gateway_edge.services import collaboration as collab_svc
+from gateway_edge.services.audit import audit_service
 from gateway_edge.services.iam import iam_service
 from gateway_edge.services.session import get_redis
 
@@ -140,6 +149,7 @@ class ThreadMessageCreateArgs(BaseModel):
     target_system_agent_id: UUID | None = None
     target_tool_scope: str | None = None
     create_task: bool = True
+    task_instructions: list[str] = Field(default_factory=list)
     requests: list[CreateInteractionRequest] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -167,6 +177,25 @@ class ThreadMemorySearchArgs(BaseModel):
     use_provider: str | None = None
     include_graph: bool = True
     metadata_filters: dict[str, Any] = Field(default_factory=dict)
+
+
+class AuditEventsListArgs(BaseModel):
+    organization_id: UUID | None = None
+    workspace_id: UUID | None = None
+    thread_id: UUID | None = None
+    actor_user_id: UUID | None = None
+    actor_system_agent_id: UUID | None = None
+    action_prefix: str | None = None
+    outcome: str | None = None
+    target_type: str | None = None
+    target_id: UUID | None = None
+    correlation_id: UUID | None = None
+    request_id: UUID | None = None
+    limit: int = Field(default=100, ge=1, le=1000)
+
+
+class AuditChainVerifyArgs(BaseModel):
+    chain_partition: str | None = None
 
 
 class AgentBundleGitArgs(BaseModel):
@@ -1041,6 +1070,16 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             requires_workspace_actor=True,
             handler_name="handle_memory_thread_search",
         ),
+        "agent_catalog.list": OperationDefinition(
+            name="agent_catalog.list",
+            description="List system agents in the current global or organization scope.",
+            input_model=EmptyArgs,
+            output_schema=_type_schema(list[AgentDefinition]),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="agent_catalog.read",
+            handler_name="handle_agent_catalog_list",
+        ),
         "agent_catalog.bundle.validate": OperationDefinition(
             name="agent_catalog.bundle.validate",
             description="Validate a Git-managed agent bundle in the current global or organization scope.",
@@ -1060,6 +1099,76 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             required_permission_type="identity",
             required_permission="agent_catalog.write",
             handler_name="handle_agent_catalog_bundle_publish",
+        ),
+        "tool_catalog.list": OperationDefinition(
+            name="tool_catalog.list",
+            description="List system tools in the current global or organization scope.",
+            input_model=EmptyArgs,
+            output_schema=_type_schema(list[SystemToolDefinition]),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="tool_catalog.read",
+            handler_name="handle_tool_catalog_list",
+        ),
+        "llm_providers.list": OperationDefinition(
+            name="llm_providers.list",
+            description="List LLM provider records in the current global or organization scope.",
+            input_model=EmptyArgs,
+            output_schema=_type_schema(list[LlmProviderDefinition]),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="provider.llm.read",
+            handler_name="handle_llm_providers_list",
+        ),
+        "memory_providers.list": OperationDefinition(
+            name="memory_providers.list",
+            description="List memory provider records in the current global or organization scope.",
+            input_model=EmptyArgs,
+            output_schema=_type_schema(list[MemoryProviderDefinition]),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="provider.memory.read",
+            handler_name="handle_memory_providers_list",
+        ),
+        "mcp_servers.list": OperationDefinition(
+            name="mcp_servers.list",
+            description="List MCP server records in the current global or organization scope.",
+            input_model=EmptyArgs,
+            output_schema=_type_schema(list[McpServerDefinition]),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="provider.mcp.read",
+            handler_name="handle_mcp_servers_list",
+        ),
+        "runtime.overview.get": OperationDefinition(
+            name="runtime.overview.get",
+            description="Return runtime queue, failure, and token overview for the current scope.",
+            input_model=EmptyArgs,
+            output_schema=_type_schema(dict[str, Any]),
+            allowed_scopes=frozenset({"global", "organization"}),
+            required_permission_type="identity",
+            required_permission="organization.runtime.read",
+            handler_name="handle_runtime_overview_get",
+        ),
+        "audit.events.list": OperationDefinition(
+            name="audit.events.list",
+            description="List audit events for the current or provided authorized scope.",
+            input_model=AuditEventsListArgs,
+            output_schema=_type_schema(AuditEventPage),
+            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            required_permission_type="identity",
+            required_permission="audit.read",
+            handler_name="handle_audit_events_list",
+        ),
+        "audit.chains.verify": OperationDefinition(
+            name="audit.chains.verify",
+            description="Verify audit chain integrity for the current or provided authorized chain partition.",
+            input_model=AuditChainVerifyArgs,
+            output_schema=_type_schema(AuditChainVerificationResult),
+            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            required_permission_type="identity",
+            required_permission="audit.verify",
+            handler_name="handle_audit_chains_verify",
         ),
         "agent_git.repo.ensure": OperationDefinition(
             name="agent_git.repo.ensure",
@@ -1479,6 +1588,118 @@ async def handle_memory_thread_search(
         args.thread_id,
         CreateThreadMemorySearchRequest.from_args(actor, args),
     )
+
+
+async def handle_agent_catalog_list(ctx: McpApiContext, _: EmptyArgs) -> list[AgentDefinition]:
+    organization_id = ctx.active_scope_id if ctx.active_scope_kind == "organization" else None
+    return await collab_svc.collaboration_service.list_system_agents(
+        scope="organization" if organization_id is not None else "global",
+        organization_id=organization_id,
+    )
+
+
+async def handle_tool_catalog_list(ctx: McpApiContext, _: EmptyArgs) -> list[SystemToolDefinition]:
+    organization_id = ctx.active_scope_id if ctx.active_scope_kind == "organization" else None
+    return await collab_svc.collaboration_service.list_system_tools(
+        scope="organization" if organization_id is not None else "global",
+        organization_id=organization_id,
+    )
+
+
+async def handle_llm_providers_list(
+    ctx: McpApiContext,
+    _: EmptyArgs,
+) -> list[LlmProviderDefinition]:
+    organization_id = ctx.active_scope_id if ctx.active_scope_kind == "organization" else None
+    return await collab_svc.collaboration_service.list_llm_providers(
+        scope="organization" if organization_id is not None else "global",
+        organization_id=organization_id,
+    )
+
+
+async def handle_memory_providers_list(
+    ctx: McpApiContext,
+    _: EmptyArgs,
+) -> list[MemoryProviderDefinition]:
+    organization_id = ctx.active_scope_id if ctx.active_scope_kind == "organization" else None
+    return await collab_svc.collaboration_service.list_memory_providers(
+        scope="organization" if organization_id is not None else "global",
+        organization_id=organization_id,
+    )
+
+
+async def handle_mcp_servers_list(ctx: McpApiContext, _: EmptyArgs) -> list[McpServerDefinition]:
+    organization_id = ctx.active_scope_id if ctx.active_scope_kind == "organization" else None
+    return await collab_svc.collaboration_service.list_mcp_servers(
+        scope="organization" if organization_id is not None else "global",
+        organization_id=organization_id,
+    )
+
+
+async def handle_runtime_overview_get(ctx: McpApiContext, _: EmptyArgs) -> dict[str, Any]:
+    organization_id = ctx.active_scope_id if ctx.active_scope_kind == "organization" else None
+    return await collab_svc.collaboration_service.get_runtime_overview(
+        organization_id=organization_id,
+    )
+
+
+async def handle_audit_events_list(
+    ctx: McpApiContext,
+    args: AuditEventsListArgs,
+) -> AuditEventPage:
+    organization_id = args.organization_id
+    workspace_id = args.workspace_id
+    if ctx.active_scope_kind == "organization":
+        active_org_id = ctx.active_scope_id
+        if organization_id is None:
+            organization_id = active_org_id
+        elif organization_id != active_org_id:
+            raise PermissionError("Requested audit organization is outside the active MCP scope")
+    if ctx.active_scope_kind == "workspace":
+        active_workspace_id = ctx.active_scope_id
+        if workspace_id is None:
+            workspace_id = active_workspace_id
+        elif workspace_id != active_workspace_id:
+            raise PermissionError("Requested audit workspace is outside the active MCP scope")
+    return await audit_service.list_audit_events(
+        AuditExportRequest(
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            thread_id=args.thread_id,
+            actor_user_id=args.actor_user_id,
+            actor_system_agent_id=args.actor_system_agent_id,
+            action_prefix=args.action_prefix,
+            outcome=args.outcome,
+            target_type=args.target_type,
+            target_id=args.target_id,
+            correlation_id=args.correlation_id,
+            request_id=args.request_id,
+            limit=args.limit,
+        )
+    )
+
+
+async def handle_audit_chains_verify(
+    ctx: McpApiContext,
+    args: AuditChainVerifyArgs,
+) -> AuditChainVerificationResult:
+    chain_partition = args.chain_partition
+    if chain_partition is None:
+        if ctx.active_scope_kind == "workspace" and ctx.active_scope_id is not None:
+            chain_partition = f"workspace:{ctx.active_scope_id}"
+        elif ctx.active_scope_kind == "organization" and ctx.active_scope_id is not None:
+            chain_partition = f"organization:{ctx.active_scope_id}"
+        else:
+            chain_partition = "global"
+    if ctx.active_scope_kind == "organization" and ctx.active_scope_id is not None:
+        expected = f"organization:{ctx.active_scope_id}"
+        if chain_partition != expected:
+            raise PermissionError("Requested audit chain is outside the active organization scope")
+    if ctx.active_scope_kind == "workspace" and ctx.active_scope_id is not None:
+        expected = f"workspace:{ctx.active_scope_id}"
+        if chain_partition != expected:
+            raise PermissionError("Requested audit chain is outside the active workspace scope")
+    return await audit_service.verify_audit_chain(chain_partition)
 
 
 async def handle_agent_catalog_bundle_validate(

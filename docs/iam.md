@@ -35,7 +35,9 @@ Open Talon does not mint or broker JWTs. Human users authenticate through normal
 
 In local development, the launcher still defaults to `AUTH_MODE=any`. OIDC is the intended principal-IAM path, but API key and OpenBao auth remain accepted locally unless you narrow that setting.
 
-The gateway also exposes an MCP adapter at `/v1/mcp` for OIDC-authenticated software clients. That MCP surface reuses the same `agent_identities`, IAM role bindings, project-local `creator`/`owner`/`editor`/`viewer` access bindings, and workspace participant attachment rules described here. It does not define a second permission catalog, and it does not expose Open Talon `system_tools`, `workspace_tools`, Tinker-generated tools, or `agent-runtime` execution backends as MCP-imported tools. It exposes organization, project, workspace, thread, memory, IAM lookup, gateway-backed agent Git authoring, and agent bundle validate/publish operations when the principal has the matching permissions. The current MCP slice also exposes read-only session resources for identity, permissions, and scope, and it emits `tools/list_changed` plus `resources/list_changed` notifications after scope changes.
+The gateway also exposes an MCP adapter at `/v1/mcp` for OIDC-authenticated software clients. That MCP surface reuses the same `agent_identities`, IAM role bindings, project-local `creator`/`owner`/`editor`/`viewer` access bindings, and workspace participant attachment rules described here. It does not define a second permission catalog, and it does not expose Open Talon `system_tools`, `workspace_tools`, Tinker-generated tools, or `agent-runtime` execution backends as MCP-imported tools. It exposes organization, project, workspace, thread, memory, runtime overview, audit read/verify, catalog/provider list, IAM lookup, gateway-backed agent Git authoring, and agent bundle validate/publish operations when the principal has the matching permissions. The current MCP slice also exposes read-only session resources for identity, permissions, and scope, and it emits `tools/list_changed` plus `resources/list_changed` notifications after scope changes.
+
+The managed control-plane MCP server is stored as `open_talon_control_plane` and uses `auth.kind=open_talon_agent_identity`. Runtime MCP execution resolves the current `system_agent_id`, reads that agent identity's `secret_ref`, mints an OIDC client-credentials token, and sends it to `/v1/mcp`. Agent-private MCP bindings then expose only the allowlisted operations to that agent's execution context.
 
 ## Persistence
 
@@ -151,6 +153,8 @@ Agent permissions come from:
 - the same workspace-scoped IAM permissions as human principals, evaluated only after the linked agent is attached as a workspace participant
 
 The MCP adapter uses those same agent permissions. It filters visible MCP operations by the current session scope and then rechecks the underlying IAM permission on every call.
+
+Operational agents use this same model. `Tinker`, `Steward`, and `Curator` are normal `system_agents` whose purpose is advertised through `display_name`, `role`, and `capabilities`; their authority comes from IAM bindings, project access, workspace participant attachment, and private MCP/tool allowlists.
 
 External MCP server management is separate from the gateway-mounted MCP adapter and from the Open Talon tool catalog. Global and organization MCP server definitions use `provider.mcp.*` permissions. Workspace MCP server attachment uses `workspace.mcp_servers.write` after participant attachment. Do not use `tool_catalog.*` or `workspace.tools.write` to manage external MCP servers.
 

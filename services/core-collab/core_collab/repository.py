@@ -23,6 +23,7 @@ from .contracts import (
     AgentDefinition,
     AgentDefinitionVersion,
     AgentIdentity,
+    AgentInternalMcpServer,
     AgentInternalToolBinding,
     AgentEndpoint,
     AgentHarness,
@@ -1529,6 +1530,25 @@ class CollaborationRepository:
         )
         return self._agent_identity_from_row(row) if row else None
 
+    async def fetch_active_agent_identity_for_system_agent(
+        self,
+        system_agent_id: UUID,
+    ) -> AgentIdentity | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT agent_identity_id, system_agent_id, scope, organization_id, provider_key, issuer,
+                   external_subject, client_id, status, secret_ref, last_authenticated_at,
+                   created_at, updated_at, metadata
+            FROM agent_identities
+            WHERE system_agent_id = $1
+              AND status = 'active'
+            ORDER BY created_at ASC, agent_identity_id ASC
+            LIMIT 1
+            """,
+            system_agent_id,
+        )
+        return self._agent_identity_from_row(row) if row else None
+
     async def fetch_agent_identity_by_client(
         self,
         *,
@@ -2813,6 +2833,58 @@ class CollaborationRepository:
             self._json_dumps(binding.metadata),
         )
 
+    async def upsert_agent_internal_mcp_server(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        binding: AgentInternalMcpServer,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO agent_internal_mcp_servers (
+                system_agent_id, server_id, enabled, tools_enabled, resources_enabled,
+                prompts_enabled, sampling_enabled, name_prefix, tool_allowlist,
+                tool_denylist, resource_allowlist, prompt_allowlist,
+                attached_by, attached_at, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9,
+                $10, $11, $12,
+                $13, $14, $15, $16
+            )
+            ON CONFLICT (system_agent_id, server_id) DO UPDATE
+                SET enabled = EXCLUDED.enabled,
+                    tools_enabled = EXCLUDED.tools_enabled,
+                    resources_enabled = EXCLUDED.resources_enabled,
+                    prompts_enabled = EXCLUDED.prompts_enabled,
+                    sampling_enabled = EXCLUDED.sampling_enabled,
+                    name_prefix = EXCLUDED.name_prefix,
+                    tool_allowlist = EXCLUDED.tool_allowlist,
+                    tool_denylist = EXCLUDED.tool_denylist,
+                    resource_allowlist = EXCLUDED.resource_allowlist,
+                    prompt_allowlist = EXCLUDED.prompt_allowlist,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            binding.system_agent_id,
+            binding.server_id,
+            binding.enabled,
+            binding.tools_enabled,
+            binding.resources_enabled,
+            binding.prompts_enabled,
+            binding.sampling_enabled,
+            binding.name_prefix,
+            self._json_dumps(binding.tool_allowlist),
+            self._json_dumps(binding.tool_denylist),
+            self._json_dumps(binding.resource_allowlist),
+            self._json_dumps(binding.prompt_allowlist),
+            binding.attached_by,
+            binding.attached_at,
+            binding.updated_at,
+            self._json_dumps(binding.metadata),
+        )
+
     async def upsert_memory_provider_record(
         self, conn: asyncpg.Connection, record: MemoryProviderRecord
     ) -> None:
@@ -3214,6 +3286,19 @@ class CollaborationRepository:
             """,
             scope,
             organization_id,
+        )
+        return [self._system_agent_from_row(row) for row in rows]
+
+    async def list_claimable_system_agents(self) -> list[AgentDefinition]:
+        rows = await self._pool.fetch(
+            """
+            SELECT agent_id, agent_key, scope, organization_id, active_agent_version_id,
+                   display_name, description, role, capabilities, endpoint,
+                   system_prompt, harness, interaction_contract, definition, created_by, created_at, updated_at, metadata
+            FROM system_agents
+            WHERE scope IN ('global', 'organization')
+            ORDER BY created_at ASC
+            """
         )
         return [self._system_agent_from_row(row) for row in rows]
 
@@ -5241,6 +5326,64 @@ class CollaborationRepository:
         )
         return [self._workspace_mcp_prompt_from_row(row) for row in rows]
 
+    async def list_agent_internal_mcp_servers(
+        self,
+        system_agent_id: UUID,
+    ) -> list[AgentInternalMcpServer]:
+        rows = await self._pool.fetch(
+            """
+            SELECT aims.system_agent_id, aims.server_id, ms.server_key, ms.display_name,
+                   ms.description, ms.transport_kind, ms.trust_level,
+                   ms.enabled AS server_enabled, aims.enabled, aims.tools_enabled,
+                   aims.resources_enabled, aims.prompts_enabled, aims.sampling_enabled,
+                   aims.name_prefix, aims.tool_allowlist, aims.tool_denylist,
+                   aims.resource_allowlist, aims.prompt_allowlist,
+                   aims.attached_by, aims.attached_at, aims.updated_at, aims.metadata
+            FROM agent_internal_mcp_servers aims
+            JOIN mcp_servers ms ON ms.server_id = aims.server_id
+            WHERE aims.system_agent_id = $1
+            ORDER BY aims.attached_at ASC
+            """,
+            system_agent_id,
+        )
+        return [self._agent_internal_mcp_server_from_row(row) for row in rows]
+
+    async def list_agent_internal_mcp_tools(
+        self,
+        system_agent_id: UUID,
+    ) -> list[WorkspaceMcpTool]:
+        rows = await self._pool.fetch(
+            """
+            SELECT ms.server_id, ms.server_key, ms.display_name AS server_display_name,
+                   COALESCE(NULLIF(aims.name_prefix, ''), 'mcp_' || ms.server_key || '__') || mst.tool_name AS exposed_name,
+                   mst.tool_name AS remote_name, mst.description, mst.input_schema,
+                   mst.output_schema, mst.metadata,
+                   (aims.enabled AND aims.tools_enabled AND ms.enabled) AS enabled
+            FROM agent_internal_mcp_servers aims
+            JOIN mcp_servers ms ON ms.server_id = aims.server_id
+            JOIN mcp_server_tools mst ON mst.server_id = ms.server_id
+            WHERE aims.system_agent_id = $1
+              AND (
+                    jsonb_array_length(aims.tool_allowlist) = 0
+                 OR aims.tool_allowlist ? mst.tool_name
+              )
+              AND NOT (aims.tool_denylist ? mst.tool_name)
+            ORDER BY ms.server_key ASC, mst.tool_name ASC
+            """,
+            system_agent_id,
+        )
+        return [self._workspace_mcp_tool_from_row(row) for row in rows]
+
+    async def fetch_agent_internal_mcp_tool_by_name(
+        self,
+        system_agent_id: UUID,
+        exposed_name: str,
+    ) -> WorkspaceMcpTool | None:
+        for tool in await self.list_agent_internal_mcp_tools(system_agent_id):
+            if tool.exposed_name == exposed_name:
+                return tool
+        return None
+
     async def list_enabled_memory_providers(
         self,
         *,
@@ -6370,6 +6513,39 @@ class CollaborationRepository:
     @staticmethod
     def _workspace_mcp_server_from_row(row: asyncpg.Record) -> WorkspaceMcpServer:
         return WorkspaceMcpServer(
+            server_id=row["server_id"],
+            server_key=row["server_key"],
+            display_name=row["display_name"],
+            description=row["description"],
+            transport_kind=row["transport_kind"],
+            trust_level=row["trust_level"],
+            server_enabled=row["server_enabled"],
+            enabled=row["enabled"],
+            tools_enabled=row["tools_enabled"],
+            resources_enabled=row["resources_enabled"],
+            prompts_enabled=row["prompts_enabled"],
+            sampling_enabled=row["sampling_enabled"],
+            name_prefix=row["name_prefix"],
+            tool_allowlist=CollaborationRepository._json_value(row["tool_allowlist"], default=[]),
+            tool_denylist=CollaborationRepository._json_value(row["tool_denylist"], default=[]),
+            resource_allowlist=CollaborationRepository._json_value(
+                row["resource_allowlist"], default=[]
+            ),
+            prompt_allowlist=CollaborationRepository._json_value(
+                row["prompt_allowlist"], default=[]
+            ),
+            attached_by=row["attached_by"],
+            attached_at=row["attached_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _agent_internal_mcp_server_from_row(
+        row: asyncpg.Record,
+    ) -> AgentInternalMcpServer:
+        return AgentInternalMcpServer(
+            system_agent_id=row["system_agent_id"],
             server_id=row["server_id"],
             server_key=row["server_key"],
             display_name=row["display_name"],
