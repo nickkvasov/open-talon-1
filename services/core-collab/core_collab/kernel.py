@@ -1166,6 +1166,7 @@ class CollaborationKernel:
             )
         workspace_id = uuid4()
         now = self._now()
+        creator_subject = self._actor_project_subject(payload.actor)
         workspace = Workspace(
             workspace_id=workspace_id,
             organization_id=organization.organization_id,
@@ -1173,6 +1174,9 @@ class CollaborationKernel:
             name=payload.name,
             description=payload.description,
             owner_user_id=actor_user_id,
+            created_by=actor_user_id or payload.actor.participant_id,
+            creator_user_id=creator_subject.user_id,
+            creator_system_agent_id=creator_subject.system_agent_id,
             harness=payload.harness,
             created_at=now,
             updated_at=now,
@@ -8554,6 +8558,9 @@ class CollaborationKernel:
                 else "Managed workspace for organization operations."
             ),
             owner_user_id=None,
+            created_by=project.created_by,
+            creator_user_id=project.creator_user_id,
+            creator_system_agent_id=project.creator_system_agent_id,
             created_at=now,
             updated_at=now,
             metadata={
@@ -8946,7 +8953,9 @@ class CollaborationKernel:
                     slug="default",
                     name="Default Organization",
                     description="Implicit test organization",
-                    created_by=workspace.owner_user_id or workspace.workspace_id,
+                    created_by=workspace.created_by
+                    or workspace.owner_user_id
+                    or workspace.workspace_id,
                     created_at=workspace.created_at,
                     updated_at=workspace.updated_at,
                     metadata={},

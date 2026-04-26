@@ -764,9 +764,11 @@ class CollaborationRepository:
         await conn.execute(
             """
             INSERT INTO workspaces (
-                workspace_id, organization_id, project_id, name, description, owner_user_id, harness, created_at, updated_at, metadata
+                workspace_id, organization_id, project_id, name, description,
+                owner_user_id, created_by, creator_user_id, creator_system_agent_id,
+                harness, created_at, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (workspace_id) DO UPDATE
                 SET organization_id = EXCLUDED.organization_id,
                     project_id = EXCLUDED.project_id,
@@ -783,6 +785,13 @@ class CollaborationRepository:
             workspace.name,
             workspace.description,
             workspace.owner_user_id,
+            workspace.created_by
+            or workspace.creator_user_id
+            or workspace.creator_system_agent_id
+            or workspace.owner_user_id
+            or workspace.workspace_id,
+            workspace.creator_user_id,
+            workspace.creator_system_agent_id,
             (
                 self._json_dumps(workspace.harness.model_dump(mode="json"))
                 if workspace.harness is not None
@@ -3180,7 +3189,9 @@ class CollaborationRepository:
     async def fetch_workspace(self, workspace_id: UUID) -> Workspace | None:
         row = await self._pool.fetchrow(
             """
-            SELECT workspace_id, organization_id, project_id, name, description, owner_user_id, harness, created_at, updated_at, metadata
+            SELECT workspace_id, organization_id, project_id, name, description,
+                   owner_user_id, created_by, creator_user_id, creator_system_agent_id,
+                   harness, created_at, updated_at, metadata
             FROM workspaces
             WHERE workspace_id = $1
             """,
@@ -3196,7 +3207,9 @@ class CollaborationRepository:
     ) -> list[Workspace]:
         rows = await self._pool.fetch(
             """
-            SELECT workspace_id, organization_id, project_id, name, description, owner_user_id, harness, created_at, updated_at, metadata
+            SELECT workspace_id, organization_id, project_id, name, description,
+                   owner_user_id, created_by, creator_user_id, creator_system_agent_id,
+                   harness, created_at, updated_at, metadata
             FROM workspaces
             WHERE ($1::uuid IS NULL OR organization_id = $1)
               AND ($2::uuid IS NULL OR project_id = $2)
@@ -3217,6 +3230,7 @@ class CollaborationRepository:
         rows = await self._pool.fetch(
             """
             SELECT w.workspace_id, w.organization_id, w.project_id, w.name, w.description, w.owner_user_id,
+                   w.created_by, w.creator_user_id, w.creator_system_agent_id,
                    w.harness, w.created_at, w.updated_at, w.metadata
             FROM workspaces AS w
             JOIN organization_memberships AS membership
@@ -3247,16 +3261,24 @@ class CollaborationRepository:
     ) -> list[Workspace]:
         rows = await self._pool.fetch(
             """
-            SELECT w.workspace_id, w.organization_id, w.project_id, w.name, w.description, w.owner_user_id,
+            SELECT DISTINCT w.workspace_id, w.organization_id, w.project_id, w.name, w.description, w.owner_user_id,
+                   w.created_by, w.creator_user_id, w.creator_system_agent_id,
                    w.harness, w.created_at, w.updated_at, w.metadata
             FROM workspaces AS w
-            JOIN project_access_bindings AS access
+            LEFT JOIN project_access_bindings AS access
               ON access.project_id = w.project_id
              AND access.subject_type = 'agent'
              AND access.system_agent_id = $1
              AND access.role IN ('creator', 'owner', 'editor', 'viewer')
+            LEFT JOIN participants AS participant
+              ON participant.workspace_id = w.workspace_id
+             AND participant.system_agent_id = $1
             WHERE ($2::uuid IS NULL OR w.organization_id = $2)
               AND ($3::uuid IS NULL OR w.project_id = $3)
+              AND (
+                access.project_id IS NOT NULL
+                OR participant.participant_id IS NOT NULL
+              )
             ORDER BY w.created_at ASC
             """,
             system_agent_id,
@@ -5722,6 +5744,9 @@ class CollaborationRepository:
             name=row["name"],
             description=row["description"],
             owner_user_id=row["owner_user_id"],
+            created_by=row["created_by"],
+            creator_user_id=row["creator_user_id"],
+            creator_system_agent_id=row["creator_system_agent_id"],
             harness=(
                 WorkspaceHarness.model_validate(
                     CollaborationRepository._json_value(row["harness"], default={})

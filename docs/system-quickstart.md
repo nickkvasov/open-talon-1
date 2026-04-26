@@ -262,6 +262,7 @@ Local multi-tenant defaults:
 - new organizations receive both `Default Project` for ordinary workspaces and `Administration` for managed operational workspaces
 - organization slugs are normalized to lowercase hyphenated identifiers; `Acme Ops!!!` becomes `acme-ops`
 - every workspace belongs to a project, and every project belongs to an organization
+- workspaces record `created_by`, `creator_user_id`, and `creator_system_agent_id` for first-class human or agent creator attribution
 - `tui2`, `user-client`, and the admin web auto-select the org when exactly one organization is visible
 
 Current local hardening defaults:
@@ -637,8 +638,10 @@ Operational-agent live wiring is also behind an explicit env gate:
 
 ```bash
 OPEN_TALON_RUN_OPERATIONAL_AGENTS_LIVE=1 \
-  pytest -m integration tests/infrastructure/test_operational_agents_live_system.py -q -s
+  pytest -m integration tests/infrastructure/operational_agents_live -q -s
 ```
+
+For the full real-life operational-agent test matrix and execution protocol, see [operational-agents-real-life-test-protocol.md](./operational-agents-real-life-test-protocol.md).
 
 If you changed schema, auth, routing, or participant identity behavior, run:
 

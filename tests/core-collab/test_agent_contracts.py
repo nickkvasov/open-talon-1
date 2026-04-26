@@ -543,7 +543,15 @@ class FakeRepository:
                 continue
             if project_id is not None and workspace.project_id != project_id:
                 continue
-            if (workspace.project_id, "agent", system_agent_id) in self._project_access_bindings:
+            attached = any(
+                participant.workspace_id == workspace.workspace_id
+                and getattr(participant, "system_agent_id", None) == system_agent_id
+                for participant in self._participants.values()
+            )
+            if (
+                (workspace.project_id, "agent", system_agent_id) in self._project_access_bindings
+                or attached
+            ):
                 visible.append(workspace)
         return visible
 

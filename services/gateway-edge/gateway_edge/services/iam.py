@@ -185,7 +185,26 @@ class IamService:
         identity = await self._require_agent_identity(agent_identity_id)
         provisioner = build_machine_identity_provisioner()
         secret_store = build_secret_store()
-        provisioned = await provisioner.rotate_machine_secret(client_id=identity.client_id)
+        try:
+            provisioned = await provisioner.rotate_machine_secret(client_id=identity.client_id)
+        except KeyError:
+            system_agent = await self._require_system_agent(identity.system_agent_id)
+            provisioned = await provisioner.create_machine_identity(
+                client_id=identity.client_id,
+                display_name=system_agent.display_name,
+                description=system_agent.description,
+                metadata={
+                    "scope": system_agent.scope,
+                    "organization_id": (
+                        str(system_agent.organization_id)
+                        if system_agent.organization_id is not None
+                        else None
+                    ),
+                    **identity.metadata,
+                    **payload.metadata,
+                    "external_identity_reprovisioned": True,
+                },
+            )
         secret_ref = await secret_store.store_secret(
             path=self._existing_secret_path(identity),
             values={"client_secret": provisioned.client_secret},

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 IDENTITY_PERMISSION_DESCRIPTIONS: dict[str, str] = {
     "organization.read": "Read organization metadata that is already in scope for the principal.",
+    "organization.write": "Create or update organization metadata at the platform control-plane level.",
     "organization.members.read": "Read organization membership records.",
     "organization.members.write": "Add, update, or remove organization members.",
     "project.read": "Read project metadata inside an authorized organization.",

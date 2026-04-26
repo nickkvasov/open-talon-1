@@ -4,6 +4,13 @@ import asyncio
 import logging
 from uuid import UUID
 
+import httpx
+from open_talon_contracts.secrets import (
+    OpenBaoSecretProvider,
+    SecretResolver,
+    secret_references_from_config,
+)
+
 from gateway_edge.config import settings
 from gateway_edge.models import (
     AgentDefinition,
@@ -12,6 +19,7 @@ from gateway_edge.models import (
     CreateAgentIdentityRequest,
     IamRoleDefinition,
     ParticipantInput,
+    RotateAgentIdentitySecretRequest,
 )
 from gateway_edge.services.collaboration import collaboration_service
 from gateway_edge.services.iam import iam_service
@@ -81,24 +89,28 @@ class OperationalBootstrapService:
 
         organizations = await collaboration_service.list_organizations()
         for organization in organizations:
-            if organization.slug == "system-base":
-                continue
-            curator = await self._find_agent(
-                scope="organization",
-                organization_id=organization.organization_id,
-                agent_key="curator",
-            )
-            if curator is None:
-                continue
-            role = await self._find_role(
-                scope="organization",
-                organization_id=organization.organization_id,
-                name="organization_curator",
-            )
-            if role is None:
-                continue
-            identity = await self._ensure_identity(curator)
-            await self._ensure_role_binding(identity, role)
+            await self.ensure_for_organization(organization.organization_id)
+
+    async def ensure_for_organization(self, organization_id: UUID) -> None:
+        organization = await collaboration_service.get_organization(organization_id)
+        if organization.slug == "system-base":
+            return
+        curator = await self._find_agent(
+            scope="organization",
+            organization_id=organization.organization_id,
+            agent_key="curator",
+        )
+        if curator is None:
+            return
+        role = await self._find_role(
+            scope="organization",
+            organization_id=organization.organization_id,
+            name="organization_curator",
+        )
+        if role is None:
+            return
+        identity = await self._ensure_identity(curator)
+        await self._ensure_role_binding(identity, role)
 
     async def _find_agent(
         self,
@@ -137,7 +149,7 @@ class OperationalBootstrapService:
             None,
         )
         if identity is not None:
-            return identity
+            return await self._repair_identity_if_needed(identity)
         result = await iam_service.create_agent_identity(
             CreateAgentIdentityRequest(
                 actor=_SYSTEM_ACTOR,
@@ -151,6 +163,68 @@ class OperationalBootstrapService:
             )
         )
         return result.identity
+
+    async def _repair_identity_if_needed(self, identity: AgentIdentity) -> AgentIdentity:
+        if identity.status != "active":
+            return identity
+        try:
+            if await self._identity_client_credentials_work(identity):
+                return identity
+        except Exception as exc:
+            logger.info(
+                "Managed operational agent identity %s credential validation failed: %s",
+                identity.agent_identity_id,
+                exc,
+            )
+        result = await iam_service.rotate_agent_identity_secret(
+            identity.agent_identity_id,
+            RotateAgentIdentitySecretRequest(
+                actor=_SYSTEM_ACTOR,
+                metadata={
+                    "managed": True,
+                    "operational_agent": True,
+                    "bootstrap_secret_repaired": True,
+                },
+            ),
+        )
+        logger.info(
+            "Repaired managed operational agent identity %s secret",
+            identity.agent_identity_id,
+        )
+        return result.identity
+
+    async def _identity_client_credentials_work(self, identity: AgentIdentity) -> bool:
+        resolver = SecretResolver(
+            [
+                OpenBaoSecretProvider(
+                    address=settings.openbao_address,
+                    token=settings.openbao_admin_token,
+                    default_mount=settings.openbao_kv_mount,
+                )
+            ]
+        )
+        client_secret = await resolver.resolve(
+            secret_references_from_config(identity.secret_ref),
+            label=f"managed agent identity {identity.agent_identity_id} client secret",
+        )
+        token_endpoint = identity.metadata.get("token_endpoint")
+        if not isinstance(token_endpoint, str) or not token_endpoint:
+            token_endpoint = f"{identity.issuer.rstrip('/')}/protocol/openid-connect/token"
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+            response = await client.post(
+                token_endpoint,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": identity.client_id,
+                    "client_secret": client_secret,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+        if response.status_code in {400, 401, 403}:
+            return False
+        response.raise_for_status()
+        access_token = response.json().get("access_token")
+        return isinstance(access_token, str) and bool(access_token)
 
     async def _ensure_role_binding(
         self,

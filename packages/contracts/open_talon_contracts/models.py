@@ -350,6 +350,9 @@ class Workspace(BaseModel):
     name: str
     description: str | None = None
     owner_user_id: UUID | None = None
+    created_by: UUID | None = None
+    creator_user_id: UUID | None = None
+    creator_system_agent_id: UUID | None = None
     harness: WorkspaceHarness | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)

@@ -11,6 +11,7 @@ For coding-agent-specific project guidance, see [`AGENTS.md`](./AGENTS.md).
 - [docs/iam.md](./docs/iam.md): provider-neutral principal IAM model, permission catalog, and IAM APIs
 - [docs/agent-operations-guide.md](./docs/agent-operations-guide.md): operating guide for software development agents and scripted test users
 - [docs/tinker-tool-generation.md](./docs/tinker-tool-generation.md): Tinker request, approval, catalog, and live-test workflow
+- [docs/operational-agents-real-life-test-protocol.md](./docs/operational-agents-real-life-test-protocol.md): real local-stack test protocol for Tinker, Steward, Curator, and managed administration contexts
 - [docs/db-migrations.md](./docs/db-migrations.md): migration workflow and schema rules
 - [docs/collaboration-system-design.md](./docs/collaboration-system-design.md): historical design background from before the current collaboration implementation
 - [docs/research-comparison.md](./docs/research-comparison.md): external ecosystem comparison for multi-agent research and enterprise platforms

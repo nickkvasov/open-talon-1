@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -33,6 +34,7 @@ from gateway_edge.models import (
     CreateInteractionRequest,
     CreateMemoryEntryRequest,
     CreateMessageRequest,
+    CreateOrganizationRequest,
     CreateProjectRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
@@ -65,6 +67,7 @@ from gateway_edge.models import (
 from gateway_edge.services import collaboration as collab_svc
 from gateway_edge.services.audit import audit_service
 from gateway_edge.services.iam import iam_service
+from gateway_edge.services.operational_bootstrap import operational_bootstrap_service
 from gateway_edge.services.session import get_redis
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
@@ -86,6 +89,13 @@ class SessionSetScopeArgs(BaseModel):
     organization_id: UUID | None = None
     project_id: UUID | None = None
     workspace_id: UUID | None = None
+
+
+class OrganizationCreateArgs(BaseModel):
+    slug: str
+    name: str
+    description: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProjectRefArgs(BaseModel):
@@ -853,6 +863,16 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             required_permission="organization.read",
             handler_name="handle_organizations_list",
         ),
+        "organizations.create": OperationDefinition(
+            name="organizations.create",
+            description="Create a new organization from global control-plane scope.",
+            input_model=OrganizationCreateArgs,
+            output_schema=_type_schema(Organization),
+            allowed_scopes=frozenset({"global"}),
+            required_permission_type="identity",
+            required_permission="organization.write",
+            handler_name="handle_organizations_create",
+        ),
         "organizations.get": OperationDefinition(
             name="organizations.get",
             description="Return the active organization in organization scope.",
@@ -1341,6 +1361,19 @@ async def handle_organizations_list(ctx: McpApiContext, _: EmptyArgs) -> list[Or
         if scope.kind == "organization" and scope.id is not None:
             organizations.append(await collab_svc.collaboration_service.get_organization(scope.id))
     return organizations
+
+
+async def handle_organizations_create(ctx: McpApiContext, args: OrganizationCreateArgs) -> Organization:
+    if ctx.active_scope_kind != "global":
+        raise ValueError("organizations.create requires global scope")
+    payload = CreateOrganizationRequest(actor=ctx.identity_actor(), **args.model_dump())
+    organization = await collab_svc.collaboration_service.create_organization(payload)
+    if settings.operational_agents_bootstrap_enabled:
+        with suppress(Exception):
+            await operational_bootstrap_service.ensure_for_organization(
+                organization.organization_id
+            )
+    return organization
 
 
 async def handle_organizations_get(ctx: McpApiContext, _: EmptyArgs) -> Organization:

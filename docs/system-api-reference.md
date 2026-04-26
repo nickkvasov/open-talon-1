@@ -601,6 +601,8 @@ The `chat` APIs provide a session-based chat surface. Shared collaboration flows
 | `PUT` | `/v1/workspaces/{workspace_id}/roles/{role_name}` | create/update role definition |
 | `DELETE` | `/v1/workspaces/{workspace_id}/roles/{role_name}` | delete role definition |
 
+Workspace responses include `created_by`, `creator_user_id`, and `creator_system_agent_id` so human-created and agent-created workspaces can be attributed without relying on metadata.
+
 ### System Definitions
 
 Global system-definition APIs are operator/admin APIs.
