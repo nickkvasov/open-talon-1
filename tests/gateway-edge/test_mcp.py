@@ -5,7 +5,7 @@ import json
 from uuid import UUID, uuid4
 
 from gateway_edge.config import settings
-from gateway_edge.mcp_api import notification_hub
+from gateway_edge.mcp_api import OPERATION_REGISTRY, notification_hub
 from gateway_edge.models import AuthContext
 
 
@@ -35,6 +35,22 @@ def _agent_context(*, agent_identity_id, system_agent_id, client_id: str) -> Aut
         display_name="Provisioned Agent",
         claims={"azp": client_id, "sub": f"service-account-{client_id}"},
     )
+
+
+def test_mcp_retrieval_operations_declare_scopes_and_permissions() -> None:
+    expected = {
+        "retrieval.corpora.list",
+        "retrieval.sources.list",
+        "retrieval.search",
+        "retrieval.context_pack.create",
+        "retrieval.context_pack.get",
+    }
+
+    for name in expected:
+        operation = OPERATION_REGISTRY[name]
+        assert operation.allowed_scopes == frozenset({"global", "organization", "workspace"})
+        assert operation.required_permission in {"retrieval.read", "retrieval.search"}
+        assert operation.requires_workspace_actor is True
 
 
 def _patch_oidc_tokens(monkeypatch, token_map: dict[str, AuthContext]) -> None:

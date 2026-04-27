@@ -243,6 +243,15 @@ Relevant layered-memory defaults from [`infrastructure/.env.example`](../infrast
 - `OPEN_TALON_MEMGRAPH_USER=memgraph`
 - `OPEN_TALON_MEMGRAPH_PASSWORD=memgraph`
 
+Relevant retriever defaults from [`infrastructure/.env.example`](../infrastructure/.env.example):
+
+- `RETRIEVER_DEFAULT_EMBEDDING_PROVIDER=ollama`
+- `RETRIEVER_DEFAULT_EMBEDDING_MODEL=nomic-embed-text`
+- `RETRIEVER_DEFAULT_VISION_PROVIDER=ollama`
+- `RETRIEVER_DEFAULT_VISION_MODEL=llava`
+- `RETRIEVER_OLLAMA_BASE_URL=http://127.0.0.1:11434`
+- `RETRIEVER_VISUAL_EXTRACTION_ENABLED=false`
+
 Relevant runtime-guardrail defaults from [`infrastructure/.env.example`](../infrastructure/.env.example):
 
 - `OPEN_TALON_GLOBAL_DAILY_TOKEN_CAP=0`

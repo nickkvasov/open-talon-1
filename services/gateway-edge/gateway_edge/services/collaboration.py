@@ -8,7 +8,7 @@ import zipfile
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 _ROOT_DIR = Path(__file__).resolve().parents[4]
 
@@ -57,6 +57,11 @@ from gateway_edge.models import (
     CreateMcpServerRequest,
     CreateOrganizationRequest,
     CreateProjectRequest,
+    CreateRetrievalContextPackRequest,
+    CreateRetrievalCorpusRequest,
+    CreateRetrievalIngestionJobRequest,
+    CreateRetrievalProfileRequest,
+    CreateRetrievalSourceRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
     ConfirmWorkspaceMemoryRequest,
@@ -98,6 +103,14 @@ from gateway_edge.models import (
     IamRoleDefinition,
     RoleDefinition,
     PublishAssetFromGitRequest,
+    RetrievalContextPack,
+    RetrievalCorpus,
+    RetrievalIngestionJob,
+    RetrievalProfile,
+    RetrievalSearchResponse,
+    RetrievalSource,
+    RetrievalSourceVersion,
+    RunRetrievalSearchRequest,
     PublishAgentBundleFromGitRequest,
     ResolvedAssetBinding,
     SystemToolDefinition,
@@ -140,6 +153,7 @@ from gateway_edge.models import (
     ValidateAgentBundleFromGitRequest,
     AddOrganizationMemberRequest,
     RemoveOrganizationMemberRequest,
+    UploadFileAssetRequest,
 )
 from gateway_edge.services.agent_bundles import (
     AgentBundleCompiler,
@@ -1266,6 +1280,56 @@ class CollaborationService:
         assert result.version is not None
         return result.version
 
+    async def upload_file_asset(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None,
+        payload: UploadFileAssetRequest,
+        filename: str,
+        content: bytes,
+    ) -> WorkspaceAssetVersion:
+        resolved_organization_id = organization_id
+        if scope == "workspace" and resolved_organization_id is None and workspace_id is not None:
+            workspace = await self._require_kernel().get_workspace_detail(workspace_id)
+            resolved_organization_id = workspace.workspace.organization_id
+        content_type = payload.content_type or self._content_type_for_path(filename)
+        object_key = self._direct_asset_object_key(
+            scope=scope,
+            organization_id=resolved_organization_id,
+            workspace_id=workspace_id,
+            logical_name=payload.logical_name,
+            filename=filename,
+        )
+        stored = await self._storage.put_object(
+            object_key=object_key,
+            payload=content,
+            content_type=content_type,
+        )
+        result = await self._require_kernel().publish_asset_from_upload(
+            scope=scope,
+            organization_id=resolved_organization_id,
+            workspace_id=workspace_id,
+            payload=payload.model_copy(
+                update={
+                    "content_type": content_type,
+                    "metadata": {
+                        **payload.metadata,
+                        "filename": filename,
+                    },
+                }
+            ),
+            storage_backend="minio",
+            bucket=stored.bucket,
+            object_key=stored.object_key,
+            size_bytes=stored.size_bytes,
+            sha256=stored.sha256,
+            content_type=stored.content_type,
+        )
+        assert result.version is not None
+        return result.version
+
     async def list_workspace_assets(
         self,
         *,
@@ -1287,6 +1351,195 @@ class CollaborationService:
 
     async def get_workspace_asset(self, asset_id: UUID) -> WorkspaceAsset | None:
         return await self._require_kernel().get_workspace_asset(asset_id)
+
+    async def read_workspace_asset_version_bytes(
+        self,
+        asset_version_id: UUID,
+    ) -> bytes:
+        version = await self._require_kernel().get_workspace_asset_version(asset_version_id)
+        if version is None:
+            raise KeyError(f"Asset version {asset_version_id} not found")
+        return await self._storage.get_object(object_key=version.object_key)
+
+    async def create_retrieval_profile(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        payload: CreateRetrievalProfileRequest,
+    ) -> RetrievalProfile:
+        result = await self._require_kernel().create_retrieval_profile(
+            scope=scope,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            payload=payload,
+        )
+        assert result.profile is not None
+        return result.profile
+
+    async def list_retrieval_profiles(
+        self,
+        *,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+    ) -> list[RetrievalProfile]:
+        return await self._require_kernel().list_retrieval_profiles(
+            scope=scope,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+        )
+
+    async def create_retrieval_corpus(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        payload: CreateRetrievalCorpusRequest,
+    ) -> RetrievalCorpus:
+        result = await self._require_kernel().create_retrieval_corpus(
+            scope=scope,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            payload=payload,
+        )
+        assert result.corpus is not None
+        return result.corpus
+
+    async def list_retrieval_corpora(
+        self,
+        *,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+    ) -> list[RetrievalCorpus]:
+        return await self._require_kernel().list_retrieval_corpora(
+            scope=scope,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+        )
+
+    async def create_retrieval_source(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        payload: CreateRetrievalSourceRequest,
+    ) -> RetrievalSource:
+        result = await self._require_kernel().create_retrieval_source(
+            scope=scope,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            payload=payload,
+        )
+        assert result.source is not None
+        return result.source
+
+    async def list_retrieval_sources(
+        self,
+        *,
+        corpus_id: UUID | None = None,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+    ) -> list[RetrievalSource]:
+        return await self._require_kernel().list_retrieval_sources(
+            corpus_id=corpus_id,
+            scope=scope,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+        )
+
+    async def create_retrieval_ingestion_job(
+        self,
+        *,
+        corpus_id: UUID,
+        payload: CreateRetrievalIngestionJobRequest,
+    ) -> RetrievalIngestionJob:
+        result = await self._require_kernel().create_retrieval_ingestion_job(
+            corpus_id=corpus_id,
+            payload=payload,
+        )
+        assert result.job is not None
+        return result.job
+
+    async def list_retrieval_ingestion_jobs(
+        self,
+        *,
+        corpus_id: UUID | None = None,
+        source_id: UUID | None = None,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        status: str | None = None,
+    ) -> list[RetrievalIngestionJob]:
+        return await self._require_kernel().list_retrieval_ingestion_jobs(
+            corpus_id=corpus_id,
+            source_id=source_id,
+            scope=scope,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            status=status,
+        )
+
+    async def list_retrieval_source_versions(
+        self,
+        source_id: UUID,
+    ) -> list[RetrievalSourceVersion]:
+        return await self._require_kernel().list_retrieval_source_versions(source_id)
+
+    async def run_retrieval_search(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        payload: RunRetrievalSearchRequest,
+        embedding_vector: list[float] | None = None,
+        embedding_provider_key: str | None = None,
+        embedding_model: str | None = None,
+    ) -> RetrievalSearchResponse:
+        return await self._require_kernel().run_retrieval_search(
+            scope=scope,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            payload=payload,
+            embedding_vector=embedding_vector,
+            embedding_provider_key=embedding_provider_key,
+            embedding_model=embedding_model,
+        )
+
+    async def create_retrieval_context_pack(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        payload: CreateRetrievalContextPackRequest,
+        embedding_vector: list[float] | None = None,
+        embedding_provider_key: str | None = None,
+        embedding_model: str | None = None,
+    ) -> RetrievalContextPack:
+        result = await self._require_kernel().create_retrieval_context_pack(
+            scope=scope,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            payload=payload,
+            embedding_vector=embedding_vector,
+            embedding_provider_key=embedding_provider_key,
+            embedding_model=embedding_model,
+        )
+        assert result.context_pack is not None
+        return result.context_pack
+
+    async def get_retrieval_context_pack(
+        self,
+        context_pack_id: UUID,
+    ) -> RetrievalContextPack | None:
+        return await self._require_kernel().get_retrieval_context_pack(context_pack_id)
 
     async def list_iam_role_definitions(
         self,
@@ -2264,6 +2517,25 @@ class CollaborationService:
         else:
             prefix = f"organizations/{organization_id}/workspaces/{workspace_id}"
         return f"{prefix}/assets/{normalized_name}/{revision}/{file_name}"
+
+    @staticmethod
+    def _direct_asset_object_key(
+        *,
+        scope: str,
+        organization_id: UUID | None,
+        workspace_id: UUID | None,
+        logical_name: str,
+        filename: str,
+    ) -> str:
+        normalized_name = logical_name.replace("/", "_")
+        file_name = filename.rsplit("/", 1)[-1] or "upload.bin"
+        if scope == "global":
+            prefix = "global"
+        elif scope == "organization":
+            prefix = f"organizations/{organization_id}"
+        else:
+            prefix = f"organizations/{organization_id}/workspaces/{workspace_id}"
+        return f"{prefix}/files/{normalized_name}/{uuid4()}/{file_name}"
 
     @staticmethod
     def _event_visible_to_viewer(

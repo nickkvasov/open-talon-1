@@ -36,6 +36,7 @@ from gateway_edge.models import (
     CreateMessageRequest,
     CreateOrganizationRequest,
     CreateProjectRequest,
+    CreateRetrievalContextPackRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
     GitRepository,
@@ -53,6 +54,11 @@ from gateway_edge.models import (
     ProjectSubjectRef,
     PublishAgentBundleFromGitRequest,
     RemoveProjectAccessRequest,
+    RetrievalContextPack,
+    RetrievalCorpus,
+    RetrievalSearchResponse,
+    RetrievalSource,
+    RunRetrievalSearchRequest,
     SystemToolDefinition,
     Thread,
     ThreadDetail,
@@ -187,6 +193,38 @@ class ThreadMemorySearchArgs(BaseModel):
     use_provider: str | None = None
     include_graph: bool = True
     metadata_filters: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalSourcesListArgs(BaseModel):
+    corpus_id: UUID | None = None
+
+
+class RetrievalSearchArgs(BaseModel):
+    query: str
+    corpus_ids: list[UUID] = Field(default_factory=list)
+    profile_id: UUID | None = None
+    strategy: Literal["vector", "keyword", "hybrid"] | None = None
+    top_k: int | None = Field(default=None, ge=1)
+    metadata_filters: dict[str, Any] = Field(default_factory=dict)
+    include_context: bool = False
+    context_token_budget: int | None = Field(default=None, ge=1)
+    provider_overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalContextPackCreateArgs(BaseModel):
+    query: str
+    corpus_ids: list[UUID] = Field(default_factory=list)
+    profile_id: UUID | None = None
+    strategy: Literal["vector", "keyword", "hybrid"] | None = None
+    top_k: int | None = Field(default=None, ge=1)
+    metadata_filters: dict[str, Any] = Field(default_factory=dict)
+    context_token_budget: int | None = Field(default=None, ge=1)
+    provider_overrides: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalContextPackGetArgs(BaseModel):
+    context_pack_id: UUID
 
 
 class AuditEventsListArgs(BaseModel):
@@ -1090,6 +1128,61 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             requires_workspace_actor=True,
             handler_name="handle_memory_thread_search",
         ),
+        "retrieval.corpora.list": OperationDefinition(
+            name="retrieval.corpora.list",
+            description="List retrieval corpora visible in the active global, organization, or workspace scope.",
+            input_model=EmptyArgs,
+            output_schema=_type_schema(list[RetrievalCorpus]),
+            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            required_permission_type="identity",
+            required_permission="retrieval.read",
+            requires_workspace_actor=True,
+            handler_name="handle_retrieval_corpora_list",
+        ),
+        "retrieval.sources.list": OperationDefinition(
+            name="retrieval.sources.list",
+            description="List retrieval sources visible in the active global, organization, or workspace scope.",
+            input_model=RetrievalSourcesListArgs,
+            output_schema=_type_schema(list[RetrievalSource]),
+            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            required_permission_type="identity",
+            required_permission="retrieval.read",
+            requires_workspace_actor=True,
+            handler_name="handle_retrieval_sources_list",
+        ),
+        "retrieval.search": OperationDefinition(
+            name="retrieval.search",
+            description="Search retrieval corpora and return cited hits.",
+            input_model=RetrievalSearchArgs,
+            output_schema=_type_schema(RetrievalSearchResponse),
+            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            required_permission_type="identity",
+            required_permission="retrieval.search",
+            requires_workspace_actor=True,
+            handler_name="handle_retrieval_search",
+        ),
+        "retrieval.context_pack.create": OperationDefinition(
+            name="retrieval.context_pack.create",
+            description="Create a cited retrieval context pack in the active scope.",
+            input_model=RetrievalContextPackCreateArgs,
+            output_schema=_type_schema(RetrievalContextPack),
+            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            required_permission_type="identity",
+            required_permission="retrieval.search",
+            requires_workspace_actor=True,
+            handler_name="handle_retrieval_context_pack_create",
+        ),
+        "retrieval.context_pack.get": OperationDefinition(
+            name="retrieval.context_pack.get",
+            description="Read a retrieval context pack in the active scope.",
+            input_model=RetrievalContextPackGetArgs,
+            output_schema=_type_schema(RetrievalContextPack),
+            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            required_permission_type="identity",
+            required_permission="retrieval.read",
+            requires_workspace_actor=True,
+            handler_name="handle_retrieval_context_pack_get",
+        ),
         "agent_catalog.list": OperationDefinition(
             name="agent_catalog.list",
             description="List system agents in the current global or organization scope.",
@@ -1621,6 +1714,120 @@ async def handle_memory_thread_search(
         args.thread_id,
         CreateThreadMemorySearchRequest.from_args(actor, args),
     )
+
+
+async def _active_retrieval_scope(
+    ctx: McpApiContext,
+) -> tuple[str, UUID | None, UUID | None]:
+    if ctx.active_scope_kind == "global":
+        return "global", None, None
+    if ctx.active_scope_kind == "organization" and ctx.active_scope_id is not None:
+        return "organization", ctx.active_scope_id, None
+    if ctx.active_scope_kind == "workspace" and ctx.active_scope_id is not None:
+        detail = await collab_svc.collaboration_service.get_workspace(ctx.active_scope_id)
+        return "workspace", detail.workspace.organization_id, ctx.active_scope_id
+    raise ValueError("Retrieval MCP operations require global, organization, or workspace scope")
+
+
+async def _retrieval_actor(
+    ctx: McpApiContext,
+    *,
+    provider_overrides: dict[str, Any] | None = None,
+) -> ParticipantInput:
+    if ctx.active_scope_kind == "workspace":
+        actor = await ctx.resolve_workspace_actor(auto_create=False)
+    else:
+        actor = ctx.identity_actor()
+    if not provider_overrides:
+        return actor
+    _, organization_id, workspace_id = await _active_retrieval_scope(ctx)
+    await authorization_engine.authorize(
+        "mcp.retrieval.provider_overrides",
+        {
+            "auth_context": ctx.auth_context,
+            "permission_type": "workspace" if workspace_id is not None else "identity",
+            "permission": "retrieval.admin",
+            "organization_id": organization_id,
+            "workspace_id": workspace_id,
+        },
+    )
+    permissions = set(actor.iam_permissions)
+    permissions.add("retrieval.admin")
+    return actor.model_copy(update={"iam_permissions": sorted(permissions)})
+
+
+async def handle_retrieval_corpora_list(
+    ctx: McpApiContext,
+    _: EmptyArgs,
+) -> list[RetrievalCorpus]:
+    scope, organization_id, workspace_id = await _active_retrieval_scope(ctx)
+    return await collab_svc.collaboration_service.list_retrieval_corpora(
+        scope=scope,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+
+
+async def handle_retrieval_sources_list(
+    ctx: McpApiContext,
+    args: RetrievalSourcesListArgs,
+) -> list[RetrievalSource]:
+    scope, organization_id, workspace_id = await _active_retrieval_scope(ctx)
+    return await collab_svc.collaboration_service.list_retrieval_sources(
+        corpus_id=args.corpus_id,
+        scope=scope,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+
+
+async def handle_retrieval_search(
+    ctx: McpApiContext,
+    args: RetrievalSearchArgs,
+) -> RetrievalSearchResponse:
+    scope, organization_id, workspace_id = await _active_retrieval_scope(ctx)
+    actor = await _retrieval_actor(ctx, provider_overrides=args.provider_overrides)
+    payload = RunRetrievalSearchRequest(actor=actor, **args.model_dump())
+    return await collab_svc.collaboration_service.run_retrieval_search(
+        scope=scope,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+        payload=payload,
+    )
+
+
+async def handle_retrieval_context_pack_create(
+    ctx: McpApiContext,
+    args: RetrievalContextPackCreateArgs,
+) -> RetrievalContextPack:
+    scope, organization_id, workspace_id = await _active_retrieval_scope(ctx)
+    actor = await _retrieval_actor(ctx, provider_overrides=args.provider_overrides)
+    payload = CreateRetrievalContextPackRequest(actor=actor, **args.model_dump())
+    return await collab_svc.collaboration_service.create_retrieval_context_pack(
+        scope=scope,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+        payload=payload,
+    )
+
+
+async def handle_retrieval_context_pack_get(
+    ctx: McpApiContext,
+    args: RetrievalContextPackGetArgs,
+) -> RetrievalContextPack:
+    scope, organization_id, workspace_id = await _active_retrieval_scope(ctx)
+    context_pack = await collab_svc.collaboration_service.get_retrieval_context_pack(
+        args.context_pack_id
+    )
+    if context_pack is None:
+        raise KeyError(f"Retrieval context pack {args.context_pack_id} not found")
+    if (
+        context_pack.scope != scope
+        or context_pack.organization_id != organization_id
+        or context_pack.workspace_id != workspace_id
+    ):
+        raise KeyError(f"Retrieval context pack {args.context_pack_id} not found")
+    return context_pack
 
 
 async def handle_agent_catalog_list(ctx: McpApiContext, _: EmptyArgs) -> list[AgentDefinition]:

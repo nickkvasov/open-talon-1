@@ -61,6 +61,17 @@ from .contracts import (
     ParticipantProfile,
     Project,
     ProjectAccessBinding,
+    RetrievalChunk,
+    RetrievalChunkCitation,
+    RetrievalContextPack,
+    RetrievalCorpus,
+    RetrievalEmbedding,
+    RetrievalIngestionJob,
+    RetrievalProfile,
+    RetrievalRun,
+    RetrievalSearchHit,
+    RetrievalSource,
+    RetrievalSourceVersion,
     ResolvedAssetBinding,
     Run,
     RunStep,
@@ -2145,6 +2156,24 @@ class CollaborationRepository:
             return await self._asset_organization_id(self._pool, asset_id)
         return None
 
+    async def _effective_organization_for_scope(
+        self,
+        conn: asyncpg.Connection | asyncpg.Pool,
+        *,
+        scope: str,
+        organization_id: UUID | None,
+        workspace_id: UUID | None,
+    ) -> UUID | None:
+        if scope == "global":
+            return None
+        if organization_id is not None:
+            return organization_id
+        if workspace_id is not None:
+            return await self._workspace_organization_id(conn, workspace_id)
+        if scope == "organization":
+            return await self._default_organization_id(conn)
+        return organization_id
+
     async def upsert_workspace_tool(
         self,
         conn: asyncpg.Connection,
@@ -3825,6 +3854,927 @@ class CollaborationRepository:
             asset_id,
         )
         return [self._workspace_asset_version_from_row(row) for row in rows]
+
+    async def upsert_retrieval_profile(
+        self, conn: asyncpg.Connection, profile: RetrievalProfile
+    ) -> None:
+        organization_id = profile.organization_id
+        if profile.scope in {"organization", "workspace"}:
+            organization_id = await self._effective_organization_for_scope(
+                conn,
+                scope=profile.scope,
+                organization_id=profile.organization_id,
+                workspace_id=profile.workspace_id,
+            )
+        await conn.execute(
+            """
+            INSERT INTO retrieval_profiles (
+                profile_id, scope, organization_id, workspace_id, name, description,
+                embedding_provider_key, embedding_model, embedding_dimension,
+                vision_provider_key, vision_model, visual_extraction_enabled,
+                vector_store_provider_key, chunking_strategy, chunk_size_tokens,
+                chunk_overlap_tokens, search_strategy, vector_weight, keyword_weight,
+                top_k, reranker_provider_key, reranker_model, context_token_budget,
+                citation_strictness, created_by, created_at, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9,
+                $10, $11, $12,
+                $13, $14, $15,
+                $16, $17, $18, $19,
+                $20, $21, $22, $23,
+                $24, $25, $26, $27, $28
+            )
+            ON CONFLICT (profile_id) DO UPDATE
+                SET scope = EXCLUDED.scope,
+                    organization_id = EXCLUDED.organization_id,
+                    workspace_id = EXCLUDED.workspace_id,
+                    name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    embedding_provider_key = EXCLUDED.embedding_provider_key,
+                    embedding_model = EXCLUDED.embedding_model,
+                    embedding_dimension = EXCLUDED.embedding_dimension,
+                    vision_provider_key = EXCLUDED.vision_provider_key,
+                    vision_model = EXCLUDED.vision_model,
+                    visual_extraction_enabled = EXCLUDED.visual_extraction_enabled,
+                    vector_store_provider_key = EXCLUDED.vector_store_provider_key,
+                    chunking_strategy = EXCLUDED.chunking_strategy,
+                    chunk_size_tokens = EXCLUDED.chunk_size_tokens,
+                    chunk_overlap_tokens = EXCLUDED.chunk_overlap_tokens,
+                    search_strategy = EXCLUDED.search_strategy,
+                    vector_weight = EXCLUDED.vector_weight,
+                    keyword_weight = EXCLUDED.keyword_weight,
+                    top_k = EXCLUDED.top_k,
+                    reranker_provider_key = EXCLUDED.reranker_provider_key,
+                    reranker_model = EXCLUDED.reranker_model,
+                    context_token_budget = EXCLUDED.context_token_budget,
+                    citation_strictness = EXCLUDED.citation_strictness,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            profile.profile_id,
+            profile.scope,
+            organization_id,
+            profile.workspace_id,
+            profile.name,
+            profile.description,
+            profile.embedding_provider_key,
+            profile.embedding_model,
+            profile.embedding_dimension,
+            profile.vision_provider_key,
+            profile.vision_model,
+            profile.visual_extraction_enabled,
+            profile.vector_store_provider_key,
+            profile.chunking_strategy,
+            profile.chunk_size_tokens,
+            profile.chunk_overlap_tokens,
+            profile.search_strategy,
+            profile.vector_weight,
+            profile.keyword_weight,
+            profile.top_k,
+            profile.reranker_provider_key,
+            profile.reranker_model,
+            profile.context_token_budget,
+            profile.citation_strictness,
+            profile.created_by,
+            profile.created_at,
+            profile.updated_at,
+            self._json_dumps(profile.metadata),
+        )
+
+    async def upsert_retrieval_corpus(
+        self, conn: asyncpg.Connection, corpus: RetrievalCorpus
+    ) -> None:
+        organization_id = corpus.organization_id
+        if corpus.scope in {"organization", "workspace"}:
+            organization_id = await self._effective_organization_for_scope(
+                conn,
+                scope=corpus.scope,
+                organization_id=corpus.organization_id,
+                workspace_id=corpus.workspace_id,
+            )
+        await conn.execute(
+            """
+            INSERT INTO retrieval_corpora (
+                corpus_id, scope, organization_id, workspace_id, name, description,
+                default_profile_id, created_by, created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (corpus_id) DO UPDATE
+                SET scope = EXCLUDED.scope,
+                    organization_id = EXCLUDED.organization_id,
+                    workspace_id = EXCLUDED.workspace_id,
+                    name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    default_profile_id = EXCLUDED.default_profile_id,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            corpus.corpus_id,
+            corpus.scope,
+            organization_id,
+            corpus.workspace_id,
+            corpus.name,
+            corpus.description,
+            corpus.default_profile_id,
+            corpus.created_by,
+            corpus.created_at,
+            corpus.updated_at,
+            self._json_dumps(corpus.metadata),
+        )
+
+    async def upsert_retrieval_source(
+        self, conn: asyncpg.Connection, source: RetrievalSource
+    ) -> None:
+        organization_id = source.organization_id
+        if source.scope in {"organization", "workspace"}:
+            organization_id = await self._effective_organization_for_scope(
+                conn,
+                scope=source.scope,
+                organization_id=source.organization_id,
+                workspace_id=source.workspace_id,
+            )
+        await conn.execute(
+            """
+            INSERT INTO retrieval_sources (
+                source_id, corpus_id, scope, organization_id, workspace_id, asset_id,
+                active_asset_version_id, title, source_type, content_type,
+                created_by, created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (source_id) DO UPDATE
+                SET corpus_id = EXCLUDED.corpus_id,
+                    scope = EXCLUDED.scope,
+                    organization_id = EXCLUDED.organization_id,
+                    workspace_id = EXCLUDED.workspace_id,
+                    asset_id = EXCLUDED.asset_id,
+                    active_asset_version_id = EXCLUDED.active_asset_version_id,
+                    title = EXCLUDED.title,
+                    source_type = EXCLUDED.source_type,
+                    content_type = EXCLUDED.content_type,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            source.source_id,
+            source.corpus_id,
+            source.scope,
+            organization_id,
+            source.workspace_id,
+            source.asset_id,
+            source.active_asset_version_id,
+            source.title,
+            source.source_type,
+            source.content_type,
+            source.created_by,
+            source.created_at,
+            source.updated_at,
+            self._json_dumps(source.metadata),
+        )
+
+    async def next_retrieval_source_version(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        source_id: UUID,
+    ) -> int:
+        return await conn.fetchval(
+            """
+            SELECT COALESCE(MAX(version), 0) + 1
+            FROM retrieval_source_versions
+            WHERE source_id = $1
+            """,
+            source_id,
+        )
+
+    async def upsert_retrieval_source_version(
+        self, conn: asyncpg.Connection, source_version: RetrievalSourceVersion
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO retrieval_source_versions (
+                source_version_id, source_id, asset_version_id, version, ingestion_job_id,
+                extracted_object_key, extracted_sha256, created_by, created_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (source_version_id) DO UPDATE
+                SET source_id = EXCLUDED.source_id,
+                    asset_version_id = EXCLUDED.asset_version_id,
+                    version = EXCLUDED.version,
+                    ingestion_job_id = EXCLUDED.ingestion_job_id,
+                    extracted_object_key = EXCLUDED.extracted_object_key,
+                    extracted_sha256 = EXCLUDED.extracted_sha256,
+                    metadata = EXCLUDED.metadata
+            """,
+            source_version.source_version_id,
+            source_version.source_id,
+            source_version.asset_version_id,
+            source_version.version,
+            source_version.ingestion_job_id,
+            source_version.extracted_object_key,
+            source_version.extracted_sha256,
+            source_version.created_by,
+            source_version.created_at,
+            self._json_dumps(source_version.metadata),
+        )
+
+    async def upsert_retrieval_ingestion_job(
+        self, conn: asyncpg.Connection, job: RetrievalIngestionJob
+    ) -> None:
+        organization_id = job.organization_id
+        if job.scope in {"organization", "workspace"}:
+            organization_id = await self._effective_organization_for_scope(
+                conn,
+                scope=job.scope,
+                organization_id=job.organization_id,
+                workspace_id=job.workspace_id,
+            )
+        await conn.execute(
+            """
+            INSERT INTO retrieval_ingestion_jobs (
+                job_id, corpus_id, source_id, source_version_id, profile_id,
+                scope, organization_id, workspace_id, status, stage, requested_by,
+                started_at, completed_at, error, created_at, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9, $10, $11,
+                $12, $13, $14, $15, $16, $17
+            )
+            ON CONFLICT (job_id) DO UPDATE
+                SET corpus_id = EXCLUDED.corpus_id,
+                    source_id = EXCLUDED.source_id,
+                    source_version_id = EXCLUDED.source_version_id,
+                    profile_id = EXCLUDED.profile_id,
+                    scope = EXCLUDED.scope,
+                    organization_id = EXCLUDED.organization_id,
+                    workspace_id = EXCLUDED.workspace_id,
+                    status = EXCLUDED.status,
+                    stage = EXCLUDED.stage,
+                    started_at = EXCLUDED.started_at,
+                    completed_at = EXCLUDED.completed_at,
+                    error = EXCLUDED.error,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            job.job_id,
+            job.corpus_id,
+            job.source_id,
+            job.source_version_id,
+            job.profile_id,
+            job.scope,
+            organization_id,
+            job.workspace_id,
+            job.status,
+            job.stage,
+            job.requested_by,
+            job.started_at,
+            job.completed_at,
+            job.error,
+            job.created_at,
+            job.updated_at,
+            self._json_dumps(job.metadata),
+        )
+
+    async def replace_retrieval_chunks(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        source_version_id: UUID,
+        chunks: Sequence[RetrievalChunk],
+    ) -> None:
+        await conn.execute(
+            "DELETE FROM retrieval_chunks WHERE source_version_id = $1",
+            source_version_id,
+        )
+        for chunk in chunks:
+            await self.upsert_retrieval_chunk(conn, chunk)
+
+    async def upsert_retrieval_chunk(
+        self, conn: asyncpg.Connection, chunk: RetrievalChunk
+    ) -> None:
+        organization_id = chunk.organization_id
+        if chunk.scope in {"organization", "workspace"}:
+            organization_id = await self._effective_organization_for_scope(
+                conn,
+                scope=chunk.scope,
+                organization_id=chunk.organization_id,
+                workspace_id=chunk.workspace_id,
+            )
+        await conn.execute(
+            """
+            INSERT INTO retrieval_chunks (
+                chunk_id, corpus_id, source_id, source_version_id, scope, organization_id,
+                workspace_id, chunk_kind, ordinal, content, summary, token_count,
+                content_hash, citation, created_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            ON CONFLICT (chunk_id) DO UPDATE
+                SET corpus_id = EXCLUDED.corpus_id,
+                    source_id = EXCLUDED.source_id,
+                    source_version_id = EXCLUDED.source_version_id,
+                    scope = EXCLUDED.scope,
+                    organization_id = EXCLUDED.organization_id,
+                    workspace_id = EXCLUDED.workspace_id,
+                    chunk_kind = EXCLUDED.chunk_kind,
+                    ordinal = EXCLUDED.ordinal,
+                    content = EXCLUDED.content,
+                    summary = EXCLUDED.summary,
+                    token_count = EXCLUDED.token_count,
+                    content_hash = EXCLUDED.content_hash,
+                    citation = EXCLUDED.citation,
+                    metadata = EXCLUDED.metadata
+            """,
+            chunk.chunk_id,
+            chunk.corpus_id,
+            chunk.source_id,
+            chunk.source_version_id,
+            chunk.scope,
+            organization_id,
+            chunk.workspace_id,
+            chunk.chunk_kind,
+            chunk.ordinal,
+            chunk.content,
+            chunk.summary,
+            chunk.token_count,
+            chunk.content_hash,
+            (
+                self._json_dumps(chunk.citation.model_dump(mode="json"))
+                if chunk.citation is not None
+                else None
+            ),
+            chunk.created_at,
+            self._json_dumps(chunk.metadata),
+        )
+
+    async def upsert_retrieval_embedding(
+        self,
+        conn: asyncpg.Connection,
+        embedding: RetrievalEmbedding,
+        *,
+        vector: Sequence[float] | None = None,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO retrieval_embeddings (
+                embedding_id, chunk_id, provider_key, model, dimensions,
+                vector_store_provider_key, content_hash, embedding, embedded_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector, $9, $10)
+            ON CONFLICT (embedding_id) DO UPDATE
+                SET chunk_id = EXCLUDED.chunk_id,
+                    provider_key = EXCLUDED.provider_key,
+                    model = EXCLUDED.model,
+                    dimensions = EXCLUDED.dimensions,
+                    vector_store_provider_key = EXCLUDED.vector_store_provider_key,
+                    content_hash = EXCLUDED.content_hash,
+                    embedding = EXCLUDED.embedding,
+                    embedded_at = EXCLUDED.embedded_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            embedding.embedding_id,
+            embedding.chunk_id,
+            embedding.provider_key,
+            embedding.model,
+            embedding.dimensions,
+            embedding.vector_store_provider_key,
+            embedding.content_hash,
+            self._vector_literal(vector) if vector is not None else None,
+            embedding.embedded_at,
+            self._json_dumps(embedding.metadata),
+        )
+
+    async def upsert_retrieval_run(
+        self, conn: asyncpg.Connection, run: RetrievalRun
+    ) -> None:
+        organization_id = run.organization_id
+        if run.scope in {"organization", "workspace"}:
+            organization_id = await self._effective_organization_for_scope(
+                conn,
+                scope=run.scope,
+                organization_id=run.organization_id,
+                workspace_id=run.workspace_id,
+            )
+        await conn.execute(
+            """
+            INSERT INTO retrieval_runs (
+                run_id, run_kind, scope, organization_id, workspace_id, profile_id,
+                query, status, created_by, created_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (run_id) DO UPDATE
+                SET run_kind = EXCLUDED.run_kind,
+                    scope = EXCLUDED.scope,
+                    organization_id = EXCLUDED.organization_id,
+                    workspace_id = EXCLUDED.workspace_id,
+                    profile_id = EXCLUDED.profile_id,
+                    query = EXCLUDED.query,
+                    status = EXCLUDED.status,
+                    metadata = EXCLUDED.metadata
+            """,
+            run.run_id,
+            run.run_kind,
+            run.scope,
+            organization_id,
+            run.workspace_id,
+            run.profile_id,
+            run.query,
+            run.status,
+            run.created_by,
+            run.created_at,
+            self._json_dumps(run.metadata),
+        )
+
+    async def upsert_retrieval_hit(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        hit_id: UUID,
+        run_id: UUID,
+        hit: RetrievalSearchHit,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO retrieval_hits (
+                hit_id, run_id, chunk_id, rank, score, vector_score, keyword_score, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (hit_id) DO UPDATE
+                SET run_id = EXCLUDED.run_id,
+                    chunk_id = EXCLUDED.chunk_id,
+                    rank = EXCLUDED.rank,
+                    score = EXCLUDED.score,
+                    vector_score = EXCLUDED.vector_score,
+                    keyword_score = EXCLUDED.keyword_score,
+                    metadata = EXCLUDED.metadata
+            """,
+            hit_id,
+            run_id,
+            hit.chunk.chunk_id,
+            hit.rank,
+            hit.score,
+            hit.vector_score,
+            hit.keyword_score,
+            self._json_dumps(hit.metadata),
+        )
+
+    async def upsert_retrieval_context_pack(
+        self, conn: asyncpg.Connection, context_pack: RetrievalContextPack
+    ) -> None:
+        organization_id = context_pack.organization_id
+        if context_pack.scope in {"organization", "workspace"}:
+            organization_id = await self._effective_organization_for_scope(
+                conn,
+                scope=context_pack.scope,
+                organization_id=context_pack.organization_id,
+                workspace_id=context_pack.workspace_id,
+            )
+        await conn.execute(
+            """
+            INSERT INTO retrieval_context_packs (
+                context_pack_id, run_id, scope, organization_id, workspace_id,
+                profile_id, query, content, token_count, hits, created_by, created_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ON CONFLICT (context_pack_id) DO UPDATE
+                SET run_id = EXCLUDED.run_id,
+                    scope = EXCLUDED.scope,
+                    organization_id = EXCLUDED.organization_id,
+                    workspace_id = EXCLUDED.workspace_id,
+                    profile_id = EXCLUDED.profile_id,
+                    query = EXCLUDED.query,
+                    content = EXCLUDED.content,
+                    token_count = EXCLUDED.token_count,
+                    hits = EXCLUDED.hits,
+                    metadata = EXCLUDED.metadata
+            """,
+            context_pack.context_pack_id,
+            context_pack.run_id,
+            context_pack.scope,
+            organization_id,
+            context_pack.workspace_id,
+            context_pack.profile_id,
+            context_pack.query,
+            context_pack.content,
+            context_pack.token_count,
+            self._json_dumps(
+                [hit.model_dump(mode="json") for hit in context_pack.hits]
+            ),
+            context_pack.created_by,
+            context_pack.created_at,
+            self._json_dumps(context_pack.metadata),
+        )
+
+    async def fetch_retrieval_profile(
+        self, profile_id: UUID
+    ) -> RetrievalProfile | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT profile_id, scope, organization_id, workspace_id, name, description,
+                   embedding_provider_key, embedding_model, embedding_dimension,
+                   vision_provider_key, vision_model, visual_extraction_enabled,
+                   vector_store_provider_key, chunking_strategy, chunk_size_tokens,
+                   chunk_overlap_tokens, search_strategy, vector_weight, keyword_weight,
+                   top_k, reranker_provider_key, reranker_model, context_token_budget,
+                   citation_strictness, created_by, created_at, updated_at, metadata
+            FROM retrieval_profiles
+            WHERE profile_id = $1
+            """,
+            profile_id,
+        )
+        return self._retrieval_profile_from_row(row) if row else None
+
+    async def list_retrieval_profiles(
+        self,
+        *,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+    ) -> list[RetrievalProfile]:
+        effective_organization_id = organization_id
+        if scope in {None, "organization", "workspace"} and workspace_id is not None:
+            effective_organization_id = await self._effective_organization_filter(
+                organization_id=organization_id,
+                workspace_id=workspace_id,
+            )
+        rows = await self._pool.fetch(
+            """
+            SELECT profile_id, scope, organization_id, workspace_id, name, description,
+                   embedding_provider_key, embedding_model, embedding_dimension,
+                   vision_provider_key, vision_model, visual_extraction_enabled,
+                   vector_store_provider_key, chunking_strategy, chunk_size_tokens,
+                   chunk_overlap_tokens, search_strategy, vector_weight, keyword_weight,
+                   top_k, reranker_provider_key, reranker_model, context_token_budget,
+                   citation_strictness, created_by, created_at, updated_at, metadata
+            FROM retrieval_profiles
+            WHERE ($1::text IS NULL OR scope = $1)
+              AND (($2::uuid IS NULL AND organization_id IS NULL) OR organization_id = $2)
+              AND (($3::uuid IS NULL AND workspace_id IS NULL) OR workspace_id = $3)
+            ORDER BY created_at ASC
+            """,
+            scope,
+            effective_organization_id,
+            workspace_id,
+        )
+        return [self._retrieval_profile_from_row(row) for row in rows]
+
+    async def fetch_retrieval_corpus(self, corpus_id: UUID) -> RetrievalCorpus | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT corpus_id, scope, organization_id, workspace_id, name, description,
+                   default_profile_id, created_by, created_at, updated_at, metadata
+            FROM retrieval_corpora
+            WHERE corpus_id = $1
+            """,
+            corpus_id,
+        )
+        return self._retrieval_corpus_from_row(row) if row else None
+
+    async def list_retrieval_corpora(
+        self,
+        *,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+    ) -> list[RetrievalCorpus]:
+        effective_organization_id = organization_id
+        if scope in {None, "organization", "workspace"} and workspace_id is not None:
+            effective_organization_id = await self._effective_organization_filter(
+                organization_id=organization_id,
+                workspace_id=workspace_id,
+            )
+        rows = await self._pool.fetch(
+            """
+            SELECT corpus_id, scope, organization_id, workspace_id, name, description,
+                   default_profile_id, created_by, created_at, updated_at, metadata
+            FROM retrieval_corpora
+            WHERE ($1::text IS NULL OR scope = $1)
+              AND (($2::uuid IS NULL AND organization_id IS NULL) OR organization_id = $2)
+              AND (($3::uuid IS NULL AND workspace_id IS NULL) OR workspace_id = $3)
+            ORDER BY created_at ASC
+            """,
+            scope,
+            effective_organization_id,
+            workspace_id,
+        )
+        return [self._retrieval_corpus_from_row(row) for row in rows]
+
+    async def fetch_retrieval_source(self, source_id: UUID) -> RetrievalSource | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT source_id, corpus_id, scope, organization_id, workspace_id, asset_id,
+                   active_asset_version_id, title, source_type, content_type,
+                   created_by, created_at, updated_at, metadata
+            FROM retrieval_sources
+            WHERE source_id = $1
+            """,
+            source_id,
+        )
+        return self._retrieval_source_from_row(row) if row else None
+
+    async def list_retrieval_sources(
+        self,
+        *,
+        corpus_id: UUID | None = None,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+    ) -> list[RetrievalSource]:
+        effective_organization_id = organization_id
+        if scope in {None, "organization", "workspace"} and workspace_id is not None:
+            effective_organization_id = await self._effective_organization_filter(
+                organization_id=organization_id,
+                workspace_id=workspace_id,
+            )
+        rows = await self._pool.fetch(
+            """
+            SELECT source_id, corpus_id, scope, organization_id, workspace_id, asset_id,
+                   active_asset_version_id, title, source_type, content_type,
+                   created_by, created_at, updated_at, metadata
+            FROM retrieval_sources
+            WHERE ($1::uuid IS NULL OR corpus_id = $1)
+              AND ($2::text IS NULL OR scope = $2)
+              AND (($3::uuid IS NULL AND organization_id IS NULL) OR organization_id = $3)
+              AND (($4::uuid IS NULL AND workspace_id IS NULL) OR workspace_id = $4)
+            ORDER BY created_at ASC
+            """,
+            corpus_id,
+            scope,
+            effective_organization_id,
+            workspace_id,
+        )
+        return [self._retrieval_source_from_row(row) for row in rows]
+
+    async def fetch_retrieval_source_version(
+        self, source_version_id: UUID
+    ) -> RetrievalSourceVersion | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT source_version_id, source_id, asset_version_id, version, ingestion_job_id,
+                   extracted_object_key, extracted_sha256, created_by, created_at, metadata
+            FROM retrieval_source_versions
+            WHERE source_version_id = $1
+            """,
+            source_version_id,
+        )
+        return self._retrieval_source_version_from_row(row) if row else None
+
+    async def list_retrieval_source_versions(
+        self, source_id: UUID
+    ) -> list[RetrievalSourceVersion]:
+        rows = await self._pool.fetch(
+            """
+            SELECT source_version_id, source_id, asset_version_id, version, ingestion_job_id,
+                   extracted_object_key, extracted_sha256, created_by, created_at, metadata
+            FROM retrieval_source_versions
+            WHERE source_id = $1
+            ORDER BY version ASC
+            """,
+            source_id,
+        )
+        return [self._retrieval_source_version_from_row(row) for row in rows]
+
+    async def fetch_retrieval_ingestion_job(
+        self, job_id: UUID
+    ) -> RetrievalIngestionJob | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT job_id, corpus_id, source_id, source_version_id, profile_id,
+                   scope, organization_id, workspace_id, status, stage, requested_by,
+                   started_at, completed_at, error, created_at, updated_at, metadata
+            FROM retrieval_ingestion_jobs
+            WHERE job_id = $1
+            """,
+            job_id,
+        )
+        return self._retrieval_ingestion_job_from_row(row) if row else None
+
+    async def list_retrieval_ingestion_jobs(
+        self,
+        *,
+        corpus_id: UUID | None = None,
+        source_id: UUID | None = None,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        status: str | None = None,
+    ) -> list[RetrievalIngestionJob]:
+        effective_organization_id = organization_id
+        if scope in {None, "organization", "workspace"} and workspace_id is not None:
+            effective_organization_id = await self._effective_organization_filter(
+                organization_id=organization_id,
+                workspace_id=workspace_id,
+            )
+        rows = await self._pool.fetch(
+            """
+            SELECT job_id, corpus_id, source_id, source_version_id, profile_id,
+                   scope, organization_id, workspace_id, status, stage, requested_by,
+                   started_at, completed_at, error, created_at, updated_at, metadata
+            FROM retrieval_ingestion_jobs
+            WHERE ($1::uuid IS NULL OR corpus_id = $1)
+              AND ($2::uuid IS NULL OR source_id = $2)
+              AND ($3::text IS NULL OR scope = $3)
+              AND (($4::uuid IS NULL AND organization_id IS NULL) OR organization_id = $4)
+              AND (($5::uuid IS NULL AND workspace_id IS NULL) OR workspace_id = $5)
+              AND ($6::text IS NULL OR status = $6)
+            ORDER BY created_at DESC
+            """,
+            corpus_id,
+            source_id,
+            scope,
+            effective_organization_id,
+            workspace_id,
+            status,
+        )
+        return [self._retrieval_ingestion_job_from_row(row) for row in rows]
+
+    async def claim_next_retrieval_ingestion_job(
+        self,
+        *,
+        now,
+    ) -> RetrievalIngestionJob | None:
+        row = await self._pool.fetchrow(
+            """
+            WITH candidate AS (
+                SELECT job_id
+                FROM retrieval_ingestion_jobs
+                WHERE status = 'queued'
+                ORDER BY created_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE retrieval_ingestion_jobs job
+            SET status = 'running',
+                stage = 'extracting',
+                started_at = COALESCE(job.started_at, $1),
+                updated_at = $1
+            FROM candidate
+            WHERE job.job_id = candidate.job_id
+            RETURNING job.job_id, job.corpus_id, job.source_id, job.source_version_id, job.profile_id,
+                      job.scope, job.organization_id, job.workspace_id, job.status, job.stage,
+                      job.requested_by, job.started_at, job.completed_at, job.error,
+                      job.created_at, job.updated_at, job.metadata
+            """,
+            now,
+        )
+        return self._retrieval_ingestion_job_from_row(row) if row else None
+
+    async def update_retrieval_ingestion_job(
+        self,
+        job_id: UUID,
+        *,
+        status: str,
+        stage: str,
+        now,
+        source_version_id: UUID | None = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> RetrievalIngestionJob | None:
+        row = await self._pool.fetchrow(
+            """
+            UPDATE retrieval_ingestion_jobs
+            SET status = $2,
+                stage = $3,
+                source_version_id = COALESCE($4::uuid, source_version_id),
+                error = $5,
+                completed_at = CASE WHEN $2 IN ('completed', 'failed') THEN $6 ELSE completed_at END,
+                updated_at = $6,
+                metadata = COALESCE($7::jsonb, metadata)
+            WHERE job_id = $1
+            RETURNING job_id, corpus_id, source_id, source_version_id, profile_id,
+                      scope, organization_id, workspace_id, status, stage, requested_by,
+                      started_at, completed_at, error, created_at, updated_at, metadata
+            """,
+            job_id,
+            status,
+            stage,
+            source_version_id,
+            error,
+            now,
+            self._json_dumps(metadata) if metadata is not None else None,
+        )
+        return self._retrieval_ingestion_job_from_row(row) if row else None
+
+    async def search_retrieval_chunks(
+        self,
+        *,
+        query: str,
+        corpus_ids: Sequence[UUID] | None,
+        scope: str,
+        organization_id: UUID | None,
+        workspace_id: UUID | None,
+        limit: int,
+        strategy: str = "hybrid",
+        metadata_filters: dict[str, Any] | None = None,
+        embedding_vector: Sequence[float] | None = None,
+        embedding_provider_key: str | None = None,
+        embedding_model: str | None = None,
+        vector_weight: float = 0.65,
+        keyword_weight: float = 0.35,
+    ) -> list[RetrievalSearchHit]:
+        effective_organization_id = organization_id
+        if scope in {"organization", "workspace"}:
+            effective_organization_id = await self._effective_organization_filter(
+                organization_id=organization_id,
+                workspace_id=workspace_id,
+            )
+        vector_literal = self._vector_literal(embedding_vector) if embedding_vector else None
+        rows = await self._pool.fetch(
+            """
+            WITH query_value AS (
+                SELECT plainto_tsquery('simple', $1) AS tsq
+            ),
+            scored AS (
+                SELECT
+                    rc.chunk_id, rc.corpus_id, rc.source_id, rc.source_version_id,
+                    rc.scope, rc.organization_id, rc.workspace_id, rc.chunk_kind,
+                    rc.ordinal, rc.content, rc.summary, rc.token_count,
+                    rc.content_hash, rc.citation, rc.created_at, rc.metadata,
+                    CASE
+                        WHEN $9::text IN ('keyword', 'hybrid')
+                             AND rc.search_vector @@ query_value.tsq
+                        THEN ts_rank_cd(rc.search_vector, query_value.tsq)
+                        ELSE NULL
+                    END AS keyword_score,
+                    CASE
+                        WHEN $10::text IS NOT NULL AND re.embedding IS NOT NULL
+                        THEN 1.0 / (1.0 + (re.embedding <=> $10::vector))
+                        ELSE NULL
+                    END AS vector_score
+                FROM retrieval_chunks rc
+                CROSS JOIN query_value
+                LEFT JOIN retrieval_embeddings re
+                  ON re.chunk_id = rc.chunk_id
+                 AND ($11::text IS NULL OR re.provider_key = $11)
+                 AND ($12::text IS NULL OR re.model = $12)
+                WHERE rc.scope = $2
+                  AND (($3::uuid IS NULL AND rc.organization_id IS NULL) OR rc.organization_id = $3)
+                  AND (($4::uuid IS NULL AND rc.workspace_id IS NULL) OR rc.workspace_id = $4)
+                  AND ($5::uuid[] IS NULL OR rc.corpus_id = ANY($5::uuid[]))
+                  AND ($6::jsonb IS NULL OR rc.metadata @> $6::jsonb)
+            )
+            SELECT *,
+                   (COALESCE(vector_score, 0.0) * $7::double precision)
+                 + (COALESCE(keyword_score, 0.0) * $8::double precision) AS score
+            FROM scored
+            WHERE keyword_score IS NOT NULL OR vector_score IS NOT NULL
+            ORDER BY score DESC, ordinal ASC, chunk_id ASC
+            LIMIT $13
+            """,
+            query,
+            scope,
+            effective_organization_id,
+            workspace_id,
+            list(corpus_ids) if corpus_ids else None,
+            self._json_dumps(metadata_filters) if metadata_filters else None,
+            vector_weight,
+            keyword_weight,
+            strategy,
+            vector_literal,
+            embedding_provider_key,
+            embedding_model,
+            limit,
+        )
+        return [
+            RetrievalSearchHit(
+                chunk=self._retrieval_chunk_from_row(row),
+                score=float(row["score"]) if row["score"] is not None else None,
+                vector_score=(
+                    float(row["vector_score"]) if row["vector_score"] is not None else None
+                ),
+                keyword_score=(
+                    float(row["keyword_score"]) if row["keyword_score"] is not None else None
+                ),
+                rank=index + 1,
+            )
+            for index, row in enumerate(rows)
+        ]
+
+    async def fetch_retrieval_run(self, run_id: UUID) -> RetrievalRun | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT run_id, run_kind, scope, organization_id, workspace_id, profile_id,
+                   query, status, created_by, created_at, metadata
+            FROM retrieval_runs
+            WHERE run_id = $1
+            """,
+            run_id,
+        )
+        return self._retrieval_run_from_row(row) if row else None
+
+    async def fetch_retrieval_context_pack(
+        self, context_pack_id: UUID
+    ) -> RetrievalContextPack | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT context_pack_id, run_id, scope, organization_id, workspace_id,
+                   profile_id, query, content, token_count, hits, created_by, created_at, metadata
+            FROM retrieval_context_packs
+            WHERE context_pack_id = $1
+            """,
+            context_pack_id,
+        )
+        return self._retrieval_context_pack_from_row(row) if row else None
 
     async def fetch_workspace_asset_version(
         self, asset_version_id: UUID
@@ -6371,6 +7321,198 @@ class CollaborationRepository:
         )
 
     @staticmethod
+    def _retrieval_profile_from_row(row: asyncpg.Record) -> RetrievalProfile:
+        return RetrievalProfile(
+            profile_id=row["profile_id"],
+            scope=row["scope"],
+            organization_id=row["organization_id"],
+            workspace_id=row["workspace_id"],
+            name=row["name"],
+            description=row["description"],
+            embedding_provider_key=row["embedding_provider_key"],
+            embedding_model=row["embedding_model"],
+            embedding_dimension=row["embedding_dimension"],
+            vision_provider_key=row["vision_provider_key"],
+            vision_model=row["vision_model"],
+            visual_extraction_enabled=row["visual_extraction_enabled"],
+            vector_store_provider_key=row["vector_store_provider_key"],
+            chunking_strategy=row["chunking_strategy"],
+            chunk_size_tokens=row["chunk_size_tokens"],
+            chunk_overlap_tokens=row["chunk_overlap_tokens"],
+            search_strategy=row["search_strategy"],
+            vector_weight=row["vector_weight"],
+            keyword_weight=row["keyword_weight"],
+            top_k=row["top_k"],
+            reranker_provider_key=row["reranker_provider_key"],
+            reranker_model=row["reranker_model"],
+            context_token_budget=row["context_token_budget"],
+            citation_strictness=row["citation_strictness"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _retrieval_corpus_from_row(row: asyncpg.Record) -> RetrievalCorpus:
+        return RetrievalCorpus(
+            corpus_id=row["corpus_id"],
+            scope=row["scope"],
+            organization_id=row["organization_id"],
+            workspace_id=row["workspace_id"],
+            name=row["name"],
+            description=row["description"],
+            default_profile_id=row["default_profile_id"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _retrieval_source_from_row(row: asyncpg.Record) -> RetrievalSource:
+        return RetrievalSource(
+            source_id=row["source_id"],
+            corpus_id=row["corpus_id"],
+            scope=row["scope"],
+            organization_id=row["organization_id"],
+            workspace_id=row["workspace_id"],
+            asset_id=row["asset_id"],
+            active_asset_version_id=row["active_asset_version_id"],
+            title=row["title"],
+            source_type=row["source_type"],
+            content_type=row["content_type"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _retrieval_source_version_from_row(
+        row: asyncpg.Record,
+    ) -> RetrievalSourceVersion:
+        return RetrievalSourceVersion(
+            source_version_id=row["source_version_id"],
+            source_id=row["source_id"],
+            asset_version_id=row["asset_version_id"],
+            version=row["version"],
+            ingestion_job_id=row["ingestion_job_id"],
+            extracted_object_key=row["extracted_object_key"],
+            extracted_sha256=row["extracted_sha256"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _retrieval_chunk_from_row(row: asyncpg.Record) -> RetrievalChunk:
+        citation_payload = CollaborationRepository._json_value(
+            row["citation"],
+            default=None,
+        )
+        return RetrievalChunk(
+            chunk_id=row["chunk_id"],
+            corpus_id=row["corpus_id"],
+            source_id=row["source_id"],
+            source_version_id=row["source_version_id"],
+            scope=row["scope"],
+            organization_id=row["organization_id"],
+            workspace_id=row["workspace_id"],
+            chunk_kind=row["chunk_kind"],
+            ordinal=row["ordinal"],
+            content=row["content"],
+            summary=row["summary"],
+            token_count=row["token_count"],
+            content_hash=row["content_hash"],
+            citation=(
+                RetrievalChunkCitation.model_validate(citation_payload)
+                if citation_payload is not None
+                else None
+            ),
+            created_at=row["created_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _retrieval_embedding_from_row(row: asyncpg.Record) -> RetrievalEmbedding:
+        return RetrievalEmbedding(
+            embedding_id=row["embedding_id"],
+            chunk_id=row["chunk_id"],
+            provider_key=row["provider_key"],
+            model=row["model"],
+            dimensions=row["dimensions"],
+            vector_store_provider_key=row["vector_store_provider_key"],
+            content_hash=row["content_hash"],
+            embedded_at=row["embedded_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _retrieval_ingestion_job_from_row(
+        row: asyncpg.Record,
+    ) -> RetrievalIngestionJob:
+        return RetrievalIngestionJob(
+            job_id=row["job_id"],
+            corpus_id=row["corpus_id"],
+            source_id=row["source_id"],
+            source_version_id=row["source_version_id"],
+            profile_id=row["profile_id"],
+            scope=row["scope"],
+            organization_id=row["organization_id"],
+            workspace_id=row["workspace_id"],
+            status=row["status"],
+            stage=row["stage"],
+            requested_by=row["requested_by"],
+            started_at=row["started_at"],
+            completed_at=row["completed_at"],
+            error=row["error"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _retrieval_run_from_row(row: asyncpg.Record) -> RetrievalRun:
+        return RetrievalRun(
+            run_id=row["run_id"],
+            run_kind=row["run_kind"],
+            scope=row["scope"],
+            organization_id=row["organization_id"],
+            workspace_id=row["workspace_id"],
+            profile_id=row["profile_id"],
+            query=row["query"],
+            status=row["status"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _retrieval_context_pack_from_row(
+        row: asyncpg.Record,
+    ) -> RetrievalContextPack:
+        hits_payload = CollaborationRepository._json_value(row["hits"], default=[])
+        return RetrievalContextPack(
+            context_pack_id=row["context_pack_id"],
+            run_id=row["run_id"],
+            scope=row["scope"],
+            organization_id=row["organization_id"],
+            workspace_id=row["workspace_id"],
+            profile_id=row["profile_id"],
+            query=row["query"],
+            content=row["content"],
+            token_count=row["token_count"],
+            hits=[
+                RetrievalSearchHit.model_validate(hit_payload)
+                for hit_payload in hits_payload
+            ],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
     def _asset_link_from_alias_row(row: asyncpg.Record) -> AssetLink:
         return AssetLink(
             link_id=row["link_id"],
@@ -7078,6 +8220,10 @@ class CollaborationRepository:
         if isinstance(value, str):
             return json.loads(value)
         return value
+
+    @staticmethod
+    def _vector_literal(values: Sequence[float]) -> str:
+        return "[" + ",".join(str(float(value)) for value in values) + "]"
 
     @staticmethod
     def _uuid_or_none(value: Any) -> UUID | None:

@@ -280,6 +280,11 @@ Current MCP system API operations:
 - `memory.workspace.list`
 - `memory.workspace.create`
 - `memory.thread.search`
+- `retrieval.corpora.list`
+- `retrieval.sources.list`
+- `retrieval.search`
+- `retrieval.context_pack.create`
+- `retrieval.context_pack.get`
 - `agent_catalog.list`
 - `agent_catalog.bundle.validate`
 - `agent_catalog.bundle.publish`
@@ -700,6 +705,14 @@ Git-managed system and organization agent definitions are authored as modular bu
 | `GET` | `/v1/assets/{asset_id}/download` | presigned asset download URL |
 | `GET` | `/v1/agents/{agent_id}/assets` | resolve agent asset bindings |
 | `GET` | `/v1/tools/{tool_id}/assets` | resolve tool asset bindings |
+| `POST` | `/v1/files` | upload global file asset version |
+| `GET` | `/v1/files` | list global file assets |
+| `POST` | `/v1/organizations/{organization_id}/files` | upload org file asset version |
+| `GET` | `/v1/organizations/{organization_id}/files` | list org file assets |
+| `POST` | `/v1/workspaces/{workspace_id}/files` | upload workspace file asset version |
+| `GET` | `/v1/workspaces/{workspace_id}/files` | list workspace file assets |
+| `GET` | `/v1/files/{asset_id}/versions` | list file asset versions |
+| `GET` | `/v1/files/{asset_id}/download` | presigned file download URL |
 | `GET` | `/v1/workspaces/{workspace_id}/tools` | list attached workspace tools |
 | `PUT` | `/v1/workspaces/{workspace_id}/tools/{tool_id}` | attach tool to workspace |
 | `PATCH` | `/v1/workspaces/{workspace_id}/tools/{tool_id}` | update workspace tool attachment |
@@ -725,6 +738,28 @@ Git-managed system and organization agent definitions are authored as modular bu
 | `POST` | `/v1/workspaces/{workspace_id}/git-repositories` | register workspace Git repository |
 | `GET` | `/v1/workspaces/{workspace_id}/git-repositories` | list workspace Git repositories |
 | `POST` | `/v1/workspaces/{workspace_id}/assets/publish-from-git` | publish workspace asset version |
+
+### Retrieval APIs
+
+Retrieval corpora, sources, jobs, runs, and context packs are scoped as `global`, `organization`, or `workspace`. Raw file bytes stay in MinIO as immutable `workspace_assets` versions; retrieval rows link back to `asset_id` and `asset_version_id`. Workspace retrieval requires participant attachment plus the matching retrieval permission.
+
+| Method | Path | Summary |
+| --- | --- | --- |
+| `GET` | `/v1/retrieval/profiles` | list global retrieval profiles |
+| `POST` | `/v1/retrieval/profiles` | create global retrieval profile |
+| `GET` | `/v1/retrieval/corpora` | list global retrieval corpora |
+| `POST` | `/v1/retrieval/corpora` | create global retrieval corpus |
+| `GET` | `/v1/retrieval/sources` | list global retrieval sources |
+| `POST` | `/v1/retrieval/sources` | link a global file asset to a corpus |
+| `GET` | `/v1/retrieval/jobs` | list global retrieval ingestion jobs |
+| `POST` | `/v1/retrieval/corpora/{corpus_id}/jobs` | enqueue global source ingestion |
+| `POST` | `/v1/retrieval/search` | search global retrieval corpora |
+| `POST` | `/v1/retrieval/context-packs` | create global cited context pack |
+| `GET` | `/v1/retrieval/context-packs/{context_pack_id}` | get global context pack |
+| `GET/POST` | `/v1/organizations/{organization_id}/retrieval/...` | organization-scoped equivalent routes |
+| `GET/POST` | `/v1/workspaces/{workspace_id}/retrieval/...` | workspace-scoped equivalent routes |
+
+The default vector backend is pgvector. The default embedding provider is configurable Ollama via `RETRIEVER_DEFAULT_EMBEDDING_PROVIDER`, `RETRIEVER_DEFAULT_EMBEDDING_MODEL`, and `RETRIEVER_OLLAMA_BASE_URL`. Visual extraction is disabled by default and uses the configurable Ollama vision provider when `RETRIEVER_VISUAL_EXTRACTION_ENABLED=true`.
 
 ### Tool Generation And Approval
 

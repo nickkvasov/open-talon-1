@@ -20,7 +20,13 @@ for path in (_GW_DIR, _CONTRACTS_DIR):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from gateway_edge.models import GitRepository, ParticipantInput, PublishAssetFromGitRequest, WorkspaceAssetVersion
+from gateway_edge.models import (
+    GitRepository,
+    ParticipantInput,
+    PublishAssetFromGitRequest,
+    UploadFileAssetRequest,
+    WorkspaceAssetVersion,
+)
 from gateway_edge.services.collaboration import CollaborationService
 from gateway_edge.services.git_publish import GitPublishService
 from gateway_edge.services.object_storage import MinioObjectStorage, StoredObject
@@ -217,3 +223,66 @@ async def test_collaboration_service_publish_asset_from_git_uses_repo_revision_a
     assert captured["stored_payload"] == b"# admin\n"
     assert captured["stored_content_type"] == "text/markdown"
     assert captured["stored_object_key"] == "global/assets/admin-agent-md/resolved-sha/AGENT.md"
+
+
+@pytest.mark.asyncio
+async def test_collaboration_service_upload_file_asset_uses_direct_upload_source_kind():
+    actor = ParticipantInput(
+        participant_id=uuid4(),
+        participant_type="user",
+        display_name="Nikolay",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeKernel:
+        async def publish_asset_from_upload(self, **kwargs):
+            captured.update(kwargs)
+            version = WorkspaceAssetVersion(
+                asset_version_id=uuid4(),
+                asset_id=uuid4(),
+                version=1,
+                source_kind="direct_upload",
+                storage_backend="minio",
+                bucket=kwargs["bucket"],
+                object_key=kwargs["object_key"],
+                content_type=kwargs["content_type"],
+                size_bytes=kwargs["size_bytes"],
+                sha256=kwargs["sha256"],
+                created_by=actor.participant_id,
+            )
+            return SimpleNamespace(version=version)
+
+    class FakeStorage:
+        async def put_object(self, *, object_key, payload, content_type):
+            captured["stored_object_key"] = object_key
+            captured["stored_payload"] = payload
+            captured["stored_content_type"] = content_type
+            return StoredObject(
+                bucket="open-talon-assets",
+                object_key=object_key,
+                size_bytes=len(payload),
+                sha256="b" * 64,
+                content_type=content_type,
+            )
+
+    service = CollaborationService()
+    service._kernel = FakeKernel()
+    service._storage = FakeStorage()
+
+    version = await service.upload_file_asset(
+        scope="global",
+        workspace_id=None,
+        payload=UploadFileAssetRequest(
+            actor=actor,
+            logical_name="uploaded-book",
+            title="Uploaded Book",
+        ),
+        filename="book.md",
+        content=b"# Book\n",
+    )
+
+    assert version.source_kind == "direct_upload"
+    assert version.content_type == "text/markdown"
+    assert captured["stored_payload"] == b"# Book\n"
+    assert str(captured["stored_object_key"]).startswith("global/files/uploaded-book/")
+    assert captured["payload"].metadata["filename"] == "book.md"

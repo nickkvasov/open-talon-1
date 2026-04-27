@@ -61,7 +61,7 @@ If you want to run the service directly instead of through the launcher:
 
 ```bash
 source .venv/bin/activate
-PYTHONPATH="packages/contracts:services/core-collab:services/gateway-edge:services/agent-runtime:services/generated-tools-builder:apps/tui" \
+PYTHONPATH="packages/contracts:services/core-collab:services/gateway-edge:services/agent-runtime:services/retriever:services/generated-tools-builder:apps/tui" \
   uvicorn gateway_edge.main:app --host 0.0.0.0 --port 8000
 ```
 

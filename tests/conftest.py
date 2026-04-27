@@ -43,7 +43,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
                 item.add_marker(pytest.mark.logic)
             else:
                 item.add_marker(pytest.mark.route)
-        elif suite in {"agent-runtime", "workspace-memory", "presence-directory", "tui"}:
+        elif suite in {"agent-runtime", "workspace-memory", "presence-directory", "retriever", "tui"}:
             item.add_marker(pytest.mark.logic)
         elif suite == "business-cases":
             item.add_marker(pytest.mark.business_case)

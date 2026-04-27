@@ -53,3 +53,29 @@ def test_principal_iam_migration_keeps_human_and_agent_bindings_separate() -> No
     assert "CREATE TABLE IF NOT EXISTS human_role_bindings" in sql
     assert "CREATE TABLE IF NOT EXISTS agent_identities" in sql
     assert "CREATE TABLE IF NOT EXISTS agent_role_bindings" in sql
+
+
+def test_retrieval_service_migration_declares_scoped_tables_and_indexes() -> None:
+    sql = (MIGRATIONS_DIR / "20260426000700_add_retrieval_service.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CREATE EXTENSION IF NOT EXISTS vector" in sql
+    for table_name in (
+        "retrieval_corpora",
+        "retrieval_sources",
+        "retrieval_source_versions",
+        "retrieval_chunks",
+        "retrieval_embeddings",
+        "retrieval_profiles",
+        "retrieval_ingestion_jobs",
+        "retrieval_runs",
+        "retrieval_hits",
+        "retrieval_context_packs",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table_name}" in sql
+    assert "retrieval_chunks_scope_check" in sql
+    assert "idx_retrieval_chunks_search_vector" in sql
+    assert "embedding vector" in sql
+    assert "REFERENCES workspace_assets(asset_id)" in sql
+    assert "REFERENCES workspace_asset_versions(asset_version_id)" in sql

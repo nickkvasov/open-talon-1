@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "open-talon-retriever"
+version = "0.1.0"
+description = "Reusable retrieval ingestion and provider layer for Open Talon"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7",
+    "httpx>=0.27",
+    "asyncpg>=0.29",
+    "pymupdf>=1.24",
+    "open-talon-contracts",
+    "open-talon-core-collab",
+]
+
+[project.scripts]
+talon-retriever-worker = "retriever.worker:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["retriever"]

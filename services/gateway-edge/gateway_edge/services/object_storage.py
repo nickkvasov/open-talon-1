@@ -112,6 +112,13 @@ class MinioObjectStorage:
             content_type=content_type,
         )
 
+    async def get_object(self, *, object_key: str) -> bytes:
+        url = self.presign_get(object_key=object_key)
+        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.content
+
     def presign_get(self, *, object_key: str, expires_seconds: int = 900) -> str:
         now = datetime.now(UTC)
         amz_datetime, datestamp = _amz_date(now)

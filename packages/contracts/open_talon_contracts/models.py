@@ -51,6 +51,20 @@ RegistryScope = Literal["global", "organization"]
 AssetScope = Literal["global", "organization", "workspace"]
 AssetStorageBackend = Literal["minio"]
 AssetTargetType = Literal["system_agent", "system_tool", "workspace", "workspace_tool"]
+RetrievalIngestionJobStatus = Literal["queued", "running", "completed", "failed"]
+RetrievalIngestionStage = Literal[
+    "queued",
+    "extracting",
+    "visual_extracting",
+    "chunking",
+    "embedding",
+    "indexing",
+    "completed",
+    "failed",
+]
+RetrievalChunkKind = Literal["text", "visual", "table", "metadata"]
+RetrievalSearchStrategy = Literal["vector", "keyword", "hybrid"]
+RetrievalRunKind = Literal["search", "context_pack"]
 AuditScopeType = Literal["global", "organization", "workspace", "thread"]
 AuditActorType = Literal["user", "agent", "system", "api_key", "unknown"]
 AuditOutcome = Literal["success", "failure", "denied", "error"]
@@ -1042,6 +1056,202 @@ class WorkspaceAssetVersion(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class RetrievalCorpus(BaseModel):
+    corpus_id: UUID
+    scope: AssetScope = "global"
+    organization_id: UUID | None = None
+    workspace_id: UUID | None = None
+    name: str
+    description: str | None = None
+    default_profile_id: UUID | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalProfile(BaseModel):
+    profile_id: UUID
+    scope: AssetScope = "global"
+    organization_id: UUID | None = None
+    workspace_id: UUID | None = None
+    name: str
+    description: str | None = None
+    embedding_provider_key: str | None = None
+    embedding_model: str | None = None
+    embedding_dimension: int | None = None
+    vision_provider_key: str | None = None
+    vision_model: str | None = None
+    visual_extraction_enabled: bool = False
+    vector_store_provider_key: str = "pgvector"
+    chunking_strategy: str = "structure_aware"
+    chunk_size_tokens: int = Field(default=800, ge=1)
+    chunk_overlap_tokens: int = Field(default=80, ge=0)
+    search_strategy: RetrievalSearchStrategy = "hybrid"
+    vector_weight: float = 0.65
+    keyword_weight: float = 0.35
+    top_k: int = Field(default=12, ge=1)
+    reranker_provider_key: str | None = None
+    reranker_model: str | None = None
+    context_token_budget: int = Field(default=6_000, ge=1)
+    citation_strictness: Literal["required", "best_effort"] = "required"
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalSource(BaseModel):
+    source_id: UUID
+    corpus_id: UUID
+    scope: AssetScope = "global"
+    organization_id: UUID | None = None
+    workspace_id: UUID | None = None
+    asset_id: UUID
+    active_asset_version_id: UUID | None = None
+    title: str
+    source_type: str = "file"
+    content_type: str | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalSourceVersion(BaseModel):
+    source_version_id: UUID
+    source_id: UUID
+    asset_version_id: UUID
+    version: int
+    ingestion_job_id: UUID | None = None
+    extracted_object_key: str | None = None
+    extracted_sha256: str | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalChunkCitation(BaseModel):
+    source_id: UUID
+    source_version_id: UUID | None = None
+    asset_version_id: UUID | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    section: str | None = None
+    region: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalChunk(BaseModel):
+    chunk_id: UUID
+    corpus_id: UUID
+    source_id: UUID
+    source_version_id: UUID | None = None
+    scope: AssetScope = "global"
+    organization_id: UUID | None = None
+    workspace_id: UUID | None = None
+    chunk_kind: RetrievalChunkKind = "text"
+    ordinal: int = 0
+    content: str
+    summary: str | None = None
+    token_count: int = 0
+    content_hash: str
+    citation: RetrievalChunkCitation | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalEmbedding(BaseModel):
+    embedding_id: UUID
+    chunk_id: UUID
+    provider_key: str
+    model: str
+    dimensions: int
+    vector_store_provider_key: str = "pgvector"
+    content_hash: str
+    embedded_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalIngestionJob(BaseModel):
+    job_id: UUID
+    corpus_id: UUID
+    source_id: UUID | None = None
+    source_version_id: UUID | None = None
+    profile_id: UUID | None = None
+    scope: AssetScope = "global"
+    organization_id: UUID | None = None
+    workspace_id: UUID | None = None
+    status: RetrievalIngestionJobStatus = "queued"
+    stage: RetrievalIngestionStage = "queued"
+    requested_by: UUID
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalSearchRequest(BaseModel):
+    query: str
+    corpus_ids: list[UUID] = Field(default_factory=list)
+    scope: AssetScope | None = None
+    organization_id: UUID | None = None
+    workspace_id: UUID | None = None
+    profile_id: UUID | None = None
+    strategy: RetrievalSearchStrategy | None = None
+    top_k: int | None = Field(default=None, ge=1)
+    metadata_filters: dict[str, Any] = Field(default_factory=dict)
+    include_context: bool = False
+    context_token_budget: int | None = Field(default=None, ge=1)
+
+
+class RetrievalSearchHit(BaseModel):
+    chunk: RetrievalChunk
+    score: float | None = None
+    vector_score: float | None = None
+    keyword_score: float | None = None
+    rank: int = 0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalRun(BaseModel):
+    run_id: UUID
+    run_kind: RetrievalRunKind = "search"
+    scope: AssetScope = "global"
+    organization_id: UUID | None = None
+    workspace_id: UUID | None = None
+    profile_id: UUID | None = None
+    query: str | None = None
+    status: Literal["completed", "failed"] = "completed"
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalContextPack(BaseModel):
+    context_pack_id: UUID
+    run_id: UUID | None = None
+    scope: AssetScope = "global"
+    organization_id: UUID | None = None
+    workspace_id: UUID | None = None
+    profile_id: UUID | None = None
+    query: str
+    content: str
+    token_count: int = 0
+    hits: list[RetrievalSearchHit] = Field(default_factory=list)
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalSearchResponse(BaseModel):
+    run: RetrievalRun
+    hits: list[RetrievalSearchHit] = Field(default_factory=list)
+    context_pack: RetrievalContextPack | None = None
+
+
 class AgentDefinitionVersion(BaseModel):
     agent_version_id: UUID
     agent_id: UUID
@@ -1993,6 +2203,95 @@ class PublishAssetFromGitRequest(BaseModel):
     git_path: str
     revision: str | None = None
     content_type: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UploadFileAssetRequest(BaseModel):
+    actor: ParticipantInput
+    asset_type: str = "file"
+    logical_name: str
+    logical_path: str | None = None
+    title: str
+    description: str | None = None
+    content_type: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateRetrievalCorpusRequest(BaseModel):
+    actor: ParticipantInput
+    name: str
+    description: str | None = None
+    default_profile_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateRetrievalProfileRequest(BaseModel):
+    actor: ParticipantInput
+    name: str
+    description: str | None = None
+    embedding_provider_key: str | None = None
+    embedding_model: str | None = None
+    embedding_dimension: int | None = None
+    vision_provider_key: str | None = None
+    vision_model: str | None = None
+    visual_extraction_enabled: bool = False
+    vector_store_provider_key: str = "pgvector"
+    chunking_strategy: str = "structure_aware"
+    chunk_size_tokens: int = Field(default=800, ge=1)
+    chunk_overlap_tokens: int = Field(default=80, ge=0)
+    search_strategy: RetrievalSearchStrategy = "hybrid"
+    vector_weight: float = 0.65
+    keyword_weight: float = 0.35
+    top_k: int = Field(default=12, ge=1)
+    reranker_provider_key: str | None = None
+    reranker_model: str | None = None
+    context_token_budget: int = Field(default=6_000, ge=1)
+    citation_strictness: Literal["required", "best_effort"] = "required"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateRetrievalSourceRequest(BaseModel):
+    actor: ParticipantInput
+    corpus_id: UUID
+    asset_id: UUID
+    asset_version_id: UUID | None = None
+    title: str
+    source_type: str = "file"
+    content_type: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateRetrievalIngestionJobRequest(BaseModel):
+    actor: ParticipantInput
+    source_id: UUID | None = None
+    source_version_id: UUID | None = None
+    profile_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunRetrievalSearchRequest(BaseModel):
+    actor: ParticipantInput
+    query: str
+    corpus_ids: list[UUID] = Field(default_factory=list)
+    profile_id: UUID | None = None
+    strategy: RetrievalSearchStrategy | None = None
+    top_k: int | None = Field(default=None, ge=1)
+    metadata_filters: dict[str, Any] = Field(default_factory=dict)
+    include_context: bool = False
+    context_token_budget: int | None = Field(default=None, ge=1)
+    provider_overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateRetrievalContextPackRequest(BaseModel):
+    actor: ParticipantInput
+    query: str
+    corpus_ids: list[UUID] = Field(default_factory=list)
+    profile_id: UUID | None = None
+    strategy: RetrievalSearchStrategy | None = None
+    top_k: int | None = Field(default=None, ge=1)
+    metadata_filters: dict[str, Any] = Field(default_factory=dict)
+    context_token_budget: int | None = Field(default=None, ge=1)
+    provider_overrides: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

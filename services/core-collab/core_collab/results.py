@@ -21,6 +21,15 @@ from .contracts import (
     OrganizationMembership,
     ParticipantProfile,
     Project,
+    RetrievalContextPack,
+    RetrievalCorpus,
+    RetrievalIngestionJob,
+    RetrievalProfile,
+    RetrievalRun,
+    RetrievalSearchHit,
+    RetrievalSearchResponse,
+    RetrievalSource,
+    RetrievalSourceVersion,
     ResolvedAssetBinding,
     RoleDefinition,
     Run,
@@ -160,6 +169,19 @@ class WorkspaceAssetCommandResult(CommandResult):
 
 
 @dataclass
+class RetrievalCommandResult(CommandResult):
+    corpus: RetrievalCorpus | None = None
+    profile: RetrievalProfile | None = None
+    source: RetrievalSource | None = None
+    source_version: RetrievalSourceVersion | None = None
+    job: RetrievalIngestionJob | None = None
+    run: RetrievalRun | None = None
+    hits: list[RetrievalSearchHit] = field(default_factory=list)
+    context_pack: RetrievalContextPack | None = None
+    search_response: RetrievalSearchResponse | None = None
+
+
+@dataclass
 class ToolGenerationRequestCommandResult(CommandResult):
     detail: ToolGenerationRequestDetail | None = None
     revision: ToolGenerationRevision | None = None
@@ -219,6 +241,7 @@ __all__ = [
     "OrganizationCommandResult",
     "OrganizationMembershipCommandResult",
     "ParticipantCommandResult",
+    "RetrievalCommandResult",
     "RoleDefinitionCommandResult",
     "RunCommandResult",
     "RunStepCommandResult",

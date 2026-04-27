@@ -11,6 +11,8 @@ AGENT_LOOP_PID_FILE="${RUN_DIR}/agent-loop-worker.pid"
 AGENT_LOOP_LOG_FILE="${RUN_DIR}/agent-loop-worker.log"
 TOOL_WORKER_PID_FILE="${RUN_DIR}/tool-worker.pid"
 TOOL_WORKER_LOG_FILE="${RUN_DIR}/tool-worker.log"
+RETRIEVER_WORKER_PID_FILE="${RUN_DIR}/retriever-worker.pid"
+RETRIEVER_WORKER_LOG_FILE="${RUN_DIR}/retriever-worker.log"
 RECONCILER_PID_FILE="${RUN_DIR}/reconciler.pid"
 RECONCILER_LOG_FILE="${RUN_DIR}/reconciler.log"
 PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
@@ -53,6 +55,7 @@ repo_pythonpath() {
     "${ROOT_DIR}/services/core-collab"
     "${ROOT_DIR}/services/gateway-edge"
     "${ROOT_DIR}/services/agent-runtime"
+    "${ROOT_DIR}/services/retriever"
     "${ROOT_DIR}/services/generated-tools-builder"
     "${ROOT_DIR}/services/workspace-memory"
     "${ROOT_DIR}/apps/tui"
@@ -343,6 +346,12 @@ PY
         "${RECONCILER_PID_FILE}" \
         "${RECONCILER_LOG_FILE}" \
         "${pythonpath}"
+      start_python_module \
+        "retriever-worker" \
+        "retriever.worker" \
+        "${RETRIEVER_WORKER_PID_FILE}" \
+        "${RETRIEVER_WORKER_LOG_FILE}" \
+        "${pythonpath}"
       echo "Gateway PID: ${GATEWAY_PID}"
       echo "Gateway log: ${GATEWAY_LOG_FILE}"
       return
@@ -359,6 +368,7 @@ PY
 
 stop_cmd() {
   load_local_env
+  stop_pid_file "retriever-worker" "${RETRIEVER_WORKER_PID_FILE}"
   stop_pid_file "reconciler" "${RECONCILER_PID_FILE}"
   stop_pid_file "tool-worker" "${TOOL_WORKER_PID_FILE}"
   stop_pid_file "agent-loop-worker" "${AGENT_LOOP_PID_FILE}"

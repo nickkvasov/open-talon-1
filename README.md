@@ -50,6 +50,7 @@ The typical flow is:
 | `services/gateway-edge` | public control plane and collaboration API | Owns REST, SSE, WebSocket, auth, admin, IAM, audit, collaboration, and session chat routes. |
 | `services/core-collab` | canonical collaboration and execution kernel | Owns Postgres persistence for workspaces, threads, participants, requests, tasks, runs, tool calls, memory, assets, and audit writes. |
 | `services/agent-runtime` | stateless execution plane | Runs the `agent-task-worker`, `agent-loop-worker`, `tool-worker`, and `reconciler`. |
+| `services/retriever` | reusable retrieval ingestion worker | Claims retrieval ingestion jobs, reads versioned file assets from MinIO, extracts/chunks/embeds evidence, and writes chunks plus pgvector embeddings to Postgres. |
 | `services/workspace-memory` | shared memory-provider abstraction | Keeps Postgres canonical while letting Mem0 and optional Memgraph act as derived retrieval layers. |
 | `services/generated-tools-builder` | Tinker build/publish helper | Packages generated tools for the OCI-style registry flow used during tool approval. |
 | `services/presence-directory` | reusable thread-presence primitives | Provides Valkey-backed websocket presence tracking used by `gateway-edge`. |
@@ -106,7 +107,7 @@ Important implications:
 - client apps should not treat `participant_id` as a global human identity
 - authenticated human requests may include an `actor` object for compatibility, but the gateway derives the effective human actor from the bearer token
 - agent identities authenticate with client credentials issued by the configured OIDC provider and are linked back to `system_agents` through `agent_identities`
-- when `MCP_ENABLED=true`, the gateway-mounted MCP server at `/v1/mcp` is OIDC-only and exposes permission-scoped system API operations across organization, project, workspace, thread, memory, runtime overview, audit read/verify, catalog/provider lookup, IAM lookup, and agent authoring surfaces, not Open Talon catalog/runtime tools
+- when `MCP_ENABLED=true`, the gateway-mounted MCP server at `/v1/mcp` is OIDC-only and exposes permission-scoped system API operations across organization, project, workspace, thread, memory, retrieval, runtime overview, audit read/verify, catalog/provider lookup, IAM lookup, and agent authoring surfaces, not Open Talon catalog/runtime tools
 - the managed `open_talon_control_plane` MCP server uses agent identity client credentials so operational agents can call allowlisted gateway MCP operations through runtime tool execution
 - the current MCP slice exposes read-only session resources at `ot://session/identity`, `ot://session/permissions`, and `ot://session/scope`
 - organization membership and membership roles live in Postgres, not in Keycloak claims
@@ -251,9 +252,9 @@ See [apps/admin-web/README.md](./apps/admin-web/README.md) for the full browser 
 
 The current defaults are aimed at a single medium-sized internal company deployment.
 
-- global reads and writes for system agents, system tools, global Git repositories, global asset publish/link/activate flows, provider management, and global IAM management require the matching global IAM permission or platform-admin bootstrap access
+- global reads and writes for system agents, system tools, global Git repositories, global file/retrieval flows, global asset publish/link/activate flows, provider management, and global IAM management require the matching global IAM permission or platform-admin bootstrap access
 - organization CRUD, organization membership changes, and organization-scoped IAM management require the relevant organization permissions, which are granted by membership baseline roles or explicit IAM role bindings
-- workspace role-definition changes, workspace agent attachment/update/removal, workspace tool attach/update/delete, workspace Git repository creation, and workspace asset publishing require the matching workspace-scoped IAM permission together with participant attachment
+- workspace role-definition changes, workspace agent attachment/update/removal, workspace tool attach/update/delete, workspace Git repository creation, workspace asset publishing, and workspace retrieval operations require the matching workspace-scoped IAM permission together with participant attachment
 - Tinker approval requires both `tool_generation.review` and `tool_catalog.write` in the requested publication scope
 - human workspace access depends on organization membership first, then workspace participation
 - workspace catalogs resolve as the union of platform-global resources and same-organization resources
@@ -371,6 +372,7 @@ Open Talon runs agent execution through durable stateless workers:
 - `agent-loop-worker` claims `run_steps` and executes model turns
 - `tool-worker` claims `tool_calls` and dispatches isolated tool execution
 - `reconciler` requeues expired leases and republishes wakeup events
+- `retriever-worker` claims retrieval ingestion jobs and populates retrieval chunks, full-text search data, and pgvector embeddings
 
 Execution contracts are backend-neutral:
 
@@ -419,6 +421,15 @@ Common tool endpoints:
 - `GET /v1/tool-generation/requests`: list tool-generation requests for admins
 - `GET /v1/threads/{thread_id}/tool-generation/requests`: list tool-generation requests for a thread
 - `POST /v1/tool-generation/revisions/{revision_id}/approve`: publish a generated tool into the system catalog
+
+Common file and retrieval endpoints:
+
+- `POST /v1/files`, `POST /v1/organizations/{organization_id}/files`, and `POST /v1/workspaces/{workspace_id}/files`: upload immutable file asset versions to MinIO-backed storage
+- `GET /v1/files`, `GET /v1/organizations/{organization_id}/files`, and `GET /v1/workspaces/{workspace_id}/files`: list visible file assets
+- `POST /v1/retrieval/corpora`, `POST /v1/organizations/{organization_id}/retrieval/corpora`, and `POST /v1/workspaces/{workspace_id}/retrieval/corpora`: create scoped retrieval corpora
+- `POST /v1/retrieval/sources`, `POST /v1/organizations/{organization_id}/retrieval/sources`, and `POST /v1/workspaces/{workspace_id}/retrieval/sources`: link file assets into corpora
+- `POST /v1/.../retrieval/corpora/{corpus_id}/jobs`: enqueue ingestion for a retrieval source version
+- `POST /v1/.../retrieval/search` and `POST /v1/.../retrieval/context-packs`: search indexed chunks and create cited context packs
 
 ## Layered Memory
 
@@ -576,6 +587,7 @@ It waits for both the gateway readiness endpoint and the configured OIDC discove
 - `agent-loop-worker`
 - `tool-worker`
 - `reconciler`
+- `retriever-worker`
 
 Local services:
 
@@ -584,6 +596,7 @@ Local services:
 - `agent-loop-worker`: local worker that executes agent model steps from durable `run_steps`
 - `tool-worker`: local worker that executes isolated tool invocations from durable `tool_calls`
 - `reconciler`: local worker that requeues expired leases and republishes wakeups
+- `retriever-worker`: local worker that extracts and indexes retrieval sources stored as immutable file assets
 - `postgres`: application database with `pgvector` enabled
 - `pgadmin`: pgAdmin 4 web UI for inspecting and querying the local Postgres instance
 - `kafka`: event bus for chat, collaboration, and agent-runtime traffic
@@ -722,6 +735,7 @@ That root environment installs:
 - shared contracts from `packages/contracts`
 - the collaboration kernel from `services/core-collab`
 - the agent runtime helpers from `services/agent-runtime`
+- the retriever worker from `services/retriever`
 - the gateway edge service from `services/gateway-edge`
 - the browser admin app source lives separately in `apps/admin-web` and uses its own npm dependencies and build tooling
 - the TUI app from `apps/tui`

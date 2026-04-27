@@ -12,8 +12,15 @@ from open_talon_contracts.oci_registry import (
 )
 from open_talon_contracts.models import (
     CreateOrganizationRequest,
+    CreateRetrievalContextPackRequest,
+    CreateRetrievalCorpusRequest,
+    RetrievalContextPack,
+    RetrievalCorpus,
+    RetrievalSearchHit,
+    RetrievalSearchResponse,
     ExecutionSpec,
     PublicationReview,
+    RetrievalChunk,
     WorkspaceHarness,
     WorkspaceModerationPolicy,
     normalize_organization_slug,
@@ -178,6 +185,62 @@ def test_organization_slug_normalization_is_shared_by_request_models() -> None:
     )
 
     assert request.slug == "platform-ops-team"
+
+
+def test_retrieval_contracts_serialize_scoped_search_payloads() -> None:
+    actor = {
+        "participant_id": "00000000-0000-0000-0000-000000000001",
+        "participant_type": "user",
+        "display_name": "Researcher",
+    }
+    corpus = RetrievalCorpus(
+        corpus_id=uuid4(),
+        scope="workspace",
+        organization_id=uuid4(),
+        workspace_id=uuid4(),
+        name="Playbook",
+        created_by=uuid4(),
+    )
+    chunk = RetrievalChunk(
+        chunk_id=uuid4(),
+        corpus_id=corpus.corpus_id,
+        source_id=uuid4(),
+        scope="workspace",
+        organization_id=corpus.organization_id,
+        workspace_id=corpus.workspace_id,
+        content="A cited retrieval chunk.",
+        content_hash="sha256",
+    )
+    hit = RetrievalSearchHit(chunk=chunk, score=0.9, rank=1)
+    response = RetrievalSearchResponse(
+        run={
+            "run_id": uuid4(),
+            "run_kind": "search",
+            "scope": "workspace",
+            "organization_id": corpus.organization_id,
+            "workspace_id": corpus.workspace_id,
+            "query": "chunk",
+            "created_by": uuid4(),
+        },
+        hits=[hit],
+    )
+    context_request = CreateRetrievalContextPackRequest(
+        actor=actor,
+        query="chunk",
+        corpus_ids=[corpus.corpus_id],
+        provider_overrides={"embedding_model": "local-test"},
+    )
+
+    assert CreateRetrievalCorpusRequest(actor=actor, name="Playbook").name == "Playbook"
+    assert response.model_dump(mode="json")["hits"][0]["rank"] == 1
+    assert context_request.provider_overrides["embedding_model"] == "local-test"
+    assert RetrievalContextPack(
+        context_pack_id=uuid4(),
+        query="chunk",
+        content="[1] source\nA cited retrieval chunk.",
+        hits=[hit],
+        created_by=uuid4(),
+    ).hits[0].chunk.content == "A cited retrieval chunk."
 
 
 def test_execution_spec_accepts_legacy_workspace_ref_alias() -> None:

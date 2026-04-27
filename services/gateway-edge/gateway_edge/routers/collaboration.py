@@ -51,6 +51,11 @@ from gateway_edge.models import (
     CreateMcpServerRequest,
     CreateOrganizationRequest,
     CreateProjectRequest,
+    CreateRetrievalContextPackRequest,
+    CreateRetrievalCorpusRequest,
+    CreateRetrievalIngestionJobRequest,
+    CreateRetrievalProfileRequest,
+    CreateRetrievalSourceRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
     ConfirmWorkspaceMemoryRequest,
@@ -95,8 +100,15 @@ from gateway_edge.models import (
     ProjectSubjectRef,
     PublishAssetFromGitRequest,
     PublishAgentBundleFromGitRequest,
+    RetrievalContextPack,
+    RetrievalCorpus,
+    RetrievalIngestionJob,
+    RetrievalProfile,
+    RetrievalSearchResponse,
+    RetrievalSource,
     ResolvedAssetBinding,
     RoleDefinition,
+    RunRetrievalSearchRequest,
     SystemToolDefinition,
     Thread,
     ThreadDetail,
@@ -133,6 +145,7 @@ from gateway_edge.models import (
     ValidateAgentBundleFromGitRequest,
     AddOrganizationMemberRequest,
     RemoveOrganizationMemberRequest,
+    UploadFileAssetRequest,
 )
 from gateway_edge.services import collaboration as collab_svc
 from gateway_edge.services.audit import audit_service
@@ -758,6 +771,109 @@ async def _require_asset_workspace_membership(
     elif asset.organization_id is not None:
         await _require_organization_membership(request, asset.organization_id)
     return asset
+
+
+async def _require_file_asset_visibility(
+    request: Request,
+    asset_id: UUID,
+) -> WorkspaceAsset:
+    asset = await _require_asset_workspace_membership(request, asset_id)
+    if asset.asset_type != "file":
+        raise KeyError(f"File asset {asset_id} not found")
+    if asset.workspace_id is None:
+        await _require_identity_permission(
+            request,
+            permission="asset_catalog.read",
+            organization_id=asset.organization_id,
+        )
+    return asset
+
+
+async def _require_retrieval_permission(
+    request: Request,
+    *,
+    permission: str,
+    organization_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+) -> ParticipantInput | None:
+    if workspace_id is not None:
+        return await _require_workspace_permission(
+            request,
+            workspace_id,
+            permission=permission,
+        )
+    if organization_id is not None:
+        await _require_organization_membership(request, organization_id)
+        await _require_identity_permission(
+            request,
+            permission=permission,
+            organization_id=organization_id,
+        )
+        return None
+    await _require_identity_permission(request, permission=permission)
+    return None
+
+
+async def _resolve_retrieval_actor(
+    request: Request,
+    actor: ParticipantInput,
+    *,
+    permission: str,
+    organization_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+) -> ParticipantInput:
+    scoped_actor = await _require_retrieval_permission(
+        request,
+        permission=permission,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+    if scoped_actor is not None:
+        return scoped_actor
+    if workspace_id is not None:
+        return await _resolve_workspace_actor(
+            request,
+            actor,
+            workspace_id=workspace_id,
+            auto_create=False,
+        )
+    if organization_id is not None:
+        return _resolve_organization_actor(request, actor)
+    return _resolve_global_actor(request, actor)
+
+
+async def _apply_retrieval_provider_override_permission(
+    request: Request,
+    actor: ParticipantInput,
+    provider_overrides: dict[str, object],
+    *,
+    organization_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+) -> ParticipantInput:
+    if not provider_overrides:
+        return actor
+    await _require_retrieval_permission(
+        request,
+        permission="retrieval.admin",
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+    permissions = set(actor.iam_permissions)
+    permissions.add("retrieval.admin")
+    return actor.model_copy(update={"iam_permissions": sorted(permissions)})
+
+
+def _form_actor(
+    *,
+    actor_participant_id: UUID | None,
+    actor_type: str,
+    actor_display_name: str,
+) -> ParticipantInput:
+    return ParticipantInput(
+        participant_id=actor_participant_id or uuid4(),
+        participant_type=actor_type,
+        display_name=actor_display_name,
+    )
 
 
 async def _require_workspace_admin_or_supervisor(
@@ -3756,6 +3872,1048 @@ async def list_assets(
         return await collab_svc.collaboration_service.list_workspace_assets(
             scope=scope,
             organization_id=organization_id,
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/files",
+    response_model=WorkspaceAssetVersion,
+    summary="Upload a global immutable file asset",
+)
+async def upload_global_file(
+    request: Request,
+    file: UploadFile = File(...),
+    logical_name: str = Form(...),
+    title: str = Form(...),
+    description: str | None = Form(default=None),
+    logical_path: str | None = Form(default=None),
+    content_type: str | None = Form(default=None),
+    actor_participant_id: UUID | None = Form(default=None),
+    actor_type: str = Form(default="user"),
+    actor_display_name: str = Form(default="uploader"),
+) -> WorkspaceAssetVersion:
+    await _require_identity_permission(request, permission="asset_catalog.publish")
+    actor = _resolve_global_actor(
+        request,
+        _form_actor(
+            actor_participant_id=actor_participant_id,
+            actor_type=actor_type,
+            actor_display_name=actor_display_name,
+        ),
+    )
+    payload = UploadFileAssetRequest(
+        actor=actor,
+        logical_name=logical_name,
+        logical_path=logical_path,
+        title=title,
+        description=description,
+        content_type=content_type or file.content_type,
+    )
+    try:
+        return await collab_svc.collaboration_service.upload_file_asset(
+            scope="global",
+            organization_id=None,
+            workspace_id=None,
+            payload=payload,
+            filename=file.filename or logical_name,
+            content=await file.read(),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/files",
+    response_model=list[WorkspaceAsset],
+    summary="List global file assets",
+)
+async def list_global_files(request: Request) -> list[WorkspaceAsset]:
+    await _require_identity_permission(request, permission="asset_catalog.read")
+    try:
+        assets = await collab_svc.collaboration_service.list_workspace_assets(scope="global")
+        return [asset for asset in assets if asset.asset_type == "file"]
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/files",
+    response_model=WorkspaceAssetVersion,
+    summary="Upload an organization immutable file asset",
+)
+async def upload_organization_file(
+    request: Request,
+    organization_id: UUID,
+    file: UploadFile = File(...),
+    logical_name: str = Form(...),
+    title: str = Form(...),
+    description: str | None = Form(default=None),
+    logical_path: str | None = Form(default=None),
+    content_type: str | None = Form(default=None),
+    actor_participant_id: UUID | None = Form(default=None),
+    actor_type: str = Form(default="user"),
+    actor_display_name: str = Form(default="uploader"),
+) -> WorkspaceAssetVersion:
+    await _require_organization_membership(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="asset_catalog.publish",
+        organization_id=organization_id,
+    )
+    actor = _resolve_organization_actor(
+        request,
+        _form_actor(
+            actor_participant_id=actor_participant_id,
+            actor_type=actor_type,
+            actor_display_name=actor_display_name,
+        ),
+    )
+    payload = UploadFileAssetRequest(
+        actor=actor,
+        logical_name=logical_name,
+        logical_path=logical_path,
+        title=title,
+        description=description,
+        content_type=content_type or file.content_type,
+    )
+    try:
+        return await collab_svc.collaboration_service.upload_file_asset(
+            scope="organization",
+            organization_id=organization_id,
+            workspace_id=None,
+            payload=payload,
+            filename=file.filename or logical_name,
+            content=await file.read(),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/files",
+    response_model=list[WorkspaceAsset],
+    summary="List organization file assets",
+)
+async def list_organization_files(
+    request: Request,
+    organization_id: UUID,
+) -> list[WorkspaceAsset]:
+    await _require_organization_membership(request, organization_id)
+    await _require_identity_permission(
+        request,
+        permission="asset_catalog.read",
+        organization_id=organization_id,
+    )
+    try:
+        assets = await collab_svc.collaboration_service.list_workspace_assets(
+            scope="organization",
+            organization_id=organization_id,
+        )
+        return [asset for asset in assets if asset.asset_type == "file"]
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/workspaces/{workspace_id}/files",
+    response_model=WorkspaceAssetVersion,
+    summary="Upload a workspace immutable file asset",
+)
+async def upload_workspace_file(
+    request: Request,
+    workspace_id: UUID,
+    file: UploadFile = File(...),
+    logical_name: str = Form(...),
+    title: str = Form(...),
+    description: str | None = Form(default=None),
+    logical_path: str | None = Form(default=None),
+    content_type: str | None = Form(default=None),
+    actor_participant_id: UUID | None = Form(default=None),
+    actor_type: str = Form(default="user"),
+    actor_display_name: str = Form(default="uploader"),
+) -> WorkspaceAssetVersion:
+    authorized_actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.assets.publish",
+    )
+    form_actor = _form_actor(
+        actor_participant_id=actor_participant_id,
+        actor_type=actor_type,
+        actor_display_name=actor_display_name,
+    )
+    actor = authorized_actor or await _resolve_workspace_actor(
+        request,
+        form_actor,
+        workspace_id=workspace_id,
+        auto_create=False,
+    )
+    payload = UploadFileAssetRequest(
+        actor=actor,
+        logical_name=logical_name,
+        logical_path=logical_path,
+        title=title,
+        description=description,
+        content_type=content_type or file.content_type,
+    )
+    try:
+        return await collab_svc.collaboration_service.upload_file_asset(
+            scope="workspace",
+            organization_id=None,
+            workspace_id=workspace_id,
+            payload=payload,
+            filename=file.filename or logical_name,
+            content=await file.read(),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/workspaces/{workspace_id}/files",
+    response_model=list[WorkspaceAsset],
+    summary="List workspace file assets",
+)
+async def list_workspace_files(
+    request: Request,
+    workspace_id: UUID,
+) -> list[WorkspaceAsset]:
+    await _require_workspace_membership(request, workspace_id)
+    try:
+        assets = await collab_svc.collaboration_service.list_workspace_assets(
+            scope="workspace",
+            workspace_id=workspace_id,
+        )
+        return [asset for asset in assets if asset.asset_type == "file"]
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/files/{asset_id}",
+    response_model=WorkspaceAsset,
+    summary="Get a visible file asset",
+)
+async def get_file_asset(request: Request, asset_id: UUID) -> WorkspaceAsset:
+    try:
+        return await _require_file_asset_visibility(request, asset_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/files/{asset_id}/versions",
+    response_model=list[WorkspaceAssetVersion],
+    summary="List immutable versions for a file asset",
+)
+async def list_file_asset_versions(
+    request: Request,
+    asset_id: UUID,
+) -> list[WorkspaceAssetVersion]:
+    try:
+        await _require_file_asset_visibility(request, asset_id)
+        return await collab_svc.collaboration_service.list_workspace_asset_versions(asset_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/files/{asset_id}/download",
+    response_model=dict,
+    summary="Generate a presigned download URL for a file asset version",
+)
+async def get_file_download_url(
+    request: Request,
+    asset_id: UUID,
+    asset_version_id: UUID | None = Query(default=None),
+) -> dict[str, str]:
+    try:
+        await _require_file_asset_visibility(request, asset_id)
+        url = await collab_svc.collaboration_service.get_asset_download_url(
+            asset_id,
+            asset_version_id=asset_version_id,
+        )
+        return {"url": url}
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+async def _create_retrieval_profile(
+    request: Request,
+    payload: CreateRetrievalProfileRequest,
+    *,
+    scope: str,
+    organization_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+) -> RetrievalProfile:
+    actor = await _resolve_retrieval_actor(
+        request,
+        payload.actor,
+        permission="retrieval.write",
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+    return await collab_svc.collaboration_service.create_retrieval_profile(
+        scope=scope,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+        payload=payload.model_copy(update={"actor": actor}),
+    )
+
+
+async def _list_retrieval_profiles(
+    request: Request,
+    *,
+    scope: str,
+    organization_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+) -> list[RetrievalProfile]:
+    await _require_retrieval_permission(
+        request,
+        permission="retrieval.read",
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+    return await collab_svc.collaboration_service.list_retrieval_profiles(
+        scope=scope,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+
+
+async def _create_retrieval_corpus(
+    request: Request,
+    payload: CreateRetrievalCorpusRequest,
+    *,
+    scope: str,
+    organization_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+) -> RetrievalCorpus:
+    actor = await _resolve_retrieval_actor(
+        request,
+        payload.actor,
+        permission="retrieval.write",
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+    return await collab_svc.collaboration_service.create_retrieval_corpus(
+        scope=scope,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+        payload=payload.model_copy(update={"actor": actor}),
+    )
+
+
+async def _list_retrieval_corpora(
+    request: Request,
+    *,
+    scope: str,
+    organization_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+) -> list[RetrievalCorpus]:
+    await _require_retrieval_permission(
+        request,
+        permission="retrieval.read",
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+    return await collab_svc.collaboration_service.list_retrieval_corpora(
+        scope=scope,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+
+
+async def _create_retrieval_source(
+    request: Request,
+    payload: CreateRetrievalSourceRequest,
+    *,
+    scope: str,
+    organization_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+) -> RetrievalSource:
+    await _require_file_asset_visibility(request, payload.asset_id)
+    actor = await _resolve_retrieval_actor(
+        request,
+        payload.actor,
+        permission="retrieval.write",
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+    return await collab_svc.collaboration_service.create_retrieval_source(
+        scope=scope,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+        payload=payload.model_copy(update={"actor": actor}),
+    )
+
+
+async def _list_retrieval_sources(
+    request: Request,
+    *,
+    scope: str,
+    organization_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+    corpus_id: UUID | None = None,
+) -> list[RetrievalSource]:
+    await _require_retrieval_permission(
+        request,
+        permission="retrieval.read",
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+    return await collab_svc.collaboration_service.list_retrieval_sources(
+        corpus_id=corpus_id,
+        scope=scope,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+
+
+async def _create_retrieval_job(
+    request: Request,
+    corpus_id: UUID,
+    payload: CreateRetrievalIngestionJobRequest,
+    *,
+    organization_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+) -> RetrievalIngestionJob:
+    actor = await _resolve_retrieval_actor(
+        request,
+        payload.actor,
+        permission="retrieval.write",
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+    return await collab_svc.collaboration_service.create_retrieval_ingestion_job(
+        corpus_id=corpus_id,
+        payload=payload.model_copy(update={"actor": actor}),
+    )
+
+
+async def _list_retrieval_jobs(
+    request: Request,
+    *,
+    scope: str,
+    organization_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+    corpus_id: UUID | None = None,
+    source_id: UUID | None = None,
+    status: str | None = None,
+) -> list[RetrievalIngestionJob]:
+    await _require_retrieval_permission(
+        request,
+        permission="retrieval.read",
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+    return await collab_svc.collaboration_service.list_retrieval_ingestion_jobs(
+        corpus_id=corpus_id,
+        source_id=source_id,
+        scope=scope,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+        status=status,
+    )
+
+
+async def _run_retrieval_search(
+    request: Request,
+    payload: RunRetrievalSearchRequest,
+    *,
+    scope: str,
+    organization_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+) -> RetrievalSearchResponse:
+    actor = await _resolve_retrieval_actor(
+        request,
+        payload.actor,
+        permission="retrieval.search",
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+    actor = await _apply_retrieval_provider_override_permission(
+        request,
+        actor,
+        payload.provider_overrides,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+    return await collab_svc.collaboration_service.run_retrieval_search(
+        scope=scope,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+        payload=payload.model_copy(update={"actor": actor}),
+    )
+
+
+async def _create_retrieval_context_pack(
+    request: Request,
+    payload: CreateRetrievalContextPackRequest,
+    *,
+    scope: str,
+    organization_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+) -> RetrievalContextPack:
+    actor = await _resolve_retrieval_actor(
+        request,
+        payload.actor,
+        permission="retrieval.search",
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+    actor = await _apply_retrieval_provider_override_permission(
+        request,
+        actor,
+        payload.provider_overrides,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+    return await collab_svc.collaboration_service.create_retrieval_context_pack(
+        scope=scope,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+        payload=payload.model_copy(update={"actor": actor}),
+    )
+
+
+async def _get_retrieval_context_pack(
+    request: Request,
+    context_pack_id: UUID,
+    *,
+    scope: str,
+    organization_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+) -> RetrievalContextPack:
+    await _require_retrieval_permission(
+        request,
+        permission="retrieval.read",
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+    )
+    context_pack = await collab_svc.collaboration_service.get_retrieval_context_pack(
+        context_pack_id
+    )
+    if context_pack is None:
+        raise KeyError(f"Retrieval context pack {context_pack_id} not found")
+    expected_organization_id = organization_id
+    if workspace_id is not None and expected_organization_id is None:
+        workspace = await collab_svc.collaboration_service.get_workspace(workspace_id)
+        expected_organization_id = workspace.workspace.organization_id
+    if (
+        context_pack.scope != scope
+        or context_pack.organization_id != expected_organization_id
+        or context_pack.workspace_id != workspace_id
+    ):
+        raise KeyError(f"Retrieval context pack {context_pack_id} not found")
+    return context_pack
+
+
+@router.post("/retrieval/profiles", response_model=RetrievalProfile)
+async def create_global_retrieval_profile(
+    request: Request,
+    payload: CreateRetrievalProfileRequest,
+) -> RetrievalProfile:
+    try:
+        return await _create_retrieval_profile(request, payload, scope="global")
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/retrieval/profiles", response_model=list[RetrievalProfile])
+async def list_global_retrieval_profiles(request: Request) -> list[RetrievalProfile]:
+    try:
+        return await _list_retrieval_profiles(request, scope="global")
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/retrieval/corpora", response_model=RetrievalCorpus)
+async def create_global_retrieval_corpus(
+    request: Request,
+    payload: CreateRetrievalCorpusRequest,
+) -> RetrievalCorpus:
+    try:
+        return await _create_retrieval_corpus(request, payload, scope="global")
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/retrieval/corpora", response_model=list[RetrievalCorpus])
+async def list_global_retrieval_corpora(request: Request) -> list[RetrievalCorpus]:
+    try:
+        return await _list_retrieval_corpora(request, scope="global")
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/retrieval/sources", response_model=RetrievalSource)
+async def create_global_retrieval_source(
+    request: Request,
+    payload: CreateRetrievalSourceRequest,
+) -> RetrievalSource:
+    try:
+        return await _create_retrieval_source(request, payload, scope="global")
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/retrieval/sources", response_model=list[RetrievalSource])
+async def list_global_retrieval_sources(
+    request: Request,
+    corpus_id: UUID | None = Query(default=None),
+) -> list[RetrievalSource]:
+    try:
+        return await _list_retrieval_sources(
+            request,
+            scope="global",
+            corpus_id=corpus_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/retrieval/corpora/{corpus_id}/jobs", response_model=RetrievalIngestionJob)
+async def create_global_retrieval_job(
+    request: Request,
+    corpus_id: UUID,
+    payload: CreateRetrievalIngestionJobRequest,
+) -> RetrievalIngestionJob:
+    try:
+        return await _create_retrieval_job(request, corpus_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/retrieval/jobs", response_model=list[RetrievalIngestionJob])
+async def list_global_retrieval_jobs(
+    request: Request,
+    corpus_id: UUID | None = Query(default=None),
+    source_id: UUID | None = Query(default=None),
+    status: str | None = Query(default=None),
+) -> list[RetrievalIngestionJob]:
+    try:
+        return await _list_retrieval_jobs(
+            request,
+            scope="global",
+            corpus_id=corpus_id,
+            source_id=source_id,
+            status=status,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/retrieval/search", response_model=RetrievalSearchResponse)
+async def run_global_retrieval_search(
+    request: Request,
+    payload: RunRetrievalSearchRequest,
+) -> RetrievalSearchResponse:
+    try:
+        return await _run_retrieval_search(request, payload, scope="global")
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/retrieval/context-packs", response_model=RetrievalContextPack)
+async def create_global_retrieval_context_pack(
+    request: Request,
+    payload: CreateRetrievalContextPackRequest,
+) -> RetrievalContextPack:
+    try:
+        return await _create_retrieval_context_pack(request, payload, scope="global")
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/retrieval/context-packs/{context_pack_id}", response_model=RetrievalContextPack)
+async def get_global_retrieval_context_pack(
+    request: Request,
+    context_pack_id: UUID,
+) -> RetrievalContextPack:
+    try:
+        return await _get_retrieval_context_pack(
+            request,
+            context_pack_id,
+            scope="global",
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/organizations/{organization_id}/retrieval/profiles", response_model=RetrievalProfile)
+async def create_organization_retrieval_profile(
+    request: Request,
+    organization_id: UUID,
+    payload: CreateRetrievalProfileRequest,
+) -> RetrievalProfile:
+    try:
+        return await _create_retrieval_profile(
+            request,
+            payload,
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/organizations/{organization_id}/retrieval/profiles", response_model=list[RetrievalProfile])
+async def list_organization_retrieval_profiles(
+    request: Request,
+    organization_id: UUID,
+) -> list[RetrievalProfile]:
+    try:
+        return await _list_retrieval_profiles(
+            request,
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/organizations/{organization_id}/retrieval/corpora", response_model=RetrievalCorpus)
+async def create_organization_retrieval_corpus(
+    request: Request,
+    organization_id: UUID,
+    payload: CreateRetrievalCorpusRequest,
+) -> RetrievalCorpus:
+    try:
+        return await _create_retrieval_corpus(
+            request,
+            payload,
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/organizations/{organization_id}/retrieval/corpora", response_model=list[RetrievalCorpus])
+async def list_organization_retrieval_corpora(
+    request: Request,
+    organization_id: UUID,
+) -> list[RetrievalCorpus]:
+    try:
+        return await _list_retrieval_corpora(
+            request,
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/organizations/{organization_id}/retrieval/sources", response_model=RetrievalSource)
+async def create_organization_retrieval_source(
+    request: Request,
+    organization_id: UUID,
+    payload: CreateRetrievalSourceRequest,
+) -> RetrievalSource:
+    try:
+        return await _create_retrieval_source(
+            request,
+            payload,
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/organizations/{organization_id}/retrieval/sources", response_model=list[RetrievalSource])
+async def list_organization_retrieval_sources(
+    request: Request,
+    organization_id: UUID,
+    corpus_id: UUID | None = Query(default=None),
+) -> list[RetrievalSource]:
+    try:
+        return await _list_retrieval_sources(
+            request,
+            scope="organization",
+            organization_id=organization_id,
+            corpus_id=corpus_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/organizations/{organization_id}/retrieval/corpora/{corpus_id}/jobs", response_model=RetrievalIngestionJob)
+async def create_organization_retrieval_job(
+    request: Request,
+    organization_id: UUID,
+    corpus_id: UUID,
+    payload: CreateRetrievalIngestionJobRequest,
+) -> RetrievalIngestionJob:
+    try:
+        return await _create_retrieval_job(
+            request,
+            corpus_id,
+            payload,
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/organizations/{organization_id}/retrieval/jobs", response_model=list[RetrievalIngestionJob])
+async def list_organization_retrieval_jobs(
+    request: Request,
+    organization_id: UUID,
+    corpus_id: UUID | None = Query(default=None),
+    source_id: UUID | None = Query(default=None),
+    status: str | None = Query(default=None),
+) -> list[RetrievalIngestionJob]:
+    try:
+        return await _list_retrieval_jobs(
+            request,
+            scope="organization",
+            organization_id=organization_id,
+            corpus_id=corpus_id,
+            source_id=source_id,
+            status=status,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/organizations/{organization_id}/retrieval/search", response_model=RetrievalSearchResponse)
+async def run_organization_retrieval_search(
+    request: Request,
+    organization_id: UUID,
+    payload: RunRetrievalSearchRequest,
+) -> RetrievalSearchResponse:
+    try:
+        return await _run_retrieval_search(
+            request,
+            payload,
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/organizations/{organization_id}/retrieval/context-packs", response_model=RetrievalContextPack)
+async def create_organization_retrieval_context_pack(
+    request: Request,
+    organization_id: UUID,
+    payload: CreateRetrievalContextPackRequest,
+) -> RetrievalContextPack:
+    try:
+        return await _create_retrieval_context_pack(
+            request,
+            payload,
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/organizations/{organization_id}/retrieval/context-packs/{context_pack_id}", response_model=RetrievalContextPack)
+async def get_organization_retrieval_context_pack(
+    request: Request,
+    organization_id: UUID,
+    context_pack_id: UUID,
+) -> RetrievalContextPack:
+    try:
+        return await _get_retrieval_context_pack(
+            request,
+            context_pack_id,
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/workspaces/{workspace_id}/retrieval/profiles", response_model=RetrievalProfile)
+async def create_workspace_retrieval_profile(
+    request: Request,
+    workspace_id: UUID,
+    payload: CreateRetrievalProfileRequest,
+) -> RetrievalProfile:
+    try:
+        return await _create_retrieval_profile(
+            request,
+            payload,
+            scope="workspace",
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/workspaces/{workspace_id}/retrieval/profiles", response_model=list[RetrievalProfile])
+async def list_workspace_retrieval_profiles(
+    request: Request,
+    workspace_id: UUID,
+) -> list[RetrievalProfile]:
+    try:
+        return await _list_retrieval_profiles(
+            request,
+            scope="workspace",
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/workspaces/{workspace_id}/retrieval/corpora", response_model=RetrievalCorpus)
+async def create_workspace_retrieval_corpus(
+    request: Request,
+    workspace_id: UUID,
+    payload: CreateRetrievalCorpusRequest,
+) -> RetrievalCorpus:
+    try:
+        return await _create_retrieval_corpus(
+            request,
+            payload,
+            scope="workspace",
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/workspaces/{workspace_id}/retrieval/corpora", response_model=list[RetrievalCorpus])
+async def list_workspace_retrieval_corpora(
+    request: Request,
+    workspace_id: UUID,
+) -> list[RetrievalCorpus]:
+    try:
+        return await _list_retrieval_corpora(
+            request,
+            scope="workspace",
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/workspaces/{workspace_id}/retrieval/sources", response_model=RetrievalSource)
+async def create_workspace_retrieval_source(
+    request: Request,
+    workspace_id: UUID,
+    payload: CreateRetrievalSourceRequest,
+) -> RetrievalSource:
+    try:
+        return await _create_retrieval_source(
+            request,
+            payload,
+            scope="workspace",
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/workspaces/{workspace_id}/retrieval/sources", response_model=list[RetrievalSource])
+async def list_workspace_retrieval_sources(
+    request: Request,
+    workspace_id: UUID,
+    corpus_id: UUID | None = Query(default=None),
+) -> list[RetrievalSource]:
+    try:
+        return await _list_retrieval_sources(
+            request,
+            scope="workspace",
+            workspace_id=workspace_id,
+            corpus_id=corpus_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/workspaces/{workspace_id}/retrieval/corpora/{corpus_id}/jobs", response_model=RetrievalIngestionJob)
+async def create_workspace_retrieval_job(
+    request: Request,
+    workspace_id: UUID,
+    corpus_id: UUID,
+    payload: CreateRetrievalIngestionJobRequest,
+) -> RetrievalIngestionJob:
+    try:
+        return await _create_retrieval_job(
+            request,
+            corpus_id,
+            payload,
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/workspaces/{workspace_id}/retrieval/jobs", response_model=list[RetrievalIngestionJob])
+async def list_workspace_retrieval_jobs(
+    request: Request,
+    workspace_id: UUID,
+    corpus_id: UUID | None = Query(default=None),
+    source_id: UUID | None = Query(default=None),
+    status: str | None = Query(default=None),
+) -> list[RetrievalIngestionJob]:
+    try:
+        return await _list_retrieval_jobs(
+            request,
+            scope="workspace",
+            workspace_id=workspace_id,
+            corpus_id=corpus_id,
+            source_id=source_id,
+            status=status,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/workspaces/{workspace_id}/retrieval/search", response_model=RetrievalSearchResponse)
+async def run_workspace_retrieval_search(
+    request: Request,
+    workspace_id: UUID,
+    payload: RunRetrievalSearchRequest,
+) -> RetrievalSearchResponse:
+    try:
+        return await _run_retrieval_search(
+            request,
+            payload,
+            scope="workspace",
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/workspaces/{workspace_id}/retrieval/context-packs", response_model=RetrievalContextPack)
+async def create_workspace_retrieval_context_pack(
+    request: Request,
+    workspace_id: UUID,
+    payload: CreateRetrievalContextPackRequest,
+) -> RetrievalContextPack:
+    try:
+        return await _create_retrieval_context_pack(
+            request,
+            payload,
+            scope="workspace",
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/workspaces/{workspace_id}/retrieval/context-packs/{context_pack_id}", response_model=RetrievalContextPack)
+async def get_workspace_retrieval_context_pack(
+    request: Request,
+    workspace_id: UUID,
+    context_pack_id: UUID,
+) -> RetrievalContextPack:
+    try:
+        return await _get_retrieval_context_pack(
+            request,
+            context_pack_id,
+            scope="workspace",
             workspace_id=workspace_id,
         )
     except Exception as exc:
