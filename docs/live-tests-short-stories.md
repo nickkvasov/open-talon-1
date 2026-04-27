@@ -20,7 +20,7 @@ The setup story starts with a clean local stack:
 
 That brings up the local infrastructure and service processes: gateway, runtime workers, Kafka, Postgres, Keycloak, OpenBao, Valkey, and Ollama. The live tests use the local OIDC realm and the admin test user, then create their own organizations and workspaces so they do not depend on mutable developer data.
 
-For Anchor, the important setup invariant is that the seeded agent definition resolves through the managed `local-ollama` provider. The default local model is `gemma4:latest`. The test checks the agent advertisement and routing metadata before it posts messages, because a moderation result is only meaningful if the right participant was attached to the workspace.
+For Anchor, the important setup invariant is that the seeded agent definition resolves through the managed `local-ollama` provider. The default local model comes from `OPEN_TALON_DEFAULT_REASONING_MODEL`. The test checks the agent advertisement and routing metadata before it posts messages, because a moderation result is only meaningful if the right participant was attached to the workspace.
 
 ## 3. The Protocol
 

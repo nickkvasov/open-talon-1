@@ -36,7 +36,7 @@ _OPENBAO_URL = "http://127.0.0.1:8200"
 _OPENBAO_KV_MOUNT = "secret"
 _OPENBAO_ROOT_TOKEN = os.getenv("BAO_ROOT_TOKEN", "root")
 _SEEDED_TINKER_AGENT_ID = "44444444-4444-4444-4444-444444444444"
-_EXECUTOR_MODEL = "gemma4:latest"
+_EXECUTOR_MODEL = os.getenv("OPEN_TALON_DEFAULT_REASONING_MODEL", "gemma4:31b")
 _MANAGED_TINKER_ENDPOINT = {
     "kind": "system",
     "engine_id": "openai-responses",

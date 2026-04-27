@@ -100,6 +100,7 @@ from open_talon_contracts.llm_engines import (
     LlmEngineDescriptor,
     LlmEngineRegistry,
 )
+from support.model_constants import TEST_EXPLICIT_OLLAMA_MODEL
 
 
 def _now() -> datetime:
@@ -138,8 +139,19 @@ class FakeKernel:
         self.list_claimable_called = True
         return [self.system_agent]
 
-    async def list_llm_providers(self) -> list[object]:
-        return list(self.llm_providers or [])
+    async def list_llm_providers(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[object]:
+        providers = list(self.llm_providers or [])
+        return [
+            provider
+            for provider in providers
+            if getattr(provider, "scope", "global") == scope
+            and getattr(provider, "organization_id", None) == organization_id
+        ]
 
     async def list_pending_tasks_for_system_agent(
         self,
@@ -276,7 +288,7 @@ def _build_fixture_context(*, endpoint_kind: str = "system"):
         endpoint=AgentEndpoint(
             kind=endpoint_kind,
             url="http://127.0.0.1:11434/api/generate" if endpoint_kind == "local" else "https://example.invalid/agent",
-            model="gemma4:latest",
+            model=TEST_EXPLICIT_OLLAMA_MODEL,
         ),
         system_prompt="You are a careful testing agent.",
         interaction_contract=AgentInteractionContract(
@@ -304,7 +316,7 @@ def _build_fixture_context(*, endpoint_kind: str = "system"):
                 "Call out residual risk honestly.",
             ],
         ),
-        definition={"runtime": {"model": "gemma4:latest", "provider": "ollama"}},
+        definition={"runtime": {"model": TEST_EXPLICIT_OLLAMA_MODEL, "provider": "ollama"}},
         created_by=user_id,
         created_at=now,
         updated_at=now,
@@ -991,6 +1003,77 @@ async def test_agent_runtime_can_resolve_managed_llm_provider_from_kernel():
     assert inspector.endpoint.model == "gpt-5.4-mini"
     assert inspector.metadata is not None
     assert inspector.metadata["_resolved_llm_engine"]["metadata"]["managed"] is True
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_can_resolve_organization_scoped_llm_provider():
+    organization_id = uuid4()
+    kernel = _build_fixture_context(endpoint_kind="remote")
+    kernel.context = kernel.context.model_copy(
+        update={
+            "workspace": kernel.context.workspace.model_copy(
+                update={"organization_id": organization_id}
+            ),
+            "system_agent": kernel.context.system_agent.model_copy(
+                update={
+                    "endpoint": AgentEndpoint(
+                        kind="remote",
+                        engine_id="org-anthropic",
+                        provider="anthropic",
+                    )
+                }
+            ),
+        }
+    )
+    kernel.llm_providers = [
+        LlmProviderDefinition(
+            provider_id=uuid4(),
+            scope="organization",
+            organization_id=organization_id,
+            engine_id="org-anthropic",
+            display_name="Org Anthropic",
+            description="Organization-scoped Anthropic provider.",
+            provider="anthropic",
+            endpoint_kind="remote",
+            url="https://api.anthropic.com/v1/messages",
+            default_model="claude-org-test",
+            capabilities=["chat", "vision"],
+            locality="cloud",
+            priority=250,
+            enabled=True,
+            secret_config={"env": {"name": "ANTHROPIC_API_KEY"}},
+            created_by=uuid4(),
+            updated_by=uuid4(),
+        )
+    ]
+
+    class InspectingExecutor:
+        def __init__(self) -> None:
+            self.endpoint: AgentEndpoint | None = None
+
+        async def execute(self, context: AgentExecutionContext) -> AgentRunResult:
+            self.endpoint = context.system_agent.endpoint
+            return AgentRunResult(stop_reason="completed", message="Summary: done.", summary="ok")
+
+    inspector = InspectingExecutor()
+    runtime = AgentTaskRuntime(
+        kernel=kernel,
+        publish_events=lambda events: asyncio.sleep(0),
+        poll_interval_seconds=0.01,
+        executors={
+            "local": inspector,
+            "remote": inspector,
+            "system": inspector,
+        },
+    )
+
+    await runtime._run_iteration()
+    await asyncio.gather(*kernel_safe_processing_tasks(runtime))
+
+    assert inspector.endpoint is not None
+    assert inspector.endpoint.engine_id == "org-anthropic"
+    assert inspector.endpoint.provider == "anthropic"
+    assert inspector.endpoint.model == "claude-org-test"
 
 
 @pytest.mark.asyncio
@@ -1945,7 +2028,7 @@ async def test_local_ollama_executor_emits_generation_observation(monkeypatch):
     result = await executor.execute(kernel.context)
 
     assert "Testing Agent (testing agent)" in (result.message or "")
-    assert request_log["model"] == "ollama/gemma4:latest"
+    assert request_log["model"] == f"ollama/{TEST_EXPLICIT_OLLAMA_MODEL}"
     assert request_log["api_base"] == "http://127.0.0.1:11434"
     assert request_log["timeout"] == 1.0
     assert request_log["messages"][0]["role"] == "system"
@@ -1962,11 +2045,41 @@ async def test_local_ollama_executor_emits_generation_observation(monkeypatch):
     }
     assert result.metadata["usage"] == {
         "provider": "ollama",
-        "model": "gemma4:latest",
+        "model": TEST_EXPLICIT_OLLAMA_MODEL,
         "prompt_tokens": 12,
         "completion_tokens": 7,
         "total_tokens": 19,
     }
+
+
+@pytest.mark.asyncio
+async def test_local_ollama_executor_uses_default_reasoning_model(monkeypatch):
+    kernel = _build_fixture_context(endpoint_kind="local")
+    endpoint = kernel.context.system_agent.endpoint.model_copy(update={"model": None})
+    system_agent = kernel.context.system_agent.model_copy(
+        update={
+            "endpoint": endpoint,
+            "definition": {"runtime": {"provider": "ollama"}},
+        }
+    )
+    kernel.context = kernel.context.model_copy(update={"system_agent": system_agent})
+    monkeypatch.setenv("OPEN_TALON_DEFAULT_REASONING_MODEL", "reasoning-local:test")
+
+    request_log: dict[str, object] = {}
+
+    async def fake_acompletion(**kwargs):
+        request_log.update(kwargs)
+        return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+    monkeypatch.setattr(
+        "agent_runtime.runtime._load_litellm",
+        lambda: SimpleNamespace(acompletion=fake_acompletion),
+    )
+
+    executor = LocalOllamaExecutor(timeout_seconds=1.0, observability=RecordingObserver())
+    await executor.execute(kernel.context)
+
+    assert request_log["model"] == "ollama/reasoning-local:test"
 
 
 @pytest.mark.asyncio
@@ -2085,6 +2198,61 @@ async def test_http_executor_calls_openai_responses_with_api_key(monkeypatch):
         "completion_tokens": 9,
         "total_tokens": 30,
     }
+
+
+@pytest.mark.asyncio
+async def test_http_executor_calls_anthropic_with_generic_litellm_secret(monkeypatch):
+    kernel = _build_fixture_context(endpoint_kind="remote")
+    kernel.context = kernel.context.model_copy(
+        update={
+            "system_agent": kernel.context.system_agent.model_copy(
+                update={
+                    "endpoint": AgentEndpoint(
+                        kind="remote",
+                        url="https://api.anthropic.com/v1/messages",
+                        model="claude-vision-test",
+                        provider="anthropic",
+                        engine_id="anthropic-messages",
+                    )
+                }
+            )
+        }
+    )
+    observer = RecordingObserver()
+    request_log: dict[str, object] = {}
+
+    async def fake_acompletion(**kwargs):
+        request_log.update(kwargs)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Anthropic validation complete.",
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-anthropic-test")
+    monkeypatch.setattr(
+        "agent_runtime.runtime._load_litellm",
+        lambda: SimpleNamespace(acompletion=fake_acompletion),
+    )
+
+    executor = HttpEndpointExecutor(
+        timeout_seconds=1.0,
+        endpoint_scope="remote",
+        observability=observer,
+    )
+    result = await executor.execute(kernel.context)
+
+    assert "Testing Agent (testing agent)" in (result.message or "")
+    assert request_log["model"] == "anthropic/claude-vision-test"
+    assert request_log["api_base"] == "https://api.anthropic.com"
+    assert request_log["api_key"] == "sk-anthropic-test"
+    assert observer.records[0]["name"] == "remote-anthropic-messages"
+    assert result.metadata["provider"] == "anthropic"
 
 
 @pytest.mark.asyncio
@@ -2231,7 +2399,7 @@ def test_langfuse_runtime_observer_uses_observation_api_for_generation():
     observer = LangfuseRuntimeObserver(FakeClient())
     with observer.start_generation(
         name="runtime-generate",
-        model="gemma4:latest",
+        model=TEST_EXPLICIT_OLLAMA_MODEL,
         input={"message": "hi"},
         metadata={"provider": "ollama"},
     ):
@@ -2241,7 +2409,7 @@ def test_langfuse_runtime_observer_uses_observation_api_for_generation():
         {
             "name": "runtime-generate",
             "as_type": "generation",
-            "model": "gemma4:latest",
+            "model": TEST_EXPLICIT_OLLAMA_MODEL,
             "input": {"message": "hi"},
             "metadata": {"provider": "ollama"},
         }

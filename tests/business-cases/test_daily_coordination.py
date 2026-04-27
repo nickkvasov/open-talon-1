@@ -33,6 +33,7 @@ from test_agent_contracts import (  # noqa: E402
     _workspace_manager_actor,
     _claim_single_pending_task,
 )
+from support.model_constants import TEST_EXPLICIT_OLLAMA_MODEL  # noqa: E402
 
 
 @pytest.mark.asyncio
@@ -85,7 +86,7 @@ async def test_role_based_daily_coordination_pilot_flow(business_case_log_dir: P
             description="Collects daily work and blocker updates.",
             role="standup coordinator",
             capabilities=["coordination", "standups"],
-            endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+            endpoint=AgentEndpoint(kind="local", model=TEST_EXPLICIT_OLLAMA_MODEL),
             system_prompt="Coordinate the daily delivery standup.",
         )
     )
@@ -96,7 +97,7 @@ async def test_role_based_daily_coordination_pilot_flow(business_case_log_dir: P
             description="Reviews blocker ownership and mitigation risk.",
             role="risk reviewer",
             capabilities=["risk", "mitigation"],
-            endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+            endpoint=AgentEndpoint(kind="local", model=TEST_EXPLICIT_OLLAMA_MODEL),
             system_prompt="Review blocker mitigation risk and ownership.",
         )
     )

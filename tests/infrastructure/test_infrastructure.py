@@ -29,7 +29,40 @@ BAO_ROOT_TOKEN = os.getenv("BAO_ROOT_TOKEN", "root")
 KAFKA_PORT = os.getenv("KAFKA_PORT", "9092")
 
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
-OLLAMA_MODELS = [m.strip() for m in os.getenv("REQUIRED_MODELS", "gemma4:31b,gemma4:e4b").split(',') if m.strip()]
+OLLAMA_REASONING_MODEL = os.getenv("OPEN_TALON_DEFAULT_REASONING_MODEL", "gemma4:31b")
+OLLAMA_RETRIEVER_EMBEDDING_MODEL = os.getenv(
+    "RETRIEVER_DEFAULT_EMBEDDING_MODEL",
+    "bge-m3:567m",
+)
+OLLAMA_RETRIEVER_VISION_MODEL = os.getenv("RETRIEVER_DEFAULT_VISION_MODEL", "gemma4:31b")
+
+
+def _split_models(raw: str | None) -> list[str]:
+    return [m.strip() for m in (raw or "").split(",") if m.strip()]
+
+
+def _dedupe_models(models: list[str]) -> list[str]:
+    deduped = []
+    for model in models:
+        if model not in deduped:
+            deduped.append(model)
+    return deduped
+
+
+OLLAMA_MODELS = _dedupe_models(
+    _split_models(os.getenv("REQUIRED_MODELS"))
+    or [
+        OLLAMA_REASONING_MODEL,
+        OLLAMA_RETRIEVER_EMBEDDING_MODEL,
+        OLLAMA_RETRIEVER_VISION_MODEL,
+    ]
+)
+OLLAMA_GENERATION_MODELS = _split_models(os.getenv("OLLAMA_GENERATION_MODELS")) or [
+    OLLAMA_REASONING_MODEL
+]
+OLLAMA_EMBEDDING_MODELS = _split_models(os.getenv("OLLAMA_EMBEDDING_MODELS")) or [
+    OLLAMA_RETRIEVER_EMBEDDING_MODEL
+]
 FORGEJO_HTTP_PORT = os.getenv("FORGEJO_HTTP_PORT", "3001")
 LANGFUSE_PORT = os.getenv("LANGFUSE_PORT", "3000")
 LANGFUSE_CLICKHOUSE_HTTP_PORT = os.getenv("LANGFUSE_CLICKHOUSE_HTTP_PORT", "8123")
@@ -324,17 +357,16 @@ def test_functional_ollama_serving(infrastructure):
     import urllib.request
     import json
     
-    # Ollama may normalize pulled aliases (for example ``gemma4:e4b`` can appear
-    # as ``gemma4:31b`` in /api/tags), so treat the tags endpoint as a liveness
-    # check and generation with the configured model refs as the source of truth.
     req = urllib.request.Request(f'http://127.0.0.1:{OLLAMA_PORT}/api/tags')
     with urllib.request.urlopen(req) as response:
         data = json.loads(response.read().decode())
         models = [m['name'] for m in data['models']]
         assert models
+        missing_models = sorted(set(OLLAMA_MODELS) - set(models))
+        assert not missing_models, f"Missing Ollama models: {missing_models}"
         
-    # Perform basic inference generation for both models
-    for model_name in OLLAMA_MODELS:
+    # Perform basic inference generation only for generation-capable models.
+    for model_name in OLLAMA_GENERATION_MODELS:
         payload = json.dumps({
             "model": model_name,
             "prompt": "Reply with precisely the word: hello",
@@ -346,3 +378,15 @@ def test_functional_ollama_serving(infrastructure):
             result = json.loads(response.read().decode())
             assert 'response' in result
             assert len(result['response']) > 0
+
+    # Embedding models are required for Retriever, but do not support generation.
+    for model_name in OLLAMA_EMBEDDING_MODELS:
+        payload = json.dumps({
+            "model": model_name,
+            "prompt": "retriever embedding health probe",
+        }).encode('utf-8')
+        req = urllib.request.Request(f'http://127.0.0.1:{OLLAMA_PORT}/api/embeddings', data=payload, headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=120) as response:
+            result = json.loads(response.read().decode())
+            assert 'embedding' in result
+            assert result['embedding']

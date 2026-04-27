@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import os
+import sys
 from datetime import datetime, timezone
 import httpx
 from uuid import UUID, uuid4
 
+_TESTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
+
 from gateway_edge.config import settings
 from gateway_edge.models import AuthContext, IamRoleDefinition, ParticipantProfile
+from support.model_constants import TEST_EXPLICIT_OLLAMA_MODEL
 
 
 def _oidc_context(*, roles: list[str]) -> AuthContext:
@@ -2808,7 +2815,7 @@ async def test_create_and_update_system_agent_round_trips_harness(client, actor_
             "description": "Carries explicit harness state.",
             "role": "research agent",
             "capabilities": ["research"],
-            "endpoint": {"kind": "local", "model": "gemma4:latest"},
+            "endpoint": {"kind": "local", "model": TEST_EXPLICIT_OLLAMA_MODEL},
             "system_prompt": "Research carefully.",
             "harness": {
                 "version": 1,
@@ -2925,7 +2932,7 @@ async def test_update_system_agent_preserves_harness_when_omitted_and_clears_wit
             "description": "Carries explicit harness state.",
             "role": "research agent",
             "capabilities": ["research"],
-            "endpoint": {"kind": "local", "model": "gemma4:latest"},
+            "endpoint": {"kind": "local", "model": TEST_EXPLICIT_OLLAMA_MODEL},
             "system_prompt": "Research carefully.",
             "harness": {
                 "version": 1,

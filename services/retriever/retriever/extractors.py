@@ -131,7 +131,7 @@ class PdfTextExtractor:
             metadata={"content_type": content_type, "filename": filename},
         )
 
-    def render_pages(self, payload: bytes, *, dpi: int = 160) -> list[tuple[int, bytes]]:
+    def render_pages(self, payload: bytes, *, dpi: int = 180) -> list[tuple[int, bytes]]:
         try:
             import fitz
         except ImportError as exc:

@@ -4619,6 +4619,31 @@ class CollaborationRepository:
         )
         return self._retrieval_ingestion_job_from_row(row) if row else None
 
+    async def claim_retrieval_ingestion_job(
+        self,
+        job_id: UUID,
+        *,
+        now,
+    ) -> RetrievalIngestionJob | None:
+        row = await self._pool.fetchrow(
+            """
+            UPDATE retrieval_ingestion_jobs
+            SET status = 'running',
+                stage = 'extracting',
+                started_at = COALESCE(started_at, $2),
+                updated_at = $2
+            WHERE job_id = $1
+              AND status = 'queued'
+            RETURNING job_id, corpus_id, source_id, source_version_id, profile_id,
+                      scope, organization_id, workspace_id, status, stage,
+                      requested_by, started_at, completed_at, error,
+                      created_at, updated_at, metadata
+            """,
+            job_id,
+            now,
+        )
+        return self._retrieval_ingestion_job_from_row(row) if row else None
+
     async def update_retrieval_ingestion_job(
         self,
         job_id: UUID,
@@ -4671,6 +4696,8 @@ class CollaborationRepository:
         embedding_model: str | None = None,
         vector_weight: float = 0.65,
         keyword_weight: float = 0.35,
+        conn: asyncpg.Connection | None = None,
+        lock_chunks: bool = False,
     ) -> list[RetrievalSearchHit]:
         effective_organization_id = organization_id
         if scope in {"organization", "workspace"}:
@@ -4679,8 +4706,10 @@ class CollaborationRepository:
                 workspace_id=workspace_id,
             )
         vector_literal = self._vector_literal(embedding_vector) if embedding_vector else None
-        rows = await self._pool.fetch(
-            """
+        chunk_lock_clause = "FOR KEY SHARE OF rc" if lock_chunks else ""
+        executor = conn or self._pool
+        rows = await executor.fetch(
+            f"""
             WITH query_value AS (
                 SELECT plainto_tsquery('simple', $1) AS tsq
             ),
@@ -4712,6 +4741,7 @@ class CollaborationRepository:
                   AND (($4::uuid IS NULL AND rc.workspace_id IS NULL) OR rc.workspace_id = $4)
                   AND ($5::uuid[] IS NULL OR rc.corpus_id = ANY($5::uuid[]))
                   AND ($6::jsonb IS NULL OR rc.metadata @> $6::jsonb)
+                {chunk_lock_clause}
             )
             SELECT *,
                    (COALESCE(vector_score, 0.0) * $7::double precision)

@@ -10,7 +10,7 @@ topic publication review:
 
 Run them only against a started local stack with gateway, runtime workers,
 Kafka, Postgres, Keycloak, OpenBao, and the managed `local-ollama` provider.
-The default local provider uses `gemma4:latest`.
+The default local provider uses `OPEN_TALON_DEFAULT_REASONING_MODEL`.
 
 For the narrative behind the live-test idea, setup, protocol, and run-log style,
 see [docs/live-tests-short-stories.md](../../../docs/live-tests-short-stories.md).

@@ -44,6 +44,7 @@ from open_talon_contracts.models import (  # noqa: E402
     ToolParameterContract,
     ToolParameterDefinition,
 )
+from support.model_constants import TEST_EXPLICIT_OLLAMA_MODEL  # noqa: E402
 from test_agent_contracts import (  # noqa: E402
     AgentEndpoint,
     AgentRunResult,
@@ -153,7 +154,7 @@ async def test_tinker_can_publish_and_execute_fibonacci_tool(
                 "validates generated tools before approval",
                 "submits generated tool revisions for catalog review",
             ],
-            endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+            endpoint=AgentEndpoint(kind="local", model=TEST_EXPLICIT_OLLAMA_MODEL),
             system_prompt="Build tools carefully, prefer reuse, and justify trust levels.",
             definition={"tool_generation_agent": True},
             metadata={"tool_generation_agent": True},
@@ -175,7 +176,7 @@ async def test_tinker_can_publish_and_execute_fibonacci_tool(
             description="Uses attached tools to solve numeric tasks.",
             role="math agent",
             capabilities=["calculation", "verification"],
-            endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+            endpoint=AgentEndpoint(kind="local", model=TEST_EXPLICIT_OLLAMA_MODEL),
             system_prompt="Use the narrowest available tool to solve numeric requests.",
         )
     )

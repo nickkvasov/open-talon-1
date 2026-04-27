@@ -14,6 +14,10 @@ from open_talon_contracts.models import (
     RetrievalChunkCitation,
     RetrievalEmbedding,
 )
+from open_talon_contracts.llm_engines import (  # noqa: E402
+    LlmEngineRegistry,
+    llm_engine_descriptor_from_provider_definition,
+)
 
 _ROOT_DIR = Path(__file__).resolve().parents[3]
 for relative in (
@@ -32,7 +36,13 @@ from gateway_edge.services.object_storage import MinioObjectStorage  # noqa: E40
 from .chunking import SimpleStructureAwareChunker
 from .config import RetrieverSettings
 from .extractors import ExtractorRegistry
-from .ollama import OllamaEmbeddingProvider, OllamaVisionProvider
+from .llm import (
+    LlmVisionProvider,
+    ResolvedVisionEngine,
+    default_vision_engine_descriptor,
+    resolve_vision_engine,
+)
+from .ollama import OllamaEmbeddingProvider
 from .providers import ExtractedSegment
 
 
@@ -55,7 +65,7 @@ class RetrieverWorker:
         self._embedding_provider = OllamaEmbeddingProvider(
             base_url=settings.ollama_base_url,
         )
-        self._vision_provider = OllamaVisionProvider(base_url=settings.ollama_base_url)
+        self._vision_provider = LlmVisionProvider(settings=settings)
         self._pool: asyncpg.Pool | None = None
         self._repository: CollaborationRepository | None = None
         self._kernel: CollaborationKernel | None = None
@@ -110,6 +120,24 @@ class RetrieverWorker:
             )
         return True
 
+    async def process_job(self, job_id) -> bool:
+        repository = self._require_repository()
+        job = await repository.claim_retrieval_ingestion_job(job_id, now=_now())
+        if job is None:
+            return False
+        try:
+            await self._process_job(job.job_id)
+        except Exception as exc:
+            logger.exception("Retrieval ingestion job failed: %s", job.job_id)
+            await repository.update_retrieval_ingestion_job(
+                job.job_id,
+                status="failed",
+                stage="failed",
+                now=_now(),
+                error=str(exc),
+            )
+        return True
+
     async def _process_job(self, job_id) -> None:
         repository = self._require_repository()
         kernel = self._require_kernel()
@@ -140,7 +168,9 @@ class RetrieverWorker:
             filename=filename if isinstance(filename, str) else None,
         )
         if self._visual_extraction_enabled(profile) and self._is_pdf(asset_version):
-            document.segments.extend(await self._visual_segments(payload, profile=profile))
+            document.segments.extend(
+                await self._visual_segments(payload, profile=profile, job=job)
+            )
         chunk_size = profile.chunk_size_tokens if profile is not None else 800
         chunk_overlap = profile.chunk_overlap_tokens if profile is not None else 80
         chunks = self._chunker.chunk(
@@ -231,22 +261,51 @@ class RetrieverWorker:
             return profile.visual_extraction_enabled
         return self._settings.visual_extraction_enabled
 
-    def _vision_model(self, profile) -> str:
-        if profile is not None and profile.vision_model:
-            return profile.vision_model
-        return self._settings.default_vision_model
+    async def _vision_engine(self, *, profile, job) -> ResolvedVisionEngine:
+        repository = self._require_repository()
+        descriptors = [default_vision_engine_descriptor(self._settings)]
+        descriptors.extend(
+            llm_engine_descriptor_from_provider_definition(item)
+            for item in await repository.list_llm_providers(
+                scope="global",
+                organization_id=None,
+            )
+        )
+        if job.organization_id is not None:
+            descriptors.extend(
+                llm_engine_descriptor_from_provider_definition(item)
+                for item in await repository.list_llm_providers(
+                    scope="organization",
+                    organization_id=job.organization_id,
+                )
+            )
+        return resolve_vision_engine(
+            registry=LlmEngineRegistry(descriptors),
+            settings=self._settings,
+            profile=profile,
+        )
 
-    async def _visual_segments(self, payload: bytes, *, profile) -> list[ExtractedSegment]:
+    async def _visual_segments(
+        self,
+        payload: bytes,
+        *,
+        profile,
+        job,
+    ) -> list[ExtractedSegment]:
         rendered = self._extractors.render_pdf_pages(payload)
         segments: list[ExtractedSegment] = []
+        engine = await self._vision_engine(profile=profile, job=job)
         prompt = (
             "Extract visible textual and semantic evidence from this page. "
-            "Return concise notes with table contents when visible."
+            "For charts, include the chart type, visible title, axis or series labels, "
+            "numeric values when readable, and the main relationship such as highest, "
+            "lowest, trend, or comparison. Return concise notes with table contents "
+            "when visible."
         )
         for page_number, image_bytes in rendered:
             text = await self._vision_provider.describe_image(
                 image_bytes,
-                model=self._vision_model(profile),
+                engine=engine,
                 prompt=prompt,
             )
             if text:
@@ -256,7 +315,13 @@ class RetrieverWorker:
                         page_start=page_number,
                         page_end=page_number,
                         segment_kind="visual",
-                        metadata={"visual_extraction": True, "page": page_number},
+                        metadata={
+                            "visual_extraction": True,
+                            "page": page_number,
+                            "llm_engine_id": engine.descriptor.engine_id,
+                            "llm_provider": engine.descriptor.provider,
+                            "llm_model": engine.model,
+                        },
                     )
                 )
         return segments

@@ -44,6 +44,7 @@ from open_talon_contracts.models import (
     WorkspaceAsset,
     WorkspaceAssetVersion,
 )
+from support.model_constants import TEST_EXPLICIT_OLLAMA_MODEL
 from core_collab.migrations import apply_pending_migrations
 from core_collab.repository import CollaborationRepository, UserRecord
 
@@ -381,7 +382,7 @@ async def test_repository_workspace_and_agent_harness_round_trip():
         description="Agent harness integration test.",
         role="research agent",
         capabilities=["research"],
-        endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+        endpoint=AgentEndpoint(kind="local", model=TEST_EXPLICIT_OLLAMA_MODEL),
         system_prompt="Research carefully.",
         harness=AgentHarness(
             summary="Choose tools dynamically from the workspace catalog.",

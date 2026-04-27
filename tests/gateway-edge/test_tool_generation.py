@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import os
+import sys
 from datetime import datetime, timezone
 from uuid import uuid4
+
+_TESTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
 
 from gateway_edge.config import settings
 from gateway_edge.models import (
@@ -15,6 +21,7 @@ from gateway_edge.models import (
     ToolGenerationRevision,
     Workspace,
 )
+from support.model_constants import TEST_EXPLICIT_OLLAMA_MODEL
 
 
 def _oidc_context(*, roles: list[str], user_id=None) -> AuthContext:
@@ -274,7 +281,7 @@ async def test_admin_can_attach_tinker_and_start_fibonacci_tool_request(
                 "validates generated tools before approval",
                 "submits generated tool revisions for catalog review",
             ],
-            "endpoint": {"kind": "local", "model": "gemma4:latest"},
+            "endpoint": {"kind": "local", "model": TEST_EXPLICIT_OLLAMA_MODEL},
             "system_prompt": "Build tools carefully, prefer reuse, and justify trust levels.",
             "definition": {"tool_generation_agent": True},
             "metadata": {"tool_generation_agent": True},
@@ -352,7 +359,7 @@ async def test_admin_can_request_organization_scoped_tinker_tool(
             "description": "Builds tools on demand and submits them for approval.",
             "role": "generated tool authoring and validation agent",
             "capabilities": ["generates new agent-usable tools from workspace requests"],
-            "endpoint": {"kind": "local", "model": "gemma4:latest"},
+            "endpoint": {"kind": "local", "model": TEST_EXPLICIT_OLLAMA_MODEL},
             "system_prompt": "Build tools carefully.",
             "definition": {"tool_generation_agent": True},
             "metadata": {"tool_generation_agent": True},

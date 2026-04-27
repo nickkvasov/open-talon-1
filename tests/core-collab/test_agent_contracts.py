@@ -30,6 +30,7 @@ from open_talon_contracts.agent_contracts import (  # noqa: E402
     build_default_interaction_contract,
     interaction_contract_is_empty,
 )
+from support.model_constants import TEST_EXPLICIT_OLLAMA_MODEL  # noqa: E402
 from open_talon_contracts.iam import WORKSPACE_PERMISSION_NAMES  # noqa: E402
 from open_talon_contracts.log_management import (  # noqa: E402
     RotationPolicy,
@@ -1958,6 +1959,30 @@ async def test_kernel_can_create_list_update_and_delete_llm_provider():
 
 
 @pytest.mark.asyncio
+async def test_kernel_rejects_embedding_capability_on_llm_provider():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+
+    with pytest.raises(ValueError, match="embedding capabilities"):
+        await kernel.create_llm_provider(
+            CreateLlmProviderRequest(
+                actor=_actor(),
+                engine_id="mixed-provider",
+                display_name="Mixed Provider",
+                description="Invalid mixed generation and embedding provider.",
+                provider="ollama",
+                endpoint_kind="local",
+                url="http://127.0.0.1:11434/api/generate",
+                default_model=TEST_EXPLICIT_OLLAMA_MODEL,
+                capabilities=["chat", "embedding"],
+                locality="host",
+                priority=100,
+                enabled=True,
+            )
+        )
+
+
+@pytest.mark.asyncio
 async def test_kernel_prevents_disabling_or_deleting_referenced_llm_provider():
     now = datetime.now(timezone.utc)
     repository = FakeRepository(
@@ -2175,7 +2200,7 @@ async def test_kernel_create_system_agent_fills_missing_interaction_contract():
             description="Validates changes and reports regressions.",
             role="testing agent",
             capabilities=["tests", "validation"],
-            endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+            endpoint=AgentEndpoint(kind="local", model=TEST_EXPLICIT_OLLAMA_MODEL),
             system_prompt="You are a careful testing agent.",
         )
     )
@@ -2210,7 +2235,7 @@ async def test_kernel_create_and_update_system_agent_round_trips_harness():
             description="Agent with explicit harness state.",
             role="research agent",
             capabilities=["research"],
-            endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+            endpoint=AgentEndpoint(kind="local", model=TEST_EXPLICIT_OLLAMA_MODEL),
             system_prompt="Research carefully.",
             harness=initial_harness,
         )
@@ -2260,7 +2285,7 @@ async def test_kernel_update_system_agent_preserves_existing_harness_when_omitte
             description="Agent with stable harness state.",
             role="research agent",
             capabilities=["research"],
-            endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+            endpoint=AgentEndpoint(kind="local", model=TEST_EXPLICIT_OLLAMA_MODEL),
             system_prompt="Research carefully.",
             harness=initial_harness,
         )
@@ -2291,7 +2316,7 @@ async def test_kernel_update_system_agent_clears_harness_when_explicit_null():
             description="Agent with removable harness state.",
             role="research agent",
             capabilities=["research"],
-            endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+            endpoint=AgentEndpoint(kind="local", model=TEST_EXPLICIT_OLLAMA_MODEL),
             system_prompt="Research carefully.",
             harness=AgentHarness(
                 summary="This harness should be removed.",
@@ -2438,7 +2463,7 @@ async def test_kernel_git_agent_keys_are_isolated_by_scope_and_manual_agents_sti
         description="Manual database-backed agent.",
         role="assistant",
         capabilities=["chat"],
-        endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+        endpoint=AgentEndpoint(kind="local", model=TEST_EXPLICIT_OLLAMA_MODEL),
         system_prompt="Manual prompt.",
         created_by=uuid4(),
         created_at=datetime.now(timezone.utc),
@@ -3325,7 +3350,7 @@ async def test_build_agent_execution_context_filters_messages_and_memory_by_view
         description="Validates changes with only the allowed workspace context.",
         role="testing agent",
         capabilities=["tests", "validation"],
-        endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+        endpoint=AgentEndpoint(kind="local", model=TEST_EXPLICIT_OLLAMA_MODEL),
         system_prompt="You are a careful testing agent.",
         interaction_contract=build_default_interaction_contract(
             display_name="Testing Agent",
@@ -3650,7 +3675,7 @@ async def test_build_agent_execution_context_applies_harness_memory_policy():
         description="Uses harness state during execution.",
         role="testing agent",
         capabilities=["tests", "validation"],
-        endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+        endpoint=AgentEndpoint(kind="local", model=TEST_EXPLICIT_OLLAMA_MODEL),
         system_prompt="Validate carefully.",
         harness=AgentHarness(
             summary="Ground work in evidence.",
@@ -3848,7 +3873,7 @@ async def test_build_agent_execution_context_does_not_advertise_disabled_workspa
         description="Validates changes with only the allowed workspace context.",
         role="testing agent",
         capabilities=["tests", "validation"],
-        endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+        endpoint=AgentEndpoint(kind="local", model=TEST_EXPLICIT_OLLAMA_MODEL),
         system_prompt="You are a careful testing agent.",
         interaction_contract=build_default_interaction_contract(
             display_name="Testing Agent",
@@ -4191,7 +4216,7 @@ def _seed_tinker_workspace(repository: FakeRepository) -> dict[str, object]:
         description="Generates tools on demand.",
         role="generated tool authoring and validation agent",
         capabilities=["generates new agent-usable tools from workspace requests"],
-        endpoint=AgentEndpoint(kind="local", model="gemma4:latest"),
+        endpoint=AgentEndpoint(kind="local", model=TEST_EXPLICIT_OLLAMA_MODEL),
         system_prompt="Build tools carefully.",
         created_by=user_id,
         created_at=now,

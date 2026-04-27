@@ -759,7 +759,7 @@ Retrieval corpora, sources, jobs, runs, and context packs are scoped as `global`
 | `GET/POST` | `/v1/organizations/{organization_id}/retrieval/...` | organization-scoped equivalent routes |
 | `GET/POST` | `/v1/workspaces/{workspace_id}/retrieval/...` | workspace-scoped equivalent routes |
 
-The default vector backend is pgvector. The default embedding provider is configurable Ollama via `RETRIEVER_DEFAULT_EMBEDDING_PROVIDER`, `RETRIEVER_DEFAULT_EMBEDDING_MODEL`, and `RETRIEVER_OLLAMA_BASE_URL`. Visual extraction is disabled by default and uses the configurable Ollama vision provider when `RETRIEVER_VISUAL_EXTRACTION_ENABLED=true`.
+The default vector backend is pgvector. The default embedding provider is configurable Ollama via `RETRIEVER_DEFAULT_EMBEDDING_PROVIDER`, `RETRIEVER_DEFAULT_EMBEDDING_MODEL`, and `RETRIEVER_OLLAMA_BASE_URL`. Visual extraction is disabled by default; when enabled, Retriever resolves the visual extraction LLM through the shared `llm_providers` engine registry, defaulting to `RETRIEVER_DEFAULT_VISION_ENGINE_ID=local-ollama`.
 
 ### Tool Generation And Approval
 

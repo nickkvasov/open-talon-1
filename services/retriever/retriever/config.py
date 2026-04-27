@@ -21,9 +21,10 @@ def _float_env(name: str, default: float) -> float:
 @dataclass(frozen=True)
 class RetrieverSettings:
     default_embedding_provider: str = "ollama"
-    default_embedding_model: str = "nomic-embed-text"
+    default_embedding_model: str = "bge-m3:567m"
     default_vision_provider: str = "ollama"
-    default_vision_model: str = "llava"
+    default_vision_engine_id: str = "local-ollama"
+    default_vision_model: str = "gemma4:31b"
     ollama_base_url: str = "http://127.0.0.1:11434"
     visual_extraction_enabled: bool = False
     worker_poll_interval_seconds: float = 1.0
@@ -52,15 +53,19 @@ class RetrieverSettings:
             ),
             default_embedding_model=os.getenv(
                 "RETRIEVER_DEFAULT_EMBEDDING_MODEL",
-                "nomic-embed-text",
+                "bge-m3:567m",
             ),
             default_vision_provider=os.getenv(
                 "RETRIEVER_DEFAULT_VISION_PROVIDER",
                 "ollama",
             ),
+            default_vision_engine_id=os.getenv(
+                "RETRIEVER_DEFAULT_VISION_ENGINE_ID",
+                "local-ollama",
+            ),
             default_vision_model=os.getenv(
                 "RETRIEVER_DEFAULT_VISION_MODEL",
-                "llava",
+                "gemma4:31b",
             ),
             ollama_base_url=os.getenv(
                 "RETRIEVER_OLLAMA_BASE_URL",

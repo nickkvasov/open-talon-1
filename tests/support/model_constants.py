@@ -1,0 +1,1 @@
+TEST_EXPLICIT_OLLAMA_MODEL = "gemma4:latest"

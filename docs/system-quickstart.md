@@ -245,10 +245,12 @@ Relevant layered-memory defaults from [`infrastructure/.env.example`](../infrast
 
 Relevant retriever defaults from [`infrastructure/.env.example`](../infrastructure/.env.example):
 
+- `OPEN_TALON_DEFAULT_REASONING_MODEL=gemma4:31b`
 - `RETRIEVER_DEFAULT_EMBEDDING_PROVIDER=ollama`
-- `RETRIEVER_DEFAULT_EMBEDDING_MODEL=nomic-embed-text`
+- `RETRIEVER_DEFAULT_EMBEDDING_MODEL=bge-m3:567m`
 - `RETRIEVER_DEFAULT_VISION_PROVIDER=ollama`
-- `RETRIEVER_DEFAULT_VISION_MODEL=llava`
+- `RETRIEVER_DEFAULT_VISION_ENGINE_ID=local-ollama`
+- `RETRIEVER_DEFAULT_VISION_MODEL=gemma4:31b`
 - `RETRIEVER_OLLAMA_BASE_URL=http://127.0.0.1:11434`
 - `RETRIEVER_VISUAL_EXTRACTION_ENABLED=false`
 
@@ -667,7 +669,7 @@ pytest tests/business-cases/test_tinker_tool_generation.py -q
 pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s
 ```
 
-The live Tinker system test is marked `integration`, so it is excluded from the default `pytest -q` run by `pytest.ini`. It expects `gemma4:latest` to be available in the local Ollama instance.
+The live Tinker system test is marked `integration`, so it is excluded from the default `pytest -q` run by `pytest.ini`. It expects the configured `OPEN_TALON_DEFAULT_REASONING_MODEL` to be available in the local Ollama instance.
 
 Operational-agent live wiring is also behind an explicit env gate:
 
@@ -804,13 +806,17 @@ If you run Docker Compose directly instead of `./open-talon start`, enable the o
 docker compose -f infrastructure/docker-compose.yaml --profile mem0-graph up -d
 ```
 
-## 13. Seeded OpenAI Agent Smoke Test
+## 13. Seeded LLM Provider Smoke Test
 
-The local migrations seed:
+The local managed defaults seed:
 
 - `local-ollama`
 - `openai-responses`
 - sample system agent `Reasoning Planner` with `agent_id` `33333333-3333-3333-3333-333333333333`
+
+Agents and Retriever visual extraction resolve through the same persistent
+`llm_providers` registry. Retriever embeddings stay on the Retriever embedding
+provider abstraction because embedding vectors have separate indexing semantics.
 
 To test the seeded OpenAI-backed agent end to end:
 

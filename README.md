@@ -574,7 +574,7 @@ That provider can then be exposed by registering it in `build_provider_index(...
 - **Langfuse**: Self-hosted LLM observability stack that can be used as one runtime observability backend for traces, prompts, and evaluations.
 - **HyperDX**: Optional OTLP-compatible observability sink/UI for local investigations and runtime telemetry experiments.
 - **Ollama AI**: Serves dynamic generative model orchestration natively mapped across standard REST.
-    - Operates natively against Google's modern **Gemma 4** models, with the default test setup pulling the lightweight `gemma4:latest` model.
+    - Operates natively against Google's modern **Gemma 4** models, with the default local reasoning model set by `OPEN_TALON_DEFAULT_REASONING_MODEL=gemma4:31b`.
 
 ## Infrastructure
 
@@ -743,11 +743,16 @@ That root environment installs:
 
 `services/gateway-edge` is the only supported local gateway path for day-to-day development.
 
-## OpenAI Engine
+## LLM Engines
 
 LLM provider and engine definitions are persistent system resources. They are managed through the `llm-providers` API and stored in Postgres, not defined from environment variables.
 
-The local migrations seed two default providers:
+Agents and Retriever visual extraction both resolve models through this registry.
+Retriever embeddings remain on the Retriever embedding-provider abstraction because
+embedding APIs have different request and storage semantics from generation/vision
+LLMs.
+
+The local managed defaults seed two default providers:
 
 - `local-ollama`
 - `openai-responses`
@@ -767,7 +772,7 @@ OPEN_TALON_OPENBAO_TOKEN=root
 EOF
 ```
 
-`gateway-edge` and `agent-runtime` load `.run/openai.env` automatically if it exists.
+`gateway-edge`, `agent-runtime`, and the Retriever LLM secret resolver load `.run/openai.env` automatically if it exists.
 
 If you want the `openai-responses` provider to resolve credentials from OpenBao, store the key in KV v2:
 
@@ -857,7 +862,7 @@ Example LLM provider definition for `POST /v1/llm-providers`:
   "endpoint_kind": "remote",
   "url": "https://api.openai.com/v1/responses",
   "default_model": "gpt-5.4-mini",
-  "capabilities": ["chat", "completion", "tool_calling", "reasoning"],
+  "capabilities": ["chat", "completion", "tool_calling", "reasoning", "vision", "image_input"],
   "locality": "cloud",
   "priority": 220,
   "enabled": true,
@@ -878,10 +883,40 @@ To add another hosted or network LLM provider cleanly:
 
 1. Create or validate the provider through `POST /v1/llm-providers` or `POST /v1/llm-providers/validate` with a unique `engine_id`, endpoint details, capabilities, locality, and `secret_config`.
 2. Store the provider secret in OpenBao, or point `secret_config.env` at an environment variable for local-only development.
-3. If the provider uses a provider-specific wire protocol, add an execution branch in [runtime.py](./services/agent-runtime/agent_runtime/runtime.py), similar to the OpenAI path.
+3. Agents use LiteLLM for `openai`, `ollama`, and `anthropic` provider keys by default. For another LiteLLM-backed provider, set provider metadata such as `"transport": "litellm"` and use the LiteLLM provider/model naming.
 4. If the new provider needs a new secret backend instead of `env` or `openbao`, add a new `SecretProvider` implementation in [secrets.py](./services/agent-runtime/agent_runtime/secrets.py) and register it in `build_default_secret_resolver()`.
 
-For most API-key-based providers, the persistence and secret wiring should not require executor changes beyond the provider-specific request/response format.
+For Anthropic, a provider definition follows the same shape:
+
+```json
+{
+  "engine_id": "anthropic-messages",
+  "display_name": "Anthropic Messages",
+  "description": "Cloud Anthropic Messages API provider.",
+  "provider": "anthropic",
+  "endpoint_kind": "remote",
+  "url": "https://api.anthropic.com/v1/messages",
+  "default_model": "<anthropic-model>",
+  "capabilities": ["chat", "completion", "vision", "image_input"],
+  "locality": "cloud",
+  "priority": 210,
+  "enabled": true,
+  "secret_config": {
+    "env": { "name": "ANTHROPIC_API_KEY" },
+    "openbao": {
+      "mount": "secret",
+      "path": "open-talon/llm/anthropic",
+      "field": "api_key"
+    }
+  }
+}
+```
+
+Retriever profiles can point `vision_provider_key` at either an engine id such as
+`anthropic-messages` or a provider key such as `anthropic`; the selected engine's
+default model is used unless the profile sets `vision_model`. Do not advertise
+embedding capabilities on LLM providers. Retriever embedding models belong to the
+Retriever embedding-provider path and are indexed separately.
 
 ## Quickstart
 

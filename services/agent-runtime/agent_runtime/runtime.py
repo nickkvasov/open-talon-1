@@ -9,7 +9,6 @@ import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlparse, urlunparse
 from uuid import UUID
 
 import httpx
@@ -37,6 +36,13 @@ from open_talon_contracts.llm_engines import (  # noqa: E402
     LlmEngineRegistry,
     llm_engine_descriptor_from_provider_definition,
 )
+from open_talon_contracts.llm_runtime import (  # noqa: E402
+    api_key_references_from_engine_metadata,
+    extract_text_response,
+    litellm_model_name,
+    litellm_payload,
+    provider_base_url,
+)
 
 from .llm_engines import (  # noqa: E402
     build_default_llm_engine_registry,
@@ -50,16 +56,19 @@ from .observability import (  # noqa: E402
     build_observability_provider_from_env,
 )
 from .secrets import (  # noqa: E402
-    SecretReference,
     SecretResolver,
     build_default_secret_resolver,
-    secret_references_from_config,
 )
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 _LITELLM_MODULE: Any | None = None
+_LITELLM_DEFAULT_PROVIDER_KEYS = {
+    "anthropic",
+    "ollama",
+    "openai",
+}
 
 
 async def _record_runtime_audit(
@@ -104,7 +113,12 @@ class RuntimeKernel(Protocol):
 
     async def list_claimable_system_agents(self) -> list[AgentDefinition]: ...
 
-    async def list_llm_providers(self) -> list[Any]: ...
+    async def list_llm_providers(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[Any]: ...
 
     async def search_thread_memory(self, thread_id: UUID, payload: Any) -> Any: ...
 
@@ -183,54 +197,6 @@ def _litellm_messages(
     ]
 
 
-def _litellm_model_name(*, provider: str, model: str) -> str:
-    if "/" in model:
-        return model
-    if provider in {"openai", "ollama"}:
-        return f"{provider}/{model}"
-    return model
-
-
-def _litellm_api_base(
-    *,
-    provider: str,
-    endpoint_url: str | None,
-) -> str | None:
-    if not endpoint_url:
-        return None
-    parsed = urlparse(endpoint_url)
-    if not parsed.scheme or not parsed.netloc:
-        return endpoint_url.rstrip("/")
-    path = parsed.path.rstrip("/")
-    # Provider definitions store full API endpoint URLs, while LiteLLM expects the
-    # provider base URL and derives the concrete route itself.
-    suffixes_by_provider = {
-        "openai": ("/responses", "/chat/completions", "/completions"),
-        "ollama": ("/api/generate", "/api/chat"),
-    }
-    for suffix in suffixes_by_provider.get(provider, ()):
-        if path.endswith(suffix):
-            path = path[: -len(suffix)]
-            break
-    normalized = urlunparse(
-        parsed._replace(
-            path=path,
-            params="",
-            query="",
-            fragment="",
-        )
-    )
-    return normalized.rstrip("/")
-
-
-def _litellm_payload(response: Any) -> Any:
-    if hasattr(response, "model_dump"):
-        return response.model_dump()
-    if hasattr(response, "dict"):
-        return response.dict()
-    return response
-
-
 def _litellm_usage_details(payload: Any) -> dict[str, int]:
     if not isinstance(payload, dict):
         return {}
@@ -279,15 +245,17 @@ async def _execute_litellm_completion(
         system_prompt=context.system_agent.system_prompt,
         prompt=prompt,
     )
-    litellm_model = _litellm_model_name(provider=provider, model=model)
-    api_base = _litellm_api_base(provider=provider, endpoint_url=endpoint_url)
+    litellm_model = litellm_model_name(provider=provider, model=model)
+    api_base = provider_base_url(provider=provider, endpoint_url=endpoint_url)
     api_key: str | None = None
-    if provider == "openai":
+    if provider != "ollama":
         if secret_resolver is None:  # pragma: no cover - defensive
-            raise RuntimeError("secret_resolver is required for OpenAI LiteLLM execution")
+            raise RuntimeError(
+                f"secret_resolver is required for {provider} LiteLLM execution"
+            )
         api_key = await secret_resolver.resolve(
-            _openai_api_key_references(context),
-            label="OpenAI API key",
+            _api_key_references(context, provider=provider),
+            label=f"{provider} API key",
         )
     request_payload = {
         "provider": provider,
@@ -317,7 +285,7 @@ async def _execute_litellm_completion(
             call_kwargs["api_base"] = api_base
         if api_key:
             call_kwargs["api_key"] = api_key
-        payload = _litellm_payload(await _load_litellm().acompletion(**call_kwargs))
+        payload = litellm_payload(await _load_litellm().acompletion(**call_kwargs))
         usage_details = _litellm_usage_details(payload)
         observation.update(
             output=payload,
@@ -364,7 +332,7 @@ class LocalOllamaExecutor:
         model = (
             endpoint.model
             or _definition_runtime_value(context, "model")
-            or "gemma4:latest"
+            or os.getenv("OPEN_TALON_DEFAULT_REASONING_MODEL", "gemma4:31b")
         )
         logger.debug(
             "LocalOllamaExecutor execute agent_id=%s model=%s thread_id=%s",
@@ -415,7 +383,7 @@ class HttpEndpointExecutor:
             endpoint.url,
             context.thread.thread_id,
         )
-        if provider in {"openai", "ollama"} and endpoint.model:
+        if endpoint.model and _uses_litellm_transport(context, provider=provider):
             return await self._execute_litellm(context, provider=provider)
         request_payload = {
             "agent": context.system_agent.model_dump(mode="json"),
@@ -491,14 +459,17 @@ class HttpEndpointExecutor:
                 f"{self._endpoint_scope.capitalize()} {provider} agent {context.system_agent.agent_id} is missing a model"
             )
         summary_by_provider = {
+            "anthropic": "Completed with remote Anthropic",
             "openai": "Completed with remote OpenAI",
             "ollama": "Completed with remote Ollama",
         }
         observation_name_by_provider = {
+            "anthropic": f"{self._endpoint_scope}-anthropic-messages",
             "openai": f"{self._endpoint_scope}-openai-responses",
             "ollama": f"{self._endpoint_scope}-ollama-generate",
         }
         debug_source_by_provider = {
+            "anthropic": "anthropic-messages",
             "openai": "openai-responses",
             "ollama": "remote-ollama",
         }
@@ -547,6 +518,27 @@ def build_default_agent_executors(
     }
 
 
+async def _list_runtime_llm_providers(
+    kernel: RuntimeKernel,
+    context: AgentExecutionContext,
+) -> list[Any]:
+    try:
+        providers = list(
+            await kernel.list_llm_providers(scope="global", organization_id=None)
+        )
+        organization_id = context.workspace.organization_id
+        if organization_id is not None:
+            providers.extend(
+                await kernel.list_llm_providers(
+                    scope="organization",
+                    organization_id=organization_id,
+                )
+            )
+        return providers
+    except TypeError:
+        return list(await kernel.list_llm_providers())
+
+
 class RuntimeExecutionManager:
     def __init__(
         self,
@@ -587,7 +579,7 @@ class RuntimeExecutionManager:
     ) -> AgentExecutionContext:
         managed = [
             llm_engine_descriptor_from_provider_definition(item)
-            for item in await kernel.list_llm_providers()
+            for item in await _list_runtime_llm_providers(kernel, context)
         ]
         registry = LlmEngineRegistry.merged(self._engine_registry.list(), managed)
         resolved = resolve_llm_engine_for_context(context, registry)
@@ -1250,37 +1242,33 @@ def _definition_runtime_value(context: AgentExecutionContext, key: str) -> Any:
     return None
 
 
-def _openai_api_key_references(context: AgentExecutionContext) -> list[SecretReference]:
-    references: list[SecretReference] = []
+def _uses_litellm_transport(
+    context: AgentExecutionContext,
+    *,
+    provider: str,
+) -> bool:
+    if provider in _LITELLM_DEFAULT_PROVIDER_KEYS:
+        return True
+    metadata = _resolved_llm_engine(context).get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    transport = metadata.get("transport")
+    if transport == "litellm":
+        return True
+    return metadata.get("litellm") is True or metadata.get("litellm_provider") is True
+
+
+def _api_key_references(
+    context: AgentExecutionContext,
+    *,
+    provider: str,
+) -> list[Any]:
     engine = _resolved_llm_engine(context)
     metadata = engine.get("metadata")
-    if isinstance(metadata, dict):
-        references.extend(
-            secret_references_from_config(metadata.get("api_key_secret"))
-        )
-        references.extend(
-            secret_references_from_config(metadata.get("secret_config"))
-        )
-        env_name = metadata.get("auth_env_var")
-        if isinstance(env_name, str) and env_name:
-            references.append(SecretReference(provider="env", name=env_name))
-    if not references:
-        references.append(SecretReference(provider="env", name="OPENAI_API_KEY"))
-        references.append(
-            SecretReference(
-                provider="openbao",
-                mount=os.getenv("OPEN_TALON_OPENBAO_KV_MOUNT", "secret"),
-                path=os.getenv(
-                    "OPEN_TALON_OPENAI_OPENBAO_PATH",
-                    "open-talon/llm/openai",
-                ),
-                field_name=os.getenv(
-                    "OPEN_TALON_OPENAI_OPENBAO_FIELD",
-                    "api_key",
-                ),
-            )
-        )
-    return _dedupe_secret_references(references)
+    return api_key_references_from_engine_metadata(
+        provider=provider,
+        metadata=metadata if isinstance(metadata, dict) else None,
+    )
 
 
 def _resolved_llm_engine(context: AgentExecutionContext) -> dict[str, Any]:
@@ -1288,64 +1276,8 @@ def _resolved_llm_engine(context: AgentExecutionContext) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _dedupe_secret_references(
-    references: list[SecretReference],
-) -> list[SecretReference]:
-    seen: set[tuple[str, str | None, str | None, str | None, str | None]] = set()
-    unique: list[SecretReference] = []
-    for reference in references:
-        key = (
-            reference.provider,
-            reference.name,
-            reference.mount,
-            reference.path,
-            reference.field_name,
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(reference)
-    return unique
-
-
 def _extract_text_response(payload: Any) -> str:
-    if isinstance(payload, dict):
-        if isinstance(payload.get("response"), str):
-            return payload["response"]
-        if isinstance(payload.get("message"), str):
-            return payload["message"]
-        if isinstance(payload.get("output_text"), str):
-            return payload["output_text"]
-        if isinstance(payload.get("text"), str):
-            return payload["text"]
-        choices = payload.get("choices")
-        if isinstance(choices, list) and choices:
-            first_choice = choices[0]
-            if isinstance(first_choice, dict):
-                message = first_choice.get("message")
-                if isinstance(message, dict):
-                    content = _text_from_message_content(message.get("content"))
-                    if content:
-                        return content
-    if isinstance(payload, str):
-        return payload
-    return json.dumps(payload)
-
-
-def _text_from_message_content(content: Any) -> str | None:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict):
-                if isinstance(item.get("text"), str):
-                    parts.append(item["text"])
-                elif item.get("type") == "text" and isinstance(item.get("content"), str):
-                    parts.append(item["content"])
-        if parts:
-            return "\n".join(parts)
-    return None
+    return extract_text_response(payload) or json.dumps(payload)
 
 
 def _coerce_run_result(

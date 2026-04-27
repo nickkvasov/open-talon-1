@@ -123,7 +123,7 @@ The repository includes a live integration test that exercises the full Tinker f
 - let Tinker build and validate a real Docker-backed tool
 - approve the revision
 - manually attach the published tool to the workspace
-- create another agent using `gemma4:latest`
+- create another agent using the configured `OPEN_TALON_DEFAULT_REASONING_MODEL`
 - wait for the second agent to call the generated tool and return the final answer
 - clean up workspace, agent, tool, image, and organization artifacts
 
@@ -139,7 +139,7 @@ Prerequisites:
 
 - local Docker working
 - local stack dependencies available through `./open-talon start`
-- Ollama serving `gemma4:latest`
+- Ollama serving the configured `OPEN_TALON_DEFAULT_REASONING_MODEL`
 
 Check available local Ollama models with:
 

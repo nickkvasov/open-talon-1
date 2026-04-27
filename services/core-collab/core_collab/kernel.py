@@ -436,6 +436,11 @@ class CollaborationKernel:
                             ),
                         )
                 await self._repository.upsert_workspace(conn, operations_workspace)
+                await self._ensure_anchor_attached_for_workspace(
+                    conn,
+                    operations_workspace.workspace_id,
+                    now=now,
+                )
                 if curator_agent is not None:
                     await self._repository.upsert_system_agent(conn, curator_agent)
                 if curator_role is not None and hasattr(
@@ -1739,6 +1744,7 @@ class CollaborationKernel:
             updated_at=now,
             metadata=payload.metadata,
         )
+        self._validate_llm_provider_definition(provider)
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 await self._repository.upsert_llm_provider(conn, provider)
@@ -2081,6 +2087,7 @@ class CollaborationKernel:
                 ),
             }
         )
+        self._validate_llm_provider_definition(updated)
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 await self._repository.upsert_llm_provider(conn, updated)
@@ -2781,7 +2788,7 @@ class CollaborationKernel:
                             conn,
                             source_id=source.source_id,
                         ),
-                        ingestion_job_id=job_id,
+                        ingestion_job_id=None,
                         created_by=payload.actor.participant_id,
                         created_at=now,
                         metadata={},
@@ -2874,21 +2881,6 @@ class CollaborationKernel:
         strategy = payload.strategy or (profile.search_strategy if profile is not None else "hybrid")
         vector_weight = profile.vector_weight if profile is not None else 0.65
         keyword_weight = profile.keyword_weight if profile is not None else 0.35
-        hits = await self._repository.search_retrieval_chunks(
-            query=payload.query,
-            corpus_ids=[corpus.corpus_id for corpus in corpora],
-            scope=scope,
-            organization_id=organization.organization_id if organization else None,
-            workspace_id=workspace_id,
-            limit=top_k,
-            strategy=strategy,
-            metadata_filters=payload.metadata_filters,
-            embedding_vector=embedding_vector,
-            embedding_provider_key=embedding_provider_key,
-            embedding_model=embedding_model,
-            vector_weight=vector_weight,
-            keyword_weight=keyword_weight,
-        )
         run = RetrievalRun(
             run_id=uuid4(),
             run_kind="search",
@@ -2907,6 +2899,23 @@ class CollaborationKernel:
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
+                hits = await self._repository.search_retrieval_chunks(
+                    query=payload.query,
+                    corpus_ids=[corpus.corpus_id for corpus in corpora],
+                    scope=scope,
+                    organization_id=organization.organization_id if organization else None,
+                    workspace_id=workspace_id,
+                    limit=top_k,
+                    strategy=strategy,
+                    metadata_filters=payload.metadata_filters,
+                    embedding_vector=embedding_vector,
+                    embedding_provider_key=embedding_provider_key,
+                    embedding_model=embedding_model,
+                    vector_weight=vector_weight,
+                    keyword_weight=keyword_weight,
+                    conn=conn,
+                    lock_chunks=True,
+                )
                 await self._repository.upsert_retrieval_run(conn, run)
                 for hit in hits:
                     await self._repository.upsert_retrieval_hit(
@@ -10221,6 +10230,20 @@ class CollaborationKernel:
             raise ValueError("network=full requires trust_level='trusted'")
         if execution.backend_kind == "local_process" and execution.trust_level != "trusted":
             raise ValueError("local_process execution requires trust_level='trusted'")
+
+    @staticmethod
+    def _validate_llm_provider_definition(provider: LlmProviderDefinition) -> None:
+        capabilities = {
+            item.strip().lower()
+            for item in provider.capabilities
+            if isinstance(item, str) and item.strip()
+        }
+        embedding_markers = {"embed", "embedding", "embeddings", "vector"}
+        if capabilities.intersection(embedding_markers):
+            raise ValueError(
+                "LLM providers must not advertise embedding capabilities; "
+                "use Retriever embedding providers for embedding models"
+            )
 
     async def _validate_asset_link_target(
         self,

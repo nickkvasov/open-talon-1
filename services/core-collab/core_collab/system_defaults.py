@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import os
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import asyncpg
@@ -53,6 +54,10 @@ ANCHOR_CAPABILITIES = [
     "flags conversation drift after publication in balanced and open workspaces",
     "privately explains blocked messages to the issuer when enabled",
 ]
+
+
+def _default_reasoning_model() -> str:
+    return os.getenv("OPEN_TALON_DEFAULT_REASONING_MODEL", "gemma4:31b")
 
 _OPERATIONAL_AGENT_PERMISSIONS = [
     "organization.read",
@@ -657,8 +662,16 @@ class ManagedSystemDefaultsRepairer:
                 provider="ollama",
                 endpoint_kind="local",
                 url="http://127.0.0.1:11434/api/generate",
-                default_model="gemma4:latest",
-                capabilities=["chat", "completion", "local", "host", "ollama"],
+                default_model=_default_reasoning_model(),
+                capabilities=[
+                    "chat",
+                    "completion",
+                    "vision",
+                    "image_input",
+                    "local",
+                    "host",
+                    "ollama",
+                ],
                 locality="host",
                 priority=100,
                 enabled=True,
@@ -686,6 +699,8 @@ class ManagedSystemDefaultsRepairer:
                     "completion",
                     "tool_calling",
                     "reasoning",
+                    "vision",
+                    "image_input",
                     "responses-api",
                     "model:gpt-5.4-mini",
                 ],

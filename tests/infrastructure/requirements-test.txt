@@ -1,9 +1,12 @@
 pytest
 testcontainers[compose]
+asyncpg
+httpx
 psycopg
 psycopg-binary
 confluent-kafka
 hvac
 redis
 pgvector
+pymupdf>=1.24
 python-dotenv

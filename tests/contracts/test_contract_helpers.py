@@ -26,6 +26,12 @@ from open_talon_contracts.models import (
     normalize_organization_slug,
 )
 from open_talon_contracts.secrets import SecretReference, secret_references_from_config
+from open_talon_contracts.llm_runtime import (
+    api_key_references_from_engine_metadata,
+    extract_text_response,
+    litellm_model_name,
+    provider_base_url,
+)
 from open_talon_contracts.telemetry import (
     PayloadRedactionPolicy,
     TelemetryContext,
@@ -121,6 +127,41 @@ def test_secret_references_from_config_supports_env_and_openbao_shapes() -> None
             },
         ),
     ]
+
+
+def test_llm_runtime_helpers_normalize_litellm_provider_details(monkeypatch) -> None:
+    monkeypatch.setenv("OPEN_TALON_ANTHROPIC_OPENBAO_PATH", "custom/anthropic")
+
+    assert litellm_model_name(provider="anthropic", model="claude-test") == (
+        "anthropic/claude-test"
+    )
+    assert litellm_model_name(provider="custom", model="vendor/model") == "vendor/model"
+    assert provider_base_url(
+        provider="anthropic",
+        endpoint_url="https://api.anthropic.com/v1/messages",
+    ) == "https://api.anthropic.com"
+
+    references = api_key_references_from_engine_metadata(
+        provider="anthropic",
+        metadata={},
+    )
+
+    assert references[0] == SecretReference(
+        provider="env",
+        name="ANTHROPIC_API_KEY",
+    )
+    assert references[1] == SecretReference(
+        provider="openbao",
+        mount="secret",
+        path="custom/anthropic",
+        field_name="api_key",
+    )
+
+
+def test_llm_runtime_helpers_extract_text_from_chat_payload() -> None:
+    assert extract_text_response(
+        {"choices": [{"message": {"content": [{"type": "text", "text": "ok"}]}}]}
+    ) == "ok"
 
 
 def test_workspace_moderation_policy_defaults_and_normalization() -> None:

@@ -83,7 +83,7 @@ export OPEN_TALON_LIVE_ADMIN_USERNAME=admin
 export OPEN_TALON_LIVE_ADMIN_PASSWORD=admin123
 ```
 
-For live tests that depend on model quality, keep the model dependency explicit. The Tinker live path currently expects `gemma4:latest` in local Ollama:
+For live tests that depend on model quality, keep the model dependency explicit. The Tinker live path currently expects the configured `OPEN_TALON_DEFAULT_REASONING_MODEL` in local Ollama:
 
 ```bash
 curl http://127.0.0.1:11434/api/tags

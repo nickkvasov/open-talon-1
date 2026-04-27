@@ -108,6 +108,13 @@ Primary local flow:
 - Runtime observability is provider-backed. Langfuse and OTLP-compatible sinks such as HyperDX are integrations, not architectural constants.
 - Use `packages/contracts/open_talon_contracts/telemetry.py` for shared telemetry context and redaction behavior instead of inventing per-service variants.
 - LLM providers are persistent records in `llm_providers`; do not reintroduce env-defined engine registries.
+- Agents and Retriever visual extraction must resolve generation/vision models through the shared LLM provider abstraction: `llm_providers`, `packages/contracts/open_talon_contracts/llm_engines.py`, `packages/contracts/open_talon_contracts/llm_runtime.py`, and the runtime resolver in `services/agent-runtime`.
+- Retriever embeddings are separate from generation/vision LLMs. Keep embedding model/provider selection on the Retriever embedding-provider abstraction because embeddings have different request shape, dimensions, vector persistence, and pgvector indexing semantics.
+- Retriever visual extraction is a vision-LLM workload and should use the shared LLM engine registry. `RetrievalProfile.vision_provider_key` can refer to an engine id such as `local-ollama` or a provider key such as `openai` or `anthropic`; organization-scoped retrieval should include global plus same-organization LLM providers.
+- Retriever visual extraction must prove document understanding, not only object recognition. Chart tests should assert semantic facts such as chart title, labels, approximate values, peaks/highest values, trends, or comparisons rather than accepting vague phrases like "there is a chart."
+- Keep Retriever visual tests realistic but bounded. Prefer public, stable, rights-clear PDF fixtures with documented source/rights, then derive the relevant page or crop at test runtime instead of sending an entire multi-page report through a local vision model unless the test is explicitly about throughput.
+- Local Ollama model roles are configured through `OPEN_TALON_DEFAULT_REASONING_MODEL`, `RETRIEVER_DEFAULT_EMBEDDING_MODEL`, and `RETRIEVER_DEFAULT_VISION_MODEL`. `REQUIRED_MODELS` is only an explicit bootstrap override for the Ollama service, not the canonical place to duplicate model roles.
+- Local live tests that use Ollama must use the infrastructure Ollama service from `infrastructure/docker-compose.yaml`; do not rely on a separately running host Ollama with different models.
 - Memory providers are persistent records in `memory_providers`; do not hardcode provider definitions in application logic after bootstrapping.
 - `system_agents`, `system_tools`, `llm_providers`, and `memory_providers` support `global` and `organization` scope; `git_repositories`, `workspace_assets`, and `asset_links` support `global`, `organization`, and `workspace` scope.
 - Local OpenBao uses persistent file storage under `infrastructure/data/openbao`; do not assume `docker compose down` clears local secrets.
@@ -226,6 +233,21 @@ If a change touches layered memory, memory providers, Mem0, or graph-memory supp
 - run relevant memory route tests in `tests/gateway-edge`
 - keep `infrastructure/.env.example`, `infrastructure/docker-compose.yaml`, and `open-talon` aligned if graph mode behavior changes
 
+If a change touches LLM provider resolution, local model defaults, Retriever extraction, or model secret handling:
+
+- inspect `packages/contracts/open_talon_contracts/llm_engines.py`, `packages/contracts/open_talon_contracts/llm_runtime.py`, `services/agent-runtime/agent_runtime/runtime.py`, `services/core-collab/core_collab/system_defaults.py`, `services/gateway-edge/gateway_edge/services/llm_provider_health.py`, and `services/retriever`
+- keep `llm_providers` as the source of truth for generation and vision provider definitions; do not add parallel env-only provider registries
+- verify agent runtime resolution for global and organization-scoped providers when tenant behavior changes
+- verify Retriever visual extraction uses the LLM engine registry while Retriever embeddings remain on the embedding-provider path
+- verify Retriever visual/chart extraction against realistic PDFs with source/rights documented under `tests/fixtures` when chart understanding changes; tests should assert chart semantics such as labels, values, and highest/peak/trend relationships
+- keep local-vision live tests bounded by extracting the specific page/crop under test from larger PDFs; full-document visual extraction with `gemma4:31b` can take minutes and should be reserved for explicit throughput or coverage tests
+- account for the always-running `talon-retriever-worker` during live tests. Tests that process a specific ingestion job directly must claim that exact queued job first, or wait if the stack worker already claimed it, instead of processing the same job twice.
+- keep retrieval search/hit persistence transactionally consistent when chunks can be replaced. Search results that are persisted into `retrieval_hits` should be selected and written in one transaction with appropriate chunk locking or revalidation so stale chunk ids cannot violate hit foreign keys.
+- keep `infrastructure/.env.example`, `infrastructure/docker-compose.yaml`, `infrastructure/ollama-entrypoint.sh`, `README.md`, `docs/system-api-reference.md`, `docs/system-quickstart.md`, and `services/retriever/README.md` aligned with model/provider defaults
+- run `tests/agent-runtime/test_runtime.py`, `tests/retriever`, relevant `tests/core-collab/test_agent_contracts.py`, and `tests/gateway-edge/test_llm_provider_health.py`
+- run `OPEN_TALON_RUN_RETRIEVER_LIVE=1 pytest -m integration tests/infrastructure/test_retriever_live_system.py -q -s` against the real local stack when PDF parsing, image understanding, OCR-like extraction, chart extraction, Ollama model roles, or Retriever ingestion behavior changes
+- live Retriever tests may need local-service access to Docker Compose Postgres, MinIO, and Ollama; if sandboxed execution fails with a local network or Docker socket permission error, rerun the same command with the required escalation rather than weakening the test
+
 If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 
 - run relevant `gateway-edge` auth tests
@@ -239,6 +261,7 @@ If a change touches the admin web, browser OIDC login, admin-browser routing, or
 - inspect `apps/admin-web`, `services/gateway-edge`, and Keycloak defaults together
 - keep `apps/admin-web/public/runtime-config.json`, `apps/admin-web/README.md`, `README.md`, and `docs/system-quickstart.md` aligned
 - run `npm run build` in `apps/admin-web`
+- run admin-web e2e only with the local stack running; several live infrastructure suites stop the stack in teardown, so run `./open-talon start` again before `npm run test:e2e` if Keycloak or gateway was just torn down
 - run `npm run test:e2e` in `apps/admin-web` when browser behavior or destructive admin flows change
 
 If a change touches workspace authz, global admin routes, or workspace membership filtering:
@@ -280,13 +303,14 @@ If a change touches Tinker, tool generation, generated-tool approval, or interna
 - run `tests/gateway-edge/test_tool_generation.py`
 - run `tests/business-cases/test_tinker_tool_generation.py`
 - run `tests/agent-runtime/test_execution.py` when local helper execution or execution backends changed
-- run `pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s` when the end-to-end Tinker/runtime path changes and the local machine has `gemma4:latest`
+- run `pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s` when the end-to-end Tinker/runtime path changes and the configured `OPEN_TALON_DEFAULT_REASONING_MODEL` is available in the infrastructure Ollama service
 
 If a change touches operational agents, managed administration contexts, agent-private MCP bindings, or control-plane MCP operations:
 
 - inspect `system_agents`, `agent_identities`, IAM bindings, MCP server/binding code, repository workspace visibility, runtime task claiming, and gateway bootstrap together
 - keep agent purpose in `display_name`, `role`, and `capabilities`; avoid new classification fields unless they are strictly required
 - keep managed contexts idempotent and deterministic: `System Base / Administration / System Operations` plus every organization's `Administration / Organization Operations`
+- any code path that creates an organization and its managed `Organization Operations` workspace must attach the global Anchor participant immediately. If a prior path could have created workspaces without Anchor, add an explicit migration/backfill instead of relying on manual repair.
 - verify global `Steward`, organization-scoped `Curator`, and workspace-attached `Anchor` paths when changing shared operator or publication-review behavior
 - keep deterministic live harnesses under `tests/infrastructure/operational_agents_live` so new operational agents can add focused test modules instead of growing one monolithic file
 - run `tests/core-collab/test_agent_contracts.py` and relevant gateway IAM/MCP tests
@@ -351,10 +375,11 @@ If a change touches operational agents, managed administration contexts, agent-p
 5. If execution behavior changes, inspect `services/agent-runtime`, `services/core-collab`, and gateway event fanout together.
 6. If memory behavior changes, inspect `db/migrations`, `services/workspace-memory`, `services/core-collab`, `services/gateway-edge`, and memory-related contracts together.
 7. If LLM provider or secret behavior changes, inspect `llm_providers` migrations, gateway provider routes, runtime secret resolution, and local OpenBao wiring together.
-8. If operational-agent behavior changes, inspect gateway bootstrap, IAM bindings, MCP allowlists, `agent_identities`, workspace participant attachment, and runtime task claiming together.
-9. Update code to match the migrated schema.
-10. Run targeted tests.
-11. Run broader tests if the change affects shared contracts or persistence.
+8. If Retriever ingestion or visual extraction changes, inspect `services/retriever`, retrieval contracts, retrieval repository/kernel methods, MinIO asset storage, pgvector persistence, and LLM provider resolution together.
+9. If operational-agent behavior changes, inspect gateway bootstrap, IAM bindings, MCP allowlists, `agent_identities`, workspace participant attachment, and runtime task claiming together.
+10. Update code to match the migrated schema.
+11. Run targeted tests.
+12. Run broader tests if the change affects shared contracts or persistence.
 
 ## Key Files
 
@@ -371,10 +396,18 @@ If a change touches operational agents, managed administration contexts, agent-p
 - `services/core-collab/core_collab/repository.py`
 - `services/core-collab/core_collab/kernel.py`
 - `services/agent-runtime/agent_runtime/workers.py`
+- `services/agent-runtime/agent_runtime/runtime.py`
 - `services/agent-runtime/agent_runtime/agent_task_worker.py`
 - `services/agent-runtime/agent_runtime/config.py`
 - `services/agent-runtime/agent_runtime/secrets.py`
 - `services/agent-runtime/agent_runtime/execution/`
+- `services/retriever/retriever/llm.py`
+- `services/retriever/retriever/worker.py`
+- `services/retriever/retriever/config.py`
+- `services/retriever/README.md`
+- `infrastructure/docker-compose.yaml`
+- `infrastructure/ollama-entrypoint.sh`
+- `infrastructure/.env.example`
 - `services/workspace-memory/workspace_memory/providers.py`
 - `services/workspace-memory/workspace_memory/secrets.py`
 - `services/gateway-edge/gateway_edge/services/collaboration.py`
@@ -391,9 +424,11 @@ If a change touches operational agents, managed administration contexts, agent-p
 - `services/agent-runtime/agent_runtime/observability.py`
 - `services/agent-runtime/agent_runtime/tinker_tools.py`
 - `packages/contracts/open_talon_contracts/llm_engines.py`
+- `packages/contracts/open_talon_contracts/llm_runtime.py`
 - `packages/contracts/open_talon_contracts/telemetry.py`
 - `apps/tui/open_talon_tui/main.py`
 - `apps/tui/open_talon_tui/tui2.py`
+- `tests/infrastructure/test_retriever_live_system.py`
 - `tests/infrastructure/test_tinker_live_system.py`
 - `tests/infrastructure/operational_agents_live/`
 
