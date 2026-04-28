@@ -19,7 +19,13 @@ def _migration_up_sql(sql: str) -> str:
     return sql[up_match.end() : end].strip()
 
 
-async def apply_pending_migrations(pool: asyncpg.Pool) -> None:
+async def apply_pending_migrations(
+    pool: asyncpg.Pool,
+    *,
+    migrations_dir: Path | None = None,
+) -> list[str]:
+    applied_now: list[str] = []
+    source_dir = migrations_dir or _MIGRATIONS_DIR
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -32,7 +38,7 @@ async def apply_pending_migrations(pool: asyncpg.Pool) -> None:
         applied_rows = await conn.fetch("SELECT version FROM schema_migrations")
         applied_versions = {row["version"] for row in applied_rows}
 
-        for migration_path in sorted(_MIGRATIONS_DIR.glob("*.sql")):
+        for migration_path in sorted(source_dir.glob("*.sql")):
             version = migration_path.stem
             if version in applied_versions:
                 continue
@@ -46,3 +52,5 @@ async def apply_pending_migrations(pool: asyncpg.Pool) -> None:
                     """,
                     version,
                 )
+            applied_now.append(version)
+    return applied_now

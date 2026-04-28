@@ -994,12 +994,16 @@ timeline
 
 ## Database Migrations
 
-Database schema changes are tracked as `dbmate`-style SQL files in [`db/migrations`](./db/migrations).
+Database schema changes are tracked as SQL files in [`db/migrations`](./db/migrations).
 
 - App startup and tests apply pending migrations through the repo's Python migration runner.
 - For local manual migration work, use [`scripts/dbmate.sh`](./scripts/dbmate.sh).
-- `dbmate` itself is the recommended CLI for creating and applying new migration files.
-- Default local values for `DATABASE_URL` and `DBMATE_MIGRATIONS_DIR` are documented in [`infrastructure/.env.example`](./infrastructure/.env.example).
+- `scripts/dbmate.sh` is a compatibility wrapper around that same Python runner for
+  `new`, `up`, and `status`; it does not require the external dbmate binary.
+- Plain SQL migrations and dbmate-style `-- migrate:up` / `-- migrate:down` files
+  are both supported. Only the `up` block is applied by the Python runner.
+- Default local values for `DATABASE_URL` and `DBMATE_MIGRATIONS_DIR` are
+  documented in [`infrastructure/.env.example`](./infrastructure/.env.example).
 
 Examples:
 
@@ -1007,7 +1011,7 @@ Examples:
 # create a new migration file
 ./scripts/dbmate.sh new add_threads_archive_state
 
-# apply pending migrations
+# apply pending migrations through the same runner used by startup/tests
 ./scripts/dbmate.sh up
 
 # inspect migration status
