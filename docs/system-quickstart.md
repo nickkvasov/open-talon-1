@@ -680,6 +680,11 @@ OPEN_TALON_RUN_OPERATIONAL_AGENTS_LIVE=1 \
   pytest -m integration tests/infrastructure/operational_agents_live -q -s
 ```
 
+After schema, route, bootstrap, or managed-agent definition changes, run
+`./scripts/dbmate.sh up` and restart the local stack before relying on live-test
+results. A stale gateway process can otherwise report old-route `404` responses
+that look like authorization or wiring failures.
+
 For the full real-life operational-agent test matrix and execution protocol, see [operational-agents-real-life-test-protocol.md](./operational-agents-real-life-test-protocol.md).
 
 If you changed schema, auth, routing, or participant identity behavior, run:

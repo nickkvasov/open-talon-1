@@ -136,7 +136,11 @@ Primary local flow:
 - Keep migrations SQL-first and reviewable.
 - Use `./scripts/dbmate.sh new <name>` to create a migration.
 - Use `./scripts/dbmate.sh up` to apply pending migrations locally.
+- Use `./scripts/dbmate.sh status` to inspect applied, pending, and local `recorded-only` migration rows before assuming schema drift is a code problem.
+- `./scripts/dbmate.sh` is the canonical manual migration entrypoint. It is a compatibility wrapper over the Python runner, not a requirement to install or use external `dbmate`.
 - Startup/tests also apply pending migrations through the Python migration runner in `services/core-collab/core_collab/migrations.py`.
+- The Python migration runner supports legacy plain SQL files and dbmate-style `-- migrate:up` / `-- migrate:down` files, but application/startup/test migration application must execute only the up block.
+- A `recorded-only` migration in local status usually means that historical local state has a row in `schema_migrations` for a file no longer present. Treat it as a local-drift signal to understand, not as permission to edit old migrations.
 
 ## Development Environment
 
@@ -228,6 +232,8 @@ If a change touches schema, repository, participant hydration, routing, or migra
 
 - run relevant `core-collab` tests
 - run relevant `gateway-edge` tests
+- run migration-script coverage such as `tests/scripts/test_system_scripts.py` and `tests/core-collab/test_migration_files.py` when migration tooling or migration-file parsing changes
+- run `./scripts/dbmate.sh up` against the local stack when schema changes need to be applied before live tests
 - run full `pytest -q` when feasible
 
 If a change touches layered memory, memory providers, Mem0, or graph-memory support:
@@ -318,6 +324,10 @@ If a change touches operational agents, managed administration contexts, agent-p
 - any code path that creates an organization and its managed `Organization Operations` workspace must attach the global Anchor participant immediately. If a prior path could have created workspaces without Anchor, add an explicit migration/backfill instead of relying on manual repair.
 - verify global `Steward`, organization-scoped `Curator`, and workspace-attached `Anchor` paths when changing shared operator or publication-review behavior
 - keep deterministic live harnesses under `tests/infrastructure/operational_agents_live` so new operational agents can add focused test modules instead of growing one monolithic file
+- deterministic live harnesses that call internal MCP tools must pass the explicit `_mcp_scope` expected by the gateway session; missing scope often appears as tools not being visible despite correct allowlists
+- after changing live gateway routes, bootstrap, or agent definitions, restart the local stack before trusting a plain live-test `404`; a stale gateway can look like an authorization or routing regression
+- live tests that patch managed-agent endpoints or local Keycloak client settings must restore them in `finally` blocks
+- keep operational-agent live tests bounded and deterministic; use harnesses to prove control-plane contracts instead of relying on local model quality unless model behavior is the feature under test
 - run `tests/core-collab/test_agent_contracts.py` and relevant gateway IAM/MCP tests
 - run `OPEN_TALON_RUN_OPERATIONAL_AGENTS_LIVE=1 pytest -m integration tests/infrastructure/operational_agents_live -q -s` against the real local stack for end-to-end identity, MCP, runtime, and durable `tool_calls` coverage
 - run `OPEN_TALON_RUN_ANCHOR_LIVE=1 pytest -m integration tests/infrastructure/anchor_live_system -q -s` when publication review, Anchor, or workspace topic-moderation behavior changes
@@ -329,6 +339,8 @@ If a change touches Methodologist, Conductor, methodics execution, or other mana
 - make the response contract explicit enough that outputs can be translated into existing Open Talon structures such as `WorkspaceHarness.methodology`, `methodics`, `execution_rules`, participants, tools, retrieval corpora, and artifacts
 - require cited source evidence for extraction claims and explicit labels for inferred or ideated implementation tools
 - keep Conductor opt-in per workspace: no auto-attach, no normal message fanout, and no active methodics loop unless a start API/MCP call creates execution state
+- keep Conductor's private MCP allowlist limited to agent-appropriate execution reads and pending resource-request creation; human-gated operations such as start, cancel, approve, and reject must be exercised with a human principal
+- Conductor live coverage currently proves attach/start gating, internal MCP read/resource-request creation, human approve/reject/cancel tools, and normal-message fanout isolation. Add separate focused live coverage when full DoD progression, rework, or final execution-report behavior is implemented.
 - run `tests/core-collab/test_agent_contracts.py` and relevant repository migration tests when seeded specialist definitions change
 
 ## Code Change Rules

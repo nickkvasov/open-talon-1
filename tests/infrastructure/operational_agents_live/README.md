@@ -22,3 +22,15 @@ Layout:
 To add another operational agent, create a new `test_<agent>_live_system.py` module
 and put any reusable deterministic harness logic in `harnesses.py`. Keep the test
 targeted to one agent behavior so the suite remains composable.
+
+Runbook notes:
+
+- Apply pending schema first with `./scripts/dbmate.sh up` after migration changes.
+- Restart the stack after route, bootstrap, or managed-agent definition changes before
+  trusting a plain live-test `404`; an old gateway process can look like a routing failure.
+- Deterministic harnesses that call internal MCP tools must pass the explicit `_mcp_scope`
+  for the session they need.
+- Patch managed-agent endpoints and local Keycloak settings inside `try` / `finally`
+  blocks so failed live runs do not poison the next run.
+- Keep model-independent control-plane tests on deterministic harnesses. Use local Ollama
+  only when the behavior under test is model quality or provider integration.

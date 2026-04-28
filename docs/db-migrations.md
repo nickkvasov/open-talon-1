@@ -10,8 +10,12 @@ Open Talon tracks database changes as reviewable SQL files in [`db/migrations`](
 - [`scripts/dbmate.sh`](../scripts/dbmate.sh) is the local compatibility entrypoint
   for creating, applying, and inspecting migrations. It delegates to the same
   Python runner used by startup and tests, so the manual and runtime paths stay aligned.
+- Do not use an external `dbmate` binary to apply Open Talon migrations. The
+  repository contains both legacy plain SQL migrations and dbmate-style files,
+  and the wrapper keeps those formats consistent with startup behavior.
 - Both plain SQL migrations and dbmate-style `-- migrate:up` / `-- migrate:down`
-  files are supported. The Python runner applies only the up block.
+  files are supported. The Python runner applies only the up block; down blocks
+  are for review context or manual rollback planning, not startup/test application.
 
 ## Environment
 
@@ -35,6 +39,11 @@ The wrapper script uses those same conventions and defaults to the local dev Pos
 ./scripts/dbmate.sh status
 ```
 
+`status` may show `recorded-only` rows when a local database has historical
+entries in `schema_migrations` for files that are no longer present in the
+working tree. Treat that as a local-drift signal to understand before debugging
+the application layer.
+
 ## Authoring Guidelines
 
 - Never edit an old migration after it has been applied in any shared environment.
@@ -42,6 +51,8 @@ The wrapper script uses those same conventions and defaults to the local dev Pos
 - Keep schema changes and destructive cleanup steps explicit.
 - Prefer defensive SQL for upgrades from older local databases.
 - When a migration changes runtime assumptions, land the code change and the migration in the same PR.
+- After adding a migration, run both `./scripts/dbmate.sh up` and the migration
+  file tests so dbmate-style block parsing stays aligned with runtime startup.
 
 ## CI Recommendation
 

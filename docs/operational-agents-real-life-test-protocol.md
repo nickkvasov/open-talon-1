@@ -24,6 +24,7 @@ The protocol covers these managed agents and contexts:
 - `Steward` with `agent_key=steward`, role `platform operations steward`
 - `Curator` with `agent_key=curator`, role `organization operations curator`
 - `Anchor` with `agent_key=anchor`, role `workspace topic alignment reviewer`, using the managed `local-ollama` provider by default
+- `Conductor` with `agent_key=conductor`, role `workspace methodics execution conductor`
 - `System Base / Administration / System Operations`
 - each non-system organization's `Administration / Organization Operations`
 - the managed control-plane MCP server `open_talon_control_plane`
@@ -59,6 +60,17 @@ Start the local stack:
 ```bash
 ./open-talon start
 ```
+
+After migration or schema changes, apply pending migrations before running live tests:
+
+```bash
+./scripts/dbmate.sh up
+./scripts/dbmate.sh status
+```
+
+The migration wrapper is intentionally the same path used by startup and tests.
+It supports legacy plain SQL and dbmate-style migrations while applying only the
+`-- migrate:up` block.
 
 The live protocol expects these local services to be reachable:
 
@@ -103,6 +115,9 @@ The suite is split by live behavior so new operational agents can add focused mo
 - `test_bootstrap_live_system.py` verifies managed context bootstrap and organization Curator wiring.
 - `test_steward_live_system.py` verifies the system-level `Steward` task path.
 - `test_curator_live_system.py` verifies the organization-level `Curator` task path.
+- `test_conductor_live_system.py` verifies opt-in Conductor methodics execution start,
+  internal MCP reads, pending resource requests, human-gated approve/reject/cancel,
+  and normal-message fanout isolation.
 
 This suite verifies:
 
@@ -120,6 +135,8 @@ This suite verifies:
 - a targeted Curator task can create a new organization project through the private `control_plane__projects.create` MCP tool
 - the same Curator task can create a workspace in that project through the private `control_plane__workspaces.create` MCP tool
 - durable `tool_calls` rows are completed for the private control-plane MCP operations, with `tool_source=agent_internal_mcp_server`
+- a workspace without attached Conductor receives a clear conflict on methodics execution start
+- an attached Conductor can read execution state and create pending resource requests through internal MCP, while human-gated methodics control tools remain unavailable to the Conductor machine principal
 
 For noninteractive local execution, the live test temporarily enables direct password grants on the local `open-talon-tui` Keycloak client and restores the original setting afterward. The normal TUI flow remains device-flow based.
 
@@ -314,6 +331,42 @@ Pass criteria:
 - generated-tool approval publishes only to the target catalog
 - approval does not attach the tool to any workspace
 - organization-scoped and global publication paths remain distinct
+
+### 11. Verify Conductor Methodics Execution Gate
+
+Run this check when changing Methodologist, Conductor, methodics execution, MCP
+scope filtering, workspace participant attachment, or managed specialist-agent
+seeds.
+
+Minimum automated coverage:
+
+- starting methodics execution without attached Conductor returns `409 Conflict`
+- attaching Conductor through the normal workspace agent attachment flow enables targeted methodics tasks
+- starting execution snapshots the active `WorkspaceHarness.methodics`
+- Conductor private MCP can read execution state and create pending resource requests
+- human principals can approve, reject, and cancel through human-gated tools
+- Conductor does not receive ordinary untargeted workspace message fanout
+
+Pass criteria:
+
+- Conductor authority comes from workspace attachment, IAM, and private MCP allowlists
+- start/cancel/approve/reject are exercised with a human token, not the Conductor machine token
+- `tool_calls` for internal Conductor MCP actions use `tool_source=agent_internal_mcp_server`
+- failed harness MCP calls stop quickly with useful evidence instead of repeatedly growing execution context
+
+Full DoD progression, rework loops, and final execution reports are not yet part
+of the current live contract; add separate focused live tests when those behaviors
+are implemented.
+
+## Live-Test Hygiene
+
+Use these checks before weakening a live test:
+
+- If a new route returns a plain `404` after code changes, restart the stack and rerun; a stale gateway process can serve old routes.
+- Deterministic harnesses that call internal MCP tools must pass an explicit `_mcp_scope`.
+- Any test that patches managed-agent endpoints, Keycloak client settings, or other shared local state must restore it in a `finally` block.
+- Prefer deterministic harnesses for control-plane behavior. Use local Ollama only when model quality or provider integration is what the test is proving.
+- If sandboxed execution fails with local network `Operation not permitted`, rerun the same command with the required escalation instead of changing the test.
 
 ## Failure And Repair Cases
 
