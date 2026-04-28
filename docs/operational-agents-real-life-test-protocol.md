@@ -10,6 +10,7 @@ Related references:
 - [system-api-reference.md](./system-api-reference.md)
 - [iam.md](./iam.md)
 - [agent-operations-guide.md](./agent-operations-guide.md)
+- [seeded-agents/README.md](./seeded-agents/README.md)
 - [tinker-tool-generation.md](./tinker-tool-generation.md)
 - [live-tests-short-stories.md](./live-tests-short-stories.md)
 - [operational-agents-test-run-log-2026-04-26.md](./operational-agents-test-run-log-2026-04-26.md)
@@ -20,12 +21,12 @@ Related references:
 
 The protocol covers these managed agents and contexts:
 
-- `Tinker` with `agent_key=tinker`, role `generated tool authoring and validation agent`
-- `Steward` with `agent_key=steward`, role `platform operations steward`
-- `Curator` with `agent_key=curator`, role `organization operations curator`
-- `Anchor` with `agent_key=anchor`, role `workspace topic alignment reviewer`, using the managed `local-ollama` provider by default
-- `Methodologist` with `agent_key=methodologist`, role `methodology extraction and workspace design agent`
-- `Conductor` with `agent_key=conductor`, role `workspace methodics execution conductor`
+- [`Tinker`](./seeded-agents/tinker.md) with `agent_key=tinker`
+- [`Steward`](./seeded-agents/steward.md) with `agent_key=steward`
+- [`Curator`](./seeded-agents/curator.md) with `agent_key=curator`
+- [`Anchor`](./seeded-agents/anchor.md) with `agent_key=anchor`, using the managed `local-ollama` provider by default
+- [`Methodologist`](./seeded-agents/methodologist.md) with `agent_key=methodologist`
+- [`Conductor`](./seeded-agents/conductor.md) with `agent_key=conductor`
 - `System Base / Administration / System Operations`
 - each non-system organization's `Administration / Organization Operations`
 - the managed control-plane MCP server `open_talon_control_plane`

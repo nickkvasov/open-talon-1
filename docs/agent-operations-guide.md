@@ -12,7 +12,10 @@ Use this guide when an agent needs to:
 - validate participant business-role routing and resumable collaboration
 - inspect collaboration logs and runtime outcomes
 
-For the full system and API reference, use [system-api-reference.md](./system-api-reference.md). For the principal IAM model and `/v1/iam/...` endpoints, use [iam.md](./iam.md).
+For the full system and API reference, use [system-api-reference.md](./system-api-reference.md).
+For the principal IAM model and `/v1/iam/...` endpoints, use [iam.md](./iam.md).
+For the seeded-agent system concept, cards, harnesses, and live-test design, use
+[seeded-agents/README.md](./seeded-agents/README.md).
 
 Terminology used in this guide:
 

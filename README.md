@@ -10,6 +10,7 @@ For coding-agent-specific project guidance, see [`AGENTS.md`](./AGENTS.md).
 - [docs/system-api-reference.md](./docs/system-api-reference.md): current system and API reference for engineers and client builders
 - [docs/iam.md](./docs/iam.md): provider-neutral principal IAM model, permission catalog, and IAM APIs
 - [docs/agent-operations-guide.md](./docs/agent-operations-guide.md): operating guide for software development agents and scripted test users
+- [docs/seeded-agents/README.md](./docs/seeded-agents/README.md): seeded-agent system concept plus one card per seeded agent, including idea, harness, live-test design, and tested behavior
 - [docs/tinker-tool-generation.md](./docs/tinker-tool-generation.md): Tinker request, approval, catalog, and live-test workflow
 - [docs/operational-agents-real-life-test-protocol.md](./docs/operational-agents-real-life-test-protocol.md): real local-stack test protocol for Tinker, Steward, Curator, and managed administration contexts
 - [docs/db-migrations.md](./docs/db-migrations.md): migration workflow and schema rules

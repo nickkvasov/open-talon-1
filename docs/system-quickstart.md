@@ -9,6 +9,7 @@ For full current-state reference material, use:
 - [system-api-reference.md](./system-api-reference.md)
 - [iam.md](./iam.md)
 - [agent-operations-guide.md](./agent-operations-guide.md)
+- [seeded-agents/README.md](./seeded-agents/README.md)
 
 ## Prerequisites
 
@@ -601,7 +602,7 @@ Current publication rules:
 
 The local schema seeds managed operational and specialist agents without adding a separate operational profile field:
 
-- `Tinker` (`agent_key=tinker`) has role `generated tool authoring and validation agent` and owns generated-tool authoring behavior through its definition, harness, private tools, and task payloads.
+- `Tinker` (`agent_key=tinker`) has role `tool generation agent` and owns generated-tool authoring behavior through its definition, harness, private tools, and task payloads.
 - `Steward` (`agent_key=steward`) has role `platform operations steward` and is attached to `System Base / Administration / System Operations`.
 - `Curator` (`agent_key=curator`) has role `organization operations curator`; every non-system organization receives one in its `Administration / Organization Operations` workspace.
 - `Anchor` (`agent_key=anchor`) has role `workspace topic alignment reviewer`; every workspace receives an Anchor participant whose task-routing metadata disables normal message fanout and accepts only publication-review work. Anchor uses the managed `local-ollama` LLM provider by default.

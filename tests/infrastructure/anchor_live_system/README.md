@@ -14,6 +14,8 @@ The default local provider uses `OPEN_TALON_DEFAULT_REASONING_MODEL`.
 
 For the narrative behind the live-test idea, setup, protocol, and run-log style,
 see [docs/live-tests-short-stories.md](../../../docs/live-tests-short-stories.md).
+For Anchor's agent card, harness summary, and tested behavior list, see
+[docs/seeded-agents/anchor.md](../../../docs/seeded-agents/anchor.md).
 
 ```bash
 OPEN_TALON_RUN_ANCHOR_LIVE=1 ./.venv/bin/python -m pytest -m integration tests/infrastructure/anchor_live_system -q -s

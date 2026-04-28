@@ -24,6 +24,7 @@ This reference is written for two audiences:
 - [system-quickstart.md](./system-quickstart.md): fastest path to a running local stack
 - [iam.md](./iam.md): principal IAM model, permission catalog, and IAM API surface
 - [agent-operations-guide.md](./agent-operations-guide.md): practical usage guide for software development agents and scripted clients
+- [seeded-agents/README.md](./seeded-agents/README.md): seeded-agent system concept, cards, harnesses, live-test design, and tested behavior
 - [db-migrations.md](./db-migrations.md): schema and migration workflow
 - [collaboration-system-design.md](./collaboration-system-design.md): historical design background and archived architecture notes
 - [research-comparison.md](./research-comparison.md): external ecosystem comparison for multi-agent research and enterprise platforms
@@ -119,7 +120,7 @@ The most important ownership rules are:
 - `organizations`, `projects`, `project_access_bindings`, and `organization_memberships` store the tenant and work hierarchy above workspaces
 - `system_agents` stores platform-global and organization-scoped agent definitions
 - managed operational contexts are seeded as `System Base / Administration / System Operations` plus `Administration / Organization Operations` for each non-system organization
-- managed agents are ordinary system agents: `Tinker` (`generated tool authoring and validation agent`), `Steward` (`platform operations steward`), organization-scoped `Curator` (`organization operations curator`), workspace-attached `Anchor` (`workspace topic alignment reviewer`), global `Methodologist` (`methodology extraction and workspace design agent`), and global `Conductor` (`workspace methodics execution conductor`)
+- managed agents are ordinary system agents: `Tinker` (`tool generation agent`), `Steward` (`platform operations steward`), organization-scoped `Curator` (`organization operations curator`), workspace-attached `Anchor` (`workspace topic alignment reviewer`), global `Methodologist` (`methodology extraction and workspace design agent`), and global `Conductor` (`workspace methodics execution conductor`)
 - the agent runtime is generic and must not branch on `agent_key`, display name, role text, capability text, or metadata tags; specialization belongs in agent definitions, harnesses, interaction contracts, task payloads, bindings, and tool/MCP allowlists
 - `participants` stores workspace-local attachment and state for both humans and agents
 - `threads` and `timeline_messages` are the shared collaboration surface

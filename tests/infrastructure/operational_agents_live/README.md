@@ -2,6 +2,10 @@
 
 This suite verifies managed operational agents against the real local Open Talon stack.
 
+For the per-agent cards, harness summaries, live-test design, and tested
+behavior matrix, see
+[`docs/seeded-agents`](../../../docs/seeded-agents/README.md).
+
 Run it from the repository root after `./open-talon start`:
 
 ```bash
