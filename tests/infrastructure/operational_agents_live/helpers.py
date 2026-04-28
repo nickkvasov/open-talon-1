@@ -21,6 +21,8 @@ PROJECT_CREATE_TOOL = "control_plane__projects.create"
 WORKSPACE_CREATE_TOOL = "control_plane__workspaces.create"
 METHODICS_EXECUTION_GET_TOOL = "control_plane__methodics.executions.get"
 METHODICS_RESOURCE_REQUEST_CREATE_TOOL = "control_plane__methodics.resource_requests.create"
+METHODICS_ASSIGNMENT_CREATE_TOOL = "control_plane__methodics.assignments.create"
+METHODICS_STEP_EVALUATE_TOOL = "control_plane__methodics.steps.evaluate"
 
 
 def postgres_dsn() -> str:

@@ -292,6 +292,8 @@ Current MCP system API operations:
 - `methodics.resource_requests.approve`
 - `methodics.resource_requests.create`
 - `methodics.resource_requests.reject`
+- `methodics.assignments.create`
+- `methodics.steps.evaluate`
 - `agent_catalog.list`
 - `agent_catalog.bundle.validate`
 - `agent_catalog.bundle.publish`
@@ -774,7 +776,7 @@ The default vector backend is pgvector. The default embedding provider is config
 
 ### Methodics Execution APIs
 
-Methodics execution is workspace-scoped and opt-in. A methodics execution agent must already be attached as a workspace agent participant before an authorized human caller starts execution from the active `WorkspaceHarness.methodics`; otherwise the start route returns `409 Conflict`. Runtime resolution is contract-based: the attached participant must advertise task routing that accepts `methodics_execution_start`, rather than being selected by `agent_key`, display name, role text, capability text, or metadata tags. Start/cancel and resource request approval/rejection are human-gated. Conductor receives targeted methodics tasks and can read execution state or create pending resource requests, but its managed internal MCP allowlist excludes the human control operations.
+Methodics execution is workspace-scoped and opt-in. A methodics execution agent must already be attached as a workspace agent participant before an authorized human caller starts execution from the active `WorkspaceHarness.methodics`; otherwise the start route returns `409 Conflict`. Runtime resolution is contract-based: the attached participant must advertise task routing that accepts `methodics_execution_start`, rather than being selected by `agent_key`, display name, role text, capability text, or metadata tags. Start/cancel and resource request approval/rejection are human-gated. Conductor receives targeted methodics tasks and can read execution state, create assignments, evaluate DoD pass/fail/rework, advance steps, create a final execution report, and create pending resource requests through its managed internal MCP allowlist.
 
 | Method | Path | Summary |
 | --- | --- | --- |
@@ -782,6 +784,8 @@ Methodics execution is workspace-scoped and opt-in. A methodics execution agent 
 | `GET` | `/v1/workspaces/{workspace_id}/methodics/executions` | list workspace methodics executions |
 | `GET` | `/v1/workspaces/{workspace_id}/methodics/executions/{execution_id}` | get execution detail with steps, assignments, checks, and resource requests |
 | `POST` | `/v1/workspaces/{workspace_id}/methodics/executions/{execution_id}/cancel` | cancel a methodics execution |
+| `POST` | `/v1/workspaces/{workspace_id}/methodics/executions/{execution_id}/assignments` | create a methodics execution assignment for the active execution |
+| `POST` | `/v1/workspaces/{workspace_id}/methodics/executions/{execution_id}/steps/evaluate` | record a DoD evaluation and advance, rework, fail, or complete execution |
 | `POST` | `/v1/workspaces/{workspace_id}/methodics/executions/{execution_id}/resource-requests` | create a pending Conductor resource request |
 | `POST` | `/v1/workspaces/{workspace_id}/methodics/resource-requests/{resource_request_id}/approve` | approve a Conductor resource request |
 | `POST` | `/v1/workspaces/{workspace_id}/methodics/resource-requests/{resource_request_id}/reject` | reject a Conductor resource request |

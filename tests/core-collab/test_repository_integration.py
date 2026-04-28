@@ -350,6 +350,8 @@ async def test_repository_migrations_seed_operational_agents_and_contexts_idempo
         conductor_exposed = {tool.exposed_name for tool in conductor_tools}
         assert "control_plane__methodics.executions.get" in conductor_exposed
         assert "control_plane__methodics.resource_requests.create" in conductor_exposed
+        assert "control_plane__methodics.assignments.create" in conductor_exposed
+        assert "control_plane__methodics.steps.evaluate" in conductor_exposed
         assert "control_plane__methodics.executions.create" not in conductor_exposed
         conductor_roles = await repository.list_iam_role_definitions(
             subject_kind="agent",

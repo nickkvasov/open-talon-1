@@ -10,13 +10,16 @@ import psycopg
 import pytest
 
 from .harnesses import (
+    ConductorFullLoopHarnessState,
     ConductorTaskHarnessHandler,
     ConductorTaskHarnessServer,
     ConductorTaskHarnessState,
 )
 from .helpers import (
+    METHODICS_ASSIGNMENT_CREATE_TOOL,
     METHODICS_EXECUTION_GET_TOOL,
     METHODICS_RESOURCE_REQUEST_CREATE_TOOL,
+    METHODICS_STEP_EVALUATE_TOOL,
     admin_token,
     direct_access_grants_enabled,
     gateway_url,
@@ -89,6 +92,48 @@ def _methodics_harness() -> dict[str, Any]:
             }
         ],
         "metadata": {"system_test": True},
+    }
+
+
+def _methodics_loop_harness() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "summary": "Live Conductor full execution loop harness.",
+        "methodology": {
+            "ontology": "Workspace requirements, readiness evidence, assignments, and DoD checks.",
+            "principles": [
+                "Assign every active step before verification.",
+                "Advance only after evidence satisfies the step definition of done.",
+            ],
+        },
+        "methodics": [
+            {
+                "name": "Evidence-backed launch loop",
+                "goal": "Complete a two-step methodics execution with a rework loop.",
+                "steps": [
+                    {
+                        "instruction": "Collect requirements evidence for launch.",
+                        "expected_artifacts": ["requirements evidence note"],
+                        "verification": ["Requirements evidence includes measurable acceptance criteria."],
+                    },
+                    {
+                        "instruction": "Verify readiness and produce final report.",
+                        "expected_artifacts": ["readiness verification report"],
+                        "verification": ["Readiness report satisfies the final definition of done."],
+                    },
+                ],
+                "success_criteria": ["Final execution report confirms all steps passed."],
+            }
+        ],
+        "execution_rules": [
+            {
+                "name": "dod-before-advance",
+                "instruction": "Record DoD checks before progressing to the next step.",
+                "priority": "critical",
+                "scope": "validation",
+            }
+        ],
+        "metadata": {"system_test": True, "full_loop": True},
     }
 
 
@@ -178,6 +223,377 @@ def _resource_request_row(
         "title": title,
         "requested_by_system_agent_id": requested_by_system_agent_id,
     }
+
+
+def _methodic_execution_summary(*, execution_id: str) -> dict[str, Any] | None:
+    with psycopg.connect(postgres_dsn()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    execution.status,
+                    execution.current_step_execution_id::text,
+                    execution.metadata,
+                    step.step_execution_id::text,
+                    step.step_index,
+                    step.status,
+                    step.evidence_refs,
+                    assignment.assignment_id::text,
+                    assignment.assignment_kind,
+                    assignment.status,
+                    assignment.title,
+                    assignment.metadata,
+                    ch.check_id::text,
+                    ch.status,
+                    ch.reason,
+                    ch.metadata
+                FROM methodic_executions AS execution
+                LEFT JOIN methodic_execution_steps AS step
+                  ON step.execution_id = execution.execution_id
+                LEFT JOIN methodic_execution_assignments AS assignment
+                  ON assignment.execution_id = execution.execution_id
+                LEFT JOIN methodic_execution_checks AS ch
+                  ON ch.execution_id = execution.execution_id
+                WHERE execution.execution_id = %s
+                ORDER BY step.step_index ASC, assignment.created_at ASC, ch.created_at ASC
+                """,
+                (execution_id,),
+            )
+            rows = cur.fetchall()
+    if not rows:
+        return None
+    status, current_step_execution_id, metadata = rows[0][0], rows[0][1], rows[0][2] or {}
+    steps: dict[str, dict[str, Any]] = {}
+    assignments: dict[str, dict[str, Any]] = {}
+    checks: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        (
+            _status,
+            _current_step_execution_id,
+            _metadata,
+            step_execution_id,
+            step_index,
+            step_status,
+            evidence_refs,
+            assignment_id,
+            assignment_kind,
+            assignment_status,
+            assignment_title,
+            assignment_metadata,
+            check_id,
+            check_status,
+            check_reason,
+            check_metadata,
+        ) = row
+        if step_execution_id is not None:
+            steps[step_execution_id] = {
+                "step_execution_id": step_execution_id,
+                "step_index": step_index,
+                "status": step_status,
+                "evidence_refs": evidence_refs or [],
+            }
+        if assignment_id is not None:
+            assignments[assignment_id] = {
+                "assignment_id": assignment_id,
+                "assignment_kind": assignment_kind,
+                "status": assignment_status,
+                "title": assignment_title,
+                "metadata": assignment_metadata or {},
+            }
+        if check_id is not None:
+            checks[check_id] = {
+                "check_id": check_id,
+                "status": check_status,
+                "reason": check_reason,
+                "metadata": check_metadata or {},
+            }
+    return {
+        "status": status,
+        "current_step_execution_id": current_step_execution_id,
+        "metadata": metadata,
+        "steps": list(steps.values()),
+        "assignments": list(assignments.values()),
+        "checks": list(checks.values()),
+    }
+
+
+def _final_report_message(*, thread_id: str) -> dict[str, Any] | None:
+    with psycopg.connect(postgres_dsn()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    message_id::text,
+                    content,
+                    metadata
+                FROM timeline_messages
+                WHERE thread_id = %s
+                  AND metadata->>'methodics_final_report' = 'true'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (thread_id,),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return None
+    message_id, content, metadata = row
+    return {"message_id": message_id, "content": content, "metadata": metadata or {}}
+
+
+def test_conductor_live_completes_full_methodics_execution_loop():
+    require_live_operational_agents()
+    gateway = gateway_url()
+    client_id = human_client_id()
+    actor = live_actor(display_name="Conductor Full Loop Admin")
+    server: ConductorTaskHarnessServer | None = None
+    server_thread: threading.Thread | None = None
+    original_conductor_endpoint: dict[str, Any] | None = None
+    conductor_id: str | None = None
+    token: str | None = None
+
+    with direct_access_grants_enabled(client_id=client_id):
+        try:
+            token = admin_token(client_id=client_id)
+            suffix = uuid4().hex[:10]
+            organization = json_request(
+                "POST",
+                f"{gateway}/v1/organizations",
+                token=token,
+                payload={
+                    "actor": actor,
+                    "slug": f"conductor-loop-{suffix}",
+                    "name": f"Conductor Loop {suffix}",
+                    "metadata": {"system_test": True},
+                },
+            )
+            organization_id = str(organization["organization_id"])
+            me = json_request("GET", f"{gateway}/v1/me", token=token)
+            organization_members = json_request(
+                "GET",
+                f"{gateway}/v1/organizations/{organization_id}/members",
+                token=token,
+            )
+            if not any(member["user_id"] == me["user_id"] for member in organization_members):
+                json_request(
+                    "POST",
+                    f"{gateway}/v1/organizations/{organization_id}/members",
+                    token=token,
+                    payload={
+                        "actor": actor,
+                        "user_id": me["user_id"],
+                        "role": "owner",
+                        "metadata": {"system_test": True},
+                    },
+                )
+            workspace_detail = json_request(
+                "POST",
+                f"{gateway}/v1/organizations/{organization_id}/workspaces",
+                token=token,
+                payload={
+                    "name": f"Conductor Full Loop {suffix}",
+                    "description": "Live Conductor full methodics execution workspace.",
+                    "actor": actor,
+                    "harness": _methodics_loop_harness(),
+                    "metadata": {"system_test": True},
+                },
+            )
+            workspace_id = str(workspace_detail["workspace"]["workspace_id"])
+            workspace_actor = _actor_from_participant(
+                next(
+                    participant
+                    for participant in workspace_detail["participants"]
+                    if participant["participant_type"] == "user"
+                )
+            )
+            agents = json_request("GET", f"{gateway}/v1/agents", token=token)
+            conductor = next(agent for agent in agents if agent["agent_key"] == "conductor")
+            conductor_id = str(conductor["agent_id"])
+            original_conductor_endpoint = conductor["endpoint"]
+
+            def conductor_identity() -> dict[str, Any] | None:
+                identities = json_request("GET", f"{gateway}/v1/iam/agent-identities", token=token)
+                return next(
+                    (
+                        identity
+                        for identity in identities
+                        if identity["system_agent_id"] == conductor_id
+                        and identity["status"] == "active"
+                    ),
+                    None,
+                )
+
+            assert wait_for(
+                "Conductor machine identity bootstrap",
+                conductor_identity,
+                timeout_seconds=60.0,
+                interval_seconds=1.0,
+            )
+
+            harness_state = ConductorFullLoopHarnessState()
+            server = ConductorTaskHarnessServer(
+                ("127.0.0.1", 0),
+                ConductorTaskHarnessHandler,
+                state=harness_state,
+            )
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            harness_url = f"http://127.0.0.1:{server.server_address[1]}/conductor-loop"
+
+            json_request(
+                "PATCH",
+                f"{gateway}/v1/agents/{conductor_id}",
+                token=token,
+                payload={
+                    "actor": actor,
+                    "endpoint": {
+                        "kind": "remote",
+                        "url": harness_url,
+                        "model": conductor["endpoint"].get("model"),
+                        "provider": "system-test-harness",
+                    },
+                    "metadata": {"system_test_harness": True},
+                },
+            )
+
+            conductor_participant = json_request(
+                "POST",
+                f"{gateway}/v1/workspaces/{workspace_id}/agents",
+                token=token,
+                payload={"actor": workspace_actor, "agent_id": conductor_id},
+            )
+            assert conductor_participant["metadata"]["task_routing"]["normal_message_fanout"] is False
+
+            execution_detail = json_request(
+                "POST",
+                f"{gateway}/v1/workspaces/{workspace_id}/methodics/executions",
+                token=token,
+                payload={
+                    "actor": workspace_actor,
+                    "target_goal": "Run the full live methodics loop.",
+                    "methodic_indexes": [0],
+                    "metadata": {"system_test": True, "full_loop": True},
+                },
+            )
+            execution = execution_detail["execution"]
+            execution_id = str(execution["execution_id"])
+            thread_id = str(execution["thread_id"])
+            assert execution["status"] == "running"
+            assert len(execution_detail["steps"]) == 2
+            assert execution_detail["steps"][0]["status"] == "active"
+            assert execution_detail["steps"][1]["status"] == "pending"
+
+            completed = wait_for(
+                "completed Conductor full methodics execution loop",
+                lambda: (
+                    summary
+                    if (summary := _methodic_execution_summary(execution_id=execution_id))
+                    and summary["status"] == "completed"
+                    and len(summary["checks"]) >= 3
+                    else None
+                ),
+                timeout_seconds=240.0,
+                interval_seconds=2.0,
+            )
+
+            assert completed["current_step_execution_id"] is None
+            step_statuses = {
+                item["step_index"]: item["status"] for item in completed["steps"]
+            }
+            assert step_statuses == {0: "passed", 1: "passed"}
+            outcomes = [check["metadata"].get("outcome") for check in completed["checks"]]
+            assert outcomes.count("rework") == 1
+            assert outcomes.count("passed") >= 2
+            assignment_titles = {assignment["title"] for assignment in completed["assignments"]}
+            assert "Collect launch requirements evidence" in assignment_titles
+            assert "Produce readiness verification report" in assignment_titles
+            assignment_kinds = [assignment["assignment_kind"] for assignment in completed["assignments"]]
+            assert assignment_kinds.count("manual") >= 2
+            assert assignment_kinds.count("agent_task") >= 3
+            assert "Final execution report" in completed["metadata"]["final_report"]
+
+            report = wait_for(
+                "Conductor final execution report message",
+                lambda: _final_report_message(thread_id=thread_id),
+                timeout_seconds=60.0,
+                interval_seconds=1.0,
+            )
+            assert "all methodics steps passed after one rework loop" in report["content"]
+
+            task_rows = _conductor_task_rows(
+                workspace_id=workspace_id,
+                conductor_id=conductor_id,
+            )
+            task_kinds = [row["metadata"].get("task_kind") for row in task_rows]
+            assert "methodics_execution_start" in task_kinds
+            assert task_kinds.count("methodics_step_coordinate") >= 2
+
+            assert wait_for(
+                "Conductor full-loop deterministic harness requests",
+                lambda: harness_state.request_count() >= 9,
+                timeout_seconds=60.0,
+                interval_seconds=1.0,
+            )
+
+            def completed_tool_calls() -> list[dict[str, Any]] | None:
+                rows = tool_call_rows(
+                    thread_id=thread_id,
+                    system_agent_id=conductor_id,
+                    tool_names=(
+                        METHODICS_EXECUTION_GET_TOOL,
+                        METHODICS_ASSIGNMENT_CREATE_TOOL,
+                        METHODICS_STEP_EVALUATE_TOOL,
+                    ),
+                )
+                by_name: dict[str, list[dict[str, Any]]] = {}
+                for row in rows:
+                    by_name.setdefault(row["tool_name"], []).append(row)
+                expected = {
+                    METHODICS_EXECUTION_GET_TOOL,
+                    METHODICS_ASSIGNMENT_CREATE_TOOL,
+                    METHODICS_STEP_EVALUATE_TOOL,
+                }
+                if expected <= set(by_name) and all(
+                    any(row["status"] == "completed" for row in by_name[tool_name])
+                    for tool_name in expected
+                ):
+                    return rows
+                return None
+
+            tool_calls = wait_for(
+                "Conductor full-loop MCP tool calls",
+                completed_tool_calls,
+                timeout_seconds=60.0,
+                interval_seconds=1.0,
+            )
+            assert all(
+                row["metadata"].get("tool_source") == "agent_internal_mcp_server"
+                for row in tool_calls
+            )
+        finally:
+            if (
+                original_conductor_endpoint is not None
+                and conductor_id is not None
+                and token is not None
+            ):
+                try:
+                    json_request(
+                        "PATCH",
+                        f"{gateway}/v1/agents/{conductor_id}",
+                        token=token,
+                        payload={
+                            "actor": actor,
+                            "endpoint": original_conductor_endpoint,
+                            "metadata": {"system_test_harness": False},
+                        },
+                    )
+                except Exception:
+                    pass
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+            if server_thread is not None:
+                server_thread.join(timeout=5.0)
 
 
 def test_conductor_live_executes_methodics_start_and_resource_gate():
@@ -491,6 +907,8 @@ def test_conductor_live_executes_methodics_start_and_resource_gate():
                 "methodics.resource_requests.approve",
                 "methodics.resource_requests.create",
                 "methodics.resource_requests.reject",
+                "methodics.assignments.create",
+                "methodics.steps.evaluate",
             } <= tool_names
 
             executions_list, _ = mcp_call(
@@ -519,6 +937,12 @@ def test_conductor_live_executes_methodics_start_and_resource_gate():
                 request_id="methodics-get",
             )
             assert execution_get["result"]["isError"] is False
+            assert execution_get["result"]["structuredContent"]["execution"]["status"] == "running"
+            assert (
+                execution_get["result"]["structuredContent"]["execution"]["current_step_execution_id"]
+                == first_step["step_execution_id"]
+            )
+            assert execution_get["result"]["structuredContent"]["steps"][0]["status"] == "active"
             resource_statuses = {
                 item["title"]: item["status"]
                 for item in execution_get["result"]["structuredContent"]["resource_requests"]

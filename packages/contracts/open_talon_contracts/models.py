@@ -70,6 +70,7 @@ MethodicExecutionStepStatus = Literal["pending", "active", "blocked", "passed", 
 MethodicExecutionAssignmentStatus = Literal["created", "waiting", "completed", "cancelled", "failed"]
 MethodicExecutionAssignmentKind = Literal["interaction_request", "agent_task", "message", "manual"]
 MethodicExecutionCheckStatus = Literal["passed", "failed", "inconclusive"]
+MethodicStepEvaluationOutcome = Literal["passed", "failed", "rework"]
 MethodicResourceRequestStatus = Literal["pending", "approved", "rejected", "cancelled"]
 MethodicResourceKind = Literal[
     "user",
@@ -211,6 +212,9 @@ class TargetRef(BaseModel):
         "tool_generation_request",
         "tool_generation_revision",
         "methodic_execution",
+        "methodic_execution_step",
+        "methodic_execution_assignment",
+        "methodic_execution_check",
         "methodic_resource_request",
     ]
     id: UUID
@@ -2452,6 +2456,29 @@ class CreateMethodicResourceRequestRequest(BaseModel):
 class ReviewMethodicResourceRequest(BaseModel):
     actor: ParticipantInput
     reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateMethodicAssignmentRequest(BaseModel):
+    actor: ParticipantInput
+    step_execution_id: UUID
+    assignment_kind: MethodicExecutionAssignmentKind = "manual"
+    title: str
+    instructions: str | None = None
+    assignee_participant_id: UUID | None = None
+    assignee_system_agent_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvaluateMethodicStepRequest(BaseModel):
+    actor: ParticipantInput
+    step_execution_id: UUID
+    outcome: MethodicStepEvaluationOutcome
+    reason: str | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    evidence_refs: list[dict[str, Any]] = Field(default_factory=list)
+    rework_instructions: str | None = None
+    final_report: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

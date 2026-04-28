@@ -30,6 +30,7 @@ from gateway_edge.models import (
     AuditEventPage,
     AuditExportRequest,
     CancelMethodicExecutionRequest,
+    CreateMethodicAssignmentRequest,
     CreateAgentGitWorktreeSessionRequest,
     CreateGitRepositoryRequest,
     CreateInteractionRequest,
@@ -42,6 +43,7 @@ from gateway_edge.models import (
     CreateRetrievalContextPackRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
+    EvaluateMethodicStepRequest,
     GitRepository,
     MemoryEntry,
     LlmProviderDefinition,
@@ -270,6 +272,29 @@ class MethodicsResourceRequestCreateArgs(BaseModel):
 class MethodicsResourceRequestReviewArgs(BaseModel):
     resource_request_id: UUID
     reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodicsAssignmentCreateArgs(BaseModel):
+    execution_id: UUID
+    step_execution_id: UUID
+    assignment_kind: str = "manual"
+    title: str
+    instructions: str | None = None
+    assignee_participant_id: UUID | None = None
+    assignee_system_agent_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodicsStepEvaluateArgs(BaseModel):
+    execution_id: UUID
+    step_execution_id: UUID
+    outcome: Literal["passed", "failed", "rework"]
+    reason: str | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    evidence_refs: list[dict[str, Any]] = Field(default_factory=list)
+    rework_instructions: str | None = None
+    final_report: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -1313,6 +1338,28 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             requires_human_principal=True,
             handler_name="handle_methodics_resource_requests_reject",
         ),
+        "methodics.assignments.create": OperationDefinition(
+            name="methodics.assignments.create",
+            description="Create a methodics execution assignment for an active step.",
+            input_model=MethodicsAssignmentCreateArgs,
+            output_schema=_type_schema(MethodicExecutionDetail),
+            allowed_scopes=frozenset({"workspace"}),
+            required_permission_type="workspace",
+            required_permission="methodics.execute",
+            requires_workspace_actor=True,
+            handler_name="handle_methodics_assignments_create",
+        ),
+        "methodics.steps.evaluate": OperationDefinition(
+            name="methodics.steps.evaluate",
+            description="Record Conductor DoD evaluation and advance, rework, or fail a methodics step.",
+            input_model=MethodicsStepEvaluateArgs,
+            output_schema=_type_schema(MethodicExecutionDetail),
+            allowed_scopes=frozenset({"workspace"}),
+            required_permission_type="workspace",
+            required_permission="methodics.execute",
+            requires_workspace_actor=True,
+            handler_name="handle_methodics_steps_evaluate",
+        ),
         "agent_catalog.list": OperationDefinition(
             name="agent_catalog.list",
             description="List system agents in the current global or organization scope.",
@@ -2115,6 +2162,42 @@ async def handle_methodics_resource_requests_reject(
         args.resource_request_id,
         payload,
         approved=False,
+    )
+
+
+async def handle_methodics_assignments_create(
+    ctx: McpApiContext,
+    args: MethodicsAssignmentCreateArgs,
+) -> MethodicExecutionDetail:
+    if ctx.active_scope_kind != "workspace" or ctx.active_scope_id is None:
+        raise ValueError("methodics.assignments.create requires an active workspace scope")
+    actor = await _methodics_actor(ctx, permission="methodics.execute")
+    payload = CreateMethodicAssignmentRequest(
+        actor=actor,
+        **args.model_dump(exclude={"execution_id"}),
+    )
+    return await collab_svc.collaboration_service.create_methodic_assignment(
+        ctx.active_scope_id,
+        args.execution_id,
+        payload,
+    )
+
+
+async def handle_methodics_steps_evaluate(
+    ctx: McpApiContext,
+    args: MethodicsStepEvaluateArgs,
+) -> MethodicExecutionDetail:
+    if ctx.active_scope_kind != "workspace" or ctx.active_scope_id is None:
+        raise ValueError("methodics.steps.evaluate requires an active workspace scope")
+    actor = await _methodics_actor(ctx, permission="methodics.execute")
+    payload = EvaluateMethodicStepRequest(
+        actor=actor,
+        **args.model_dump(exclude={"execution_id"}),
+    )
+    return await collab_svc.collaboration_service.evaluate_methodic_step(
+        ctx.active_scope_id,
+        args.execution_id,
+        payload,
     )
 
 

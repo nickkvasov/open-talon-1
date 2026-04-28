@@ -62,6 +62,8 @@ def test_mcp_methodics_operations_declare_workspace_scope_and_permissions() -> N
         "methodics.resource_requests.approve": "methodics.admin",
         "methodics.resource_requests.create": "methodics.execute",
         "methodics.resource_requests.reject": "methodics.admin",
+        "methodics.assignments.create": "methodics.execute",
+        "methodics.steps.evaluate": "methodics.execute",
     }
 
     for name, permission in expected.items():

@@ -56,6 +56,7 @@ from gateway_edge.models import (
     CreateMemoryProviderRequest,
     CreateMcpServerRequest,
     CancelMethodicExecutionRequest,
+    CreateMethodicAssignmentRequest,
     CreateMethodicExecutionRequest,
     CreateMethodicResourceRequestRequest,
     CreateOrganizationRequest,
@@ -86,6 +87,7 @@ from gateway_edge.models import (
     DeleteWorkspaceMcpServerRequest,
     DeleteWorkspaceRequest,
     EventEnvelope,
+    EvaluateMethodicStepRequest,
     GitRepository,
     InteractionRequestDetail,
     LinkAssetRequest,
@@ -1626,6 +1628,36 @@ class CollaborationService:
         await self._publish_events(result.events)
         assert result.resource_request is not None
         return result.resource_request
+
+    async def create_methodic_assignment(
+        self,
+        workspace_id: UUID,
+        execution_id: UUID,
+        payload: CreateMethodicAssignmentRequest,
+    ) -> MethodicExecutionDetail:
+        result = await self._require_kernel().create_methodic_assignment(
+            workspace_id,
+            execution_id,
+            payload,
+        )
+        await self._publish_events(result.events)
+        assert result.detail is not None
+        return result.detail
+
+    async def evaluate_methodic_step(
+        self,
+        workspace_id: UUID,
+        execution_id: UUID,
+        payload: EvaluateMethodicStepRequest,
+    ) -> MethodicExecutionDetail:
+        result = await self._require_kernel().evaluate_methodic_step(
+            workspace_id,
+            execution_id,
+            payload,
+        )
+        await self._publish_events(result.events)
+        assert result.detail is not None
+        return result.detail
 
     async def list_iam_role_definitions(
         self,

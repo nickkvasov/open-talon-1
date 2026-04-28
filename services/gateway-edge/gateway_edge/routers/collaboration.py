@@ -50,6 +50,7 @@ from gateway_edge.models import (
     CreateMemoryProviderRequest,
     CreateMcpServerRequest,
     CancelMethodicExecutionRequest,
+    CreateMethodicAssignmentRequest,
     CreateMethodicExecutionRequest,
     CreateMethodicResourceRequestRequest,
     CreateOrganizationRequest,
@@ -136,6 +137,7 @@ from gateway_edge.models import (
     UpsertProjectAccessRequest,
     ReviewToolGenerationRevisionRequest,
     ReviewMethodicResourceRequest,
+    EvaluateMethodicStepRequest,
     RemoveProjectAccessRequest,
     UpdateWorkspaceToolRequest,
     UpdateWorkspaceMcpServerRequest,
@@ -5107,6 +5109,68 @@ async def create_workspace_methodic_resource_request(
             permission="methodics.execute",
         )
         return await collab_svc.collaboration_service.create_methodic_resource_request(
+            workspace_id,
+            execution_id,
+            payload.model_copy(update={"actor": actor}),
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if "terminal methodic execution" in message:
+            raise HTTPException(status_code=409, detail=message) from exc
+        raise _http_error(exc) from exc
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/workspaces/{workspace_id}/methodics/executions/{execution_id}/assignments",
+    response_model=MethodicExecutionDetail,
+)
+async def create_workspace_methodic_assignment(
+    request: Request,
+    workspace_id: UUID,
+    execution_id: UUID,
+    payload: CreateMethodicAssignmentRequest,
+) -> MethodicExecutionDetail:
+    try:
+        actor = await _resolve_methodics_actor(
+            request,
+            payload.actor,
+            workspace_id=workspace_id,
+            permission="methodics.execute",
+        )
+        return await collab_svc.collaboration_service.create_methodic_assignment(
+            workspace_id,
+            execution_id,
+            payload.model_copy(update={"actor": actor}),
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if "terminal methodic execution" in message:
+            raise HTTPException(status_code=409, detail=message) from exc
+        raise _http_error(exc) from exc
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/workspaces/{workspace_id}/methodics/executions/{execution_id}/steps/evaluate",
+    response_model=MethodicExecutionDetail,
+)
+async def evaluate_workspace_methodic_step(
+    request: Request,
+    workspace_id: UUID,
+    execution_id: UUID,
+    payload: EvaluateMethodicStepRequest,
+) -> MethodicExecutionDetail:
+    try:
+        actor = await _resolve_methodics_actor(
+            request,
+            payload.actor,
+            workspace_id=workspace_id,
+            permission="methodics.execute",
+        )
+        return await collab_svc.collaboration_service.evaluate_methodic_step(
             workspace_id,
             execution_id,
             payload.model_copy(update={"actor": actor}),

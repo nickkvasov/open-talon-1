@@ -154,3 +154,14 @@ def test_methodic_resource_request_create_migration_adds_conductor_tool() -> Non
 
     assert "methodics.resource_requests.create" in sql
     assert "agent_key = 'conductor'" in sql
+
+
+def test_conductor_methodics_loop_migration_adds_agent_tools() -> None:
+    sql = (
+        MIGRATIONS_DIR / "20260428224416_add_conductor_methodics_loop_tools.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "methodics.assignments.create" in sql
+    assert "methodics.steps.evaluate" in sql
+    assert "agent_key = 'conductor'" in sql
+    assert "methodics_loop_tools" in sql

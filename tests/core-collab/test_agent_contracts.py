@@ -61,10 +61,12 @@ from open_talon_contracts.models import (  # noqa: E402
     EventEnvelope,
     ExecutionSpec,
     CompletionRule,
+    CancelMethodicExecutionRequest,
     CreateInteractionAnswerRequest,
     CreateInteractionQuestionRequest,
     CreateInteractionRequest,
     CreateInteractionRequestsRequest,
+    CreateMethodicAssignmentRequest,
     CreateMethodicExecutionRequest,
     CreateMethodicResourceRequestRequest,
     CreateMessageRequest,
@@ -118,6 +120,7 @@ from open_talon_contracts.models import (  # noqa: E402
     UpdateLlmProviderRequest,
     UpdateProjectRequest,
     UpsertProjectAccessRequest,
+    EvaluateMethodicStepRequest,
     ReviewToolGenerationRevisionRequest,
     RemoveProjectAccessRequest,
     UpdateWorkspaceRequest,
@@ -3157,6 +3160,8 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
     ]
     assert "methodics.executions.get" in conductor_binding.tool_allowlist
     assert "methodics.resource_requests.create" in conductor_binding.tool_allowlist
+    assert "methodics.assignments.create" in conductor_binding.tool_allowlist
+    assert "methodics.steps.evaluate" in conductor_binding.tool_allowlist
     assert "methodics.executions.create" not in conductor_binding.tool_allowlist
     assert "methodics.resource_requests.approve" in conductor_binding.tool_denylist
     conductor_role = next(role for role in repository._iam_roles.values() if role.name == "workspace_conductor")
@@ -3233,6 +3238,49 @@ def _seed_methodics_workspace(
         updated_at=now,
     )
     return workspace
+
+
+def _attach_conductor_participant(
+    repository: FakeRepository,
+    workspace: Workspace,
+    *,
+    system_agent_id: UUID = CONDUCTOR_AGENT_ID,
+) -> ParticipantProfile:
+    now = datetime.now(timezone.utc)
+    participant = ParticipantProfile(
+        participant_id=uuid4(),
+        workspace_id=workspace.workspace_id,
+        participant_type="agent",
+        system_agent_id=system_agent_id,
+        display_name="Conductor",
+        roles=["workspace methodics execution conductor"],
+        capabilities=["coordinates active WorkspaceHarness methodics"],
+        status="active",
+        metadata={
+            "task_routing": {
+                "normal_message_fanout": False,
+                "accepted_task_kinds": [
+                    "methodics_execution_start",
+                    "methodics_step_coordinate",
+                    "methodics_step_verify",
+                    "methodics_resource_review",
+                ],
+            }
+        },
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace.workspace_id, participant.participant_id)] = participant
+    return participant
+
+
+def _conductor_methodics_actor(participant: ParticipantProfile) -> ParticipantInput:
+    return ParticipantInput(
+        participant_id=participant.participant_id,
+        participant_type="agent",
+        display_name=participant.display_name,
+        iam_permissions=["methodics.execute"],
+    )
 
 
 @pytest.mark.asyncio
@@ -3463,6 +3511,210 @@ async def test_methodics_resource_request_create_is_pending_and_agent_requested(
     assert "methodic_resource_request.created" in {
         event.event_type for event in resource.events
     }
+
+
+@pytest.mark.asyncio
+async def test_methodics_assignment_dod_rework_progression_and_final_report():
+    repository = FakeRepository()
+    actor = _workspace_actor_with_methodics_permissions()
+    workspace = _seed_methodics_workspace(repository, actor)
+    conductor_participant = _attach_conductor_participant(repository, workspace)
+    conductor_actor = _conductor_methodics_actor(conductor_participant)
+    kernel = CollaborationKernel(repository)
+
+    start = await kernel.create_methodic_execution(
+        workspace.workspace_id,
+        CreateMethodicExecutionRequest(actor=actor, target_goal="Launch the workflow"),
+    )
+    assert start.detail is not None
+    first_step = start.detail.steps[0]
+
+    assigned = await kernel.create_methodic_assignment(
+        workspace.workspace_id,
+        start.detail.execution.execution_id,
+        CreateMethodicAssignmentRequest(
+            actor=conductor_actor,
+            step_execution_id=first_step.step_execution_id,
+            title="Collect launch requirements",
+            instructions="Create a requirements note and attach evidence.",
+            assignee_participant_id=actor.participant_id,
+            metadata={"source": "unit-test"},
+        ),
+    )
+
+    assert assigned.detail is not None
+    manual_assignment = next(
+        assignment
+        for assignment in assigned.detail.assignments
+        if assignment.assignment_kind == "manual"
+    )
+    assert manual_assignment.status == "waiting"
+    assert manual_assignment.assignee_participant_id == actor.participant_id
+    assert assigned.detail.steps[0].assigned_participant_id == actor.participant_id
+
+    rework = await kernel.evaluate_methodic_step(
+        workspace.workspace_id,
+        start.detail.execution.execution_id,
+        EvaluateMethodicStepRequest(
+            actor=conductor_actor,
+            step_execution_id=first_step.step_execution_id,
+            outcome="rework",
+            reason="Requirements note is missing acceptance criteria.",
+            confidence=0.4,
+            evidence_refs=[{"kind": "message", "id": "requirements-draft"}],
+            rework_instructions="Add measurable acceptance criteria.",
+        ),
+    )
+
+    assert rework.detail is not None
+    assert rework.detail.execution.status == "running"
+    assert rework.detail.execution.current_step_execution_id == first_step.step_execution_id
+    assert rework.detail.steps[0].status == "rework"
+    assert rework.detail.checks[-1].status == "failed"
+    assert rework.detail.checks[-1].metadata["outcome"] == "rework"
+    rework_assignment = next(
+        assignment
+        for assignment in rework.detail.assignments
+        if assignment.metadata.get("task_kind") == "methodics_step_coordinate"
+        and assignment.step_execution_id == first_step.step_execution_id
+    )
+    assert repository._tasks[rework_assignment.task_id].metadata["task_kind"] == (
+        "methodics_step_coordinate"
+    )
+
+    progressed = await kernel.evaluate_methodic_step(
+        workspace.workspace_id,
+        start.detail.execution.execution_id,
+        EvaluateMethodicStepRequest(
+            actor=conductor_actor,
+            step_execution_id=first_step.step_execution_id,
+            outcome="passed",
+            reason="Acceptance criteria are now present.",
+            confidence=0.92,
+            evidence_refs=[{"kind": "artifact", "id": "requirements-note-v2"}],
+        ),
+    )
+
+    assert progressed.detail is not None
+    second_step = progressed.detail.steps[1]
+    assert progressed.detail.steps[0].status == "passed"
+    assert second_step.status == "active"
+    assert progressed.detail.execution.current_step_execution_id == second_step.step_execution_id
+    assert any(
+        assignment.status == "completed"
+        for assignment in progressed.detail.assignments
+        if assignment.step_execution_id == first_step.step_execution_id
+    )
+
+    second_assigned = await kernel.create_methodic_assignment(
+        workspace.workspace_id,
+        start.detail.execution.execution_id,
+        CreateMethodicAssignmentRequest(
+            actor=conductor_actor,
+            step_execution_id=second_step.step_execution_id,
+            title="Verify launch readiness",
+            instructions="Produce readiness evidence for the final DoD check.",
+            assignee_participant_id=actor.participant_id,
+        ),
+    )
+    assert second_assigned.detail is not None
+    assert second_assigned.detail.steps[1].assigned_participant_id == actor.participant_id
+
+    final = await kernel.evaluate_methodic_step(
+        workspace.workspace_id,
+        start.detail.execution.execution_id,
+        EvaluateMethodicStepRequest(
+            actor=conductor_actor,
+            step_execution_id=second_step.step_execution_id,
+            outcome="passed",
+            reason="Readiness evidence satisfies the definition of done.",
+            confidence=0.95,
+            evidence_refs=[{"kind": "artifact", "id": "readiness-report"}],
+            final_report="Final execution report: launch workflow completed with cited evidence.",
+        ),
+    )
+
+    assert final.detail is not None
+    assert final.detail.execution.status == "completed"
+    assert final.detail.execution.current_step_execution_id is None
+    assert final.detail.execution.metadata["final_report"].startswith("Final execution report")
+    assert [step.status for step in final.detail.steps] == ["passed", "passed"]
+    assert [check.metadata["outcome"] for check in final.detail.checks] == [
+        "rework",
+        "passed",
+        "passed",
+    ]
+    final_messages = [
+        message
+        for messages in repository._messages.values()
+        for message in messages
+        if message.metadata.get("methodics_final_report")
+    ]
+    assert len(final_messages) == 1
+    assert "launch workflow completed" in final_messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_methodics_dod_failure_and_active_step_cancellation_are_terminal():
+    repository = FakeRepository()
+    actor = _workspace_actor_with_methodics_permissions()
+    workspace = _seed_methodics_workspace(repository, actor)
+    conductor_participant = _attach_conductor_participant(repository, workspace)
+    conductor_actor = _conductor_methodics_actor(conductor_participant)
+    kernel = CollaborationKernel(repository)
+
+    failing_start = await kernel.create_methodic_execution(
+        workspace.workspace_id,
+        CreateMethodicExecutionRequest(actor=actor, target_goal="Fail the workflow"),
+    )
+    assert failing_start.detail is not None
+    failing_step = failing_start.detail.steps[0]
+
+    failed = await kernel.evaluate_methodic_step(
+        workspace.workspace_id,
+        failing_start.detail.execution.execution_id,
+        EvaluateMethodicStepRequest(
+            actor=conductor_actor,
+            step_execution_id=failing_step.step_execution_id,
+            outcome="failed",
+            reason="Definition of done cannot be satisfied.",
+            evidence_refs=[{"kind": "artifact", "id": "failed-evidence"}],
+        ),
+    )
+
+    assert failed.detail is not None
+    assert failed.detail.execution.status == "failed"
+    assert failed.detail.execution.current_step_execution_id is None
+    assert failed.detail.steps[0].status == "failed"
+    assert failed.detail.checks[-1].metadata["outcome"] == "failed"
+    assert all(
+        assignment.status == "failed"
+        for assignment in failed.detail.assignments
+        if assignment.step_execution_id == failing_step.step_execution_id
+    )
+
+    cancellable_start = await kernel.create_methodic_execution(
+        workspace.workspace_id,
+        CreateMethodicExecutionRequest(actor=actor, target_goal="Cancel active workflow"),
+    )
+    assert cancellable_start.detail is not None
+    assert cancellable_start.detail.execution.status == "running"
+    assert cancellable_start.detail.steps[0].status == "active"
+
+    cancelled = await kernel.cancel_methodic_execution(
+        workspace.workspace_id,
+        cancellable_start.detail.execution.execution_id,
+        CancelMethodicExecutionRequest(
+            actor=actor,
+            reason="Human owner stopped the workflow during the active step.",
+        ),
+    )
+
+    assert cancelled.detail is not None
+    assert cancelled.detail.execution.status == "cancelled"
+    assert cancelled.detail.execution.cancelled_at is not None
+    assert cancelled.detail.execution.current_step_execution_id is None
+    assert cancelled.detail.execution.error.startswith("Human owner")
 
 
 def test_kernel_run_output_includes_standardized_usage_payload():

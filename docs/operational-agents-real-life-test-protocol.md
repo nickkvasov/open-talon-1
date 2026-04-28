@@ -24,6 +24,7 @@ The protocol covers these managed agents and contexts:
 - `Steward` with `agent_key=steward`, role `platform operations steward`
 - `Curator` with `agent_key=curator`, role `organization operations curator`
 - `Anchor` with `agent_key=anchor`, role `workspace topic alignment reviewer`, using the managed `local-ollama` provider by default
+- `Methodologist` with `agent_key=methodologist`, role `methodology extraction and workspace design agent`
 - `Conductor` with `agent_key=conductor`, role `workspace methodics execution conductor`
 - `System Base / Administration / System Operations`
 - each non-system organization's `Administration / Organization Operations`
@@ -115,9 +116,13 @@ The suite is split by live behavior so new operational agents can add focused mo
 - `test_bootstrap_live_system.py` verifies managed context bootstrap and organization Curator wiring.
 - `test_steward_live_system.py` verifies the system-level `Steward` task path.
 - `test_curator_live_system.py` verifies the organization-level `Curator` task path.
+- `test_methodologist_live_system.py` verifies Methodologist receives cited Retriever
+  context-pack evidence and returns methodology basis, methodics, methods/tools/actors,
+  workspace template, and source-vs-inference separation.
 - `test_conductor_live_system.py` verifies opt-in Conductor methodics execution start,
-  internal MCP reads, pending resource requests, human-gated approve/reject/cancel,
-  and normal-message fanout isolation.
+  internal MCP reads, assignment creation, DoD rework/pass progression, final execution
+  reports, pending resource requests, active-step cancellation, human-gated
+  approve/reject/cancel, and normal-message fanout isolation.
 
 This suite verifies:
 
@@ -135,8 +140,10 @@ This suite verifies:
 - a targeted Curator task can create a new organization project through the private `control_plane__projects.create` MCP tool
 - the same Curator task can create a workspace in that project through the private `control_plane__workspaces.create` MCP tool
 - durable `tool_calls` rows are completed for the private control-plane MCP operations, with `tool_source=agent_internal_mcp_server`
+- a targeted Methodologist task can consume cited Retriever context-pack evidence and
+  produce a response-contract-shaped methodology extraction plus workspace template draft
 - a workspace without attached Conductor receives a clear conflict on methodics execution start
-- an attached Conductor can read execution state and create pending resource requests through internal MCP, while human-gated methodics control tools remain unavailable to the Conductor machine principal
+- an attached Conductor can read execution state, create assignments, evaluate DoD outcomes, advance steps, complete final reports, and create pending resource requests through internal MCP, while human-gated methodics control tools remain unavailable to the Conductor machine principal
 
 For noninteractive local execution, the live test temporarily enables direct password grants on the local `open-talon-tui` Keycloak client and restores the original setting afterward. The normal TUI flow remains device-flow based.
 
@@ -332,7 +339,27 @@ Pass criteria:
 - approval does not attach the tool to any workspace
 - organization-scoped and global publication paths remain distinct
 
-### 11. Verify Conductor Methodics Execution Gate
+### 11. Verify Methodologist Evidence Extraction
+
+Run this check when changing Methodologist, Retriever context-pack handling,
+agent response contracts, workspace template drafting, or methodology/methodics
+contracts.
+
+Minimum automated coverage:
+
+- Methodologist is attached through the normal workspace agent attachment flow
+- the targeted task includes a real workspace-scoped Retriever context pack with citations
+- the harness receives the context pack id, source citation, and chunk markers in execution context
+- the final workspace reply includes methodology basis, methodics, methods/tools/actors, and workspace template sections
+- source-backed claims are cited and inferred or ideated implementation items are labeled separately
+
+Pass criteria:
+
+- Methodologist behavior comes from its agent definition, harness, interaction contract, task payload, and visible retrieval evidence
+- the live output can be translated into `WorkspaceHarness.methodology`, `methodics`, and `execution_rules`
+- the test remains deterministic and does not depend on local model quality unless model behavior is explicitly under test
+
+### 12. Verify Conductor Methodics Execution Gate
 
 Run this check when changing Methodologist, Conductor, methodics execution, MCP
 scope filtering, workspace participant attachment, or managed specialist-agent
@@ -343,8 +370,9 @@ Minimum automated coverage:
 - starting methodics execution without attached Conductor returns `409 Conflict`
 - attaching Conductor through the normal workspace agent attachment flow enables targeted methodics tasks
 - starting execution snapshots the active `WorkspaceHarness.methodics`
-- Conductor private MCP can read execution state and create pending resource requests
+- Conductor private MCP can read execution state, create assignments, evaluate DoD pass/fail/rework, advance steps, create a final report, and create pending resource requests
 - human principals can approve, reject, and cancel through human-gated tools
+- cancellation is exercised while an execution has an active current step
 - Conductor does not receive ordinary untargeted workspace message fanout
 
 Pass criteria:
@@ -352,11 +380,8 @@ Pass criteria:
 - Conductor authority comes from workspace attachment, IAM, and private MCP allowlists
 - start/cancel/approve/reject are exercised with a human token, not the Conductor machine token
 - `tool_calls` for internal Conductor MCP actions use `tool_source=agent_internal_mcp_server`
+- `tool_calls` rows prove assignment creation and DoD evaluation happened through the Conductor internal MCP binding
 - failed harness MCP calls stop quickly with useful evidence instead of repeatedly growing execution context
-
-Full DoD progression, rework loops, and final execution reports are not yet part
-of the current live contract; add separate focused live tests when those behaviors
-are implemented.
 
 ## Live-Test Hygiene
 

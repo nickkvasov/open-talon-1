@@ -16,8 +16,11 @@ Layout:
 - `test_bootstrap_live_system.py`: shared managed context and Curator bootstrap checks.
 - `test_steward_live_system.py`: system-level Steward task path.
 - `test_curator_live_system.py`: organization-level Curator task path.
+- `test_methodologist_live_system.py`: workspace-level Methodologist extraction from cited
+  Retriever evidence into methodology/methodics/template output.
 - `test_conductor_live_system.py`: workspace-level Conductor methodics start, internal MCP,
-  resource gate, and fanout checks.
+  assignment, DoD rework/progression/final-report, resource gate, active cancellation,
+  and fanout checks.
 
 To add another operational agent, create a new `test_<agent>_live_system.py` module
 and put any reusable deterministic harness logic in `harnesses.py`. Keep the test

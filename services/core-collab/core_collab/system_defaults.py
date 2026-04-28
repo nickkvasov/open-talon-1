@@ -185,6 +185,8 @@ _CONDUCTOR_CONTROL_PLANE_ALLOWLIST = [
     "methodics.executions.list",
     "methodics.executions.get",
     "methodics.resource_requests.create",
+    "methodics.assignments.create",
+    "methodics.steps.evaluate",
 ]
 _METHODICS_HUMAN_CONTROL_PLANE_TOOLS = [
     "methodics.executions.create",
