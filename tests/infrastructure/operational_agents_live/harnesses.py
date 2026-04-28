@@ -6,7 +6,13 @@ import json
 import threading
 from typing import Any
 
-from .helpers import PROJECT_CREATE_TOOL, STEWARD_ORGANIZATION_CREATE_TOOL, WORKSPACE_CREATE_TOOL
+from .helpers import (
+    METHODICS_EXECUTION_GET_TOOL,
+    METHODICS_RESOURCE_REQUEST_CREATE_TOOL,
+    PROJECT_CREATE_TOOL,
+    STEWARD_ORGANIZATION_CREATE_TOOL,
+    WORKSPACE_CREATE_TOOL,
+)
 
 
 def _structured_content(
@@ -121,6 +127,122 @@ class CuratorTaskHarnessServer(ThreadingHTTPServer):
 
 class CuratorTaskHarnessHandler(BaseHTTPRequestHandler):
     server: CuratorTaskHarnessServer
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("content-length", "0"))
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        body = json.dumps(self.server.state.handle(payload)).encode("utf-8")
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args) -> None:  # noqa: A003
+        return
+
+
+@dataclass
+class ConductorTaskHarnessState:
+    requests: list[dict[str, Any]] = field(default_factory=list)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def record_request(self, payload: dict[str, Any]) -> None:
+        with self._lock:
+            self.requests.append(payload)
+
+    def latest_request(self) -> dict[str, Any] | None:
+        with self._lock:
+            return self.requests[-1] if self.requests else None
+
+    def request_count(self) -> int:
+        with self._lock:
+            return len(self.requests)
+
+    def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.record_request(payload)
+        context = payload.get("context") if isinstance(payload, dict) else {}
+        if not isinstance(context, dict):
+            context = {}
+        task = context.get("task") if isinstance(context, dict) else {}
+        task_metadata = task.get("metadata") if isinstance(task, dict) else {}
+        if not isinstance(task_metadata, dict):
+            task_metadata = {}
+        workspace = context.get("workspace") if isinstance(context, dict) else {}
+        workspace_id = workspace.get("workspace_id") if isinstance(workspace, dict) else None
+        mcp_scope = {
+            "scope": "workspace",
+            "workspace_id": workspace_id,
+        }
+        execution_id = task_metadata.get("methodic_execution_id")
+        step_execution_id = task_metadata.get("methodic_execution_step_id")
+        tool_results = context.get("tool_results")
+        if not isinstance(tool_results, list):
+            tool_results = []
+        execution_detail = _structured_content(
+            tool_results,
+            METHODICS_EXECUTION_GET_TOOL,
+        )
+        resource_request = _structured_content(
+            tool_results,
+            METHODICS_RESOURCE_REQUEST_CREATE_TOOL,
+        )
+        if execution_detail is None:
+            return {
+                "stop_reason": "completed",
+                "summary": "Inspecting the active methodics execution through Conductor MCP.",
+                "tool_calls": [
+                    {
+                        "tool_name": METHODICS_EXECUTION_GET_TOOL,
+                        "arguments": {
+                            "_mcp_scope": mcp_scope,
+                            "execution_id": execution_id,
+                        },
+                        "summary": "Read the active methodics execution snapshot.",
+                    }
+                ],
+            }
+        if resource_request is None:
+            return {
+                "stop_reason": "completed",
+                "summary": "Requesting a human-gated resource for the active methodics step.",
+                "tool_calls": [
+                    {
+                        "tool_name": METHODICS_RESOURCE_REQUEST_CREATE_TOOL,
+                        "arguments": {
+                            "_mcp_scope": mcp_scope,
+                            "execution_id": execution_id,
+                            "step_execution_id": step_execution_id,
+                            "resource_kind": "tool",
+                            "action": "attach",
+                            "title": "Attach evidence checklist tool",
+                            "description": "Needed to collect and verify step evidence.",
+                            "required_permission": "workspace.tools.write",
+                            "payload": {
+                                "tool_name": "evidence-checklist",
+                                "reason": "Conductor live test resource proposal.",
+                            },
+                            "metadata": {"system_test": True},
+                        },
+                        "summary": "Create a pending methodics resource request.",
+                    }
+                ],
+            }
+        return {
+            "stop_reason": "completed",
+            "message": "Methodics execution inspected and resource request proposed.",
+            "summary": "Conductor inspected the execution and proposed the needed resource.",
+        }
+
+
+class ConductorTaskHarnessServer(ThreadingHTTPServer):
+    def __init__(self, server_address, handler_class, *, state: ConductorTaskHarnessState):
+        super().__init__(server_address, handler_class)
+        self.state = state
+
+
+class ConductorTaskHarnessHandler(BaseHTTPRequestHandler):
+    server: ConductorTaskHarnessServer
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("content-length", "0"))

@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import asyncpg
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "db" / "migrations"
+_MIGRATE_UP = re.compile(r"(?m)^\s*--\s*migrate:up\s*$")
+_MIGRATE_DOWN = re.compile(r"(?m)^\s*--\s*migrate:down\s*$")
+
+
+def _migration_up_sql(sql: str) -> str:
+    up_match = _MIGRATE_UP.search(sql)
+    if up_match is None:
+        return sql
+    down_match = _MIGRATE_DOWN.search(sql, up_match.end())
+    end = down_match.start() if down_match is not None else len(sql)
+    return sql[up_match.end() : end].strip()
 
 
 async def apply_pending_migrations(pool: asyncpg.Pool) -> None:
@@ -24,7 +36,7 @@ async def apply_pending_migrations(pool: asyncpg.Pool) -> None:
             version = migration_path.stem
             if version in applied_versions:
                 continue
-            sql = migration_path.read_text(encoding="utf-8")
+            sql = _migration_up_sql(migration_path.read_text(encoding="utf-8"))
             async with conn.transaction():
                 await conn.execute(sql)
                 await conn.execute(

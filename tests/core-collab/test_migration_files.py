@@ -30,6 +30,27 @@ def test_migration_files_are_sql_first_and_orderable() -> None:
     assert all(path.read_text(encoding="utf-8").strip() for path in paths)
 
 
+def test_python_migration_runner_uses_only_dbmate_up_block() -> None:
+    sql = """
+    -- migrate:up
+    CREATE TABLE kept_table(id UUID PRIMARY KEY);
+
+    -- migrate:down
+    DROP TABLE kept_table;
+    """
+
+    up_sql = migrations._migration_up_sql(sql)  # noqa: SLF001
+
+    assert "CREATE TABLE kept_table" in up_sql
+    assert "DROP TABLE kept_table" not in up_sql
+
+
+def test_python_migration_runner_preserves_legacy_plain_sql_migrations() -> None:
+    sql = "CREATE TABLE legacy_table(id UUID PRIMARY KEY);"
+
+    assert migrations._migration_up_sql(sql) == sql  # noqa: SLF001
+
+
 def test_audit_ledger_migration_preserves_append_only_chain_columns() -> None:
     sql = (MIGRATIONS_DIR / "20260415000200_add_audit_event_ledger.sql").read_text(
         encoding="utf-8"
