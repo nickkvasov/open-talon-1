@@ -248,7 +248,6 @@ from .runtime_execution import RuntimeExecutionService
 from .system_defaults import (
     ANCHOR_AGENT_ID,
     ANCHOR_TASK_KIND,
-    CONDUCTOR_AGENT_ID,
     CONTROL_PLANE_MCP_SERVER_ID,
     METHODICS_EXECUTION_START_TASK_KIND,
     SYSTEM_BASE_ORGANIZATION_ID,
@@ -3028,14 +3027,17 @@ class CollaborationKernel:
             payload.actor,
             permission="methodics.execute",
         )
-        conductor = await self._repository.fetch_agent_participant(
+        methodics_agent_participant = await self._resolve_methodics_execution_participant(
             workspace_id,
-            CONDUCTOR_AGENT_ID,
         )
-        if conductor is None or conductor.status not in {"active", "idle", "busy"}:
+        if (
+            methodics_agent_participant is None
+            or methodics_agent_participant.system_agent_id is None
+        ):
             raise ValueError(
                 "Conductor must be attached to the workspace before starting methodics execution"
             )
+        conductor_system_agent_id = methodics_agent_participant.system_agent_id
         if workspace.harness is None or not workspace.harness.methodics:
             raise ValueError("Workspace has no active methodics to execute")
 
@@ -3090,7 +3092,7 @@ class CollaborationKernel:
                     membership_id=uuid4(),
                     workspace_id=workspace_id,
                     thread_id=thread.thread_id,
-                    participant_id=conductor.participant_id,
+                    participant_id=methodics_agent_participant.participant_id,
                     role="agent",
                     permissions=["post_messages"],
                     joined_at=now,
@@ -3151,8 +3153,8 @@ class CollaborationKernel:
             workspace_id=workspace_id,
             organization_id=workspace.organization_id,
             thread_id=thread.thread_id,
-            conductor_system_agent_id=CONDUCTOR_AGENT_ID,
-            conductor_participant_id=conductor.participant_id,
+            conductor_system_agent_id=conductor_system_agent_id,
+            conductor_participant_id=methodics_agent_participant.participant_id,
             status="running",
             target_goal=payload.target_goal,
             current_step_execution_id=first_step.step_execution_id,
@@ -3182,8 +3184,8 @@ class CollaborationKernel:
             created_at=now,
             updated_at=now,
             metadata={
-                "target_system_agent_id": str(CONDUCTOR_AGENT_ID),
-                "target_participant_id": str(conductor.participant_id),
+                "target_system_agent_id": str(conductor_system_agent_id),
+                "target_participant_id": str(methodics_agent_participant.participant_id),
                 "response_visibility": "workspace",
                 "routing_reason": METHODICS_EXECUTION_START_TASK_KIND,
                 "task_kind": METHODICS_EXECUTION_START_TASK_KIND,
@@ -3205,8 +3207,8 @@ class CollaborationKernel:
             status="waiting",
             title=task.title,
             instructions=task.description,
-            assignee_participant_id=conductor.participant_id,
-            assignee_system_agent_id=CONDUCTOR_AGENT_ID,
+            assignee_participant_id=methodics_agent_participant.participant_id,
+            assignee_system_agent_id=conductor_system_agent_id,
             task_id=task.task_id,
             created_by=actor_participant.participant_id,
             created_at=now,
@@ -3254,7 +3256,7 @@ class CollaborationKernel:
                                 actor=actor,
                                 target=TargetRef(
                                     type="participant",
-                                    id=conductor.participant_id,
+                                    id=methodics_agent_participant.participant_id,
                                 ),
                                 payload=thread_memberships[1].model_dump(mode="json"),
                                 timestamp=now,
@@ -8870,6 +8872,27 @@ class CollaborationKernel:
             system_agent_id,
         )
 
+    async def _resolve_methodics_execution_participant(
+        self,
+        workspace_id: UUID,
+    ) -> ParticipantProfile | None:
+        participants = await self._repository.list_participants(workspace_id)
+        candidates = [
+            participant
+            for participant in participants
+            if participant.participant_type == "agent"
+            and participant.system_agent_id is not None
+            and participant.status in {"active", "idle", "busy"}
+            and self._participant_accepts_task_kind(
+                participant,
+                METHODICS_EXECUTION_START_TASK_KIND,
+            )
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item.created_at, str(item.participant_id)))
+        return candidates[0]
+
     async def _require_run_participant(
         self,
         *,
@@ -9025,6 +9048,19 @@ class CollaborationKernel:
         if isinstance(routing, dict) and routing.get("normal_message_fanout") is False:
             return False
         return True
+
+    @staticmethod
+    def _participant_accepts_task_kind(
+        participant: ParticipantProfile,
+        task_kind: str,
+    ) -> bool:
+        routing = participant.metadata.get("task_routing")
+        if not isinstance(routing, dict):
+            return False
+        accepted = routing.get("accepted_task_kinds")
+        if not isinstance(accepted, list):
+            return False
+        return task_kind in {item for item in accepted if isinstance(item, str)}
 
     @staticmethod
     def _participant_input_from_profile(participant: ParticipantProfile) -> ParticipantInput:

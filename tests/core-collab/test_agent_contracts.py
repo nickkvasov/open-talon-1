@@ -3307,6 +3307,29 @@ async def test_methodics_execution_start_requires_attached_conductor():
     repository = FakeRepository()
     actor = _workspace_actor_with_methodics_permissions()
     workspace = _seed_methodics_workspace(repository, actor)
+    now = datetime.now(timezone.utc)
+    ordinary_agent_id = uuid4()
+    ordinary_participant = ParticipantProfile(
+        participant_id=uuid4(),
+        workspace_id=workspace.workspace_id,
+        participant_type="agent",
+        system_agent_id=ordinary_agent_id,
+        display_name="Ordinary Agent",
+        roles=["collaborator"],
+        capabilities=[],
+        status="active",
+        metadata={
+            "task_routing": {
+                "normal_message_fanout": True,
+                "accepted_task_kinds": ["general_reply"],
+            }
+        },
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[
+        (workspace.workspace_id, ordinary_participant.participant_id)
+    ] = ordinary_participant
     kernel = CollaborationKernel(repository)
 
     with pytest.raises(ValueError, match="Conductor must be attached"):
@@ -3320,18 +3343,19 @@ async def test_methodics_execution_start_requires_attached_conductor():
 
 
 @pytest.mark.asyncio
-async def test_methodics_execution_start_snapshots_methodics_and_targets_conductor():
+async def test_methodics_execution_start_snapshots_methodics_and_targets_execution_agent_by_contract():
     repository = FakeRepository()
     actor = _workspace_actor_with_methodics_permissions()
     workspace = _seed_methodics_workspace(repository, actor)
     now = datetime.now(timezone.utc)
+    methodics_agent_id = uuid4()
     conductor_participant = ParticipantProfile(
         participant_id=uuid4(),
         workspace_id=workspace.workspace_id,
         participant_type="agent",
-        system_agent_id=CONDUCTOR_AGENT_ID,
-        display_name="Conductor",
-        roles=["workspace methodics execution conductor"],
+        system_agent_id=methodics_agent_id,
+        display_name="Workspace Methodics Agent",
+        roles=["methodics coordinator"],
         capabilities=["coordinates active WorkspaceHarness methodics"],
         status="active",
         metadata={
@@ -3356,7 +3380,7 @@ async def test_methodics_execution_start_snapshots_methodics_and_targets_conduct
     assert result.detail is not None
     detail = result.detail
     assert detail.execution.status == "running"
-    assert detail.execution.conductor_system_agent_id == CONDUCTOR_AGENT_ID
+    assert detail.execution.conductor_system_agent_id == methodics_agent_id
     assert detail.execution.conductor_participant_id == conductor_participant.participant_id
     assert detail.execution.methodics_snapshot[0]["name"] == "Evidence-backed launch"
     assert len(detail.steps) == 2
@@ -3368,9 +3392,9 @@ async def test_methodics_execution_start_snapshots_methodics_and_targets_conduct
     assert len(detail.assignments) == 1
     assignment = detail.assignments[0]
     assert assignment.assignment_kind == "agent_task"
-    assert assignment.assignee_system_agent_id == CONDUCTOR_AGENT_ID
+    assert assignment.assignee_system_agent_id == methodics_agent_id
     task = repository._tasks[assignment.task_id]
-    assert task.metadata["target_system_agent_id"] == str(CONDUCTOR_AGENT_ID)
+    assert task.metadata["target_system_agent_id"] == str(methodics_agent_id)
     assert task.metadata["target_participant_id"] == str(conductor_participant.participant_id)
     assert task.metadata["task_kind"] == "methodics_execution_start"
     assert "methodic_execution.started" in {event.event_type for event in result.events}
@@ -3392,6 +3416,12 @@ async def test_methodics_resource_request_create_is_pending_and_agent_requested(
         roles=["workspace methodics execution conductor"],
         capabilities=["coordinates active WorkspaceHarness methodics"],
         status="active",
+        metadata={
+            "task_routing": {
+                "normal_message_fanout": False,
+                "accepted_task_kinds": ["methodics_execution_start"],
+            }
+        },
         created_at=now,
         updated_at=now,
     )

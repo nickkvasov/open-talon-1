@@ -339,6 +339,7 @@ If a change touches Methodologist, Conductor, methodics execution, or other mana
 - make the response contract explicit enough that outputs can be translated into existing Open Talon structures such as `WorkspaceHarness.methodology`, `methodics`, `execution_rules`, participants, tools, retrieval corpora, and artifacts
 - require cited source evidence for extraction claims and explicit labels for inferred or ideated implementation tools
 - keep Conductor opt-in per workspace: no auto-attach, no normal message fanout, and no active methodics loop unless a start API/MCP call creates execution state
+- resolve the attached methodics execution agent from the participant/task-routing contract, especially `accepted_task_kinds` containing `methodics_execution_start`; do not hard-code Conductor UUIDs, `agent_key`, display name, role text, capability text, or metadata tags in runtime behavior
 - keep Conductor's private MCP allowlist limited to agent-appropriate execution reads and pending resource-request creation; human-gated operations such as start, cancel, approve, and reject must be exercised with a human principal
 - Conductor live coverage currently proves attach/start gating, internal MCP read/resource-request creation, human approve/reject/cancel tools, and normal-message fanout isolation. Add separate focused live coverage when full DoD progression, rework, or final execution-report behavior is implemented.
 - run `tests/core-collab/test_agent_contracts.py` and relevant repository migration tests when seeded specialist definitions change

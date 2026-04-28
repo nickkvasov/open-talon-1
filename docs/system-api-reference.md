@@ -774,7 +774,7 @@ The default vector backend is pgvector. The default embedding provider is config
 
 ### Methodics Execution APIs
 
-Methodics execution is workspace-scoped and opt-in. Conductor must already be attached as a workspace agent participant before an authorized human caller starts execution from the active `WorkspaceHarness.methodics`; otherwise the start route returns `409 Conflict`. Start/cancel and resource request approval/rejection are human-gated. Conductor receives targeted methodics tasks and can read execution state or create pending resource requests, but its managed internal MCP allowlist excludes the human control operations.
+Methodics execution is workspace-scoped and opt-in. A methodics execution agent must already be attached as a workspace agent participant before an authorized human caller starts execution from the active `WorkspaceHarness.methodics`; otherwise the start route returns `409 Conflict`. Runtime resolution is contract-based: the attached participant must advertise task routing that accepts `methodics_execution_start`, rather than being selected by `agent_key`, display name, role text, capability text, or metadata tags. Start/cancel and resource request approval/rejection are human-gated. Conductor receives targeted methodics tasks and can read execution state or create pending resource requests, but its managed internal MCP allowlist excludes the human control operations.
 
 | Method | Path | Summary |
 | --- | --- | --- |
