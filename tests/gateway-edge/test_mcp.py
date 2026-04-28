@@ -53,6 +53,34 @@ def test_mcp_retrieval_operations_declare_scopes_and_permissions() -> None:
         assert operation.requires_workspace_actor is True
 
 
+def test_mcp_methodics_operations_declare_workspace_scope_and_permissions() -> None:
+    expected = {
+        "methodics.executions.create": "methodics.execute",
+        "methodics.executions.list": "methodics.read",
+        "methodics.executions.get": "methodics.read",
+        "methodics.executions.cancel": "methodics.execute",
+        "methodics.resource_requests.approve": "methodics.admin",
+        "methodics.resource_requests.create": "methodics.execute",
+        "methodics.resource_requests.reject": "methodics.admin",
+    }
+
+    for name, permission in expected.items():
+        operation = OPERATION_REGISTRY[name]
+        assert operation.allowed_scopes == frozenset({"workspace"})
+        assert operation.required_permission_type == "workspace"
+        assert operation.required_permission == permission
+        assert operation.requires_workspace_actor is True
+        assert operation.requires_human_principal is (
+            name
+            in {
+                "methodics.executions.create",
+                "methodics.executions.cancel",
+                "methodics.resource_requests.approve",
+                "methodics.resource_requests.reject",
+            }
+        )
+
+
 def _patch_oidc_tokens(monkeypatch, token_map: dict[str, AuthContext]) -> None:
     monkeypatch.setattr(settings, "auth_mode", "oidc")
 

@@ -49,6 +49,9 @@ from gateway_edge.models import (
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
     CreateMcpServerRequest,
+    CancelMethodicExecutionRequest,
+    CreateMethodicExecutionRequest,
+    CreateMethodicResourceRequestRequest,
     CreateOrganizationRequest,
     CreateProjectRequest,
     CreateRetrievalContextPackRequest,
@@ -80,6 +83,9 @@ from gateway_edge.models import (
     MemoryProviderDefinition,
     MemoryProviderHealthReport,
     MemorySearchResponse,
+    MethodicExecution,
+    MethodicExecutionDetail,
+    MethodicResourceRequest,
     McpPromptDefinition,
     McpResourceDefinition,
     McpServerDefinition,
@@ -129,6 +135,7 @@ from gateway_edge.models import (
     UpdateProjectRequest,
     UpsertProjectAccessRequest,
     ReviewToolGenerationRevisionRequest,
+    ReviewMethodicResourceRequest,
     RemoveProjectAccessRequest,
     UpdateWorkspaceToolRequest,
     UpdateWorkspaceMcpServerRequest,
@@ -861,6 +868,39 @@ async def _apply_retrieval_provider_override_permission(
     permissions = set(actor.iam_permissions)
     permissions.add("retrieval.admin")
     return actor.model_copy(update={"iam_permissions": sorted(permissions)})
+
+
+async def _resolve_methodics_actor(
+    request: Request,
+    actor: ParticipantInput,
+    *,
+    workspace_id: UUID,
+    permission: str,
+) -> ParticipantInput:
+    scoped_actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission=permission,
+    )
+    if scoped_actor is not None:
+        return scoped_actor
+    return await _resolve_workspace_actor(
+        request,
+        actor,
+        workspace_id=workspace_id,
+        auto_create=False,
+    )
+
+
+def _require_human_methodics_actor(
+    request: Request,
+    actor: ParticipantInput,
+) -> None:
+    auth_context = _oidc_auth_context(request)
+    if auth_context is not None and auth_context.principal_type != "human":
+        raise PermissionError("Methodics execution control requires a human principal")
+    if actor.participant_type != "user":
+        raise PermissionError("Methodics execution control requires a human participant")
 
 
 def _form_actor(
@@ -4915,6 +4955,194 @@ async def get_workspace_retrieval_context_pack(
             context_pack_id,
             scope="workspace",
             workspace_id=workspace_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/workspaces/{workspace_id}/methodics/executions", response_model=MethodicExecutionDetail)
+async def create_workspace_methodic_execution(
+    request: Request,
+    workspace_id: UUID,
+    payload: CreateMethodicExecutionRequest,
+) -> MethodicExecutionDetail:
+    try:
+        actor = await _resolve_methodics_actor(
+            request,
+            payload.actor,
+            workspace_id=workspace_id,
+            permission="methodics.execute",
+        )
+        _require_human_methodics_actor(request, actor)
+        return await collab_svc.collaboration_service.create_methodic_execution(
+            workspace_id,
+            payload.model_copy(update={"actor": actor}),
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if (
+            "Conductor must be attached" in message
+            or "no active methodics" in message
+            or "no executable steps" in message
+        ):
+            raise HTTPException(status_code=409, detail=message) from exc
+        raise _http_error(exc) from exc
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/workspaces/{workspace_id}/methodics/executions", response_model=list[MethodicExecution])
+async def list_workspace_methodic_executions(
+    request: Request,
+    workspace_id: UUID,
+    status: str | None = Query(default=None),
+) -> list[MethodicExecution]:
+    try:
+        await _require_workspace_permission(
+            request,
+            workspace_id,
+            permission="methodics.read",
+        )
+        return await collab_svc.collaboration_service.list_methodic_executions(
+            workspace_id,
+            status=status,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/workspaces/{workspace_id}/methodics/executions/{execution_id}",
+    response_model=MethodicExecutionDetail,
+)
+async def get_workspace_methodic_execution(
+    request: Request,
+    workspace_id: UUID,
+    execution_id: UUID,
+) -> MethodicExecutionDetail:
+    try:
+        await _require_workspace_permission(
+            request,
+            workspace_id,
+            permission="methodics.read",
+        )
+        return await collab_svc.collaboration_service.get_methodic_execution(
+            workspace_id,
+            execution_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/workspaces/{workspace_id}/methodics/executions/{execution_id}/cancel",
+    response_model=MethodicExecutionDetail,
+)
+async def cancel_workspace_methodic_execution(
+    request: Request,
+    workspace_id: UUID,
+    execution_id: UUID,
+    payload: CancelMethodicExecutionRequest,
+) -> MethodicExecutionDetail:
+    try:
+        actor = await _resolve_methodics_actor(
+            request,
+            payload.actor,
+            workspace_id=workspace_id,
+            permission="methodics.execute",
+        )
+        _require_human_methodics_actor(request, actor)
+        return await collab_svc.collaboration_service.cancel_methodic_execution(
+            workspace_id,
+            execution_id,
+            payload.model_copy(update={"actor": actor}),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/workspaces/{workspace_id}/methodics/resource-requests/{resource_request_id}/approve",
+    response_model=MethodicResourceRequest,
+)
+async def approve_workspace_methodic_resource_request(
+    request: Request,
+    workspace_id: UUID,
+    resource_request_id: UUID,
+    payload: ReviewMethodicResourceRequest,
+) -> MethodicResourceRequest:
+    try:
+        actor = await _resolve_methodics_actor(
+            request,
+            payload.actor,
+            workspace_id=workspace_id,
+            permission="methodics.admin",
+        )
+        _require_human_methodics_actor(request, actor)
+        return await collab_svc.collaboration_service.review_methodic_resource_request(
+            workspace_id,
+            resource_request_id,
+            payload.model_copy(update={"actor": actor}),
+            approved=True,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/workspaces/{workspace_id}/methodics/executions/{execution_id}/resource-requests",
+    response_model=MethodicResourceRequest,
+)
+async def create_workspace_methodic_resource_request(
+    request: Request,
+    workspace_id: UUID,
+    execution_id: UUID,
+    payload: CreateMethodicResourceRequestRequest,
+) -> MethodicResourceRequest:
+    try:
+        actor = await _resolve_methodics_actor(
+            request,
+            payload.actor,
+            workspace_id=workspace_id,
+            permission="methodics.execute",
+        )
+        return await collab_svc.collaboration_service.create_methodic_resource_request(
+            workspace_id,
+            execution_id,
+            payload.model_copy(update={"actor": actor}),
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if "terminal methodic execution" in message:
+            raise HTTPException(status_code=409, detail=message) from exc
+        raise _http_error(exc) from exc
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/workspaces/{workspace_id}/methodics/resource-requests/{resource_request_id}/reject",
+    response_model=MethodicResourceRequest,
+)
+async def reject_workspace_methodic_resource_request(
+    request: Request,
+    workspace_id: UUID,
+    resource_request_id: UUID,
+    payload: ReviewMethodicResourceRequest,
+) -> MethodicResourceRequest:
+    try:
+        actor = await _resolve_methodics_actor(
+            request,
+            payload.actor,
+            workspace_id=workspace_id,
+            permission="methodics.admin",
+        )
+        _require_human_methodics_actor(request, actor)
+        return await collab_svc.collaboration_service.review_methodic_resource_request(
+            workspace_id,
+            resource_request_id,
+            payload.model_copy(update={"actor": actor}),
+            approved=False,
         )
     except Exception as exc:
         raise _http_error(exc) from exc

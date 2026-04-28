@@ -306,6 +306,61 @@ async def test_repository_migrations_seed_operational_agents_and_contexts_idempo
             )
             assert participant is not None
             assert participant.metadata["task_routing"]["normal_message_fanout"] is False
+
+        methodologist = await repository.fetch_system_agent(
+            UUID("44444444-4444-4444-4444-444444444447")
+        )
+        assert methodologist is not None
+        assert methodologist.agent_key == "methodologist"
+        assert methodologist.display_name == "Methodologist"
+        assert methodologist.role == "methodology extraction and workspace design agent"
+        assert methodologist.endpoint.engine_id == "local-ollama"
+        assert methodologist.endpoint.provider == "ollama"
+        assert "extracts methodology basis" in " ".join(methodologist.capabilities)
+        assert "Methodology Basis" in (
+            methodologist.interaction_contract.response_contract.required_sections
+        )
+        assert "Workspace Template" in (
+            methodologist.interaction_contract.response_contract.required_sections
+        )
+        assert methodologist.definition["runtime"]["engine_id"] == "local-ollama"
+        assert methodologist.definition["output_targets"]["workspace_harness_fields"] == [
+            "methodology",
+            "methodics",
+            "execution_rules",
+            "metadata",
+        ]
+        conductor = await repository.fetch_system_agent(
+            UUID("44444444-4444-4444-4444-444444444448")
+        )
+        assert conductor is not None
+        assert conductor.agent_key == "conductor"
+        assert conductor.display_name == "Conductor"
+        assert conductor.role == "workspace methodics execution conductor"
+        assert conductor.definition["task_routing"]["normal_message_fanout"] is False
+        assert conductor.definition["task_routing"]["accepted_task_kinds"] == [
+            "methodics_execution_start",
+            "methodics_step_coordinate",
+            "methodics_step_verify",
+            "methodics_resource_review",
+        ]
+        conductor_tools = await repository.list_agent_internal_mcp_tools(
+            conductor.agent_id
+        )
+        conductor_exposed = {tool.exposed_name for tool in conductor_tools}
+        assert "control_plane__methodics.executions.get" in conductor_exposed
+        assert "control_plane__methodics.resource_requests.create" in conductor_exposed
+        assert "control_plane__methodics.executions.create" not in conductor_exposed
+        conductor_roles = await repository.list_iam_role_definitions(
+            subject_kind="agent",
+            scope="global",
+            organization_id=None,
+        )
+        conductor_role = next(
+            role for role in conductor_roles if role.name == "workspace_conductor"
+        )
+        assert "methodics.execute" in conductor_role.permissions
+        assert "methodics.admin" not in conductor_role.permissions
     finally:
         await pool.close()
 

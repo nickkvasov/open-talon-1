@@ -92,6 +92,11 @@ Examples:
 - `retrieval.write`
 - `retrieval.search`
 - `retrieval.admin`
+- `methodology.read`
+- `methodology.write`
+- `methodics.read`
+- `methodics.execute`
+- `methodics.admin`
 - `tool_generation.read`
 - `tool_generation.review`
 - `audit.read`
@@ -112,6 +117,11 @@ Examples:
 - `retrieval.write`
 - `retrieval.search`
 - `retrieval.admin`
+- `methodology.read`
+- `methodology.write`
+- `methodics.read`
+- `methodics.execute`
+- `methodics.admin`
 - `workspace.audit.read`
 - `workspace.audit.export`
 - `workspace.audit.verify`
@@ -162,7 +172,7 @@ Agent permissions come from:
 
 The MCP adapter uses those same agent permissions. It filters visible MCP operations by the current session scope and then rechecks the underlying IAM permission on every call.
 
-Operational agents use this same model. `Tinker`, `Steward`, `Curator`, and `Anchor` are normal `system_agents` whose purpose is advertised through `display_name`, `role`, and `capabilities`; their authority comes from IAM bindings, project access, workspace participant attachment, task payloads, and private MCP/tool allowlists. Runtime workers stay generic and do not authorize or specialize behavior from agent keys, role text, capability text, or metadata tags.
+Operational and managed specialist agents use this same model. `Tinker`, `Steward`, `Curator`, `Anchor`, `Methodologist`, and `Conductor` are normal `system_agents` whose purpose is advertised through `display_name`, `role`, and `capabilities`; their authority comes from IAM bindings, project access, workspace participant attachment, task payloads, and private MCP/tool allowlists. Runtime workers stay generic and do not authorize or specialize behavior from agent keys, role text, capability text, or metadata tags. `Conductor` is opt-in per workspace: attaching it enables targeted methodics tasks, but active execution still requires an explicit human methodics execution start call and otherwise the workspace has no methodics loop. The managed `workspace_conductor` agent IAM role allows Conductor to read/search workspace execution context and create pending resource requests after attachment; start/cancel and resource request approval/rejection remain human-gated.
 
 External MCP server management is separate from the gateway-mounted MCP adapter and from the Open Talon tool catalog. Global and organization MCP server definitions use `provider.mcp.*` permissions. Workspace MCP server attachment uses `workspace.mcp_servers.write` after participant attachment. Do not use `tool_catalog.*` or `workspace.tools.write` to manage external MCP servers.
 

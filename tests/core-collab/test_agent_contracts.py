@@ -65,6 +65,8 @@ from open_talon_contracts.models import (  # noqa: E402
     CreateInteractionQuestionRequest,
     CreateInteractionRequest,
     CreateInteractionRequestsRequest,
+    CreateMethodicExecutionRequest,
+    CreateMethodicResourceRequestRequest,
     CreateMessageRequest,
     CreateToolGenerationRevisionRequest,
     DeleteLlmProviderRequest,
@@ -81,6 +83,12 @@ from open_talon_contracts.models import (  # noqa: E402
     MemoryEntry,
     MemoryProviderDefinition,
     MemoryProviderRecord,
+    MethodicExecution,
+    MethodicExecutionAssignment,
+    MethodicExecutionCheck,
+    MethodicExecutionDetail,
+    MethodicExecutionStep,
+    MethodicResourceRequest,
     McpServerDefinition,
     McpToolDefinition,
     Organization,
@@ -126,7 +134,7 @@ from open_talon_contracts.models import (  # noqa: E402
 )
 from core_collab.kernel import ANCHOR_AGENT_ID, CollaborationKernel  # noqa: E402
 from core_collab.repository import CollaborationRepository  # noqa: E402
-from core_collab.system_defaults import ManagedSystemDefaultsRepairer  # noqa: E402
+from core_collab.system_defaults import CONDUCTOR_AGENT_ID, ManagedSystemDefaultsRepairer  # noqa: E402
 
 
 class _FakeTransaction:
@@ -255,6 +263,11 @@ class FakeRepository:
         self._interaction_questions = {}
         self._interaction_targets = {}
         self._interaction_answers = {}
+        self._methodic_executions = {}
+        self._methodic_steps = {}
+        self._methodic_assignments = {}
+        self._methodic_checks = {}
+        self._methodic_resource_requests = {}
         default_organization = Organization(
             organization_id=UUID("11111111-1111-1111-1111-111111111111"),
             slug="default",
@@ -1237,6 +1250,117 @@ class FakeRepository:
 
     async def record_event(self, conn, event: EventEnvelope) -> None:
         self.recorded_events.append(event)
+
+    async def upsert_methodic_execution(self, conn, execution: MethodicExecution) -> None:
+        self._methodic_executions[execution.execution_id] = execution
+
+    async def fetch_methodic_execution(self, execution_id):
+        return self._methodic_executions.get(execution_id)
+
+    async def list_methodic_executions(self, *, workspace_id=None, status=None):
+        executions = list(self._methodic_executions.values())
+        if workspace_id is not None:
+            executions = [
+                execution
+                for execution in executions
+                if execution.workspace_id == workspace_id
+            ]
+        if status is not None:
+            executions = [
+                execution
+                for execution in executions
+                if execution.status == status
+            ]
+        return sorted(executions, key=lambda item: item.created_at, reverse=True)
+
+    async def upsert_methodic_execution_step(
+        self,
+        conn,
+        step: MethodicExecutionStep,
+    ) -> None:
+        self._methodic_steps[step.step_execution_id] = step
+
+    async def list_methodic_execution_steps(self, execution_id):
+        return sorted(
+            [
+                step
+                for step in self._methodic_steps.values()
+                if step.execution_id == execution_id
+            ],
+            key=lambda item: (item.methodic_index, item.step_index),
+        )
+
+    async def upsert_methodic_execution_assignment(
+        self,
+        conn,
+        assignment: MethodicExecutionAssignment,
+    ) -> None:
+        self._methodic_assignments[assignment.assignment_id] = assignment
+
+    async def list_methodic_execution_assignments(self, execution_id):
+        return sorted(
+            [
+                assignment
+                for assignment in self._methodic_assignments.values()
+                if assignment.execution_id == execution_id
+            ],
+            key=lambda item: item.created_at,
+        )
+
+    async def upsert_methodic_execution_check(
+        self,
+        conn,
+        check: MethodicExecutionCheck,
+    ) -> None:
+        self._methodic_checks[check.check_id] = check
+
+    async def list_methodic_execution_checks(self, execution_id):
+        return sorted(
+            [
+                check
+                for check in self._methodic_checks.values()
+                if check.execution_id == execution_id
+            ],
+            key=lambda item: item.created_at,
+        )
+
+    async def upsert_methodic_resource_request(
+        self,
+        conn,
+        request: MethodicResourceRequest,
+    ) -> None:
+        self._methodic_resource_requests[request.resource_request_id] = request
+
+    async def fetch_methodic_resource_request(self, resource_request_id):
+        return self._methodic_resource_requests.get(resource_request_id)
+
+    async def list_methodic_resource_requests(self, execution_id=None, **kwargs):
+        requests = list(self._methodic_resource_requests.values())
+        workspace_id = kwargs.get("workspace_id")
+        status = kwargs.get("status")
+        if execution_id is not None:
+            requests = [
+                request for request in requests if request.execution_id == execution_id
+            ]
+        if workspace_id is not None:
+            requests = [
+                request for request in requests if request.workspace_id == workspace_id
+            ]
+        if status is not None:
+            requests = [request for request in requests if request.status == status]
+        return sorted(requests, key=lambda item: item.created_at, reverse=True)
+
+    async def get_methodic_execution_detail(self, execution_id):
+        execution = self._methodic_executions.get(execution_id)
+        if execution is None:
+            return None
+        return MethodicExecutionDetail(
+            execution=execution,
+            steps=await self.list_methodic_execution_steps(execution_id),
+            assignments=await self.list_methodic_execution_assignments(execution_id),
+            checks=await self.list_methodic_execution_checks(execution_id),
+            resource_requests=await self.list_methodic_resource_requests(execution_id),
+        )
 
     async def upsert_llm_provider(self, conn, provider: LlmProviderDefinition) -> None:
         self._llm_providers[provider.provider_id] = provider
@@ -2924,8 +3048,46 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
     ) in repository._project_access_bindings
 
     agent_keys = {agent.agent_key for agent in repository._agents.values()}
-    assert {"tinker", "steward", "curator", "anchor"}.issubset(agent_keys)
+    assert {
+        "tinker",
+        "steward",
+        "curator",
+        "anchor",
+        "methodologist",
+        "conductor",
+    }.issubset(agent_keys)
     assert any(agent.display_name == "Reasoning Planner" for agent in repository._agents.values())
+    methodologist = next(
+        agent for agent in repository._agents.values() if agent.agent_key == "methodologist"
+    )
+    assert methodologist.display_name == "Methodologist"
+    assert methodologist.role == "methodology extraction and workspace design agent"
+    assert methodologist.endpoint.engine_id == "local-ollama"
+    assert methodologist.endpoint.provider == "ollama"
+    assert (
+        "Workspace Template"
+        in methodologist.interaction_contract.response_contract.required_sections
+    )
+    assert methodologist.definition["output_targets"]["workspace_harness_fields"] == [
+        "methodology",
+        "methodics",
+        "execution_rules",
+        "metadata",
+    ]
+    conductor = next(
+        agent for agent in repository._agents.values() if agent.agent_key == "conductor"
+    )
+    assert conductor.display_name == "Conductor"
+    assert conductor.role == "workspace methodics execution conductor"
+    assert conductor.endpoint.engine_id == "local-ollama"
+    assert conductor.endpoint.provider == "ollama"
+    assert conductor.definition["task_routing"]["normal_message_fanout"] is False
+    assert conductor.definition["task_routing"]["accepted_task_kinds"] == [
+        "methodics_execution_start",
+        "methodics_step_coordinate",
+        "methodics_step_verify",
+        "methodics_resource_review",
+    ]
 
     provider_keys = {provider.engine_id for provider in repository._llm_providers.values()}
     assert {"local-ollama", "openai-responses"}.issubset(provider_keys)
@@ -2949,6 +3111,7 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
         "organizations.create",
         "workspaces.create",
         "iam.agent_identities.list",
+        "methodics.resource_requests.approve",
     }.issubset({tool.tool_name for tool in repository._mcp_server_tools[control_plane.server_id]})
 
     steward = next(agent for agent in repository._agents.values() if agent.agent_key == "steward")
@@ -2980,6 +3143,7 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
         (curator.agent_id, control_plane.server_id)
     ]
     assert "organizations.list" in curator_binding.tool_denylist
+    assert "methodics.resource_requests.approve" not in curator_binding.tool_allowlist
     curator_role = next(role for role in repository._iam_roles.values() if role.name == "organization_curator")
     assert "organization.write" not in curator_role.permissions
     assert (
@@ -2987,6 +3151,288 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
         "agent",
         curator.agent_id,
     ) in repository._project_access_bindings
+
+    conductor_binding = repository._agent_internal_mcp_servers[
+        (conductor.agent_id, control_plane.server_id)
+    ]
+    assert "methodics.executions.get" in conductor_binding.tool_allowlist
+    assert "methodics.resource_requests.create" in conductor_binding.tool_allowlist
+    assert "methodics.executions.create" not in conductor_binding.tool_allowlist
+    assert "methodics.resource_requests.approve" in conductor_binding.tool_denylist
+    conductor_role = next(role for role in repository._iam_roles.values() if role.name == "workspace_conductor")
+    assert conductor_role.permissions == [
+        "workspace.read",
+        "retrieval.read",
+        "retrieval.search",
+        "methodics.read",
+        "methodics.execute",
+    ]
+
+
+def _workspace_actor_with_methodics_permissions() -> ParticipantInput:
+    actor_id = uuid4()
+    return ParticipantInput(
+        participant_id=actor_id,
+        participant_type="user",
+        user_id=actor_id,
+        display_name="Workspace Admin",
+        iam_permissions=sorted(WORKSPACE_PERMISSION_NAMES),
+    )
+
+
+def _seed_methodics_workspace(
+    repository: FakeRepository,
+    actor: ParticipantInput,
+) -> Workspace:
+    now = datetime.now(timezone.utc)
+    workspace = Workspace(
+        workspace_id=uuid4(),
+        organization_id=UUID("11111111-1111-1111-1111-111111111111"),
+        project_id=uuid4(),
+        name="Launch Methodics Workspace",
+        harness=WorkspaceHarness(
+            methodology=WorkspaceMethodology(
+                ontology="Delivery artifacts and verification evidence.",
+                principles=["Keep each step evidence-backed."],
+            ),
+            methodics=[
+                WorkspaceMethodic(
+                    name="Evidence-backed launch",
+                    goal="Launch a small workspace workflow",
+                    steps=[
+                        WorkspaceMethodicStep(
+                            instruction="Collect launch requirements.",
+                            expected_artifacts=["requirements note"],
+                            verification=["requirements are visible in the workspace"],
+                        ),
+                        WorkspaceMethodicStep(
+                            instruction="Verify launch readiness.",
+                            expected_artifacts=["readiness report"],
+                            verification=["definition of done is satisfied"],
+                        ),
+                    ],
+                    success_criteria=["workflow outcome is explicitly accepted"],
+                )
+            ],
+        ),
+        created_by=actor.participant_id,
+        created_at=now,
+        updated_at=now,
+    )
+    repository._workspaces[workspace.workspace_id] = workspace
+    repository._participants[(workspace.workspace_id, actor.participant_id)] = ParticipantProfile(
+        participant_id=actor.participant_id,
+        workspace_id=workspace.workspace_id,
+        participant_type="user",
+        user_id=actor.user_id,
+        display_name=actor.display_name,
+        roles=["admin"],
+        capabilities=[],
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    return workspace
+
+
+@pytest.mark.asyncio
+async def test_conductor_manual_attachment_preserves_no_normal_fanout_routing():
+    repository = FakeRepository()
+    await ManagedSystemDefaultsRepairer(repository).repair()
+    conductor = next(
+        agent for agent in repository._agents.values() if agent.agent_key == "conductor"
+    )
+    actor = _workspace_actor_with_methodics_permissions()
+    workspace = _seed_methodics_workspace(repository, actor)
+    kernel = CollaborationKernel(repository)
+
+    result = await kernel.create_agent_participant(
+        workspace.workspace_id,
+        CreateAgentParticipantRequest(actor=actor, agent_id=conductor.agent_id),
+    )
+
+    assert result.participant is not None
+    assert result.participant.system_agent_id == CONDUCTOR_AGENT_ID
+    assert result.participant.metadata["task_routing"]["normal_message_fanout"] is False
+    assert result.participant.metadata["task_routing"]["accepted_task_kinds"] == [
+        "methodics_execution_start",
+        "methodics_step_coordinate",
+        "methodics_step_verify",
+        "methodics_resource_review",
+    ]
+    now = datetime.now(timezone.utc)
+    thread_id = uuid4()
+    repository._threads[thread_id] = Thread(
+        thread_id=thread_id,
+        workspace_id=workspace.workspace_id,
+        title="Methodics",
+        created_at=now,
+        updated_at=now,
+    )
+    accepted_task = Task(
+        task_id=uuid4(),
+        workspace_id=workspace.workspace_id,
+        thread_id=thread_id,
+        title="Coordinate methodics",
+        requested_by=actor.participant_id,
+        created_at=now,
+        updated_at=now,
+        metadata={
+            "target_system_agent_id": str(conductor.agent_id),
+            "target_participant_id": str(result.participant.participant_id),
+            "task_kind": "methodics_execution_start",
+        },
+    )
+    rejected_task = accepted_task.model_copy(
+        update={
+            "task_id": uuid4(),
+            "title": "Ordinary targeted work",
+            "metadata": {
+                "target_system_agent_id": str(conductor.agent_id),
+                "target_participant_id": str(result.participant.participant_id),
+                "task_kind": "general_reply",
+            },
+        }
+    )
+    repository._tasks[accepted_task.task_id] = accepted_task
+    repository._tasks[rejected_task.task_id] = rejected_task
+
+    pending = await kernel.list_pending_tasks_for_system_agent(conductor.agent_id)
+
+    assert [task.task_id for task in pending] == [accepted_task.task_id]
+
+
+@pytest.mark.asyncio
+async def test_methodics_execution_start_requires_attached_conductor():
+    repository = FakeRepository()
+    actor = _workspace_actor_with_methodics_permissions()
+    workspace = _seed_methodics_workspace(repository, actor)
+    kernel = CollaborationKernel(repository)
+
+    with pytest.raises(ValueError, match="Conductor must be attached"):
+        await kernel.create_methodic_execution(
+            workspace.workspace_id,
+            CreateMethodicExecutionRequest(actor=actor, target_goal="Launch the workflow"),
+        )
+
+    assert repository._methodic_executions == {}
+    assert repository._tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_methodics_execution_start_snapshots_methodics_and_targets_conductor():
+    repository = FakeRepository()
+    actor = _workspace_actor_with_methodics_permissions()
+    workspace = _seed_methodics_workspace(repository, actor)
+    now = datetime.now(timezone.utc)
+    conductor_participant = ParticipantProfile(
+        participant_id=uuid4(),
+        workspace_id=workspace.workspace_id,
+        participant_type="agent",
+        system_agent_id=CONDUCTOR_AGENT_ID,
+        display_name="Conductor",
+        roles=["workspace methodics execution conductor"],
+        capabilities=["coordinates active WorkspaceHarness methodics"],
+        status="active",
+        metadata={
+            "task_routing": {
+                "normal_message_fanout": False,
+                "accepted_task_kinds": ["methodics_execution_start"],
+            }
+        },
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[
+        (workspace.workspace_id, conductor_participant.participant_id)
+    ] = conductor_participant
+    kernel = CollaborationKernel(repository)
+
+    result = await kernel.create_methodic_execution(
+        workspace.workspace_id,
+        CreateMethodicExecutionRequest(actor=actor, target_goal="Launch the workflow"),
+    )
+
+    assert result.detail is not None
+    detail = result.detail
+    assert detail.execution.status == "running"
+    assert detail.execution.conductor_system_agent_id == CONDUCTOR_AGENT_ID
+    assert detail.execution.conductor_participant_id == conductor_participant.participant_id
+    assert detail.execution.methodics_snapshot[0]["name"] == "Evidence-backed launch"
+    assert len(detail.steps) == 2
+    assert detail.steps[0].status == "active"
+    assert detail.steps[0].definition_of_done == [
+        "requirements are visible in the workspace",
+        "workflow outcome is explicitly accepted",
+    ]
+    assert len(detail.assignments) == 1
+    assignment = detail.assignments[0]
+    assert assignment.assignment_kind == "agent_task"
+    assert assignment.assignee_system_agent_id == CONDUCTOR_AGENT_ID
+    task = repository._tasks[assignment.task_id]
+    assert task.metadata["target_system_agent_id"] == str(CONDUCTOR_AGENT_ID)
+    assert task.metadata["target_participant_id"] == str(conductor_participant.participant_id)
+    assert task.metadata["task_kind"] == "methodics_execution_start"
+    assert "methodic_execution.started" in {event.event_type for event in result.events}
+    assert "task.created" in {event.event_type for event in result.events}
+
+
+@pytest.mark.asyncio
+async def test_methodics_resource_request_create_is_pending_and_agent_requested():
+    repository = FakeRepository()
+    actor = _workspace_actor_with_methodics_permissions()
+    workspace = _seed_methodics_workspace(repository, actor)
+    now = datetime.now(timezone.utc)
+    conductor_participant = ParticipantProfile(
+        participant_id=uuid4(),
+        workspace_id=workspace.workspace_id,
+        participant_type="agent",
+        system_agent_id=CONDUCTOR_AGENT_ID,
+        display_name="Conductor",
+        roles=["workspace methodics execution conductor"],
+        capabilities=["coordinates active WorkspaceHarness methodics"],
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[
+        (workspace.workspace_id, conductor_participant.participant_id)
+    ] = conductor_participant
+    kernel = CollaborationKernel(repository)
+
+    start = await kernel.create_methodic_execution(
+        workspace.workspace_id,
+        CreateMethodicExecutionRequest(actor=actor, target_goal="Launch the workflow"),
+    )
+    assert start.detail is not None
+    resource = await kernel.create_methodic_resource_request(
+        workspace.workspace_id,
+        start.detail.execution.execution_id,
+        CreateMethodicResourceRequestRequest(
+            actor=ParticipantInput(
+                participant_id=conductor_participant.participant_id,
+                participant_type="agent",
+                display_name="Conductor",
+                iam_permissions=["methodics.execute"],
+            ),
+            resource_kind="tool",
+            action="attach",
+            title="Attach evidence checklist tool",
+            description="Needed to collect step evidence.",
+            required_permission="workspace.tools.write",
+            payload={"tool_name": "evidence-checklist"},
+        ),
+    )
+
+    assert resource.resource_request is not None
+    assert resource.resource_request.status == "pending"
+    assert resource.resource_request.requested_by_system_agent_id == CONDUCTOR_AGENT_ID
+    assert resource.resource_request.step_execution_id == (
+        start.detail.execution.current_step_execution_id
+    )
+    assert "methodic_resource_request.created" in {
+        event.event_type for event in resource.events
+    }
 
 
 def test_kernel_run_output_includes_standardized_usage_payload():

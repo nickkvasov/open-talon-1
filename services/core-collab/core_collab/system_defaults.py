@@ -42,10 +42,17 @@ REASONING_PLANNER_AGENT_ID = UUID("33333333-3333-3333-3333-333333333333")
 TINKER_AGENT_ID = UUID("44444444-4444-4444-4444-444444444444")
 STEWARD_AGENT_ID = UUID("44444444-4444-4444-4444-444444444445")
 ANCHOR_AGENT_ID = UUID("44444444-4444-4444-4444-444444444446")
+METHODOLOGIST_AGENT_ID = UUID("44444444-4444-4444-4444-444444444447")
+CONDUCTOR_AGENT_ID = UUID("44444444-4444-4444-4444-444444444448")
 CONTROL_PLANE_MCP_SERVER_ID = UUID("66666666-6666-6666-6666-666666666666")
 PLATFORM_STEWARD_ROLE_ID = UUID("77777777-7777-7777-7777-777777777771")
+GLOBAL_CONDUCTOR_ROLE_ID = UUID("77777777-7777-7777-7777-777777777772")
 SYSTEM_ACTOR_ID = UUID("00000000-0000-0000-0000-000000000000")
 ANCHOR_TASK_KIND = "workspace_topic_moderation"
+METHODICS_EXECUTION_START_TASK_KIND = "methodics_execution_start"
+METHODICS_STEP_COORDINATE_TASK_KIND = "methodics_step_coordinate"
+METHODICS_STEP_VERIFY_TASK_KIND = "methodics_step_verify"
+METHODICS_RESOURCE_REVIEW_TASK_KIND = "methodics_resource_review"
 ANCHOR_ROLE = "workspace topic alignment reviewer"
 ANCHOR_CAPABILITIES = [
     "reviews messages for alignment with the workspace topic",
@@ -90,6 +97,11 @@ _OPERATIONAL_AGENT_PERMISSIONS = [
     "retrieval.write",
     "retrieval.search",
     "retrieval.admin",
+    "methodology.read",
+    "methodology.write",
+    "methodics.read",
+    "methodics.execute",
+    "methodics.admin",
     "tool_generation.read",
     "tool_generation.review",
     "audit.read",
@@ -99,6 +111,13 @@ _STEWARD_AGENT_PERMISSIONS = list(
     dict.fromkeys([*_OPERATIONAL_AGENT_PERMISSIONS, "organization.write"])
 )
 _CURATOR_AGENT_PERMISSIONS = list(_OPERATIONAL_AGENT_PERMISSIONS)
+_CONDUCTOR_AGENT_PERMISSIONS = [
+    "workspace.read",
+    "retrieval.read",
+    "retrieval.search",
+    "methodics.read",
+    "methodics.execute",
+]
 
 _CURATOR_CONTROL_PLANE_ALLOWLIST = [
     "session.get_identity",
@@ -124,6 +143,8 @@ _CURATOR_CONTROL_PLANE_ALLOWLIST = [
     "memory.workspace.list",
     "memory.workspace.create",
     "memory.thread.search",
+    "methodics.executions.list",
+    "methodics.executions.get",
     "agent_catalog.list",
     "agent_catalog.bundle.validate",
     "agent_catalog.bundle.publish",
@@ -142,12 +163,49 @@ _CURATOR_CONTROL_PLANE_ALLOWLIST = [
     "agent_git.commit.push",
     "iam.agent_identities.list",
 ]
+_CONDUCTOR_CONTROL_PLANE_ALLOWLIST = [
+    "session.get_identity",
+    "session.get_permissions",
+    "session.list_scopes",
+    "session.set_scope",
+    "workspaces.get",
+    "threads.create",
+    "threads.list",
+    "threads.get",
+    "threads.timeline.get",
+    "threads.messages.create",
+    "memory.workspace.list",
+    "memory.workspace.create",
+    "memory.thread.search",
+    "retrieval.corpora.list",
+    "retrieval.sources.list",
+    "retrieval.search",
+    "retrieval.context_pack.create",
+    "retrieval.context_pack.get",
+    "methodics.executions.list",
+    "methodics.executions.get",
+    "methodics.resource_requests.create",
+]
+_METHODICS_HUMAN_CONTROL_PLANE_TOOLS = [
+    "methodics.executions.create",
+    "methodics.executions.cancel",
+    "methodics.resource_requests.approve",
+    "methodics.resource_requests.reject",
+]
 _STEWARD_CONTROL_PLANE_ALLOWLIST = [
     "organizations.list",
     "organizations.create",
     *_CURATOR_CONTROL_PLANE_ALLOWLIST,
 ]
-_CONTROL_PLANE_TOOL_NAMES = list(dict.fromkeys(_STEWARD_CONTROL_PLANE_ALLOWLIST))
+_CONTROL_PLANE_TOOL_NAMES = list(
+    dict.fromkeys(
+        [
+            *_STEWARD_CONTROL_PLANE_ALLOWLIST,
+            *_CONDUCTOR_CONTROL_PLANE_ALLOWLIST,
+            *_METHODICS_HUMAN_CONTROL_PLANE_TOOLS,
+        ]
+    )
+)
 _CONTROL_PLANE_TOOL_DENYLIST = [
     "agent_git.file.delete",
     "agent_git.worktree.discard",
@@ -400,9 +458,16 @@ class ManagedSystemDefaultsRepairer:
         steward = next(
             agent for agent in global_agents if agent.agent_key == "steward"
         )
+        conductor = next(
+            agent for agent in global_agents if agent.agent_key == "conductor"
+        )
         await self._repository.upsert_iam_role_definition(
             conn,
             self._platform_steward_iam_role(now=now),
+        )
+        await self._repository.upsert_iam_role_definition(
+            conn,
+            self._global_conductor_iam_role(now=now),
         )
         await self._repository.upsert_agent_internal_mcp_server(
             conn,
@@ -412,8 +477,16 @@ class ManagedSystemDefaultsRepairer:
                 now=now,
             ),
         )
-        summary["iam_roles"] += 1
-        summary["internal_mcp_bindings"] += 1
+        await self._repository.upsert_agent_internal_mcp_server(
+            conn,
+            binding=self._conductor_internal_mcp_binding(
+                agent_id=conductor.agent_id,
+                server_id=control_plane.server_id,
+                now=now,
+            ),
+        )
+        summary["iam_roles"] += 2
+        summary["internal_mcp_bindings"] += 2
         return control_plane, {
             agent.agent_key: agent
             for agent in global_agents
@@ -813,6 +886,8 @@ class ManagedSystemDefaultsRepairer:
             ("global", None, "tinker", self._tinker_agent_definition),
             ("global", None, "steward", self._steward_agent_definition),
             ("global", None, "anchor", self._anchor_agent_definition),
+            ("global", None, "methodologist", self._methodologist_agent_definition),
+            ("global", None, "conductor", self._conductor_agent_definition),
         ]:
             existing = await self._find_system_agent_by_key(
                 scope=scope,
@@ -1216,6 +1291,369 @@ class ManagedSystemDefaultsRepairer:
         )
 
     @staticmethod
+    def _methodologist_agent_definition(*, now: datetime) -> AgentDefinition:
+        return AgentDefinition(
+            agent_id=METHODOLOGIST_AGENT_ID,
+            agent_key="methodologist",
+            scope="global",
+            organization_id=None,
+            display_name="Methodologist",
+            description=(
+                "Extracts methodology basis, methodics, methods, actors, tools, and "
+                "workspace implementation templates from cited domain source material."
+            ),
+            role="methodology extraction and workspace design agent",
+            capabilities=[
+                "analyzes narrow-domain books and source corpora through cited retrieval evidence",
+                "extracts methodology basis including ontology axiology epistemology and principles",
+                "derives methodics as high-level repeatable steps for achieving a stated goal",
+                "separates source-grounded methods from inferred implementation tools and automations",
+                "proposes human and agent actor responsibilities for workspace execution",
+                "drafts project and workspace template structures with harness methodology methodics and execution rules",
+            ],
+            endpoint=AgentEndpoint(
+                kind="system",
+                engine_id="local-ollama",
+                provider="ollama",
+            ),
+            system_prompt=(
+                "You are Methodologist. Analyze cited source material for a narrow domain and "
+                "extract the methodology basis, methodics, concrete methods, required actors, "
+                "candidate tools, and a project/workspace template for implementing the approach. "
+                "Use retrieval/context-pack evidence as the authority for source-derived claims. "
+                "Clearly separate what the source states from what you infer or ideate for Open Talon "
+                "implementation. Do not invent citations, and ask for more source material or a clearer "
+                "target goal when evidence is insufficient."
+            ),
+            harness=AgentHarness(
+                version=1,
+                summary=(
+                    "Evidence-first methodology extraction harness for turning source corpora into "
+                    "workspace-ready operating templates."
+                ),
+                operating_principles=[
+                    "Start from the user's target goal and the cited source corpus; do not treat general knowledge as book evidence.",
+                    "Separate methodology basis, methodics, methods, tools, actors, artifacts, and workspace template decisions.",
+                    "Keep source-grounded extraction distinct from implementation ideation.",
+                    "Preserve citations for claims that come from the source material.",
+                    "Expose uncertainty, missing coverage, and assumptions instead of overfitting a thin source set.",
+                    "Design workspace templates in terms of existing Open Talon concepts: project, workspace harness, methodology, methodics, execution rules, participants, tools, retrieval corpora, and artifacts.",
+                ],
+                planning=AgentPlanningPolicy(
+                    plan_before_act=True,
+                    incremental_execution=True,
+                    one_goal_at_a_time=True,
+                    explicit_uncertainty=True,
+                    guidance=[
+                        "Identify the domain, target outcome, source boundaries, and expected template consumer before synthesizing.",
+                        "Use an extraction pass before the design pass.",
+                        "Do a final consistency pass that maps each recommended methodic to evidence, actors, tools, and expected artifacts.",
+                    ],
+                ),
+                tool_use_policy=AgentToolUsePolicy(
+                    prefer_existing_workspace_tools=True,
+                    read_before_write=True,
+                    inspect_schema_before_use=True,
+                    cite_tool_results_in_reasoning=True,
+                    verify_side_effects_after_mutation=True,
+                    selection_principles=[
+                        "Use retrieval search or context packs for source evidence before synthesis.",
+                        "Inspect existing workspace harness, files, and retrieval corpora before proposing changes.",
+                        "Use authoring or catalog tools only when the user asks to materialize the template.",
+                    ],
+                    fallback_when_no_tool_fits=(
+                        "Return a cited analysis and explicit template draft from the visible context; "
+                        "ask for ingestion or source access when evidence is missing."
+                    ),
+                ),
+                memory_policy=AgentMemoryPolicy(
+                    use_run_memory=True,
+                    use_thread_memory=True,
+                    use_workspace_memory=True,
+                ),
+                validation_policy=AgentValidationPolicy(
+                    required_checks=[
+                        "Every source-derived methodology or methodic claim has cited evidence or is marked as an inference.",
+                        "The output distinguishes Methodology, Methodics, Methods, Tools, Actors, and Workspace Template.",
+                        "Each methodic includes goal, applicability, ordered steps, expected artifacts, and verification criteria.",
+                        "Tool recommendations state whether they are source-stated, derived from a method, or implementation ideation.",
+                        "Workspace template recommendations map to existing Open Talon harness fields where possible.",
+                    ],
+                    require_evidence_for_claims=True,
+                    require_tool_results_for_completion=False,
+                    require_tests_before_done=False,
+                ),
+                stop_policy=AgentStopPolicy(
+                    completion_conditions=[
+                        "Return a cited methodology extraction and a workspace-ready template draft, or identify the missing source/goal needed to do so."
+                    ],
+                    stop_conditions=[
+                        "Do not continue into implementation unless the user explicitly asks to materialize the template."
+                    ],
+                ),
+                metadata={
+                    "seeded": True,
+                    "managed": True,
+                    "agent_key": "methodologist",
+                    "methodology_agent": True,
+                },
+            ),
+            interaction_contract=AgentInteractionContract(
+                instructions=[
+                    "Operate as Methodologist, the methodology extraction and workspace design agent.",
+                    "Use cited retrieval or visible source evidence for source-derived claims.",
+                    "Separate source-grounded extraction from implementation ideation.",
+                    "When evidence is missing, state the gap and ask for ingestion, corpus selection, or a clearer target goal.",
+                    "Return a structure that can be translated into an Open Talon workspace harness.",
+                ],
+                response_contract=AgentResponseContract(
+                    format="markdown",
+                    title="Methodology Extraction And Workspace Template",
+                    required_sections=[
+                        "Source Scope",
+                        "Target Goal",
+                        "Methodology Basis",
+                        "Methodics",
+                        "Methods And Tools",
+                        "Actors",
+                        "Workspace Template",
+                        "Evidence And Gaps",
+                        "Next Actions",
+                    ],
+                    guidance=[
+                        "Cite source evidence for extracted methodology and methodics.",
+                        "Mark inferred or ideated tools explicitly.",
+                        "Represent methodics as ordered high-level steps with artifacts and verification criteria.",
+                        "Keep workspace-template recommendations compatible with `WorkspaceHarness.methodology`, `methodics`, and `execution_rules`.",
+                    ],
+                ),
+                completion_criteria=[
+                    "The source scope, target goal, and evidence gaps are explicit.",
+                    "Methodology basis and methodics are separated from methods, tools, and actors.",
+                    "The workspace template can guide creating or updating a project/workspace.",
+                ],
+                metadata={"contract_version": 1, "seeded": True, "agent_key": "methodologist"},
+            ),
+            definition={
+                "runtime": {
+                    "engine_id": "local-ollama",
+                    "provider": "ollama",
+                    "preferred_capabilities": ["local", "ollama", "reasoning"],
+                    "preferred_locality": "host",
+                },
+                "seeded": True,
+                "managed": True,
+                "agent_key": "methodologist",
+                "methodology_agent": True,
+                "output_targets": {
+                    "workspace_harness_fields": [
+                        "methodology",
+                        "methodics",
+                        "execution_rules",
+                        "metadata",
+                    ],
+                    "template_sections": [
+                        "project",
+                        "workspace",
+                        "retrieval_corpora",
+                        "participants",
+                        "tools",
+                        "artifacts",
+                    ],
+                },
+            },
+            created_by=SYSTEM_ACTOR_ID,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "managed": True,
+                "seeded": True,
+                "agent_key": "methodologist",
+                "methodology_agent": True,
+            },
+        )
+
+    @staticmethod
+    def _conductor_agent_definition(*, now: datetime) -> AgentDefinition:
+        accepted_task_kinds = [
+            METHODICS_EXECUTION_START_TASK_KIND,
+            METHODICS_STEP_COORDINATE_TASK_KIND,
+            METHODICS_STEP_VERIFY_TASK_KIND,
+            METHODICS_RESOURCE_REVIEW_TASK_KIND,
+        ]
+        return AgentDefinition(
+            agent_id=CONDUCTOR_AGENT_ID,
+            agent_key="conductor",
+            scope="global",
+            organization_id=None,
+            display_name="Conductor",
+            description=(
+                "Coordinates active workspace methodics only when explicitly attached "
+                "to the workspace and an execution is started."
+            ),
+            role="workspace methodics execution conductor",
+            capabilities=[
+                "coordinates active WorkspaceHarness methodics through explicit execution state",
+                "creates targeted assignments and interaction requests for workspace participants",
+                "verifies definition of done evidence before advancing methodic steps",
+                "proposes human-gated resource attachment requests for users agents tools MCP servers assets and retrieval resources",
+                "tracks methodics execution progress until completion cancellation failure or rework",
+            ],
+            endpoint=AgentEndpoint(
+                kind="system",
+                engine_id="local-ollama",
+                provider="ollama",
+            ),
+            system_prompt=(
+                "You are Conductor. Execute active workspace methodics only for a started "
+                "methodic execution in a workspace where you are already attached. Use the "
+                "execution snapshot, current step state, assignments, checks, resource requests, "
+                "and visible workspace evidence as the source of truth. Coordinate participants "
+                "through targeted tasks, interaction requests, messages, and artifacts. Verify "
+                "definition of done evidence before advancing. Propose resource attachments for "
+                "authorized human approval instead of attaching users, agents, tools, MCP servers, "
+                "assets, or retrieval resources yourself."
+            ),
+            harness=AgentHarness(
+                version=1,
+                summary=(
+                    "Workspace methodics execution harness for explicit, opt-in Conductor "
+                    "orchestration."
+                ),
+                operating_principles=[
+                    "Do nothing unless a targeted methodics execution task is assigned.",
+                    "Treat the methodics snapshot captured at execution start as the execution contract.",
+                    "Coordinate one active methodic step at a time unless the snapshot explicitly supports parallel work.",
+                    "Create clear assignments with expected evidence and definition of done.",
+                    "Verify evidence before marking a step passed; create rework when evidence is missing or weak.",
+                    "Request resource attachments through human-gated methodic resource requests.",
+                    "Keep ordinary workspace conversation unaffected when Conductor is not attached or no execution is active.",
+                ],
+                planning=AgentPlanningPolicy(
+                    plan_before_act=True,
+                    incremental_execution=True,
+                    one_goal_at_a_time=True,
+                    explicit_uncertainty=True,
+                    guidance=[
+                        "Start by reading execution state, current step, open assignments, checks, and resource requests.",
+                        "Prefer targeted coordination over broad message fanout.",
+                        "Record next action, blocker, or verification decision in execution state.",
+                    ],
+                ),
+                tool_use_policy=AgentToolUsePolicy(
+                    prefer_existing_workspace_tools=True,
+                    read_before_write=True,
+                    inspect_schema_before_use=True,
+                    cite_tool_results_in_reasoning=True,
+                    verify_side_effects_after_mutation=True,
+                    selection_principles=[
+                        "Use MCP methodics tools to read and update execution state when available.",
+                        "Use collaboration tools to create assignments, messages, and interaction requests.",
+                        "Use retrieval only for evidence needed by the current methodic step.",
+                    ],
+                    fallback_when_no_tool_fits=(
+                        "Return a concise execution status with the next required human or agent action."
+                    ),
+                ),
+                memory_policy=AgentMemoryPolicy(
+                    use_run_memory=True,
+                    use_thread_memory=True,
+                    use_workspace_memory=True,
+                ),
+                validation_policy=AgentValidationPolicy(
+                    required_checks=[
+                        "The execution id, current step, and methodics snapshot are explicit.",
+                        "Assignments identify assignee, required evidence, and definition of done.",
+                        "Step verification cites concrete evidence or records why evidence is insufficient.",
+                        "Resource attachments remain pending human approval until explicitly approved.",
+                    ],
+                    require_evidence_for_claims=True,
+                    require_tool_results_for_completion=False,
+                    require_tests_before_done=False,
+                ),
+                stop_policy=AgentStopPolicy(
+                    completion_conditions=[
+                        "The current methodic execution task has a recorded coordination, verification, resource request, or status update."
+                    ],
+                    stop_conditions=[
+                        "Do not continue executing methodics outside the active execution snapshot."
+                    ],
+                ),
+                metadata={
+                    "seeded": True,
+                    "managed": True,
+                    "agent_key": "conductor",
+                    "methodics_execution_agent": True,
+                },
+            ),
+            interaction_contract=AgentInteractionContract(
+                instructions=[
+                    "Operate as Conductor, the workspace methodics execution conductor.",
+                    "Respond only to targeted methodics execution tasks.",
+                    "Use the active methodic execution state and snapshot as the authority.",
+                    "Coordinate participants through explicit assignments and interaction requests.",
+                    "Verify definition of done evidence before advancing or completing steps.",
+                    "Create human-gated resource requests instead of attaching resources directly.",
+                ],
+                response_contract=AgentResponseContract(
+                    format="markdown",
+                    title="Methodics Execution Update",
+                    required_sections=[
+                        "Execution State",
+                        "Current Step",
+                        "Assignments",
+                        "DoD Verification",
+                        "Resource Requests",
+                        "Next Action",
+                    ],
+                    guidance=[
+                        "Keep updates operational and tied to execution ids and step ids.",
+                        "State whether the current step is coordinating, verifying, blocked, rework, or passed.",
+                        "List only resource requests that require human approval.",
+                    ],
+                ),
+                completion_criteria=[
+                    "The execution status and current step are clear.",
+                    "Any next assignment, verification decision, rework, or resource request is explicit.",
+                    "The update does not imply automatic orchestration when Conductor is not attached.",
+                ],
+                metadata={"contract_version": 1, "seeded": True, "agent_key": "conductor"},
+            ),
+            definition={
+                "runtime": {
+                    "engine_id": "local-ollama",
+                    "provider": "ollama",
+                    "preferred_capabilities": ["local", "ollama", "reasoning"],
+                    "preferred_locality": "host",
+                },
+                "seeded": True,
+                "managed": True,
+                "agent_key": "conductor",
+                "methodics_execution_agent": True,
+                "task_routing": {
+                    "normal_message_fanout": False,
+                    "accepted_task_kinds": accepted_task_kinds,
+                },
+                "execution_source": "WorkspaceHarness.methodics",
+                "resource_attachment_policy": "human_gated",
+                "dod_verification": "agent_only",
+            },
+            created_by=SYSTEM_ACTOR_ID,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "managed": True,
+                "seeded": True,
+                "agent_key": "conductor",
+                "methodics_execution_agent": True,
+                "task_routing": {
+                    "normal_message_fanout": False,
+                    "accepted_task_kinds": accepted_task_kinds,
+                },
+            },
+        )
+
+    @staticmethod
     def _platform_steward_iam_role(*, now: datetime) -> IamRoleDefinition:
         return IamRoleDefinition(
             role_id=PLATFORM_STEWARD_ROLE_ID,
@@ -1228,6 +1666,24 @@ class ManagedSystemDefaultsRepairer:
             created_at=now,
             updated_at=now,
             metadata={"seeded": True, "managed": True, "agent_key": "steward"},
+        )
+
+    @staticmethod
+    def _global_conductor_iam_role(*, now: datetime) -> IamRoleDefinition:
+        return IamRoleDefinition(
+            role_id=GLOBAL_CONDUCTOR_ROLE_ID,
+            scope="global",
+            subject_kind="agent",
+            organization_id=None,
+            name="workspace_conductor",
+            description=(
+                "Least-privilege workspace methodics execution permissions for "
+                "Conductor after explicit workspace attachment."
+            ),
+            permissions=list(_CONDUCTOR_AGENT_PERMISSIONS),
+            created_at=now,
+            updated_at=now,
+            metadata={"seeded": True, "managed": True, "agent_key": "conductor"},
         )
 
     async def _control_plane_mcp_server(self, *, now: datetime) -> McpServerDefinition:
@@ -1290,6 +1746,35 @@ class ManagedSystemDefaultsRepairer:
             attached_at=now,
             updated_at=now,
             metadata={"seeded": True, "managed": True, "agent_key": "steward"},
+        )
+
+    @staticmethod
+    def _conductor_internal_mcp_binding(
+        *,
+        agent_id: UUID,
+        server_id: UUID,
+        now: datetime,
+    ) -> AgentInternalMcpServer:
+        return AgentInternalMcpServer(
+            system_agent_id=agent_id,
+            server_id=server_id,
+            server_key="open_talon_control_plane",
+            display_name="Open Talon Control Plane",
+            description=(
+                "Managed MCP server exposing Conductor-safe workspace coordination APIs."
+            ),
+            transport_kind="streamable_http",
+            trust_level="trusted",
+            name_prefix="control_plane__",
+            tool_allowlist=list(_CONDUCTOR_CONTROL_PLANE_ALLOWLIST),
+            tool_denylist=[
+                *_METHODICS_HUMAN_CONTROL_PLANE_TOOLS,
+                *_CONTROL_PLANE_TOOL_DENYLIST,
+            ],
+            attached_by=SYSTEM_ACTOR_ID,
+            attached_at=now,
+            updated_at=now,
+            metadata={"seeded": True, "managed": True, "agent_key": "conductor"},
         )
 
     async def _tinker_internal_tools(self, *, now: datetime) -> list[SystemToolDefinition]:

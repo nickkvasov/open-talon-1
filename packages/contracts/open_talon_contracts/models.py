@@ -65,6 +65,23 @@ RetrievalIngestionStage = Literal[
 RetrievalChunkKind = Literal["text", "visual", "table", "metadata"]
 RetrievalSearchStrategy = Literal["vector", "keyword", "hybrid"]
 RetrievalRunKind = Literal["search", "context_pack"]
+MethodicExecutionStatus = Literal["submitted", "running", "completed", "cancelled", "failed"]
+MethodicExecutionStepStatus = Literal["pending", "active", "blocked", "passed", "failed", "rework", "skipped"]
+MethodicExecutionAssignmentStatus = Literal["created", "waiting", "completed", "cancelled", "failed"]
+MethodicExecutionAssignmentKind = Literal["interaction_request", "agent_task", "message", "manual"]
+MethodicExecutionCheckStatus = Literal["passed", "failed", "inconclusive"]
+MethodicResourceRequestStatus = Literal["pending", "approved", "rejected", "cancelled"]
+MethodicResourceKind = Literal[
+    "user",
+    "agent",
+    "tool",
+    "mcp_server",
+    "asset",
+    "retrieval_corpus",
+    "retrieval_source",
+    "other",
+]
+MethodicResourceAction = Literal["attach", "link", "activate", "configure", "invite", "other"]
 AuditScopeType = Literal["global", "organization", "workspace", "thread"]
 AuditActorType = Literal["user", "agent", "system", "api_key", "unknown"]
 AuditOutcome = Literal["success", "failure", "denied", "error"]
@@ -193,6 +210,8 @@ class TargetRef(BaseModel):
         "interaction_answer",
         "tool_generation_request",
         "tool_generation_revision",
+        "methodic_execution",
+        "methodic_resource_request",
     ]
     id: UUID
 
@@ -1252,6 +1271,115 @@ class RetrievalSearchResponse(BaseModel):
     context_pack: RetrievalContextPack | None = None
 
 
+class MethodicExecution(BaseModel):
+    execution_id: UUID
+    workspace_id: UUID
+    organization_id: UUID | None = None
+    thread_id: UUID | None = None
+    conductor_system_agent_id: UUID
+    conductor_participant_id: UUID
+    status: MethodicExecutionStatus = "submitted"
+    target_goal: str | None = None
+    current_step_execution_id: UUID | None = None
+    started_by: UUID
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    cancelled_at: datetime | None = None
+    error: str | None = None
+    harness_snapshot: dict[str, Any] = Field(default_factory=dict)
+    methodics_snapshot: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodicExecutionStep(BaseModel):
+    step_execution_id: UUID
+    execution_id: UUID
+    workspace_id: UUID
+    methodic_index: int = 0
+    step_index: int = 0
+    methodic_name: str
+    name: str
+    instruction: str
+    status: MethodicExecutionStepStatus = "pending"
+    expected_artifacts: list[str] = Field(default_factory=list)
+    verification: list[str] = Field(default_factory=list)
+    definition_of_done: list[str] = Field(default_factory=list)
+    evidence_refs: list[dict[str, Any]] = Field(default_factory=list)
+    assigned_participant_id: UUID | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodicExecutionAssignment(BaseModel):
+    assignment_id: UUID
+    execution_id: UUID
+    step_execution_id: UUID
+    workspace_id: UUID
+    assignment_kind: MethodicExecutionAssignmentKind = "manual"
+    status: MethodicExecutionAssignmentStatus = "created"
+    title: str
+    instructions: str | None = None
+    assignee_participant_id: UUID | None = None
+    assignee_system_agent_id: UUID | None = None
+    interaction_request_id: UUID | None = None
+    task_id: UUID | None = None
+    run_id: UUID | None = None
+    artifact_id: UUID | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    completed_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodicExecutionCheck(BaseModel):
+    check_id: UUID
+    execution_id: UUID
+    step_execution_id: UUID
+    workspace_id: UUID
+    status: MethodicExecutionCheckStatus = "inconclusive"
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    reason: str | None = None
+    evidence_refs: list[dict[str, Any]] = Field(default_factory=list)
+    checked_by_system_agent_id: UUID | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodicResourceRequest(BaseModel):
+    resource_request_id: UUID
+    execution_id: UUID
+    workspace_id: UUID
+    step_execution_id: UUID | None = None
+    resource_kind: MethodicResourceKind = "other"
+    action: MethodicResourceAction = "other"
+    status: MethodicResourceRequestStatus = "pending"
+    title: str
+    description: str | None = None
+    required_permission: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    requested_by_system_agent_id: UUID | None = None
+    approved_by: UUID | None = None
+    rejected_by: UUID | None = None
+    decided_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodicExecutionDetail(BaseModel):
+    execution: MethodicExecution
+    steps: list[MethodicExecutionStep] = Field(default_factory=list)
+    assignments: list[MethodicExecutionAssignment] = Field(default_factory=list)
+    checks: list[MethodicExecutionCheck] = Field(default_factory=list)
+    resource_requests: list[MethodicResourceRequest] = Field(default_factory=list)
+
+
 class AgentDefinitionVersion(BaseModel):
     agent_version_id: UUID
     agent_id: UUID
@@ -2292,6 +2420,38 @@ class CreateRetrievalContextPackRequest(BaseModel):
     metadata_filters: dict[str, Any] = Field(default_factory=dict)
     context_token_budget: int | None = Field(default=None, ge=1)
     provider_overrides: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateMethodicExecutionRequest(BaseModel):
+    actor: ParticipantInput
+    thread_id: UUID | None = None
+    target_goal: str | None = None
+    methodic_indexes: list[int] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CancelMethodicExecutionRequest(BaseModel):
+    actor: ParticipantInput
+    reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateMethodicResourceRequestRequest(BaseModel):
+    actor: ParticipantInput
+    step_execution_id: UUID | None = None
+    resource_kind: MethodicResourceKind = "other"
+    action: MethodicResourceAction = "other"
+    title: str
+    description: str | None = None
+    required_permission: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReviewMethodicResourceRequest(BaseModel):
+    actor: ParticipantInput
+    reason: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

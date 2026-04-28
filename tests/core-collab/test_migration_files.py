@@ -79,3 +79,57 @@ def test_retrieval_service_migration_declares_scoped_tables_and_indexes() -> Non
     assert "embedding vector" in sql
     assert "REFERENCES workspace_assets(asset_id)" in sql
     assert "REFERENCES workspace_asset_versions(asset_version_id)" in sql
+
+
+def test_methodics_execution_migration_declares_execution_tables_and_indexes() -> None:
+    sql = (
+        MIGRATIONS_DIR / "20260427191618_add_methodics_execution_state.sql"
+    ).read_text(encoding="utf-8")
+
+    for table_name in (
+        "methodic_executions",
+        "methodic_execution_steps",
+        "methodic_execution_assignments",
+        "methodic_execution_checks",
+        "methodic_resource_requests",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table_name}" in sql
+    assert "methodic_executions_status_check" in sql
+    assert "methodic_execution_steps_status_check" in sql
+    assert "methodic_resource_requests_status_check" in sql
+    assert "idx_methodic_executions_workspace_created" in sql
+    assert "REFERENCES participants(participant_id)" in sql
+    assert "REFERENCES system_agents(agent_id)" in sql
+
+
+def test_methodologist_conductor_seed_migration_declares_managed_agent_contracts() -> None:
+    sql = (
+        MIGRATIONS_DIR / "20260427180423_seed_methodologist_and_conductor_agents.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "'methodologist'" in sql
+    assert "'conductor'" in sql
+    assert "methodics_execution_start" in sql
+    assert "normal_message_fanout" in sql
+
+
+def test_conductor_control_plane_migration_declares_human_gates() -> None:
+    sql = (
+        MIGRATIONS_DIR / "20260427200100_add_conductor_control_plane_binding.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "'workspace_conductor'" in sql
+    assert "methodics.resource_requests.approve" in sql
+    assert "agent_internal_mcp_servers" in sql
+    assert "human_gated" in sql
+    assert "methodics.executions.create" in sql
+    assert "methodics.executions.get" in sql
+
+
+def test_methodic_resource_request_create_migration_adds_conductor_tool() -> None:
+    sql = (
+        MIGRATIONS_DIR / "20260427200200_add_methodic_resource_request_create_mcp.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "methodics.resource_requests.create" in sql
+    assert "agent_key = 'conductor'" in sql

@@ -29,10 +29,13 @@ from gateway_edge.models import (
     AuditChainVerificationResult,
     AuditEventPage,
     AuditExportRequest,
+    CancelMethodicExecutionRequest,
     CreateAgentGitWorktreeSessionRequest,
     CreateGitRepositoryRequest,
     CreateInteractionRequest,
     CreateMemoryEntryRequest,
+    CreateMethodicExecutionRequest,
+    CreateMethodicResourceRequestRequest,
     CreateMessageRequest,
     CreateOrganizationRequest,
     CreateProjectRequest,
@@ -44,6 +47,9 @@ from gateway_edge.models import (
     LlmProviderDefinition,
     MemoryProviderDefinition,
     MemorySearchResponse,
+    MethodicExecution,
+    MethodicExecutionDetail,
+    MethodicResourceRequest,
     McpServerDefinition,
     Organization,
     OrganizationMembership,
@@ -59,6 +65,7 @@ from gateway_edge.models import (
     RetrievalSearchResponse,
     RetrievalSource,
     RunRetrievalSearchRequest,
+    ReviewMethodicResourceRequest,
     SystemToolDefinition,
     Thread,
     ThreadDetail,
@@ -227,6 +234,45 @@ class RetrievalContextPackGetArgs(BaseModel):
     context_pack_id: UUID
 
 
+class MethodicsExecutionsCreateArgs(BaseModel):
+    thread_id: UUID | None = None
+    target_goal: str | None = None
+    methodic_indexes: list[int] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodicsExecutionsListArgs(BaseModel):
+    status: str | None = None
+
+
+class MethodicsExecutionGetArgs(BaseModel):
+    execution_id: UUID
+
+
+class MethodicsExecutionCancelArgs(BaseModel):
+    execution_id: UUID
+    reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodicsResourceRequestCreateArgs(BaseModel):
+    execution_id: UUID
+    step_execution_id: UUID | None = None
+    resource_kind: str = "other"
+    action: str = "other"
+    title: str
+    description: str | None = None
+    required_permission: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodicsResourceRequestReviewArgs(BaseModel):
+    resource_request_id: UUID
+    reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class AuditEventsListArgs(BaseModel):
     organization_id: UUID | None = None
     workspace_id: UUID | None = None
@@ -318,6 +364,7 @@ class OperationDefinition:
     required_permission: str | None
     required_project_permission: str | None = None
     requires_workspace_actor: bool = False
+    requires_human_principal: bool = False
     handler_name: str = ""
 
     @property
@@ -511,6 +558,8 @@ class McpApiContext:
 
     async def operation_visible(self, operation: OperationDefinition) -> bool:
         if self.active_scope_kind not in operation.allowed_scopes:
+            return False
+        if operation.requires_human_principal and self.auth_context.principal_type != "human":
             return False
         try:
             await self._authorize_operation(operation)
@@ -1183,6 +1232,87 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             requires_workspace_actor=True,
             handler_name="handle_retrieval_context_pack_get",
         ),
+        "methodics.executions.create": OperationDefinition(
+            name="methodics.executions.create",
+            description="Start explicit Conductor execution of active workspace methodics.",
+            input_model=MethodicsExecutionsCreateArgs,
+            output_schema=_type_schema(MethodicExecutionDetail),
+            allowed_scopes=frozenset({"workspace"}),
+            required_permission_type="workspace",
+            required_permission="methodics.execute",
+            requires_workspace_actor=True,
+            requires_human_principal=True,
+            handler_name="handle_methodics_executions_create",
+        ),
+        "methodics.executions.list": OperationDefinition(
+            name="methodics.executions.list",
+            description="List methodics executions in the active workspace.",
+            input_model=MethodicsExecutionsListArgs,
+            output_schema=_type_schema(list[MethodicExecution]),
+            allowed_scopes=frozenset({"workspace"}),
+            required_permission_type="workspace",
+            required_permission="methodics.read",
+            requires_workspace_actor=True,
+            handler_name="handle_methodics_executions_list",
+        ),
+        "methodics.executions.get": OperationDefinition(
+            name="methodics.executions.get",
+            description="Read a methodics execution and related steps, checks, assignments, and resource requests.",
+            input_model=MethodicsExecutionGetArgs,
+            output_schema=_type_schema(MethodicExecutionDetail),
+            allowed_scopes=frozenset({"workspace"}),
+            required_permission_type="workspace",
+            required_permission="methodics.read",
+            requires_workspace_actor=True,
+            handler_name="handle_methodics_executions_get",
+        ),
+        "methodics.executions.cancel": OperationDefinition(
+            name="methodics.executions.cancel",
+            description="Cancel an active methodics execution in the active workspace.",
+            input_model=MethodicsExecutionCancelArgs,
+            output_schema=_type_schema(MethodicExecutionDetail),
+            allowed_scopes=frozenset({"workspace"}),
+            required_permission_type="workspace",
+            required_permission="methodics.execute",
+            requires_workspace_actor=True,
+            requires_human_principal=True,
+            handler_name="handle_methodics_executions_cancel",
+        ),
+        "methodics.resource_requests.approve": OperationDefinition(
+            name="methodics.resource_requests.approve",
+            description="Approve a pending Conductor resource attachment request.",
+            input_model=MethodicsResourceRequestReviewArgs,
+            output_schema=_type_schema(MethodicResourceRequest),
+            allowed_scopes=frozenset({"workspace"}),
+            required_permission_type="workspace",
+            required_permission="methodics.admin",
+            requires_workspace_actor=True,
+            requires_human_principal=True,
+            handler_name="handle_methodics_resource_requests_approve",
+        ),
+        "methodics.resource_requests.create": OperationDefinition(
+            name="methodics.resource_requests.create",
+            description="Create a pending human-gated Conductor resource attachment request.",
+            input_model=MethodicsResourceRequestCreateArgs,
+            output_schema=_type_schema(MethodicResourceRequest),
+            allowed_scopes=frozenset({"workspace"}),
+            required_permission_type="workspace",
+            required_permission="methodics.execute",
+            requires_workspace_actor=True,
+            handler_name="handle_methodics_resource_requests_create",
+        ),
+        "methodics.resource_requests.reject": OperationDefinition(
+            name="methodics.resource_requests.reject",
+            description="Reject a pending Conductor resource attachment request.",
+            input_model=MethodicsResourceRequestReviewArgs,
+            output_schema=_type_schema(MethodicResourceRequest),
+            allowed_scopes=frozenset({"workspace"}),
+            required_permission_type="workspace",
+            required_permission="methodics.admin",
+            requires_workspace_actor=True,
+            requires_human_principal=True,
+            handler_name="handle_methodics_resource_requests_reject",
+        ),
         "agent_catalog.list": OperationDefinition(
             name="agent_catalog.list",
             description="List system agents in the current global or organization scope.",
@@ -1828,6 +1958,164 @@ async def handle_retrieval_context_pack_get(
     ):
         raise KeyError(f"Retrieval context pack {args.context_pack_id} not found")
     return context_pack
+
+
+async def _methodics_actor(
+    ctx: McpApiContext,
+    *,
+    permission: str,
+    human_only: bool = False,
+) -> ParticipantInput:
+    if ctx.active_scope_kind != "workspace" or ctx.active_scope_id is None:
+        raise ValueError("Methodics MCP operations require an active workspace scope")
+    if human_only and ctx.auth_context.principal_type != "human":
+        raise PermissionError("Methodics execution control operations require a human principal")
+    resolution = await authorization_engine.authorize(
+        "mcp.methodics.actor",
+        {
+            "auth_context": ctx.auth_context,
+            "permission_type": "workspace",
+            "permission": permission,
+            "workspace_id": ctx.active_scope_id,
+        },
+    )
+    if resolution.workspace_participant is None:
+        raise PermissionError("Methodics MCP operations require a workspace participant")
+    if human_only and resolution.workspace_participant.participant_type != "user":
+        raise PermissionError("Methodics execution control operations require a human participant")
+    return resolution.workspace_participant.model_copy(
+        update={"iam_permissions": sorted(resolution.workspace_permissions)}
+    )
+
+
+async def handle_methodics_executions_create(
+    ctx: McpApiContext,
+    args: MethodicsExecutionsCreateArgs,
+) -> MethodicExecutionDetail:
+    if ctx.active_scope_kind != "workspace" or ctx.active_scope_id is None:
+        raise ValueError("methodics.executions.create requires an active workspace scope")
+    actor = await _methodics_actor(
+        ctx,
+        permission="methodics.execute",
+        human_only=True,
+    )
+    payload = CreateMethodicExecutionRequest(actor=actor, **args.model_dump())
+    return await collab_svc.collaboration_service.create_methodic_execution(
+        ctx.active_scope_id,
+        payload,
+    )
+
+
+async def handle_methodics_executions_list(
+    ctx: McpApiContext,
+    args: MethodicsExecutionsListArgs,
+) -> list[MethodicExecution]:
+    if ctx.active_scope_kind != "workspace" or ctx.active_scope_id is None:
+        raise ValueError("methodics.executions.list requires an active workspace scope")
+    await _methodics_actor(ctx, permission="methodics.read")
+    return await collab_svc.collaboration_service.list_methodic_executions(
+        ctx.active_scope_id,
+        status=args.status,
+    )
+
+
+async def handle_methodics_executions_get(
+    ctx: McpApiContext,
+    args: MethodicsExecutionGetArgs,
+) -> MethodicExecutionDetail:
+    if ctx.active_scope_kind != "workspace" or ctx.active_scope_id is None:
+        raise ValueError("methodics.executions.get requires an active workspace scope")
+    await _methodics_actor(ctx, permission="methodics.read")
+    return await collab_svc.collaboration_service.get_methodic_execution(
+        ctx.active_scope_id,
+        args.execution_id,
+    )
+
+
+async def handle_methodics_executions_cancel(
+    ctx: McpApiContext,
+    args: MethodicsExecutionCancelArgs,
+) -> MethodicExecutionDetail:
+    if ctx.active_scope_kind != "workspace" or ctx.active_scope_id is None:
+        raise ValueError("methodics.executions.cancel requires an active workspace scope")
+    actor = await _methodics_actor(
+        ctx,
+        permission="methodics.execute",
+        human_only=True,
+    )
+    payload = CancelMethodicExecutionRequest(
+        actor=actor,
+        **args.model_dump(exclude={"execution_id"}),
+    )
+    return await collab_svc.collaboration_service.cancel_methodic_execution(
+        ctx.active_scope_id,
+        args.execution_id,
+        payload,
+    )
+
+
+async def handle_methodics_resource_requests_approve(
+    ctx: McpApiContext,
+    args: MethodicsResourceRequestReviewArgs,
+) -> MethodicResourceRequest:
+    if ctx.active_scope_kind != "workspace" or ctx.active_scope_id is None:
+        raise ValueError(
+            "methodics.resource_requests.approve requires an active workspace scope"
+        )
+    actor = await _methodics_actor(
+        ctx,
+        permission="methodics.admin",
+        human_only=True,
+    )
+    payload = ReviewMethodicResourceRequest(actor=actor, **args.model_dump(exclude={"resource_request_id"}))
+    return await collab_svc.collaboration_service.review_methodic_resource_request(
+        ctx.active_scope_id,
+        args.resource_request_id,
+        payload,
+        approved=True,
+    )
+
+
+async def handle_methodics_resource_requests_create(
+    ctx: McpApiContext,
+    args: MethodicsResourceRequestCreateArgs,
+) -> MethodicResourceRequest:
+    if ctx.active_scope_kind != "workspace" or ctx.active_scope_id is None:
+        raise ValueError(
+            "methodics.resource_requests.create requires an active workspace scope"
+        )
+    actor = await _methodics_actor(ctx, permission="methodics.execute")
+    payload = CreateMethodicResourceRequestRequest(
+        actor=actor,
+        **args.model_dump(exclude={"execution_id"}),
+    )
+    return await collab_svc.collaboration_service.create_methodic_resource_request(
+        ctx.active_scope_id,
+        args.execution_id,
+        payload,
+    )
+
+
+async def handle_methodics_resource_requests_reject(
+    ctx: McpApiContext,
+    args: MethodicsResourceRequestReviewArgs,
+) -> MethodicResourceRequest:
+    if ctx.active_scope_kind != "workspace" or ctx.active_scope_id is None:
+        raise ValueError(
+            "methodics.resource_requests.reject requires an active workspace scope"
+        )
+    actor = await _methodics_actor(
+        ctx,
+        permission="methodics.admin",
+        human_only=True,
+    )
+    payload = ReviewMethodicResourceRequest(actor=actor, **args.model_dump(exclude={"resource_request_id"}))
+    return await collab_svc.collaboration_service.review_methodic_resource_request(
+        ctx.active_scope_id,
+        args.resource_request_id,
+        payload,
+        approved=False,
+    )
 
 
 async def handle_agent_catalog_list(ctx: McpApiContext, _: EmptyArgs) -> list[AgentDefinition]:

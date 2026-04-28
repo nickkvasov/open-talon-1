@@ -64,7 +64,7 @@ Primary local flow:
 - Agent identity/configuration lives in `system_agents`.
 - Machine principal linkage lives in `agent_identities`.
 - Global and organization IAM role definitions live in `iam_role_definitions` with separate human and agent bindings.
-- Operational/system-wide agents advertise their purpose through normal agent fields such as `display_name`, `role`, and `capabilities`. Do not add extra operational classification columns unless there is a strict product or authorization need.
+- Operational/system-wide agents and managed specialist agents advertise their purpose through normal agent fields such as `display_name`, `role`, and `capabilities`. Do not add extra operational classification columns unless there is a strict product or authorization need.
 - IAM role bindings, project access, workspace participant attachment, and MCP/tool allowlists are the authority for operational agents; role text is descriptive, not authorization.
 - Runtime execution must stay generic. Do not branch runtime behavior on `agent_key`, display name, role text, capability text, or metadata tags; behavioral specialization belongs in agent definitions, harnesses, interaction contracts, task payloads, IAM/project/workspace bindings, publication-review records, and tool/MCP allowlists.
 - Roles and capabilities are descriptive advertisement plus discovery/routing signals only. They are not an authorization layer and must not be the hidden source of agent-specific runtime behavior.
@@ -113,6 +113,11 @@ Primary local flow:
 - Retriever visual extraction is a vision-LLM workload and should use the shared LLM engine registry. `RetrievalProfile.vision_provider_key` can refer to an engine id such as `local-ollama` or a provider key such as `openai` or `anthropic`; organization-scoped retrieval should include global plus same-organization LLM providers.
 - Retriever visual extraction must prove document understanding, not only object recognition. Chart tests should assert semantic facts such as chart title, labels, approximate values, peaks/highest values, trends, or comparisons rather than accepting vague phrases like "there is a chart."
 - Keep Retriever visual tests realistic but bounded. Prefer public, stable, rights-clear PDF fixtures with documented source/rights, then derive the relevant page or crop at test runtime instead of sending an entire multi-page report through a local vision model unless the test is explicitly about throughput.
+- `Methodologist` is a managed global specialist agent for evidence-backed methodology extraction and workspace template design. Keep it a normal `system_agents` definition with harness and interaction contract behavior; do not add Methodologist-specific runtime branches.
+- Methodologist outputs should separate source-grounded methodology basis, methodics, methods, tools, actors, and workspace templates. Source-derived claims need cited retrieval/source evidence, while inferred tools or implementation ideas must be labeled as inference or ideation.
+- `Conductor` is a separate managed global specialist for active workspace methodics execution. It must be explicitly attached through normal workspace agent attachment, and methodics execution must be explicitly started; workspace creation, Methodologist drafts, and methodics APIs must not auto-attach it.
+- Workspaces without attached Conductor have no active methodics execution loop. Starting execution must return a clear conflict if Conductor is not attached; passive `WorkspaceHarness.methodics` remains guidance only.
+- Conductor uses dedicated `methodic_*` execution tables, targets only methodics task kinds, and sets `normal_message_fanout=false`. Start/cancel and resource request approval/rejection are human-gated. Conductor can read execution state and create pending resource requests through its managed internal MCP binding, but its private allowlist must not include human-gated methodics control tools. DoD verification is agent-only in V1.
 - Local Ollama model roles are configured through `OPEN_TALON_DEFAULT_REASONING_MODEL`, `RETRIEVER_DEFAULT_EMBEDDING_MODEL`, and `RETRIEVER_DEFAULT_VISION_MODEL`. `REQUIRED_MODELS` is only an explicit bootstrap override for the Ollama service, not the canonical place to duplicate model roles.
 - Local live tests that use Ollama must use the infrastructure Ollama service from `infrastructure/docker-compose.yaml`; do not rely on a separately running host Ollama with different models.
 - Memory providers are persistent records in `memory_providers`; do not hardcode provider definitions in application logic after bootstrapping.
@@ -317,6 +322,14 @@ If a change touches operational agents, managed administration contexts, agent-p
 - run `OPEN_TALON_RUN_OPERATIONAL_AGENTS_LIVE=1 pytest -m integration tests/infrastructure/operational_agents_live -q -s` against the real local stack for end-to-end identity, MCP, runtime, and durable `tool_calls` coverage
 - run `OPEN_TALON_RUN_ANCHOR_LIVE=1 pytest -m integration tests/infrastructure/anchor_live_system -q -s` when publication review, Anchor, or workspace topic-moderation behavior changes
 - live tests may need local-service access to Keycloak, OpenBao, and gateway; if sandboxed execution fails with a local network `Operation not permitted`, rerun the same test command with the required escalation rather than weakening the test
+
+If a change touches Methodologist, Conductor, methodics execution, or other managed specialist agents:
+
+- keep the specialist as a normal `system_agents` record with `agent_key`, `display_name`, `role`, `capabilities`, `harness`, and `interaction_contract`; do not branch runtime behavior on the agent key
+- make the response contract explicit enough that outputs can be translated into existing Open Talon structures such as `WorkspaceHarness.methodology`, `methodics`, `execution_rules`, participants, tools, retrieval corpora, and artifacts
+- require cited source evidence for extraction claims and explicit labels for inferred or ideated implementation tools
+- keep Conductor opt-in per workspace: no auto-attach, no normal message fanout, and no active methodics loop unless a start API/MCP call creates execution state
+- run `tests/core-collab/test_agent_contracts.py` and relevant repository migration tests when seeded specialist definitions change
 
 ## Code Change Rules
 

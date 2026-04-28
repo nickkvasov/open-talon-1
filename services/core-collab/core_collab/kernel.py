@@ -70,6 +70,9 @@ from .contracts import (
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
     CreateMcpServerRequest,
+    CancelMethodicExecutionRequest,
+    CreateMethodicExecutionRequest,
+    CreateMethodicResourceRequestRequest,
     CreateOrganizationRequest,
     CreateProjectRequest,
     CreateRetrievalContextPackRequest,
@@ -120,6 +123,12 @@ from .contracts import (
     McpToolDefinition,
     LlmProviderDefinition,
     IamRoleDefinition,
+    MethodicExecution,
+    MethodicExecutionAssignment,
+    MethodicExecutionCheck,
+    MethodicExecutionDetail,
+    MethodicExecutionStep,
+    MethodicResourceRequest,
     Organization,
     OrganizationMembership,
     ParticipantSelector,
@@ -161,6 +170,7 @@ from .contracts import (
     WorkspaceCommunicationLogPage,
     Run,
     ReviewToolGenerationRevisionRequest,
+    ReviewMethodicResourceRequest,
     RotateAgentIdentitySecretRequest,
     StopReason,
     ToolCall,
@@ -214,6 +224,7 @@ from .results import (
     LlmProviderCommandResult,
     MemoryCommandResult,
     MemoryProviderCommandResult,
+    MethodicExecutionCommandResult,
     McpServerCommandResult,
     MessageCommandResult,
     OrganizationCommandResult,
@@ -237,7 +248,9 @@ from .runtime_execution import RuntimeExecutionService
 from .system_defaults import (
     ANCHOR_AGENT_ID,
     ANCHOR_TASK_KIND,
+    CONDUCTOR_AGENT_ID,
     CONTROL_PLANE_MCP_SERVER_ID,
+    METHODICS_EXECUTION_START_TASK_KIND,
     SYSTEM_BASE_ORGANIZATION_ID,
     administration_project_for_organization as managed_administration_project_for_organization,
     anchor_agent_definition as managed_anchor_agent_definition,
@@ -3002,6 +3015,529 @@ class CollaborationKernel:
     ) -> RetrievalContextPack | None:
         return await self._repository.fetch_retrieval_context_pack(context_pack_id)
 
+    async def create_methodic_execution(
+        self,
+        workspace_id: UUID,
+        payload: CreateMethodicExecutionRequest,
+    ) -> MethodicExecutionCommandResult:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        actor_participant = await self._require_workspace_permission(
+            workspace_id,
+            payload.actor,
+            permission="methodics.execute",
+        )
+        conductor = await self._repository.fetch_agent_participant(
+            workspace_id,
+            CONDUCTOR_AGENT_ID,
+        )
+        if conductor is None or conductor.status not in {"active", "idle", "busy"}:
+            raise ValueError(
+                "Conductor must be attached to the workspace before starting methodics execution"
+            )
+        if workspace.harness is None or not workspace.harness.methodics:
+            raise ValueError("Workspace has no active methodics to execute")
+
+        methodics = list(workspace.harness.methodics)
+        if payload.methodic_indexes:
+            invalid = [
+                index
+                for index in payload.methodic_indexes
+                if index < 0 or index >= len(methodics)
+            ]
+            if invalid:
+                raise ValueError(f"Unknown methodic indexes: {invalid}")
+            selected_indexes = list(dict.fromkeys(payload.methodic_indexes))
+        else:
+            selected_indexes = list(range(len(methodics)))
+
+        now = self._now()
+        actor = self._actor_from_input(payload.actor)
+        thread = None
+        thread_memberships: list[Membership] = []
+        thread_events: list[EventEnvelope] = []
+        if payload.thread_id is not None:
+            thread = await self._repository.fetch_thread(payload.thread_id)
+            if thread is None or thread.workspace_id != workspace_id:
+                raise KeyError(f"Thread {payload.thread_id} not found")
+        else:
+            thread = Thread(
+                thread_id=uuid4(),
+                workspace_id=workspace_id,
+                title=f"Methodics execution: {payload.target_goal or workspace.name}",
+                created_at=now,
+                updated_at=now,
+                metadata={
+                    "methodics_execution_thread": True,
+                    "created_by": str(payload.actor.participant_id),
+                },
+            )
+            thread_memberships.append(
+                Membership(
+                    membership_id=uuid4(),
+                    workspace_id=workspace_id,
+                    thread_id=thread.thread_id,
+                    participant_id=actor_participant.participant_id,
+                    role="owner",
+                    permissions=["post_messages", "manage_thread", "edit_memory"],
+                    joined_at=now,
+                    metadata={"source": "methodics_execution_start"},
+                )
+            )
+            thread_memberships.append(
+                Membership(
+                    membership_id=uuid4(),
+                    workspace_id=workspace_id,
+                    thread_id=thread.thread_id,
+                    participant_id=conductor.participant_id,
+                    role="agent",
+                    permissions=["post_messages"],
+                    joined_at=now,
+                    metadata={"source": "methodics_execution_start"},
+                )
+            )
+
+        execution_id = uuid4()
+        steps: list[MethodicExecutionStep] = []
+        selected_methodic_snapshots: list[dict[str, object]] = []
+        for methodic_index in selected_indexes:
+            methodic = methodics[methodic_index]
+            selected_methodic_snapshots.append(
+                {
+                    "methodic_index": methodic_index,
+                    **methodic.model_dump(mode="json"),
+                }
+            )
+            for step_index, step in enumerate(methodic.steps):
+                instruction = step.instruction.strip()
+                if not instruction:
+                    continue
+                name = instruction.splitlines()[0][:96]
+                definition_of_done = list(dict.fromkeys(
+                    [*step.verification, *methodic.success_criteria]
+                ))
+                steps.append(
+                    MethodicExecutionStep(
+                        step_execution_id=uuid4(),
+                        execution_id=execution_id,
+                        workspace_id=workspace_id,
+                        methodic_index=methodic_index,
+                        step_index=step_index,
+                        methodic_name=methodic.name,
+                        name=name,
+                        instruction=instruction,
+                        status="pending",
+                        expected_artifacts=list(step.expected_artifacts),
+                        verification=list(step.verification),
+                        definition_of_done=definition_of_done,
+                        created_at=now,
+                        updated_at=now,
+                        metadata={
+                            "methodic_goal": methodic.goal,
+                            "recommended_tool_patterns": list(step.recommended_tool_patterns),
+                        },
+                    )
+                )
+        if not steps:
+            raise ValueError("Selected workspace methodics have no executable steps")
+
+        first_step = steps[0].model_copy(
+            update={"status": "active", "started_at": now, "updated_at": now}
+        )
+        steps[0] = first_step
+        execution = MethodicExecution(
+            execution_id=execution_id,
+            workspace_id=workspace_id,
+            organization_id=workspace.organization_id,
+            thread_id=thread.thread_id,
+            conductor_system_agent_id=CONDUCTOR_AGENT_ID,
+            conductor_participant_id=conductor.participant_id,
+            status="running",
+            target_goal=payload.target_goal,
+            current_step_execution_id=first_step.step_execution_id,
+            started_by=actor_participant.participant_id,
+            started_at=now,
+            harness_snapshot=workspace.harness.model_dump(mode="json"),
+            methodics_snapshot=selected_methodic_snapshots,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                **payload.metadata,
+                "source": "WorkspaceHarness.methodics",
+                "methodic_indexes": selected_indexes,
+                "conductor_required": True,
+            },
+        )
+        task = Task(
+            task_id=uuid4(),
+            workspace_id=workspace_id,
+            thread_id=thread.thread_id,
+            title=f"Start methodics execution {execution_id}",
+            description="Coordinate the first active methodic execution step.",
+            requested_by=actor_participant.participant_id,
+            visibility="agents_only",
+            correlation_id=uuid4(),
+            causation_id=execution_id,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "target_system_agent_id": str(CONDUCTOR_AGENT_ID),
+                "target_participant_id": str(conductor.participant_id),
+                "response_visibility": "workspace",
+                "routing_reason": METHODICS_EXECUTION_START_TASK_KIND,
+                "task_kind": METHODICS_EXECUTION_START_TASK_KIND,
+                "methodic_execution_id": str(execution_id),
+                "methodic_execution_step_id": str(first_step.step_execution_id),
+                "task_instructions": [
+                    "Read the methodic execution snapshot and coordinate the active first step.",
+                    "Create participant assignments or resource requests as needed.",
+                    "Verify definition of done evidence before advancing the execution.",
+                ],
+            },
+        )
+        assignment = MethodicExecutionAssignment(
+            assignment_id=uuid4(),
+            execution_id=execution_id,
+            step_execution_id=first_step.step_execution_id,
+            workspace_id=workspace_id,
+            assignment_kind="agent_task",
+            status="waiting",
+            title=task.title,
+            instructions=task.description,
+            assignee_participant_id=conductor.participant_id,
+            assignee_system_agent_id=CONDUCTOR_AGENT_ID,
+            task_id=task.task_id,
+            created_by=actor_participant.participant_id,
+            created_at=now,
+            updated_at=now,
+            metadata={"task_kind": METHODICS_EXECUTION_START_TASK_KIND},
+        )
+
+        events: list[EventEnvelope] = []
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                if payload.thread_id is None:
+                    await self._repository.upsert_thread(conn, thread)
+                    for membership in thread_memberships:
+                        await self._repository.upsert_membership(conn, membership)
+                    thread_events.extend(
+                        [
+                            await self._build_thread_event(
+                                conn,
+                                workspace_id,
+                                thread.thread_id,
+                                "thread.created",
+                                actor=actor,
+                                target=TargetRef(type="thread", id=thread.thread_id),
+                                payload=thread.model_dump(mode="json"),
+                                timestamp=now,
+                            ),
+                            await self._build_thread_event(
+                                conn,
+                                workspace_id,
+                                thread.thread_id,
+                                "participant.joined",
+                                actor=actor,
+                                target=TargetRef(
+                                    type="participant",
+                                    id=actor_participant.participant_id,
+                                ),
+                                payload=thread_memberships[0].model_dump(mode="json"),
+                                timestamp=now,
+                            ),
+                            await self._build_thread_event(
+                                conn,
+                                workspace_id,
+                                thread.thread_id,
+                                "participant.joined",
+                                actor=actor,
+                                target=TargetRef(
+                                    type="participant",
+                                    id=conductor.participant_id,
+                                ),
+                                payload=thread_memberships[1].model_dump(mode="json"),
+                                timestamp=now,
+                            ),
+                        ]
+                    )
+                await self._repository.upsert_methodic_execution(conn, execution)
+                for step in steps:
+                    await self._repository.upsert_methodic_execution_step(conn, step)
+                await self._repository.upsert_task(conn, task)
+                await self._repository.upsert_methodic_execution_assignment(
+                    conn,
+                    assignment,
+                )
+                events = [
+                    *thread_events,
+                    await self._build_thread_event(
+                        conn,
+                        workspace_id,
+                        thread.thread_id,
+                        "methodic_execution.started",
+                        actor=actor,
+                        target=TargetRef(type="methodic_execution", id=execution_id),
+                        visibility="workspace",
+                        payload=execution.model_dump(mode="json"),
+                        timestamp=now,
+                        correlation_id=task.correlation_id,
+                        causation_id=execution_id,
+                    ),
+                    EventEnvelope(
+                        event_type="task.created",
+                        workspace_id=workspace_id,
+                        thread_id=thread.thread_id,
+                        actor=actor,
+                        target=TargetRef(type="task", id=task.task_id),
+                        visibility="agents_only",
+                        correlation_id=task.correlation_id,
+                        causation_id=execution_id,
+                        sequence=await self._repository.next_thread_sequence(
+                            conn,
+                            thread.thread_id,
+                        ),
+                        timestamp=now,
+                        payload=task.model_dump(mode="json"),
+                    ),
+                ]
+                for event in events:
+                    await self._repository.record_event(conn, event)
+        detail = await self._repository.get_methodic_execution_detail(execution_id)
+        assert detail is not None
+        return MethodicExecutionCommandResult(detail=detail, events=events)
+
+    async def list_methodic_executions(
+        self,
+        workspace_id: UUID,
+        *,
+        status: str | None = None,
+    ) -> list[MethodicExecution]:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        return await self._repository.list_methodic_executions(
+            workspace_id=workspace_id,
+            status=status,
+        )
+
+    async def get_methodic_execution(
+        self,
+        workspace_id: UUID,
+        execution_id: UUID,
+    ) -> MethodicExecutionDetail:
+        detail = await self._repository.get_methodic_execution_detail(execution_id)
+        if detail is None or detail.execution.workspace_id != workspace_id:
+            raise KeyError(f"Methodic execution {execution_id} not found")
+        return detail
+
+    async def cancel_methodic_execution(
+        self,
+        workspace_id: UUID,
+        execution_id: UUID,
+        payload: CancelMethodicExecutionRequest,
+    ) -> MethodicExecutionCommandResult:
+        await self._require_workspace_permission(
+            workspace_id,
+            payload.actor,
+            permission="methodics.execute",
+        )
+        detail = await self.get_methodic_execution(workspace_id, execution_id)
+        if detail.execution.status in {"completed", "cancelled", "failed"}:
+            return MethodicExecutionCommandResult(detail=detail)
+        now = self._now()
+        execution = detail.execution.model_copy(
+            update={
+                "status": "cancelled",
+                "cancelled_at": now,
+                "updated_at": now,
+                "error": payload.reason,
+                "metadata": {
+                    **detail.execution.metadata,
+                    **payload.metadata,
+                    "cancelled_by": str(payload.actor.participant_id),
+                },
+            }
+        )
+        actor = self._actor_from_input(payload.actor)
+        events: list[EventEnvelope] = []
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_methodic_execution(conn, execution)
+                if execution.thread_id is not None:
+                    event = await self._build_thread_event(
+                        conn,
+                        workspace_id,
+                        execution.thread_id,
+                        "methodic_execution.cancelled",
+                        actor=actor,
+                        target=TargetRef(type="methodic_execution", id=execution_id),
+                        visibility="workspace",
+                        payload=execution.model_dump(mode="json"),
+                        timestamp=now,
+                        causation_id=execution_id,
+                    )
+                    await self._repository.record_event(conn, event)
+                    events.append(event)
+        return MethodicExecutionCommandResult(
+            detail=await self.get_methodic_execution(workspace_id, execution_id),
+            events=events,
+        )
+
+    async def review_methodic_resource_request(
+        self,
+        workspace_id: UUID,
+        resource_request_id: UUID,
+        payload: ReviewMethodicResourceRequest,
+        *,
+        approved: bool,
+    ) -> MethodicExecutionCommandResult:
+        await self._require_workspace_permission(
+            workspace_id,
+            payload.actor,
+            permission="methodics.admin",
+        )
+        request = await self._repository.fetch_methodic_resource_request(
+            resource_request_id
+        )
+        if request is None or request.workspace_id != workspace_id:
+            raise KeyError(f"Methodic resource request {resource_request_id} not found")
+        if request.status != "pending":
+            raise ValueError("Only pending methodic resource requests can be reviewed")
+        if approved and request.required_permission:
+            await self._require_workspace_permission(
+                workspace_id,
+                payload.actor,
+                permission=request.required_permission,
+            )
+        now = self._now()
+        updated = request.model_copy(
+            update={
+                "status": "approved" if approved else "rejected",
+                "approved_by": payload.actor.participant_id if approved else None,
+                "rejected_by": None if approved else payload.actor.participant_id,
+                "decided_at": now,
+                "updated_at": now,
+                "metadata": {
+                    **request.metadata,
+                    **payload.metadata,
+                    "review_reason": payload.reason,
+                },
+            }
+        )
+        actor = self._actor_from_input(payload.actor)
+        events: list[EventEnvelope] = []
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_methodic_resource_request(conn, updated)
+                execution = await self._repository.fetch_methodic_execution(
+                    updated.execution_id
+                )
+                if execution is not None and execution.thread_id is not None:
+                    event = await self._build_thread_event(
+                        conn,
+                        workspace_id,
+                        execution.thread_id,
+                        (
+                            "methodic_resource_request.approved"
+                            if approved
+                            else "methodic_resource_request.rejected"
+                        ),
+                        actor=actor,
+                        target=TargetRef(
+                            type="methodic_resource_request",
+                            id=resource_request_id,
+                        ),
+                        visibility="workspace",
+                        payload=updated.model_dump(mode="json"),
+                        timestamp=now,
+                        causation_id=resource_request_id,
+                    )
+                    await self._repository.record_event(conn, event)
+                    events.append(event)
+        return MethodicExecutionCommandResult(resource_request=updated, events=events)
+
+    async def create_methodic_resource_request(
+        self,
+        workspace_id: UUID,
+        execution_id: UUID,
+        payload: CreateMethodicResourceRequestRequest,
+    ) -> MethodicExecutionCommandResult:
+        await self._require_workspace_permission(
+            workspace_id,
+            payload.actor,
+            permission="methodics.execute",
+        )
+        detail = await self.get_methodic_execution(workspace_id, execution_id)
+        if detail.execution.status in {"completed", "cancelled", "failed"}:
+            raise ValueError("Cannot create resource requests for a terminal methodic execution")
+        step_execution_id = (
+            payload.step_execution_id or detail.execution.current_step_execution_id
+        )
+        if step_execution_id is not None and not any(
+            step.step_execution_id == step_execution_id for step in detail.steps
+        ):
+            raise KeyError(f"Methodic execution step {step_execution_id} not found")
+        requester_system_agent_id: UUID | None = None
+        if payload.actor.participant_type == "agent":
+            participant = await self._repository.fetch_participant(
+                workspace_id,
+                payload.actor.participant_id,
+            )
+            if participant is not None:
+                requester_system_agent_id = participant.system_agent_id
+        now = self._now()
+        resource_request = MethodicResourceRequest(
+            resource_request_id=uuid4(),
+            execution_id=execution_id,
+            workspace_id=workspace_id,
+            step_execution_id=step_execution_id,
+            resource_kind=payload.resource_kind,
+            action=payload.action,
+            status="pending",
+            title=payload.title,
+            description=payload.description,
+            required_permission=payload.required_permission,
+            payload=payload.payload,
+            requested_by_system_agent_id=requester_system_agent_id,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                **payload.metadata,
+                "created_by": str(payload.actor.participant_id),
+            },
+        )
+        actor = self._actor_from_input(payload.actor)
+        events: list[EventEnvelope] = []
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_methodic_resource_request(
+                    conn,
+                    resource_request,
+                )
+                if detail.execution.thread_id is not None:
+                    event = await self._build_thread_event(
+                        conn,
+                        workspace_id,
+                        detail.execution.thread_id,
+                        "methodic_resource_request.created",
+                        actor=actor,
+                        target=TargetRef(
+                            type="methodic_resource_request",
+                            id=resource_request.resource_request_id,
+                        ),
+                        visibility="workspace",
+                        payload=resource_request.model_dump(mode="json"),
+                        timestamp=now,
+                        causation_id=execution_id,
+                    )
+                    await self._repository.record_event(conn, event)
+                    events.append(event)
+        return MethodicExecutionCommandResult(
+            resource_request=resource_request,
+            events=events,
+        )
+
     async def store_retrieval_chunks(
         self,
         *,
@@ -3975,6 +4511,10 @@ class CollaborationKernel:
         workspace_tools = await self._repository.list_workspace_tools(workspace_id)
         now = self._now()
         actor = self._actor_from_input(payload.actor)
+        participant_metadata: dict[str, object] = {}
+        task_routing = system_agent.definition.get("task_routing")
+        if isinstance(task_routing, dict):
+            participant_metadata["task_routing"] = task_routing
         participant = ParticipantProfile(
             participant_id=uuid4(),
             workspace_id=workspace_id,
@@ -3997,7 +4537,7 @@ class CollaborationKernel:
             ),
             created_at=now,
             updated_at=now,
-            metadata={},
+            metadata=participant_metadata,
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():

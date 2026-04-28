@@ -16,6 +16,8 @@ from .contracts import (
     LlmProviderDefinition,
     MemoryEntry,
     MemoryProviderDefinition,
+    MethodicExecutionDetail,
+    MethodicResourceRequest,
     McpServerDefinition,
     Organization,
     OrganizationMembership,
@@ -182,6 +184,12 @@ class RetrievalCommandResult(CommandResult):
 
 
 @dataclass
+class MethodicExecutionCommandResult(CommandResult):
+    detail: MethodicExecutionDetail | None = None
+    resource_request: MethodicResourceRequest | None = None
+
+
+@dataclass
 class ToolGenerationRequestCommandResult(CommandResult):
     detail: ToolGenerationRequestDetail | None = None
     revision: ToolGenerationRevision | None = None
@@ -236,6 +244,7 @@ __all__ = [
     "LlmProviderCommandResult",
     "MemoryCommandResult",
     "MemoryProviderCommandResult",
+    "MethodicExecutionCommandResult",
     "McpServerCommandResult",
     "MessageCommandResult",
     "OrganizationCommandResult",

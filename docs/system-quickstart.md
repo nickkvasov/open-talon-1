@@ -329,7 +329,7 @@ Identity and execution boundaries:
 - human identity is global in `users` and `auth_identities`
 - organization membership and membership roles live in `organizations` and `organization_memberships`
 - project grouping lives in `projects`; project creator, owner, editor, and viewer access live in `project_access_bindings`
-- managed agents are normal `system_agents`: `Tinker` advertises generated-tool authoring, `Steward` advertises platform operations, each organization receives a `Curator` advertising organization operations, and every workspace receives `Anchor` for topic-alignment review
+- managed agents are normal `system_agents`: `Tinker` advertises generated-tool authoring, `Steward` advertises platform operations, each organization receives a `Curator` advertising organization operations, every workspace receives `Anchor` for topic-alignment review, global `Methodologist` advertises evidence-backed methodology extraction and workspace template design, and global `Conductor` advertises opt-in workspace methodics execution
 - runtime execution is generic: workers do not branch on `agent_key`, display name, role text, capability text, or metadata tags; behavior comes from agent records, harnesses, interaction contracts, task payloads, IAM/project/workspace bindings, and tool/MCP allowlists
 - organization project catalog listing is organization-permission scoped; specific project structure and project-workspace listings are project-access-scoped
 - agent identity/configuration is global in `system_agents`
@@ -599,12 +599,14 @@ Current publication rules:
 
 ## 8B. Operational Agents
 
-The local schema seeds managed operational agents without adding a separate operational profile field:
+The local schema seeds managed operational and specialist agents without adding a separate operational profile field:
 
 - `Tinker` (`agent_key=tinker`) has role `generated tool authoring and validation agent` and owns generated-tool authoring behavior through its definition, harness, private tools, and task payloads.
 - `Steward` (`agent_key=steward`) has role `platform operations steward` and is attached to `System Base / Administration / System Operations`.
 - `Curator` (`agent_key=curator`) has role `organization operations curator`; every non-system organization receives one in its `Administration / Organization Operations` workspace.
 - `Anchor` (`agent_key=anchor`) has role `workspace topic alignment reviewer`; every workspace receives an Anchor participant whose task-routing metadata disables normal message fanout and accepts only publication-review work. Anchor uses the managed `local-ollama` LLM provider by default.
+- `Methodologist` (`agent_key=methodologist`) has role `methodology extraction and workspace design agent`; it extracts methodology basis, methodics, methods/tools, actors, and workspace-template drafts from cited retrieval/source evidence through its normal agent definition and harness.
+- `Conductor` (`agent_key=conductor`) has role `workspace methodics execution conductor`; it is not auto-attached. A workspace only gets active methodics orchestration after an authorized human participant attaches Conductor and explicitly starts a methodics execution. Conductor can read execution state and create pending resource requests through its private MCP binding after attachment, while start/cancel and resource request approval/rejection stay human-gated.
 
 The operational purpose is advertised through `display_name`, `role`, and `capabilities`. Authorization still comes from IAM role bindings, project access bindings, participant attachment, and MCP/tool allowlists.
 

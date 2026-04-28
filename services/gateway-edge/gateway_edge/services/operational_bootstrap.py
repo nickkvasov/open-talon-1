@@ -87,6 +87,21 @@ class OperationalBootstrapService:
                 identity = await self._ensure_identity(steward)
                 await self._ensure_role_binding(identity, role)
 
+        conductor = await self._find_agent(
+            scope="global",
+            organization_id=None,
+            agent_key="conductor",
+        )
+        if conductor is not None:
+            role = await self._find_role(
+                scope="global",
+                organization_id=None,
+                name="workspace_conductor",
+            )
+            if role is not None:
+                identity = await self._ensure_identity(conductor)
+                await self._ensure_role_binding(identity, role)
+
         organizations = await collaboration_service.list_organizations()
         for organization in organizations:
             await self.ensure_for_organization(organization.organization_id)

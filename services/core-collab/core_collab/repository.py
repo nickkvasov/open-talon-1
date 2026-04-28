@@ -47,6 +47,12 @@ from .contracts import (
     HumanRoleBinding,
     IamRoleDefinition,
     Membership,
+    MethodicExecution,
+    MethodicExecutionAssignment,
+    MethodicExecutionCheck,
+    MethodicExecutionDetail,
+    MethodicExecutionStep,
+    MethodicResourceRequest,
     MemoryEntry,
     MemoryProviderDefinition,
     MemoryProviderRecord,
@@ -4806,6 +4812,390 @@ class CollaborationRepository:
         )
         return self._retrieval_context_pack_from_row(row) if row else None
 
+    async def upsert_methodic_execution(
+        self,
+        conn: asyncpg.Connection,
+        execution: MethodicExecution,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO methodic_executions (
+                execution_id, workspace_id, organization_id, thread_id,
+                conductor_system_agent_id, conductor_participant_id, status,
+                target_goal, current_step_execution_id, started_by, started_at,
+                completed_at, cancelled_at, error, harness_snapshot,
+                methodics_snapshot, created_at, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19
+            )
+            ON CONFLICT (execution_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    target_goal = EXCLUDED.target_goal,
+                    current_step_execution_id = EXCLUDED.current_step_execution_id,
+                    started_at = EXCLUDED.started_at,
+                    completed_at = EXCLUDED.completed_at,
+                    cancelled_at = EXCLUDED.cancelled_at,
+                    error = EXCLUDED.error,
+                    harness_snapshot = EXCLUDED.harness_snapshot,
+                    methodics_snapshot = EXCLUDED.methodics_snapshot,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            execution.execution_id,
+            execution.workspace_id,
+            execution.organization_id,
+            execution.thread_id,
+            execution.conductor_system_agent_id,
+            execution.conductor_participant_id,
+            execution.status,
+            execution.target_goal,
+            execution.current_step_execution_id,
+            execution.started_by,
+            execution.started_at,
+            execution.completed_at,
+            execution.cancelled_at,
+            execution.error,
+            self._json_dumps(execution.harness_snapshot),
+            self._json_dumps(execution.methodics_snapshot),
+            execution.created_at,
+            execution.updated_at,
+            self._json_dumps(execution.metadata),
+        )
+
+    async def upsert_methodic_execution_step(
+        self,
+        conn: asyncpg.Connection,
+        step: MethodicExecutionStep,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO methodic_execution_steps (
+                step_execution_id, execution_id, workspace_id, methodic_index,
+                step_index, methodic_name, name, instruction, status,
+                expected_artifacts, verification, definition_of_done,
+                evidence_refs, assigned_participant_id, started_at,
+                completed_at, created_at, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19
+            )
+            ON CONFLICT (step_execution_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    expected_artifacts = EXCLUDED.expected_artifacts,
+                    verification = EXCLUDED.verification,
+                    definition_of_done = EXCLUDED.definition_of_done,
+                    evidence_refs = EXCLUDED.evidence_refs,
+                    assigned_participant_id = EXCLUDED.assigned_participant_id,
+                    started_at = EXCLUDED.started_at,
+                    completed_at = EXCLUDED.completed_at,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            step.step_execution_id,
+            step.execution_id,
+            step.workspace_id,
+            step.methodic_index,
+            step.step_index,
+            step.methodic_name,
+            step.name,
+            step.instruction,
+            step.status,
+            self._json_dumps(step.expected_artifacts),
+            self._json_dumps(step.verification),
+            self._json_dumps(step.definition_of_done),
+            self._json_dumps(step.evidence_refs),
+            step.assigned_participant_id,
+            step.started_at,
+            step.completed_at,
+            step.created_at,
+            step.updated_at,
+            self._json_dumps(step.metadata),
+        )
+
+    async def upsert_methodic_execution_assignment(
+        self,
+        conn: asyncpg.Connection,
+        assignment: MethodicExecutionAssignment,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO methodic_execution_assignments (
+                assignment_id, execution_id, step_execution_id, workspace_id,
+                assignment_kind, status, title, instructions,
+                assignee_participant_id, assignee_system_agent_id,
+                interaction_request_id, task_id, run_id, artifact_id,
+                created_by, created_at, updated_at, completed_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19
+            )
+            ON CONFLICT (assignment_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    instructions = EXCLUDED.instructions,
+                    assignee_participant_id = EXCLUDED.assignee_participant_id,
+                    assignee_system_agent_id = EXCLUDED.assignee_system_agent_id,
+                    interaction_request_id = EXCLUDED.interaction_request_id,
+                    task_id = EXCLUDED.task_id,
+                    run_id = EXCLUDED.run_id,
+                    artifact_id = EXCLUDED.artifact_id,
+                    updated_at = EXCLUDED.updated_at,
+                    completed_at = EXCLUDED.completed_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            assignment.assignment_id,
+            assignment.execution_id,
+            assignment.step_execution_id,
+            assignment.workspace_id,
+            assignment.assignment_kind,
+            assignment.status,
+            assignment.title,
+            assignment.instructions,
+            assignment.assignee_participant_id,
+            assignment.assignee_system_agent_id,
+            assignment.interaction_request_id,
+            assignment.task_id,
+            assignment.run_id,
+            assignment.artifact_id,
+            assignment.created_by,
+            assignment.created_at,
+            assignment.updated_at,
+            assignment.completed_at,
+            self._json_dumps(assignment.metadata),
+        )
+
+    async def upsert_methodic_execution_check(
+        self,
+        conn: asyncpg.Connection,
+        check: MethodicExecutionCheck,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO methodic_execution_checks (
+                check_id, execution_id, step_execution_id, workspace_id,
+                status, confidence, reason, evidence_refs,
+                checked_by_system_agent_id, created_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (check_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    confidence = EXCLUDED.confidence,
+                    reason = EXCLUDED.reason,
+                    evidence_refs = EXCLUDED.evidence_refs,
+                    checked_by_system_agent_id = EXCLUDED.checked_by_system_agent_id,
+                    metadata = EXCLUDED.metadata
+            """,
+            check.check_id,
+            check.execution_id,
+            check.step_execution_id,
+            check.workspace_id,
+            check.status,
+            check.confidence,
+            check.reason,
+            self._json_dumps(check.evidence_refs),
+            check.checked_by_system_agent_id,
+            check.created_at,
+            self._json_dumps(check.metadata),
+        )
+
+    async def upsert_methodic_resource_request(
+        self,
+        conn: asyncpg.Connection,
+        request: MethodicResourceRequest,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO methodic_resource_requests (
+                resource_request_id, execution_id, workspace_id, step_execution_id,
+                resource_kind, action, status, title, description, required_permission,
+                payload, requested_by_system_agent_id, approved_by, rejected_by,
+                decided_at, created_at, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                $10, $11, $12, $13, $14, $15, $16, $17, $18
+            )
+            ON CONFLICT (resource_request_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    description = EXCLUDED.description,
+                    required_permission = EXCLUDED.required_permission,
+                    payload = EXCLUDED.payload,
+                    approved_by = EXCLUDED.approved_by,
+                    rejected_by = EXCLUDED.rejected_by,
+                    decided_at = EXCLUDED.decided_at,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            request.resource_request_id,
+            request.execution_id,
+            request.workspace_id,
+            request.step_execution_id,
+            request.resource_kind,
+            request.action,
+            request.status,
+            request.title,
+            request.description,
+            request.required_permission,
+            self._json_dumps(request.payload),
+            request.requested_by_system_agent_id,
+            request.approved_by,
+            request.rejected_by,
+            request.decided_at,
+            request.created_at,
+            request.updated_at,
+            self._json_dumps(request.metadata),
+        )
+
+    async def fetch_methodic_execution(
+        self, execution_id: UUID
+    ) -> MethodicExecution | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT execution_id, workspace_id, organization_id, thread_id,
+                   conductor_system_agent_id, conductor_participant_id, status,
+                   target_goal, current_step_execution_id, started_by, started_at,
+                   completed_at, cancelled_at, error, harness_snapshot,
+                   methodics_snapshot, created_at, updated_at, metadata
+            FROM methodic_executions
+            WHERE execution_id = $1
+            """,
+            execution_id,
+        )
+        return self._methodic_execution_from_row(row) if row else None
+
+    async def list_methodic_executions(
+        self,
+        *,
+        workspace_id: UUID,
+        status: str | None = None,
+    ) -> list[MethodicExecution]:
+        rows = await self._pool.fetch(
+            """
+            SELECT execution_id, workspace_id, organization_id, thread_id,
+                   conductor_system_agent_id, conductor_participant_id, status,
+                   target_goal, current_step_execution_id, started_by, started_at,
+                   completed_at, cancelled_at, error, harness_snapshot,
+                   methodics_snapshot, created_at, updated_at, metadata
+            FROM methodic_executions
+            WHERE workspace_id = $1
+              AND ($2::text IS NULL OR status = $2)
+            ORDER BY created_at DESC
+            """,
+            workspace_id,
+            status,
+        )
+        return [self._methodic_execution_from_row(row) for row in rows]
+
+    async def list_methodic_execution_steps(
+        self, execution_id: UUID
+    ) -> list[MethodicExecutionStep]:
+        rows = await self._pool.fetch(
+            """
+            SELECT step_execution_id, execution_id, workspace_id, methodic_index,
+                   step_index, methodic_name, name, instruction, status,
+                   expected_artifacts, verification, definition_of_done,
+                   evidence_refs, assigned_participant_id, started_at,
+                   completed_at, created_at, updated_at, metadata
+            FROM methodic_execution_steps
+            WHERE execution_id = $1
+            ORDER BY methodic_index ASC, step_index ASC, created_at ASC
+            """,
+            execution_id,
+        )
+        return [self._methodic_execution_step_from_row(row) for row in rows]
+
+    async def list_methodic_execution_assignments(
+        self, execution_id: UUID
+    ) -> list[MethodicExecutionAssignment]:
+        rows = await self._pool.fetch(
+            """
+            SELECT assignment_id, execution_id, step_execution_id, workspace_id,
+                   assignment_kind, status, title, instructions,
+                   assignee_participant_id, assignee_system_agent_id,
+                   interaction_request_id, task_id, run_id, artifact_id,
+                   created_by, created_at, updated_at, completed_at, metadata
+            FROM methodic_execution_assignments
+            WHERE execution_id = $1
+            ORDER BY created_at ASC
+            """,
+            execution_id,
+        )
+        return [self._methodic_execution_assignment_from_row(row) for row in rows]
+
+    async def list_methodic_execution_checks(
+        self, execution_id: UUID
+    ) -> list[MethodicExecutionCheck]:
+        rows = await self._pool.fetch(
+            """
+            SELECT check_id, execution_id, step_execution_id, workspace_id,
+                   status, confidence, reason, evidence_refs,
+                   checked_by_system_agent_id, created_at, metadata
+            FROM methodic_execution_checks
+            WHERE execution_id = $1
+            ORDER BY created_at ASC
+            """,
+            execution_id,
+        )
+        return [self._methodic_execution_check_from_row(row) for row in rows]
+
+    async def fetch_methodic_resource_request(
+        self, resource_request_id: UUID
+    ) -> MethodicResourceRequest | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT resource_request_id, execution_id, workspace_id, step_execution_id,
+                   resource_kind, action, status, title, description, required_permission,
+                   payload, requested_by_system_agent_id, approved_by, rejected_by,
+                   decided_at, created_at, updated_at, metadata
+            FROM methodic_resource_requests
+            WHERE resource_request_id = $1
+            """,
+            resource_request_id,
+        )
+        return self._methodic_resource_request_from_row(row) if row else None
+
+    async def list_methodic_resource_requests(
+        self,
+        execution_id: UUID | None = None,
+        *,
+        workspace_id: UUID | None = None,
+        status: str | None = None,
+    ) -> list[MethodicResourceRequest]:
+        rows = await self._pool.fetch(
+            """
+            SELECT resource_request_id, execution_id, workspace_id, step_execution_id,
+                   resource_kind, action, status, title, description, required_permission,
+                   payload, requested_by_system_agent_id, approved_by, rejected_by,
+                   decided_at, created_at, updated_at, metadata
+            FROM methodic_resource_requests
+            WHERE ($1::uuid IS NULL OR execution_id = $1)
+              AND ($2::uuid IS NULL OR workspace_id = $2)
+              AND ($3::text IS NULL OR status = $3)
+            ORDER BY created_at ASC
+            """,
+            execution_id,
+            workspace_id,
+            status,
+        )
+        return [self._methodic_resource_request_from_row(row) for row in rows]
+
+    async def get_methodic_execution_detail(
+        self, execution_id: UUID
+    ) -> MethodicExecutionDetail | None:
+        execution = await self.fetch_methodic_execution(execution_id)
+        if execution is None:
+            return None
+        return MethodicExecutionDetail(
+            execution=execution,
+            steps=await self.list_methodic_execution_steps(execution_id),
+            assignments=await self.list_methodic_execution_assignments(execution_id),
+            checks=await self.list_methodic_execution_checks(execution_id),
+            resource_requests=await self.list_methodic_resource_requests(execution_id),
+        )
+
     async def fetch_workspace_asset_version(
         self, asset_version_id: UUID
     ) -> WorkspaceAssetVersion | None:
@@ -7539,6 +7929,140 @@ class CollaborationRepository:
             ],
             created_by=row["created_by"],
             created_at=row["created_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _methodic_execution_from_row(row: asyncpg.Record) -> MethodicExecution:
+        return MethodicExecution(
+            execution_id=row["execution_id"],
+            workspace_id=row["workspace_id"],
+            organization_id=row["organization_id"],
+            thread_id=row["thread_id"],
+            conductor_system_agent_id=row["conductor_system_agent_id"],
+            conductor_participant_id=row["conductor_participant_id"],
+            status=row["status"],
+            target_goal=row["target_goal"],
+            current_step_execution_id=row["current_step_execution_id"],
+            started_by=row["started_by"],
+            started_at=row["started_at"],
+            completed_at=row["completed_at"],
+            cancelled_at=row["cancelled_at"],
+            error=row["error"],
+            harness_snapshot=CollaborationRepository._json_value(
+                row["harness_snapshot"],
+                default={},
+            ),
+            methodics_snapshot=CollaborationRepository._json_value(
+                row["methodics_snapshot"],
+                default=[],
+            ),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _methodic_execution_step_from_row(row: asyncpg.Record) -> MethodicExecutionStep:
+        return MethodicExecutionStep(
+            step_execution_id=row["step_execution_id"],
+            execution_id=row["execution_id"],
+            workspace_id=row["workspace_id"],
+            methodic_index=row["methodic_index"],
+            step_index=row["step_index"],
+            methodic_name=row["methodic_name"],
+            name=row["name"],
+            instruction=row["instruction"],
+            status=row["status"],
+            expected_artifacts=CollaborationRepository._json_value(
+                row["expected_artifacts"],
+                default=[],
+            ),
+            verification=CollaborationRepository._json_value(
+                row["verification"],
+                default=[],
+            ),
+            definition_of_done=CollaborationRepository._json_value(
+                row["definition_of_done"],
+                default=[],
+            ),
+            evidence_refs=CollaborationRepository._json_value(
+                row["evidence_refs"],
+                default=[],
+            ),
+            assigned_participant_id=row["assigned_participant_id"],
+            started_at=row["started_at"],
+            completed_at=row["completed_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _methodic_execution_assignment_from_row(
+        row: asyncpg.Record,
+    ) -> MethodicExecutionAssignment:
+        return MethodicExecutionAssignment(
+            assignment_id=row["assignment_id"],
+            execution_id=row["execution_id"],
+            step_execution_id=row["step_execution_id"],
+            workspace_id=row["workspace_id"],
+            assignment_kind=row["assignment_kind"],
+            status=row["status"],
+            title=row["title"],
+            instructions=row["instructions"],
+            assignee_participant_id=row["assignee_participant_id"],
+            assignee_system_agent_id=row["assignee_system_agent_id"],
+            interaction_request_id=row["interaction_request_id"],
+            task_id=row["task_id"],
+            run_id=row["run_id"],
+            artifact_id=row["artifact_id"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            completed_at=row["completed_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _methodic_execution_check_from_row(row: asyncpg.Record) -> MethodicExecutionCheck:
+        return MethodicExecutionCheck(
+            check_id=row["check_id"],
+            execution_id=row["execution_id"],
+            step_execution_id=row["step_execution_id"],
+            workspace_id=row["workspace_id"],
+            status=row["status"],
+            confidence=row["confidence"],
+            reason=row["reason"],
+            evidence_refs=CollaborationRepository._json_value(
+                row["evidence_refs"],
+                default=[],
+            ),
+            checked_by_system_agent_id=row["checked_by_system_agent_id"],
+            created_at=row["created_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _methodic_resource_request_from_row(row: asyncpg.Record) -> MethodicResourceRequest:
+        return MethodicResourceRequest(
+            resource_request_id=row["resource_request_id"],
+            execution_id=row["execution_id"],
+            workspace_id=row["workspace_id"],
+            step_execution_id=row["step_execution_id"],
+            resource_kind=row["resource_kind"],
+            action=row["action"],
+            status=row["status"],
+            title=row["title"],
+            description=row["description"],
+            required_permission=row["required_permission"],
+            payload=CollaborationRepository._json_value(row["payload"], default={}),
+            requested_by_system_agent_id=row["requested_by_system_agent_id"],
+            approved_by=row["approved_by"],
+            rejected_by=row["rejected_by"],
+            decided_at=row["decided_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),
         )
 

@@ -119,7 +119,7 @@ The most important ownership rules are:
 - `organizations`, `projects`, `project_access_bindings`, and `organization_memberships` store the tenant and work hierarchy above workspaces
 - `system_agents` stores platform-global and organization-scoped agent definitions
 - managed operational contexts are seeded as `System Base / Administration / System Operations` plus `Administration / Organization Operations` for each non-system organization
-- managed agents are ordinary system agents: `Tinker` (`generated tool authoring and validation agent`), `Steward` (`platform operations steward`), organization-scoped `Curator` (`organization operations curator`), and workspace-attached `Anchor` (`workspace topic alignment reviewer`)
+- managed agents are ordinary system agents: `Tinker` (`generated tool authoring and validation agent`), `Steward` (`platform operations steward`), organization-scoped `Curator` (`organization operations curator`), workspace-attached `Anchor` (`workspace topic alignment reviewer`), global `Methodologist` (`methodology extraction and workspace design agent`), and global `Conductor` (`workspace methodics execution conductor`)
 - the agent runtime is generic and must not branch on `agent_key`, display name, role text, capability text, or metadata tags; specialization belongs in agent definitions, harnesses, interaction contracts, task payloads, bindings, and tool/MCP allowlists
 - `participants` stores workspace-local attachment and state for both humans and agents
 - `threads` and `timeline_messages` are the shared collaboration surface
@@ -285,6 +285,13 @@ Current MCP system API operations:
 - `retrieval.search`
 - `retrieval.context_pack.create`
 - `retrieval.context_pack.get`
+- `methodics.executions.create`
+- `methodics.executions.list`
+- `methodics.executions.get`
+- `methodics.executions.cancel`
+- `methodics.resource_requests.approve`
+- `methodics.resource_requests.create`
+- `methodics.resource_requests.reject`
 - `agent_catalog.list`
 - `agent_catalog.bundle.validate`
 - `agent_catalog.bundle.publish`
@@ -667,6 +674,10 @@ In the current implementation, org-scoped create/list routes are explicit. Updat
 
 System-agent definitions accept an optional typed `harness.compaction_policy` object. Current strategies are `full_context`, `recent_window`, `rolling_summary`, and `summary_plus_retrieval`; the runtime applies this policy immediately before prompt rendering without mutating the canonical `AgentExecutionContext`.
 
+`Methodologist` is a seeded global system agent for turning cited retrieval/source evidence into methodology basis, methodics, methods/tools, actor responsibilities, and workspace template drafts. It does not add a special runtime path; behavior comes from its agent definition, harness, response contract, retrieval context supplied to the run, and any workspace/tool/MCP bindings granted by IAM.
+
+`Conductor` is a separate seeded global system agent for active workspace methodics execution. It is opt-in per workspace through normal agent attachment. If Conductor is not attached, `WorkspaceHarness.methodics` remains passive guidance and starting execution returns `409 Conflict`.
+
 Git-managed system and organization agent definitions are authored as modular bundles under `agents/<agent_key>/` and published through the gateway. The publish flow compiles the bundle into the existing `system_agents` runtime projection and writes immutable `agent_definition_versions` history. Runtime workers continue to read Postgres only; Forgejo and managed worktrees are authoring infrastructure, not runtime dependencies.
 
 ### Git Repositories, Assets, And Tool Attachments
@@ -760,6 +771,20 @@ Retrieval corpora, sources, jobs, runs, and context packs are scoped as `global`
 | `GET/POST` | `/v1/workspaces/{workspace_id}/retrieval/...` | workspace-scoped equivalent routes |
 
 The default vector backend is pgvector. The default embedding provider is configurable Ollama via `RETRIEVER_DEFAULT_EMBEDDING_PROVIDER`, `RETRIEVER_DEFAULT_EMBEDDING_MODEL`, and `RETRIEVER_OLLAMA_BASE_URL`. Visual extraction is disabled by default; when enabled, Retriever resolves the visual extraction LLM through the shared `llm_providers` engine registry, defaulting to `RETRIEVER_DEFAULT_VISION_ENGINE_ID=local-ollama`.
+
+### Methodics Execution APIs
+
+Methodics execution is workspace-scoped and opt-in. Conductor must already be attached as a workspace agent participant before an authorized human caller starts execution from the active `WorkspaceHarness.methodics`; otherwise the start route returns `409 Conflict`. Start/cancel and resource request approval/rejection are human-gated. Conductor receives targeted methodics tasks and can read execution state or create pending resource requests, but its managed internal MCP allowlist excludes the human control operations.
+
+| Method | Path | Summary |
+| --- | --- | --- |
+| `POST` | `/v1/workspaces/{workspace_id}/methodics/executions` | start Conductor execution of active workspace methodics |
+| `GET` | `/v1/workspaces/{workspace_id}/methodics/executions` | list workspace methodics executions |
+| `GET` | `/v1/workspaces/{workspace_id}/methodics/executions/{execution_id}` | get execution detail with steps, assignments, checks, and resource requests |
+| `POST` | `/v1/workspaces/{workspace_id}/methodics/executions/{execution_id}/cancel` | cancel a methodics execution |
+| `POST` | `/v1/workspaces/{workspace_id}/methodics/executions/{execution_id}/resource-requests` | create a pending Conductor resource request |
+| `POST` | `/v1/workspaces/{workspace_id}/methodics/resource-requests/{resource_request_id}/approve` | approve a Conductor resource request |
+| `POST` | `/v1/workspaces/{workspace_id}/methodics/resource-requests/{resource_request_id}/reject` | reject a Conductor resource request |
 
 ### Tool Generation And Approval
 

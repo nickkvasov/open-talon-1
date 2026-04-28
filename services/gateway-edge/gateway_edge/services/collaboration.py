@@ -55,6 +55,9 @@ from gateway_edge.models import (
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
     CreateMcpServerRequest,
+    CancelMethodicExecutionRequest,
+    CreateMethodicExecutionRequest,
+    CreateMethodicResourceRequestRequest,
     CreateOrganizationRequest,
     CreateProjectRequest,
     CreateRetrievalContextPackRequest,
@@ -94,6 +97,9 @@ from gateway_edge.models import (
     McpServerDefinition,
     McpToolDefinition,
     LlmProviderDefinition,
+    MethodicExecution,
+    MethodicExecutionDetail,
+    MethodicResourceRequest,
     Organization,
     OrganizationMembership,
     ParticipantInput,
@@ -137,6 +143,7 @@ from gateway_edge.models import (
     UpdateProjectRequest,
     UpsertProjectAccessRequest,
     ReviewToolGenerationRevisionRequest,
+    ReviewMethodicResourceRequest,
     RemoveProjectAccessRequest,
     UpdateWorkspaceToolRequest,
     UpdateWorkspaceMcpServerRequest,
@@ -1540,6 +1547,85 @@ class CollaborationService:
         context_pack_id: UUID,
     ) -> RetrievalContextPack | None:
         return await self._require_kernel().get_retrieval_context_pack(context_pack_id)
+
+    async def create_methodic_execution(
+        self,
+        workspace_id: UUID,
+        payload: CreateMethodicExecutionRequest,
+    ) -> MethodicExecutionDetail:
+        result = await self._require_kernel().create_methodic_execution(workspace_id, payload)
+        await self._publish_events(result.events)
+        assert result.detail is not None
+        return result.detail
+
+    async def list_methodic_executions(
+        self,
+        workspace_id: UUID,
+        *,
+        status: str | None = None,
+    ) -> list[MethodicExecution]:
+        return await self._require_kernel().list_methodic_executions(
+            workspace_id,
+            status=status,
+        )
+
+    async def get_methodic_execution(
+        self,
+        workspace_id: UUID,
+        execution_id: UUID,
+    ) -> MethodicExecutionDetail:
+        return await self._require_kernel().get_methodic_execution(
+            workspace_id,
+            execution_id,
+        )
+
+    async def cancel_methodic_execution(
+        self,
+        workspace_id: UUID,
+        execution_id: UUID,
+        payload: CancelMethodicExecutionRequest,
+    ) -> MethodicExecutionDetail:
+        result = await self._require_kernel().cancel_methodic_execution(
+            workspace_id,
+            execution_id,
+            payload,
+        )
+        await self._publish_events(result.events)
+        assert result.detail is not None
+        return result.detail
+
+    async def review_methodic_resource_request(
+        self,
+        workspace_id: UUID,
+        resource_request_id: UUID,
+        payload: ReviewMethodicResourceRequest,
+        *,
+        approved: bool,
+    ) -> MethodicResourceRequest:
+        result = await self._require_kernel().review_methodic_resource_request(
+            workspace_id,
+            resource_request_id,
+            payload,
+            approved=approved,
+        )
+        await self._publish_events(result.events)
+        assert result.resource_request is not None
+        return result.resource_request
+
+    async def create_methodic_resource_request(
+        self,
+        workspace_id: UUID,
+        execution_id: UUID,
+        payload: CreateMethodicResourceRequestRequest,
+    ) -> MethodicResourceRequest:
+        result = await self._require_kernel().create_methodic_resource_request(
+            workspace_id,
+            execution_id,
+            payload,
+        )
+        await self._publish_events(result.events)
+        assert result.resource_request is not None
+        return result.resource_request
 
     async def list_iam_role_definitions(
         self,

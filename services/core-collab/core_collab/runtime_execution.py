@@ -83,10 +83,18 @@ class RuntimeExecutionService:
             system_agent_id,
             limit,
         )
-        return await self._repository.list_pending_tasks_for_system_agent(
+        tasks = await self._repository.list_pending_tasks_for_system_agent(
             system_agent_id,
             limit=limit,
         )
+        system_agent = await self._repository.fetch_system_agent(system_agent_id)
+        if system_agent is None:
+            return []
+        return [
+            task
+            for task in tasks
+            if self._agent_accepts_task_kind(system_agent.definition, task)
+        ]
 
     async def claim_task_for_system_agent(
         self,
@@ -115,6 +123,10 @@ class RuntimeExecutionService:
         system_agent = await self._repository.fetch_system_agent(system_agent_id)
         if system_agent is None:
             raise KeyError(f"System agent {system_agent_id} not found")
+        if not self._agent_accepts_task_kind(system_agent.definition, task):
+            raise ValueError(
+                f"Task {task_id} has task kind not accepted by system agent {system_agent_id}"
+            )
         participant = await self._resolve_agent_participant(
             workspace_id=task.workspace_id,
             system_agent_id=system_agent_id,
@@ -383,6 +395,21 @@ class RuntimeExecutionService:
             thread_reply_contract=system_agent.interaction_contract,
             tool_results=tool_results,
         )
+
+    @staticmethod
+    def _agent_accepts_task_kind(
+        agent_definition: dict[str, object],
+        task: Task,
+    ) -> bool:
+        routing = agent_definition.get("task_routing")
+        if not isinstance(routing, dict):
+            return True
+        accepted = routing.get("accepted_task_kinds")
+        if not isinstance(accepted, list) or not accepted:
+            return True
+        accepted_task_kinds = {item for item in accepted if isinstance(item, str)}
+        task_kind = task.metadata.get("task_kind") or task.metadata.get("routing_reason")
+        return isinstance(task_kind, str) and task_kind in accepted_task_kinds
 
     @staticmethod
     def _memory_scope_enabled(system_agent, scope: str) -> bool:
