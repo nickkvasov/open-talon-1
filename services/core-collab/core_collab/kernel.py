@@ -122,6 +122,8 @@ from .contracts import (
     McpPromptDefinition,
     McpResourceDefinition,
     McpServerDefinition,
+    McpServerSyncJob,
+    McpServerSyncResult,
     McpToolDefinition,
     LlmProviderDefinition,
     IamRoleDefinition,
@@ -141,6 +143,7 @@ from .contracts import (
     ProjectAccessRole,
     ProjectSubjectRef,
     PublishAssetFromGitRequest,
+    RequestMcpServerSyncRequest,
     RetrievalChunk,
     RetrievalContextPack,
     RetrievalCorpus,
@@ -1933,6 +1936,174 @@ class CollaborationKernel:
         if await self._repository.fetch_mcp_server(server_id) is None:
             raise KeyError(f"MCP server {server_id} not found")
         return await self._repository.list_mcp_server_prompts(server_id)
+
+    async def request_mcp_server_sync(
+        self,
+        server_id: UUID,
+        payload: RequestMcpServerSyncRequest,
+    ) -> McpServerSyncResult:
+        existing = await self._repository.fetch_mcp_server(server_id)
+        if existing is None:
+            raise KeyError(f"MCP server {server_id} not found")
+        now = self._now()
+        job = McpServerSyncJob(
+            job_id=uuid4(),
+            server_id=server_id,
+            status="created",
+            requested_by=payload.actor.participant_id,
+            requested_at=now,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.create_mcp_server_sync_job(conn, job)
+                server = await self._repository.update_mcp_server_sync_status(
+                    conn,
+                    server_id=server_id,
+                    status="queued",
+                    error=None,
+                    synced_at=None,
+                    updated_at=now,
+                )
+        if server is None:
+            raise KeyError(f"MCP server {server_id} not found")
+        return McpServerSyncResult(server=server, job=job)
+
+    async def list_mcp_server_sync_jobs(
+        self,
+        server_id: UUID,
+        *,
+        limit: int = 20,
+    ) -> list[McpServerSyncJob]:
+        if await self._repository.fetch_mcp_server(server_id) is None:
+            raise KeyError(f"MCP server {server_id} not found")
+        return await self._repository.list_mcp_server_sync_jobs(
+            server_id=server_id,
+            limit=max(1, min(limit, 100)),
+        )
+
+    async def claim_next_mcp_server_sync_job(
+        self,
+        *,
+        worker_id: str,
+        lease_seconds: int = 120,
+    ) -> McpServerSyncJob | None:
+        now = self._now()
+        return await self._repository.claim_next_mcp_server_sync_job(
+            worker_id=worker_id,
+            now=now,
+            lease_expires_at=now + timedelta(seconds=lease_seconds),
+        )
+
+    async def heartbeat_mcp_server_sync_job(
+        self,
+        job_id: UUID,
+        *,
+        worker_id: str,
+        lease_seconds: int = 120,
+    ) -> McpServerSyncJob | None:
+        now = self._now()
+        return await self._repository.heartbeat_mcp_server_sync_job(
+            job_id=job_id,
+            worker_id=worker_id,
+            now=now,
+            lease_expires_at=now + timedelta(seconds=lease_seconds),
+        )
+
+    async def complete_mcp_server_sync_job(
+        self,
+        job_id: UUID,
+        *,
+        worker_id: str,
+        tools: list[McpToolDefinition],
+        resources: list[McpResourceDefinition],
+        prompts: list[McpPromptDefinition],
+        metadata: dict | None = None,
+    ) -> McpServerSyncResult:
+        job = await self._repository.fetch_mcp_server_sync_job(job_id)
+        if job is None:
+            raise KeyError(f"MCP server sync job {job_id} not found")
+        now = self._now()
+        tools = [tool.model_copy(update={"server_id": job.server_id}) for tool in tools]
+        resources = [
+            resource.model_copy(update={"server_id": job.server_id}) for resource in resources
+        ]
+        prompts = [prompt.model_copy(update={"server_id": job.server_id}) for prompt in prompts]
+        result = {
+            "tool_count": len(tools),
+            "resource_count": len(resources),
+            "prompt_count": len(prompts),
+            **(metadata or {}),
+        }
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.replace_mcp_server_capabilities(
+                    conn,
+                    server_id=job.server_id,
+                    tools=tools,
+                    resources=resources,
+                    prompts=prompts,
+                )
+                completed = await self._repository.complete_mcp_server_sync_job(
+                    conn,
+                    job_id=job_id,
+                    worker_id=worker_id,
+                    result=result,
+                    now=now,
+                )
+                if completed is None:
+                    raise RuntimeError(
+                        f"MCP server sync job {job_id} is not claimed by worker {worker_id}"
+                    )
+                server = await self._repository.update_mcp_server_sync_status(
+                    conn,
+                    server_id=job.server_id,
+                    status="completed",
+                    error=None,
+                    synced_at=now,
+                    updated_at=now,
+                )
+        if server is None:
+            raise KeyError(f"MCP server {job.server_id} not found")
+        return McpServerSyncResult(server=server, job=completed)
+
+    async def fail_mcp_server_sync_job(
+        self,
+        job_id: UUID,
+        *,
+        worker_id: str,
+        error: str,
+    ) -> McpServerSyncResult:
+        job = await self._repository.fetch_mcp_server_sync_job(job_id)
+        if job is None:
+            raise KeyError(f"MCP server sync job {job_id} not found")
+        now = self._now()
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                failed = await self._repository.fail_mcp_server_sync_job(
+                    conn,
+                    job_id=job_id,
+                    worker_id=worker_id,
+                    error=error,
+                    now=now,
+                )
+                if failed is None:
+                    raise RuntimeError(
+                        f"MCP server sync job {job_id} is not claimed by worker {worker_id}"
+                    )
+                server = await self._repository.update_mcp_server_sync_status(
+                    conn,
+                    server_id=job.server_id,
+                    status="failed",
+                    error=error,
+                    synced_at=None,
+                    updated_at=now,
+                )
+        if server is None:
+            raise KeyError(f"MCP server {job.server_id} not found")
+        return McpServerSyncResult(server=server, job=failed)
 
     async def list_system_tools(
         self,
@@ -10096,6 +10267,10 @@ class CollaborationKernel:
                 "mcp_server_id": str(tool.server_id),
                 "mcp_server_key": tool.server_key,
                 "mcp_tool_name": tool.remote_name,
+                "mcp_workspace_attachment_metadata": tool.metadata.get(
+                    "workspace_attachment",
+                    {},
+                ),
                 "tool_name": tool.exposed_name,
                 "system_agent_id": str(system_agent_id),
                 "workspace_id": str(workspace_id),

@@ -45,6 +45,19 @@ services:
       - ./data/memgraph:/var/lib/memgraph
     restart: unless-stopped
 
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    profiles:
+      - web-search
+    environment:
+      SEARXNG_BASE_URL: ${SEARXNG_PUBLIC_URL:-http://127.0.0.1:8082/}
+    ports:
+      - "${SEARXNG_PORT:-8082}:8080"
+    volumes:
+      - ./searxng:/etc/searxng:ro
+    restart: unless-stopped
+
   langfuse-db-init:
     image: pgvector/pgvector:pg16
     container_name: langfuse-db-init

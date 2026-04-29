@@ -812,6 +812,33 @@ class McpPromptDefinition(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class McpServerSyncJob(BaseModel):
+    job_id: UUID
+    server_id: UUID
+    status: Literal["created", "claimed", "completed", "failed"] = "created"
+    requested_by: UUID
+    requested_at: datetime = Field(default_factory=utcnow)
+    claimed_by_worker: str | None = None
+    lease_expires_at: datetime | None = None
+    last_heartbeat_at: datetime | None = None
+    attempt_count: int = 0
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RequestMcpServerSyncRequest(BaseModel):
+    actor: ParticipantInput
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class McpServerSyncResult(BaseModel):
+    server: McpServerDefinition
+    job: McpServerSyncJob
+
+
 class WorkspaceMcpServer(BaseModel):
     server_id: UUID
     server_key: str

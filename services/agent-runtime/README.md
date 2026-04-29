@@ -1,8 +1,10 @@
 # agent-runtime
 
-Reusable runtime helpers for task-claiming Open Talon agents that emit `task.*` and `run.*` collaboration events, execute isolated tool calls, and drive the live generated-tool path used by Tinker.
+Reusable runtime helpers for task-claiming Open Talon agents that emit `task.*` and `run.*` collaboration events, execute isolated tool calls, sync external System Plugin capabilities, and drive the live generated-tool path used by Tinker.
 
 Provider-backed model generations route through LiteLLM so local Ollama and managed OpenAI-style endpoints share one completion transport while generic remote agent endpoints continue to use their native JSON contract.
+
+`talon-mcp-sync-worker` claims durable `mcp_server_sync_jobs`, validates the backing MCP endpoint for a System Plugin, discovers tools/resources/prompts, and replaces the cached capability rows without importing them into `system_tools`.
 
 ## Langfuse
 

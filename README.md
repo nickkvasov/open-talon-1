@@ -50,7 +50,8 @@ The typical flow is:
 | --- | --- | --- |
 | `services/gateway-edge` | public control plane and collaboration API | Owns REST, SSE, WebSocket, auth, admin, IAM, audit, collaboration, and session chat routes. |
 | `services/core-collab` | canonical collaboration and execution kernel | Owns Postgres persistence for workspaces, threads, participants, requests, tasks, runs, tool calls, memory, assets, and audit writes. |
-| `services/agent-runtime` | stateless execution plane | Runs the `agent-task-worker`, `agent-loop-worker`, `tool-worker`, and `reconciler`. |
+| `services/agent-runtime` | stateless execution plane | Runs the `agent-task-worker`, `agent-loop-worker`, `tool-worker`, `mcp-sync-worker`, and `reconciler`. |
+| `services/web-search-mcp` | managed web-search System Plugin | Exposes `search`, `fetch`, and `search_and_fetch` over MCP using self-hosted SearXNG and Crawl4AI. |
 | `services/retriever` | reusable retrieval ingestion worker | Claims retrieval ingestion jobs, reads versioned file assets from MinIO, extracts/chunks/embeds evidence, and writes chunks plus pgvector embeddings to Postgres. |
 | `services/workspace-memory` | shared memory-provider abstraction | Keeps Postgres canonical while letting Mem0 and optional Memgraph act as derived retrieval layers. |
 | `services/generated-tools-builder` | Tinker build/publish helper | Packages generated tools for the OCI-style registry flow used during tool approval. |
@@ -150,7 +151,7 @@ Important rules:
 - the effective tenant hierarchy is `platform > organization > project > workspace > thread`
 - `users` are global human identities, `organization_memberships` hold org-level access, and `participants` remain workspace-local state
 - `system_agents`, `system_tools`, `llm_providers`, and `memory_providers` can be platform-global or organization-scoped
-- `mcp_servers` are separate external MCP integration definitions; they are not Open Talon `system_tools`
+- `mcp_servers` back System Plugin registry records in v1; they are not Open Talon `system_tools`
 - thread activity is ordered by a monotonic thread-local `sequence`
 - Postgres is the source of truth for collaboration and execution state; Kafka is the wake-up and fanout bus
 - threads are the shared surface in v1; tracked requests are rendered into the same thread instead of using private DM semantics
@@ -335,13 +336,15 @@ Open Talon models tools in two layers:
 - `system_tools`: platform-global or organization-scoped tool definitions
 - `workspace_tools`: workspace-scoped attachments that enable a system tool for a specific workspace
 
-External MCP integrations use a separate model:
+System Plugins use a separate external-capability model. In v1 each System Plugin is backed by an MCP server:
 
-- `mcp_servers`: platform-global or organization-scoped external MCP server definitions
-- `mcp_server_tools`, `mcp_server_resources`, and `mcp_server_prompts`: discovered MCP capabilities cached from those servers
-- `workspace_mcp_servers`: workspace-scoped attachments that make selected MCP capabilities visible to agents
+- `mcp_servers`: platform-global or organization-scoped System Plugin registry records
+- `mcp_server_tools`, `mcp_server_resources`, and `mcp_server_prompts`: discovered plugin capabilities cached from the backing MCP servers
+- `workspace_mcp_servers`: workspace-scoped plugin attachments that make selected capabilities visible to agents
 
-MCP tools are rendered and executed as external MCP capabilities. They are never inserted into `system_tools`, never attached through `workspace_tools`, and never published by Tinker. The gateway-mounted `/v1/mcp` endpoint remains the inbound Open Talon system API adapter and does not import or proxy these external MCP servers.
+System Plugin capabilities are rendered and executed as external MCP-backed capabilities. They are never inserted into `system_tools`, never attached through `workspace_tools`, never published by Tinker, and never auto-attached to workspaces. The gateway-mounted `/v1/mcp` endpoint remains the inbound Open Talon system API adapter and does not import or proxy these external System Plugins.
+
+The managed `web_search` System Plugin is seeded globally. Start its local backing services with `./open-talon start --web-search`, then sync capabilities from the admin console or `POST /v1/system-plugins/{server_id}/sync`. It uses SearXNG for search and Crawl4AI for clean Markdown extraction. Parsed pages are returned by default; asset-candidate output is guarded by explicit plugin attachment metadata and `workspace.assets.publish`.
 
 This means a tool is defined once at the platform or organization layer, then added to any compatible workspace that wants to advertise it to attached agents.
 
@@ -372,6 +375,7 @@ Open Talon runs agent execution through durable stateless workers:
 - `agent-task-worker` claims `tasks`, creates `runs`, and resolves the target LLM engine
 - `agent-loop-worker` claims `run_steps` and executes model turns
 - `tool-worker` claims `tool_calls` and dispatches isolated tool execution
+- `mcp-sync-worker` validates System Plugin MCP endpoints and durably refreshes cached plugin capabilities
 - `reconciler` requeues expired leases and republishes wakeup events
 - `retriever-worker` claims retrieval ingestion jobs and populates retrieval chunks, full-text search data, and pgvector embeddings
 
@@ -413,12 +417,17 @@ Common tool endpoints:
 - `PUT /v1/workspaces/{workspace_id}/tools/{tool_id}`: attach a system tool to a workspace
 - `PATCH /v1/workspaces/{workspace_id}/tools/{tool_id}`: update workspace attachment state
 - `DELETE /v1/workspaces/{workspace_id}/tools/{tool_id}`: detach a tool from a workspace
-- `GET /v1/mcp-servers`: list global external MCP server definitions
-- `POST /v1/mcp-servers`: create a global external MCP server definition
-- `GET /v1/organizations/{organization_id}/mcp-servers`: list organization-scoped external MCP server definitions
-- `POST /v1/organizations/{organization_id}/mcp-servers`: create an organization-scoped external MCP server definition
-- `GET /v1/workspaces/{workspace_id}/mcp-servers`: list external MCP servers attached to a workspace
-- `PUT /v1/workspaces/{workspace_id}/mcp-servers/{server_id}`: attach an external MCP server to a workspace
+- `GET /v1/system-plugins`: list global System Plugin definitions
+- `POST /v1/system-plugins`: create a global System Plugin definition
+- `POST /v1/system-plugins/{server_id}/sync`: enqueue capability sync for a System Plugin
+- `GET /v1/system-plugins/{server_id}/tools`: list cached plugin tool capabilities
+- `GET /v1/system-plugins/{server_id}/resources`: list cached plugin resource capabilities
+- `GET /v1/system-plugins/{server_id}/prompts`: list cached plugin prompt capabilities
+- `GET /v1/organizations/{organization_id}/system-plugins`: list organization-scoped System Plugin definitions
+- `POST /v1/organizations/{organization_id}/system-plugins`: create an organization-scoped System Plugin definition
+- `GET /v1/workspaces/{workspace_id}/system-plugins`: list System Plugin attachments for a workspace
+- `PUT /v1/workspaces/{workspace_id}/system-plugins/{server_id}`: attach a System Plugin to a workspace
+- `GET /v1/workspaces/{workspace_id}/plugin-capabilities/tools`: list workspace-visible plugin tools
 - `GET /v1/tool-generation/requests`: list tool-generation requests for admins
 - `GET /v1/threads/{thread_id}/tool-generation/requests`: list tool-generation requests for a thread
 - `POST /v1/tool-generation/revisions/{revision_id}/approve`: publish a generated tool into the system catalog
@@ -587,6 +596,7 @@ It waits for both the gateway readiness endpoint and the configured OIDC discove
 - `agent-task-worker`
 - `agent-loop-worker`
 - `tool-worker`
+- `mcp-sync-worker`
 - `reconciler`
 - `retriever-worker`
 
@@ -596,8 +606,10 @@ Local services:
 - `agent-task-worker`: local worker that claims durable `tasks`, creates `runs`, and resolves the target LLM engine
 - `agent-loop-worker`: local worker that executes agent model steps from durable `run_steps`
 - `tool-worker`: local worker that executes isolated tool invocations from durable `tool_calls`
+- `mcp-sync-worker`: local worker that validates System Plugin MCP endpoints and refreshes cached capabilities
 - `reconciler`: local worker that requeues expired leases and republishes wakeups
 - `retriever-worker`: local worker that extracts and indexes retrieval sources stored as immutable file assets
+- `web-search-mcp`: optional local System Plugin MCP service started with `./open-talon start --web-search`
 - `postgres`: application database with `pgvector` enabled
 - `pgadmin`: pgAdmin 4 web UI for inspecting and querying the local Postgres instance
 - `kafka`: event bus for chat, collaboration, and agent-runtime traffic

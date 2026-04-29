@@ -45,6 +45,7 @@ ANCHOR_AGENT_ID = UUID("44444444-4444-4444-4444-444444444446")
 METHODOLOGIST_AGENT_ID = UUID("44444444-4444-4444-4444-444444444447")
 CONDUCTOR_AGENT_ID = UUID("44444444-4444-4444-4444-444444444448")
 CONTROL_PLANE_MCP_SERVER_ID = UUID("66666666-6666-6666-6666-666666666666")
+WEB_SEARCH_PLUGIN_MCP_SERVER_ID = UUID("66666666-6666-6666-6666-666666666667")
 PLATFORM_STEWARD_ROLE_ID = UUID("77777777-7777-7777-7777-777777777771")
 GLOBAL_CONDUCTOR_ROLE_ID = UUID("77777777-7777-7777-7777-777777777772")
 SYSTEM_ACTOR_ID = UUID("00000000-0000-0000-0000-000000000000")
@@ -456,6 +457,10 @@ class ManagedSystemDefaultsRepairer:
         )
         summary["mcp_servers"] += 1
         summary["mcp_tools"] += len(_CONTROL_PLANE_TOOL_NAMES)
+
+        web_search = await self._web_search_mcp_server(now=now)
+        await self._repository.upsert_mcp_server(conn, web_search)
+        summary["mcp_servers"] += 1
 
         steward = next(
             agent for agent in global_agents if agent.agent_key == "steward"
@@ -1722,6 +1727,57 @@ class ManagedSystemDefaultsRepairer:
                 "server_id": existing.server_id,
                 "created_by": existing.created_by,
                 "created_at": existing.created_at,
+                "metadata": {**existing.metadata, **server.metadata},
+            }
+        )
+
+    async def _web_search_mcp_server(self, *, now: datetime) -> McpServerDefinition:
+        existing = await self._find_mcp_server_by_key(
+            scope="global",
+            organization_id=None,
+            server_key="web_search",
+        )
+        server = McpServerDefinition(
+            server_id=WEB_SEARCH_PLUGIN_MCP_SERVER_ID,
+            scope="global",
+            organization_id=None,
+            server_key="web_search",
+            display_name="Web Search",
+            description=(
+                "Managed System Plugin for web search and page extraction backed by "
+                "self-hosted SearXNG and Crawl4AI."
+            ),
+            transport_kind="streamable_http",
+            config={
+                "url": os.getenv("OPEN_TALON_WEB_SEARCH_MCP_URL", "http://127.0.0.1:8181/mcp"),
+                "capabilities": ["search", "fetch", "search_and_fetch"],
+            },
+            secret_config={},
+            trust_level="sandboxed",
+            enabled=True,
+            last_sync_status="not_synced",
+            created_by=SYSTEM_ACTOR_ID,
+            created_at=now,
+            updated_by=SYSTEM_ACTOR_ID,
+            updated_at=now,
+            metadata={
+                "seeded": True,
+                "managed": True,
+                "system_plugin": True,
+                "plugin_key": "web_search",
+                "backing_protocol": "mcp",
+            },
+        )
+        if existing is None:
+            return server
+        return server.model_copy(
+            update={
+                "server_id": existing.server_id,
+                "created_by": existing.created_by,
+                "created_at": existing.created_at,
+                "last_sync_status": existing.last_sync_status,
+                "last_sync_error": existing.last_sync_error,
+                "last_synced_at": existing.last_synced_at,
                 "metadata": {**existing.metadata, **server.metadata},
             }
         )

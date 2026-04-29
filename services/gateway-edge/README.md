@@ -39,7 +39,7 @@ The gateway also serves the compatibility browser session-chat UI from `apps/web
 Current behavior:
 
 - it exposes Open Talon system API operations through MCP `tools/list` and `tools/call`
-- it does not expose `system_tools`, `workspace_tools`, Tinker-generated tools, or agent-runtime tool execution as MCP callables
+- it does not expose `system_tools`, `workspace_tools`, Tinker-generated tools, System Plugins, or agent-runtime tool execution as MCP callables
 - it requires OIDC bearer authentication even when the main gateway auth mode allows API keys or OpenBao
 - `initialize` returns `Mcp-Session-Id`, and later `POST` calls plus the `GET /v1/mcp` SSE stream must send that header
 - it publishes OAuth protected-resource metadata at `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/v1/mcp`
@@ -48,6 +48,8 @@ Current behavior:
 - it keeps MCP session scope separately as `global`, `organization:<id>`, or `workspace:<id>` and filters visible operations accordingly
 - scope changes publish `notifications/tools/list_changed` and `notifications/resources/list_changed`
 - it exposes read-only session resources at `ot://session/identity`, `ot://session/permissions`, and `ot://session/scope`
+
+System Plugins are managed through `/v1/system-plugins` and workspace plugin attachments. They are backed by external MCP servers in v1, but they are separate from this gateway-mounted MCP adapter.
 
 Relevant settings:
 
@@ -61,7 +63,7 @@ If you want to run the service directly instead of through the launcher:
 
 ```bash
 source .venv/bin/activate
-PYTHONPATH="packages/contracts:services/core-collab:services/gateway-edge:services/agent-runtime:services/retriever:services/generated-tools-builder:apps/tui" \
+PYTHONPATH="packages/contracts:services/core-collab:services/gateway-edge:services/agent-runtime:services/web-search-mcp:services/retriever:services/generated-tools-builder:apps/tui" \
   uvicorn gateway_edge.main:app --host 0.0.0.0 --port 8000
 ```
 

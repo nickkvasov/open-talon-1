@@ -78,6 +78,7 @@ This starts:
 - `agent-task-worker`
 - `agent-loop-worker`
 - `tool-worker`
+- `mcp-sync-worker`
 - `reconciler`
 - Postgres
 - Kafka
@@ -138,6 +139,14 @@ If you want Mem0 graph memory locally, start the system with graph mode enabled:
 
 That keeps Postgres as the canonical memory store and adds the optional local `memgraph` service for Mem0 graph retrieval. Graph retrieval is controlled by the persisted memory-provider definition, not by the launcher flag.
 
+If you want the managed web-search System Plugin locally, start with:
+
+```bash
+./open-talon start --web-search
+```
+
+That adds self-hosted SearXNG and the local `web-search-mcp` process. The seeded `web_search` System Plugin still must be synced and attached to a workspace explicitly before agents can use `search`, `fetch`, or `search_and_fetch`.
+
 ## 3. Check The Main Endpoints
 
 - Gateway: [http://127.0.0.1:8000](http://127.0.0.1:8000)
@@ -163,6 +172,8 @@ That keeps Postgres as the canonical memory store and adds the optional local `m
 - Forgejo: [http://127.0.0.1:3001](http://127.0.0.1:3001)
 - Forgejo SSH: `localhost:2222`
 - Ollama: [http://127.0.0.1:11434](http://127.0.0.1:11434)
+- SearXNG: [http://127.0.0.1:8082](http://127.0.0.1:8082) when started with `./open-talon start --web-search`
+- Web Search MCP: [http://127.0.0.1:8181/health](http://127.0.0.1:8181/health) when started with `./open-talon start --web-search`
 - HyperDX UI when started with `--profile hyperdx`: [http://127.0.0.1:8080](http://127.0.0.1:8080)
 - HyperDX OTLP gRPC when started with `--profile hyperdx`: `localhost:4317`
 - HyperDX OTLP HTTP when started with `--profile hyperdx`: `localhost:4318`
@@ -615,7 +626,7 @@ Workspace harnesses include `moderation_policy` with `enabled`, `level` (`strict
 
 `Steward` and `Curator` use the managed `open_talon_control_plane` MCP server for gateway control-plane operations. The runtime mints OIDC client-credentials tokens from `agent_identities.secret_ref` when a private control-plane MCP tool is executed.
 
-External MCP servers are managed separately from Open Talon tools. Register global or organization-scoped MCP servers with `/v1/mcp-servers` or `/v1/organizations/{organization_id}/mcp-servers`, then attach them to a workspace with `PUT /v1/workspaces/{workspace_id}/mcp-servers/{server_id}`. MCP tools, resources, and prompts are rendered in separate agent context sections and are not inserted into `system_tools` or `workspace_tools`.
+System Plugins are managed separately from Open Talon tools. In v1 they are backed by external MCP servers stored in `mcp_servers`, but the public product surface is `/v1/system-plugins`. Register global or organization-scoped plugins with `/v1/system-plugins` or `/v1/organizations/{organization_id}/system-plugins`, sync their plugin capabilities with `POST /v1/system-plugins/{server_id}/sync`, then attach them to a workspace with `PUT /v1/workspaces/{workspace_id}/system-plugins/{server_id}`. Plugin tools, resources, and prompts are rendered in separate agent context sections and are not inserted into `system_tools`, not attached through `workspace_tools`, not published by Tinker, and not auto-attached to workspaces.
 
 Useful routes:
 

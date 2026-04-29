@@ -23,6 +23,7 @@ dependencies = [
 talon-agent-task-worker = "agent_runtime.agent_task_worker:main"
 talon-agent-loop-worker = "agent_runtime.agent_loop_worker:main"
 talon-tool-worker = "agent_runtime.tool_worker:main"
+talon-mcp-sync-worker = "agent_runtime.mcp_sync_worker:main"
 talon-reconciler = "agent_runtime.reconciler:main"
 
 [tool.hatch.build.targets.wheel]

@@ -166,8 +166,8 @@ export default function SwarmResources() {
           : '/v1/git-repositories';
       const mcpServersEndpoint =
         scopeMode === 'organization'
-          ? `/v1/organizations/${selectedOrganizationId}/mcp-servers`
-          : '/v1/mcp-servers';
+          ? `/v1/organizations/${selectedOrganizationId}/system-plugins`
+          : '/v1/system-plugins';
       const [agentsRes, toolsRes, mcpServersRes] = await Promise.allSettled([
         api.get(agentsEndpoint),
         api.get(toolsEndpoint),
@@ -254,11 +254,11 @@ export default function SwarmResources() {
     const suffix = serverId ? `/${serverId}` : '';
     if (scopeMode === 'organization') {
       if (!selectedOrganizationId) {
-        throw new Error('Select an organization before using org-scoped MCP servers.');
+        throw new Error('Select an organization before using org-scoped System Plugins.');
       }
-      return `/v1/organizations/${selectedOrganizationId}/mcp-servers${suffix}`;
+      return `/v1/organizations/${selectedOrganizationId}/system-plugins${suffix}`;
     }
-    return `/v1/mcp-servers${suffix}`;
+    return `/v1/system-plugins${suffix}`;
   };
 
   const handleOpenAgentEdit = (agent) => {
@@ -539,8 +539,8 @@ export default function SwarmResources() {
   const handleDeleteMcpServer = async (server_id) => {
     setConfirmModal({
       isOpen: true,
-      title: 'Delete MCP Server?',
-      message: 'This removes the external MCP server definition and all workspace MCP attachments.',
+      title: 'Delete System Plugin?',
+      message: 'This removes the external System Plugin definition and all workspace plugin attachments.',
       onConfirm: async () => {
         try {
           await api.delete(mcpServerPath(server_id), {
@@ -548,10 +548,22 @@ export default function SwarmResources() {
           });
           fetchResources();
         } catch (err) {
-          alert('Failed to delete MCP server: ' + err.message);
+          alert('Failed to delete System Plugin: ' + err.message);
         }
       }
     });
+  };
+
+  const handleSyncMcpServer = async (server_id) => {
+    try {
+      await api.post(`${mcpServerPath(server_id)}/sync`, {
+        actor: buildAdminActor(),
+        metadata: { source: 'admin-web' }
+      });
+      fetchResources();
+    } catch (err) {
+      setError('Failed to sync System Plugin: ' + err.message);
+    }
   };
 
   const handleSaveAgent = async () => {
@@ -645,12 +657,12 @@ export default function SwarmResources() {
       };
       if (mcpModalMode === 'create') {
         if (scopeMode === 'organization' && !selectedOrganizationId) {
-          throw new Error('Select an organization before creating an org-scoped MCP server.');
+          throw new Error('Select an organization before creating an org-scoped System Plugin.');
         }
         await api.post(
           scopeMode === 'organization'
-            ? `/v1/organizations/${selectedOrganizationId}/mcp-servers`
-            : '/v1/mcp-servers',
+            ? `/v1/organizations/${selectedOrganizationId}/system-plugins`
+            : '/v1/system-plugins',
           payload
         );
       } else {
@@ -660,7 +672,7 @@ export default function SwarmResources() {
       resetMcpServerForm();
       fetchResources();
     } catch (err) {
-      setError('Failed to save MCP server: ' + err.message);
+      setError('Failed to save System Plugin: ' + err.message);
     }
   };
 
@@ -1115,11 +1127,11 @@ export default function SwarmResources() {
           </div>
         </div>
 
-        {/* MCP Servers List */}
+        {/* System Plugins List */}
         <div className="space-y-4">
           <div className="flex items-center gap-2 mb-2">
             <Globe className="text-cyan-500 w-5 h-5" />
-            <h2 className="text-lg font-bold dark:text-white">MCP Servers</h2>
+            <h2 className="text-lg font-bold dark:text-white">System Plugins</h2>
             <span className="text-xs bg-slate-100 dark:bg-slate-800 text-slate-500 py-1 px-2 rounded-full font-mono">
               {mcpServers.length}
             </span>
@@ -1127,14 +1139,14 @@ export default function SwarmResources() {
               type="button"
               onClick={() => { resetMcpServerForm(); setIsMcpModalOpen(true); }}
               className="ml-auto p-2 text-slate-400 hover:text-cyan-500 hover:bg-cyan-50 dark:hover:bg-cyan-900/30 rounded-lg transition-all"
-              title="Add MCP Server"
+              title="Add System Plugin"
             >
               <Plus className="w-4 h-4" />
             </button>
           </div>
           <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl divide-y divide-slate-100 dark:divide-slate-700 shadow-sm overflow-hidden">
             {mcpServers.length === 0 ? (
-              <div className="p-8 text-slate-500 text-center italic">No external MCP servers registered.</div>
+              <div className="p-8 text-slate-500 text-center italic">No System Plugins registered.</div>
             ) : (
               mcpServers.map(server => (
                 <div key={server.server_id} className="p-5 flex items-start justify-between hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors">
@@ -1150,18 +1162,33 @@ export default function SwarmResources() {
                       <span className={`text-[10px] px-2 py-0.5 rounded-full uppercase tracking-tight ${server.enabled ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400' : 'bg-slate-100 text-slate-500 dark:bg-slate-700'}`}>
                         {server.enabled ? 'enabled' : 'disabled'}
                       </span>
+                      {server.last_sync_status && (
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full uppercase tracking-tight ${server.last_sync_status === 'completed' ? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400' : server.last_sync_status === 'failed' ? 'bg-rose-50 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400' : 'bg-amber-50 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400'}`}>
+                          sync {server.last_sync_status}
+                        </span>
+                      )}
                     </div>
                     <p className="text-sm text-slate-500 dark:text-slate-400 line-clamp-1">{server.description}</p>
-                    <div className="flex items-center text-xs text-slate-400 font-mono">
-                      {server.server_key}
+                    <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400 font-mono">
+                      <span>{server.server_key}</span>
+                      {server.last_synced_at && <span>last synced {new Date(server.last_synced_at).toLocaleString()}</span>}
                     </div>
+                    {server.last_sync_error && <p className="text-xs text-rose-500 line-clamp-1">{server.last_sync_error}</p>}
                   </div>
                   <div className="flex gap-2">
                     <button
                       type="button"
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleSyncMcpServer(server.server_id); }}
+                      className="p-2 text-slate-400 hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 rounded-lg transition-all"
+                      title="Sync Plugin Capabilities"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
                       onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleOpenMcpServerEdit(server); }}
                       className="p-2 text-slate-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded-lg transition-all"
-                      title="Edit MCP Server"
+                      title="Edit System Plugin"
                     >
                       <Edit2 className="w-4 h-4" />
                     </button>
@@ -1169,7 +1196,7 @@ export default function SwarmResources() {
                       type="button"
                       onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteMcpServer(server.server_id); }}
                       className="p-2 text-slate-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/30 rounded-lg transition-all"
-                      title="Delete MCP Server"
+                      title="Delete System Plugin"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -1593,7 +1620,7 @@ export default function SwarmResources() {
         </div>
       )}
 
-      {/* MCP Server Modal */}
+      {/* System Plugin Modal */}
       {isMcpModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 transition-opacity animate-in fade-in duration-200">
           <div className="bg-white dark:bg-slate-800 w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 animate-in zoom-in-95 duration-200 flex flex-col">
@@ -1603,9 +1630,9 @@ export default function SwarmResources() {
                   <span className="p-1.5 rounded-lg mr-3 bg-cyan-100 dark:bg-cyan-900/30 text-cyan-600">
                     <Globe className="w-6 h-6"/>
                   </span>
-                  {mcpModalMode === 'edit' ? 'Update' : 'Register'} MCP Server
+                  {mcpModalMode === 'edit' ? 'Update' : 'Register'} System Plugin
                 </h2>
-                <p className="text-slate-500 text-sm mt-1">External MCP servers are managed separately from Open Talon tools</p>
+                <p className="text-slate-500 text-sm mt-1">External plugin capabilities are backed by MCP and stay separate from Open Talon tools</p>
               </div>
               <button onClick={() => setIsMcpModalOpen(false)} className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full transition-all">
                 <X className="w-5 h-5" />
@@ -1614,12 +1641,12 @@ export default function SwarmResources() {
             <div className="p-8 space-y-6">
               <div className="grid grid-cols-2 gap-6">
                 <div>
-                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Server Key</label>
-                  <input type="text" value={mcpServerData.server_key} onChange={e => setMcpServerData({...mcpServerData, server_key: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-cyan-500 outline-none transition-all font-mono text-sm" placeholder="github" />
+                  <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Plugin Key</label>
+                  <input type="text" value={mcpServerData.server_key} onChange={e => setMcpServerData({...mcpServerData, server_key: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-cyan-500 outline-none transition-all font-mono text-sm" placeholder="web_search" />
                 </div>
                 <div>
                   <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">Display Name</label>
-                  <input type="text" value={mcpServerData.display_name} onChange={e => setMcpServerData({...mcpServerData, display_name: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-cyan-500 outline-none transition-all" placeholder="GitHub MCP" />
+                  <input type="text" value={mcpServerData.display_name} onChange={e => setMcpServerData({...mcpServerData, display_name: e.target.value})} className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-cyan-500 outline-none transition-all" placeholder="Web Search" />
                 </div>
               </div>
               <div>
@@ -1661,7 +1688,7 @@ export default function SwarmResources() {
               <div className="flex justify-end space-x-4 pt-4">
                 <button onClick={() => setIsMcpModalOpen(false)} className="px-6 py-2.5 text-slate-500 font-semibold hover:text-slate-800 dark:hover:text-slate-200 transition-colors">Cancel</button>
                 <button onClick={handleSaveMcpServer} className="px-10 py-2.5 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg font-bold shadow-lg shadow-cyan-500/20 transition-all">
-                  {mcpModalMode === 'edit' ? 'Update Server' : 'Register Server'}
+                  {mcpModalMode === 'edit' ? 'Update Plugin' : 'Register Plugin'}
                 </button>
               </div>
             </div>

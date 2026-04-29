@@ -80,6 +80,7 @@ class McpExecutionBackend:
             raise ValueError("HTTP MCP server config requires url")
         headers = await self._headers_for_server(server, spec)
         arguments, scope_args = self._split_scope_arguments(spec.inline_payload)
+        self._validate_asset_persistence_arguments(spec, arguments)
         timeout = float(spec.profile.get("timeout_seconds") or spec.limits.timeout_seconds or 60)
         async with httpx.AsyncClient(timeout=timeout) as client:
             init = await self._rpc(
@@ -138,6 +139,7 @@ class McpExecutionBackend:
         assert ClientSession is not None
         headers = await self._headers_for_server(server, spec, include_protocol_headers=False)
         arguments, scope_args = self._split_scope_arguments(spec.inline_payload)
+        self._validate_asset_persistence_arguments(spec, arguments)
         if server.transport_kind == "stdio":
             assert StdioServerParameters is not None and stdio_client is not None
             command = list(server.config.get("command") or [])
@@ -261,6 +263,28 @@ class McpExecutionBackend:
         if not isinstance(scope_args, dict):
             raise ValueError("_mcp_scope must be an object when provided")
         return arguments, scope_args
+
+    @staticmethod
+    def _validate_asset_persistence_arguments(spec: ExecutionSpec, arguments: dict[str, Any]) -> None:
+        requested = bool(arguments.get("persist_asset") or arguments.get("persist_assets"))
+        if not requested:
+            return
+        metadata = spec.metadata.get("mcp_workspace_attachment_metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        asset_persistence = metadata.get("asset_persistence")
+        enabled = any(
+            bool(metadata.get(key))
+            for key in (
+                "allow_asset_persistence",
+                "persist_assets_enabled",
+                "persist_fetched_pages_as_assets",
+            )
+        ) or (isinstance(asset_persistence, dict) and bool(asset_persistence.get("enabled")))
+        if not enabled:
+            raise ValueError(
+                "MCP tool requested asset persistence, but the workspace plugin attachment does not enable it"
+            )
 
     @staticmethod
     def _sdk_result_to_execution_result(result: Any) -> ExecutionResult:

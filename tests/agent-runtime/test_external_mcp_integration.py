@@ -23,6 +23,7 @@ for path in (_AGENT_RUNTIME_DIR, _CONTRACTS_DIR, _CORE_COLLAB_DIR, _TESTS_DIR):
         sys.path.insert(0, path)
 
 from agent_runtime.execution.mcp import McpExecutionBackend
+from agent_runtime.mcp_discovery import discover_mcp_capabilities
 from agent_runtime.runtime import render_prompt
 from open_talon_contracts.models import (
     ActorRef,
@@ -81,6 +82,34 @@ def test_full_featured_mcp_server_exposes_tools_resources_and_prompts():
     assert prompts["prompts"][0]["name"] == "incident_triage"
     assert resource["contents"][0]["text"].startswith("# MCP Integration")
     assert prompt["messages"][0]["content"]["text"] == "Triage gateway-edge"
+
+
+@pytest.mark.asyncio
+async def test_mcp_capability_discovery_caches_tools_resources_and_prompts():
+    now = datetime.now(timezone.utc)
+    server_id = uuid4()
+    with FullFeaturedMcpServer() as test_server:
+        result = await discover_mcp_capabilities(
+            McpServerDefinition(
+                server_id=server_id,
+                server_key="full_featured",
+                display_name="Full Featured MCP",
+                description="Test MCP server",
+                transport_kind="streamable_http",
+                config={"url": test_server.url},
+                created_by=uuid4(),
+                created_at=now,
+                updated_by=uuid4(),
+                updated_at=now,
+            )
+        )
+
+    assert {tool.tool_name for tool in result.tools} == {"echo", "summarize"}
+    assert all(tool.server_id == server_id for tool in result.tools)
+    assert all(tool.capability_hash for tool in result.tools)
+    assert result.resources[0].uri == "docs://open-talon/mcp"
+    assert result.prompts[0].prompt_name == "incident_triage"
+    assert result.prompts[0].arguments_schema["properties"]["service"]["type"] == "string"
 
 
 @pytest.mark.asyncio
@@ -212,6 +241,35 @@ async def test_mcp_execution_backend_mints_agent_identity_token(monkeypatch):
     assert headers["Authorization"] == "Bearer agent-token"
     assert posted["url"] == "http://issuer.test/token"
     assert posted["data"]["client_id"] == "open-talon-agent-steward"
+
+
+def test_mcp_execution_backend_rejects_unauthorized_asset_persistence():
+    backend = McpExecutionBackend(kernel=object())
+    spec = ExecutionSpec(
+        invocation_id=uuid4(),
+        handler_ref="fetch",
+        inline_payload={"url": "https://example.test", "persist_asset": True},
+        metadata={"backend_kind": "mcp", "mcp_workspace_attachment_metadata": {}},
+    )
+
+    with pytest.raises(ValueError, match="does not enable"):
+        backend._validate_asset_persistence_arguments(  # noqa: SLF001
+            spec,
+            {"url": "https://example.test", "persist_asset": True},
+        )
+
+    allowed = spec.model_copy(
+        update={
+            "metadata": {
+                "backend_kind": "mcp",
+                "mcp_workspace_attachment_metadata": {"asset_persistence": {"enabled": True}},
+            }
+        }
+    )
+    backend._validate_asset_persistence_arguments(  # noqa: SLF001
+        allowed,
+        {"url": "https://example.test", "persist_asset": True},
+    )
 
 
 def test_agent_prompt_keeps_mcp_capabilities_separate_from_open_talon_tools():
@@ -361,10 +419,10 @@ def test_agent_prompt_keeps_mcp_capabilities_separate_from_open_talon_tools():
 
     assert "Workspace tools:" in prompt
     assert "- repo_search | enabled: yes | Open Talon source search." in prompt
-    assert "Workspace MCP tools:" in prompt
+    assert "Workspace System Plugin tools:" in prompt
     assert "mcp_full_featured__echo | server: Full Featured MCP" in prompt
-    assert "Workspace MCP resources:" in prompt
+    assert "Workspace System Plugin resources:" in prompt
     assert "docs://open-talon/mcp" in prompt
-    assert "Workspace MCP prompts:" in prompt
+    assert "Workspace System Plugin prompts:" in prompt
     assert "mcp_full_featured__incident_triage | server: Full Featured MCP" in prompt
     assert "They do not override this agent's Open Talon harness" in prompt

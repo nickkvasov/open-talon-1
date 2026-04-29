@@ -97,6 +97,8 @@ from gateway_edge.models import (
     McpPromptDefinition,
     McpResourceDefinition,
     McpServerDefinition,
+    McpServerSyncJob,
+    McpServerSyncResult,
     McpToolDefinition,
     LlmProviderDefinition,
     MethodicExecution,
@@ -111,6 +113,7 @@ from gateway_edge.models import (
     IamRoleDefinition,
     RoleDefinition,
     PublishAssetFromGitRequest,
+    RequestMcpServerSyncRequest,
     RetrievalContextPack,
     RetrievalCorpus,
     RetrievalIngestionJob,
@@ -702,6 +705,24 @@ class CollaborationService:
 
     async def list_mcp_server_prompts(self, server_id: UUID) -> list[McpPromptDefinition]:
         return await self._require_kernel().list_mcp_server_prompts(server_id)
+
+    async def request_mcp_server_sync(
+        self,
+        server_id: UUID,
+        payload: RequestMcpServerSyncRequest,
+    ) -> McpServerSyncResult:
+        return await self._require_kernel().request_mcp_server_sync(server_id, payload)
+
+    async def list_mcp_server_sync_jobs(
+        self,
+        server_id: UUID,
+        *,
+        limit: int = 20,
+    ) -> list[McpServerSyncJob]:
+        return await self._require_kernel().list_mcp_server_sync_jobs(
+            server_id,
+            limit=limit,
+        )
 
     async def create_system_tool(
         self,

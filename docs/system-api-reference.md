@@ -65,6 +65,7 @@ The repository also includes helper packages that matter when you are documentin
 | Component | Role in the current system | Status in local runtime |
 | --- | --- | --- |
 | `services/workspace-memory` | memory-provider abstraction shared by gateway, core-collab, and runtime | active library, not a standalone service |
+| `services/web-search-mcp` | managed web-search System Plugin MCP service | optional local process started by `./open-talon start --web-search` |
 | `services/generated-tools-builder` | OCI packaging and publish helpers for generated tools | active helper library used by Tinker flows |
 | `services/presence-directory` | Valkey-backed websocket presence state | active library used by `gateway-edge` |
 | `apps/web` | browser client for the legacy session-chat routes | static app mounted by `gateway-edge` at `/` when the directory is present |
@@ -233,8 +234,8 @@ Current MCP behavior:
 - successful scope changes emit `notifications/tools/list_changed` and `notifications/resources/list_changed`
 - the visible MCP operation set is filtered from the caller's existing IAM permissions, project-local `creator`/`owner`/`editor`/`viewer` permissions in project scope, and workspace participant attachment where the underlying API already requires it
 - successful operation calls return both a short text `content` summary and `structuredContent`; protocol/schema failures stay JSON-RPC errors
-- MCP exposes system API operations only; it does not expose `system_tools`, `workspace_tools`, Tinker-generated tools, or `agent-runtime` execution backends as imported MCP tools
-- External MCP server attachments are modeled separately under `/v1/mcp-servers` and `/v1/workspaces/{workspace_id}/mcp-servers`; they are not imported into Open Talon `system_tools`.
+- MCP exposes system API operations only; it does not expose `system_tools`, `workspace_tools`, Tinker-generated tools, System Plugins, or `agent-runtime` execution backends as imported MCP tools
+- System Plugins are the public external-capability layer. V1 stores them in `mcp_servers`, syncs discovered plugin capabilities into `mcp_server_tools`, `mcp_server_resources`, and `mcp_server_prompts`, and attaches them through `workspace_mcp_servers`. They are not imported into Open Talon `system_tools`, not published by Tinker, and not auto-attached to workspaces.
 
 Current MCP session resources:
 
@@ -731,24 +732,26 @@ Git-managed system and organization agent definitions are authored as modular bu
 | `PUT` | `/v1/workspaces/{workspace_id}/tools/{tool_id}` | attach tool to workspace |
 | `PATCH` | `/v1/workspaces/{workspace_id}/tools/{tool_id}` | update workspace tool attachment |
 | `DELETE` | `/v1/workspaces/{workspace_id}/tools/{tool_id}` | detach tool from workspace |
-| `POST` | `/v1/mcp-servers` | create global external MCP server |
-| `GET` | `/v1/mcp-servers` | list global external MCP servers |
-| `GET` | `/v1/mcp-servers/{server_id}` | get external MCP server |
-| `PATCH` | `/v1/mcp-servers/{server_id}` | update external MCP server |
-| `DELETE` | `/v1/mcp-servers/{server_id}` | delete external MCP server |
-| `GET` | `/v1/mcp-servers/{server_id}/tools` | list discovered MCP tools |
-| `GET` | `/v1/mcp-servers/{server_id}/resources` | list discovered MCP resources |
-| `GET` | `/v1/mcp-servers/{server_id}/prompts` | list discovered MCP prompts |
-| `POST` | `/v1/organizations/{organization_id}/mcp-servers` | create organization-scoped external MCP server |
-| `GET` | `/v1/organizations/{organization_id}/mcp-servers` | list organization-scoped external MCP servers |
-| `GET` | `/v1/workspaces/{workspace_id}/catalog/mcp-servers` | list MCP servers visible to workspace |
-| `GET` | `/v1/workspaces/{workspace_id}/mcp-servers` | list MCP servers attached to workspace |
-| `PUT` | `/v1/workspaces/{workspace_id}/mcp-servers/{server_id}` | attach MCP server to workspace |
-| `PATCH` | `/v1/workspaces/{workspace_id}/mcp-servers/{server_id}` | update MCP server attachment |
-| `DELETE` | `/v1/workspaces/{workspace_id}/mcp-servers/{server_id}` | detach MCP server from workspace |
-| `GET` | `/v1/workspaces/{workspace_id}/mcp-tools` | list workspace-visible MCP tools |
-| `GET` | `/v1/workspaces/{workspace_id}/mcp-resources` | list workspace-visible MCP resources |
-| `GET` | `/v1/workspaces/{workspace_id}/mcp-prompts` | list workspace-visible MCP prompts |
+| `POST` | `/v1/system-plugins` | create global System Plugin |
+| `GET` | `/v1/system-plugins` | list global System Plugins |
+| `GET` | `/v1/system-plugins/{server_id}` | get System Plugin |
+| `PATCH` | `/v1/system-plugins/{server_id}` | update System Plugin |
+| `DELETE` | `/v1/system-plugins/{server_id}` | delete System Plugin |
+| `POST` | `/v1/system-plugins/{server_id}/sync` | enqueue plugin capability sync |
+| `GET` | `/v1/system-plugins/{server_id}/sync-jobs` | list plugin sync jobs |
+| `GET` | `/v1/system-plugins/{server_id}/tools` | list discovered plugin tools |
+| `GET` | `/v1/system-plugins/{server_id}/resources` | list discovered plugin resources |
+| `GET` | `/v1/system-plugins/{server_id}/prompts` | list discovered plugin prompts |
+| `POST` | `/v1/organizations/{organization_id}/system-plugins` | create organization-scoped System Plugin |
+| `GET` | `/v1/organizations/{organization_id}/system-plugins` | list organization-scoped System Plugins |
+| `GET` | `/v1/workspaces/{workspace_id}/catalog/system-plugins` | list System Plugins visible to workspace |
+| `GET` | `/v1/workspaces/{workspace_id}/system-plugins` | list workspace plugin attachments |
+| `PUT` | `/v1/workspaces/{workspace_id}/system-plugins/{server_id}` | attach System Plugin to workspace |
+| `PATCH` | `/v1/workspaces/{workspace_id}/system-plugins/{server_id}` | update plugin attachment |
+| `DELETE` | `/v1/workspaces/{workspace_id}/system-plugins/{server_id}` | detach System Plugin from workspace |
+| `GET` | `/v1/workspaces/{workspace_id}/plugin-capabilities/tools` | list workspace-visible plugin tools |
+| `GET` | `/v1/workspaces/{workspace_id}/plugin-capabilities/resources` | list workspace-visible plugin resources |
+| `GET` | `/v1/workspaces/{workspace_id}/plugin-capabilities/prompts` | list workspace-visible plugin prompts |
 | `POST` | `/v1/workspaces/{workspace_id}/git-repositories` | register workspace Git repository |
 | `GET` | `/v1/workspaces/{workspace_id}/git-repositories` | list workspace Git repositories |
 | `POST` | `/v1/workspaces/{workspace_id}/assets/publish-from-git` | publish workspace asset version |

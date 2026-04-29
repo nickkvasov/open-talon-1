@@ -60,6 +60,7 @@ from .contracts import (
     McpPromptDefinition,
     McpResourceDefinition,
     McpServerDefinition,
+    McpServerSyncJob,
     McpToolDefinition,
     LlmProviderDefinition,
     Organization,
@@ -2824,6 +2825,248 @@ class CollaborationRepository:
                 prompt.discovered_at,
                 self._json_dumps(prompt.metadata),
             )
+
+    async def update_mcp_server_sync_status(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        server_id: UUID,
+        status: str,
+        error: str | None,
+        synced_at,
+        updated_at,
+    ) -> McpServerDefinition | None:
+        row = await conn.fetchrow(
+            """
+            UPDATE mcp_servers
+            SET last_sync_status = $2,
+                last_sync_error = $3,
+                last_synced_at = COALESCE($4::timestamptz, last_synced_at),
+                updated_at = $5
+            WHERE server_id = $1
+            RETURNING server_id, scope, organization_id, server_key, display_name, description,
+                      transport_kind, config, secret_config, trust_level, enabled,
+                      last_sync_status, last_sync_error, last_synced_at,
+                      created_by, created_at, updated_by, updated_at, metadata
+            """,
+            server_id,
+            status,
+            error,
+            synced_at,
+            updated_at,
+        )
+        return self._mcp_server_from_row(row) if row else None
+
+    async def create_mcp_server_sync_job(
+        self,
+        conn: asyncpg.Connection,
+        job: McpServerSyncJob,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO mcp_server_sync_jobs (
+                job_id, server_id, status, requested_by, requested_at,
+                claimed_by_worker, lease_expires_at, last_heartbeat_at,
+                attempt_count, result, error, created_at, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8,
+                $9, $10, $11, $12, $13, $14
+            )
+            """,
+            job.job_id,
+            job.server_id,
+            job.status,
+            job.requested_by,
+            job.requested_at,
+            job.claimed_by_worker,
+            job.lease_expires_at,
+            job.last_heartbeat_at,
+            job.attempt_count,
+            self._json_dumps(job.result),
+            job.error,
+            job.created_at,
+            job.updated_at,
+            self._json_dumps(job.metadata),
+        )
+
+    async def list_mcp_server_sync_jobs(
+        self,
+        *,
+        server_id: UUID,
+        limit: int = 20,
+    ) -> list[McpServerSyncJob]:
+        rows = await self._pool.fetch(
+            """
+            SELECT job_id, server_id, status, requested_by, requested_at,
+                   claimed_by_worker, lease_expires_at, last_heartbeat_at,
+                   attempt_count, result, error, created_at, updated_at, metadata
+            FROM mcp_server_sync_jobs
+            WHERE server_id = $1
+            ORDER BY requested_at DESC, created_at DESC
+            LIMIT $2
+            """,
+            server_id,
+            limit,
+        )
+        return [self._mcp_server_sync_job_from_row(row) for row in rows]
+
+    async def fetch_mcp_server_sync_job(self, job_id: UUID) -> McpServerSyncJob | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT job_id, server_id, status, requested_by, requested_at,
+                   claimed_by_worker, lease_expires_at, last_heartbeat_at,
+                   attempt_count, result, error, created_at, updated_at, metadata
+            FROM mcp_server_sync_jobs
+            WHERE job_id = $1
+            """,
+            job_id,
+        )
+        return self._mcp_server_sync_job_from_row(row) if row else None
+
+    async def claim_next_mcp_server_sync_job(
+        self,
+        *,
+        worker_id: str,
+        now,
+        lease_expires_at,
+    ) -> McpServerSyncJob | None:
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    WITH next_job AS (
+                        SELECT job_id
+                        FROM mcp_server_sync_jobs
+                        WHERE status = 'created'
+                           OR (status = 'claimed' AND lease_expires_at < $2)
+                        ORDER BY requested_at ASC, created_at ASC
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT 1
+                    )
+                    UPDATE mcp_server_sync_jobs AS job
+                    SET status = 'claimed',
+                        claimed_by_worker = $1,
+                        lease_expires_at = $3,
+                        last_heartbeat_at = $2,
+                        attempt_count = attempt_count + 1,
+                        error = NULL,
+                        updated_at = $2
+                    FROM next_job
+                    WHERE job.job_id = next_job.job_id
+                    RETURNING job.job_id, job.server_id, job.status, job.requested_by,
+                              job.requested_at, job.claimed_by_worker, job.lease_expires_at,
+                              job.last_heartbeat_at, job.attempt_count, job.result,
+                              job.error, job.created_at, job.updated_at, job.metadata
+                    """,
+                    worker_id,
+                    now,
+                    lease_expires_at,
+                )
+                if row is None:
+                    return None
+                await self.update_mcp_server_sync_status(
+                    conn,
+                    server_id=row["server_id"],
+                    status="running",
+                    error=None,
+                    synced_at=None,
+                    updated_at=now,
+                )
+        return self._mcp_server_sync_job_from_row(row)
+
+    async def heartbeat_mcp_server_sync_job(
+        self,
+        *,
+        job_id: UUID,
+        worker_id: str,
+        now,
+        lease_expires_at,
+    ) -> McpServerSyncJob | None:
+        row = await self._pool.fetchrow(
+            """
+            UPDATE mcp_server_sync_jobs
+            SET lease_expires_at = $3,
+                last_heartbeat_at = $2,
+                updated_at = $2
+            WHERE job_id = $1
+              AND status = 'claimed'
+              AND claimed_by_worker = $4
+            RETURNING job_id, server_id, status, requested_by, requested_at,
+                      claimed_by_worker, lease_expires_at, last_heartbeat_at,
+                      attempt_count, result, error, created_at, updated_at, metadata
+            """,
+            job_id,
+            now,
+            lease_expires_at,
+            worker_id,
+        )
+        return self._mcp_server_sync_job_from_row(row) if row else None
+
+    async def complete_mcp_server_sync_job(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        job_id: UUID,
+        worker_id: str,
+        result: dict[str, Any],
+        now,
+    ) -> McpServerSyncJob | None:
+        row = await conn.fetchrow(
+            """
+            UPDATE mcp_server_sync_jobs
+            SET status = 'completed',
+                lease_expires_at = NULL,
+                last_heartbeat_at = $3,
+                result = $4,
+                error = NULL,
+                updated_at = $3
+            WHERE job_id = $1
+              AND status = 'claimed'
+              AND claimed_by_worker = $2
+            RETURNING job_id, server_id, status, requested_by, requested_at,
+                      claimed_by_worker, lease_expires_at, last_heartbeat_at,
+                      attempt_count, result, error, created_at, updated_at, metadata
+            """,
+            job_id,
+            worker_id,
+            now,
+            self._json_dumps(result),
+        )
+        return self._mcp_server_sync_job_from_row(row) if row else None
+
+    async def fail_mcp_server_sync_job(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        job_id: UUID,
+        worker_id: str,
+        error: str,
+        now,
+    ) -> McpServerSyncJob | None:
+        row = await conn.fetchrow(
+            """
+            UPDATE mcp_server_sync_jobs
+            SET status = 'failed',
+                lease_expires_at = NULL,
+                last_heartbeat_at = $3,
+                result = NULL,
+                error = $4,
+                updated_at = $3
+            WHERE job_id = $1
+              AND status = 'claimed'
+              AND claimed_by_worker = $2
+            RETURNING job_id, server_id, status, requested_by, requested_at,
+                      claimed_by_worker, lease_expires_at, last_heartbeat_at,
+                      attempt_count, result, error, created_at, updated_at, metadata
+            """,
+            job_id,
+            worker_id,
+            now,
+            error,
+        )
+        return self._mcp_server_sync_job_from_row(row) if row else None
 
     async def upsert_workspace_mcp_server(
         self,
@@ -6739,7 +6982,8 @@ class CollaborationRepository:
             SELECT ms.server_id, ms.server_key, ms.display_name AS server_display_name,
                    COALESCE(NULLIF(wms.name_prefix, ''), 'mcp_' || ms.server_key || '__') || mst.tool_name AS exposed_name,
                    mst.tool_name AS remote_name, mst.description, mst.input_schema,
-                   mst.output_schema, mst.metadata,
+                   mst.output_schema,
+                   mst.metadata || jsonb_build_object('workspace_attachment', wms.metadata) AS metadata,
                    (wms.enabled AND wms.tools_enabled AND ms.enabled) AS enabled
             FROM workspace_mcp_servers wms
             JOIN mcp_servers ms ON ms.server_id = wms.server_id
@@ -6772,7 +7016,8 @@ class CollaborationRepository:
             SELECT ms.server_id, ms.server_key, ms.display_name AS server_display_name,
                    COALESCE(NULLIF(wms.name_prefix, ''), 'mcp_' || ms.server_key || '__') || msr.name AS exposed_name,
                    msr.name AS remote_name, msr.uri, msr.description, msr.mime_type,
-                   msr.metadata, (wms.enabled AND wms.resources_enabled AND ms.enabled) AS enabled
+                   msr.metadata || jsonb_build_object('workspace_attachment', wms.metadata) AS metadata,
+                   (wms.enabled AND wms.resources_enabled AND ms.enabled) AS enabled
             FROM workspace_mcp_servers wms
             JOIN mcp_servers ms ON ms.server_id = wms.server_id
             JOIN mcp_server_resources msr ON msr.server_id = ms.server_id
@@ -6793,7 +7038,8 @@ class CollaborationRepository:
             SELECT ms.server_id, ms.server_key, ms.display_name AS server_display_name,
                    COALESCE(NULLIF(wms.name_prefix, ''), 'mcp_' || ms.server_key || '__') || msp.prompt_name AS exposed_name,
                    msp.prompt_name AS remote_name, msp.description, msp.arguments_schema,
-                   msp.metadata, (wms.enabled AND wms.prompts_enabled AND ms.enabled) AS enabled
+                   msp.metadata || jsonb_build_object('workspace_attachment', wms.metadata) AS metadata,
+                   (wms.enabled AND wms.prompts_enabled AND ms.enabled) AS enabled
             FROM workspace_mcp_servers wms
             JOIN mcp_servers ms ON ms.server_id = wms.server_id
             JOIN mcp_server_prompts msp ON msp.server_id = ms.server_id
@@ -8321,6 +8567,25 @@ class CollaborationRepository:
             ),
             capability_hash=row["capability_hash"],
             discovered_at=row["discovered_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _mcp_server_sync_job_from_row(row: asyncpg.Record) -> McpServerSyncJob:
+        return McpServerSyncJob(
+            job_id=row["job_id"],
+            server_id=row["server_id"],
+            status=row["status"],
+            requested_by=row["requested_by"],
+            requested_at=row["requested_at"],
+            claimed_by_worker=row["claimed_by_worker"],
+            lease_expires_at=row["lease_expires_at"],
+            last_heartbeat_at=row["last_heartbeat_at"],
+            attempt_count=row["attempt_count"],
+            result=CollaborationRepository._json_value(row["result"], default=None),
+            error=row["error"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),
         )
 
