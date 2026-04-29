@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Body, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from open_talon_contracts.iam import PROJECT_ROLE_BASE_PERMISSIONS
-from open_talon_contracts.models import normalize_organization_slug
+from open_talon_contracts.models import normalize_organization_slug, plugin_metadata_enables_asset_persistence
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -40,6 +40,7 @@ from gateway_edge.models import (
     AuditExportResult,
     AttachWorkspaceToolRequest,
     AttachWorkspaceMcpServerRequest,
+    AttachWorkspaceSystemPluginRequest,
     AssetLink,
     CreateGitRepositoryRequest,
     CreateAgentGitWorktreeSessionRequest,
@@ -49,6 +50,7 @@ from gateway_edge.models import (
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
     CreateMcpServerRequest,
+    CreateSystemPluginRequest,
     CancelMethodicExecutionRequest,
     CreateMethodicAssignmentRequest,
     CreateMethodicExecutionRequest,
@@ -73,12 +75,14 @@ from gateway_edge.models import (
     DeleteLlmProviderRequest,
     DeleteMemoryProviderRequest,
     DeleteMcpServerRequest,
+    DeleteSystemPluginRequest,
     DeleteParticipantRequest,
     DeleteRoleDefinitionRequest,
     DeleteSystemAgentRequest,
     DeleteSystemToolRequest,
     DeleteWorkspaceToolRequest,
     DeleteWorkspaceMcpServerRequest,
+    DeleteWorkspaceSystemPluginRequest,
     DeleteWorkspaceRequest,
     MemoryEntry,
     MemoryProviderDefinition,
@@ -110,6 +114,7 @@ from gateway_edge.models import (
     PublishAssetFromGitRequest,
     PublishAgentBundleFromGitRequest,
     RequestMcpServerSyncRequest,
+    RequestSystemPluginSyncRequest,
     RetrievalContextPack,
     RetrievalCorpus,
     RetrievalIngestionJob,
@@ -120,6 +125,10 @@ from gateway_edge.models import (
     RoleDefinition,
     RunRetrievalSearchRequest,
     SystemToolDefinition,
+    SystemPluginCapabilityDefinition,
+    SystemPluginDefinition,
+    SystemPluginSyncJob,
+    SystemPluginSyncResult,
     Thread,
     ThreadDetail,
     TimelineMessage,
@@ -134,6 +143,7 @@ from gateway_edge.models import (
     UpdateLlmProviderRequest,
     UpdateMemoryProviderRequest,
     UpdateMcpServerRequest,
+    UpdateSystemPluginRequest,
     UpdateMemoryEntryRequest,
     UpdateOrganizationRequest,
     UpdateProjectRequest,
@@ -144,6 +154,7 @@ from gateway_edge.models import (
     RemoveProjectAccessRequest,
     UpdateWorkspaceToolRequest,
     UpdateWorkspaceMcpServerRequest,
+    UpdateWorkspaceSystemPluginRequest,
     UpdateWorkspaceRequest,
     Workspace,
     WorkspaceAsset,
@@ -153,6 +164,10 @@ from gateway_edge.models import (
     WorkspaceMcpResource,
     WorkspaceMcpServer,
     WorkspaceMcpTool,
+    WorkspacePluginPrompt,
+    WorkspacePluginResource,
+    WorkspacePluginTool,
+    WorkspaceSystemPlugin,
     WorkspaceTool,
     ValidateAgentBundleFromGitRequest,
     AddOrganizationMemberRequest,
@@ -185,19 +200,7 @@ def _actor_log(actor: ParticipantInput) -> dict[str, str]:
 
 
 def _plugin_attachment_enables_asset_persistence(metadata: dict | None) -> bool:
-    if not isinstance(metadata, dict):
-        return False
-    if any(
-        bool(metadata.get(key))
-        for key in (
-            "allow_asset_persistence",
-            "persist_assets_enabled",
-            "persist_fetched_pages_as_assets",
-        )
-    ):
-        return True
-    asset_persistence = metadata.get("asset_persistence")
-    return isinstance(asset_persistence, dict) and bool(asset_persistence.get("enabled"))
+    return plugin_metadata_enables_asset_persistence(metadata)
 
 
 def _participant_from_ws(
@@ -1792,9 +1795,22 @@ async def list_workspace_catalog_tools(
 
 @router.get(
     "/workspaces/{workspace_id}/catalog/system-plugins",
-    response_model=list[McpServerDefinition],
+    response_model=list[SystemPluginDefinition],
     summary="List System Plugins visible to a workspace",
 )
+async def list_workspace_catalog_system_plugins(
+    request: Request,
+    workspace_id: UUID,
+) -> list[SystemPluginDefinition]:
+    try:
+        await _require_workspace_membership(request, workspace_id)
+        return await collab_svc.collaboration_service.list_workspace_catalog_system_plugins(
+            workspace_id
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get(
     "/workspaces/{workspace_id}/catalog/mcp-servers",
     response_model=list[McpServerDefinition],
@@ -2810,11 +2826,41 @@ async def _load_mcp_server(
     return server
 
 
+async def _load_system_plugin(
+    request: Request,
+    plugin_id: UUID,
+    *,
+    permission: str,
+    organization_id: UUID | None = None,
+) -> SystemPluginDefinition:
+    plugin = await collab_svc.collaboration_service.get_system_plugin(plugin_id)
+    if organization_id is not None and plugin.organization_id != organization_id:
+        raise HTTPException(status_code=404, detail=f"System Plugin {plugin_id} not found")
+    await _require_identity_permission(
+        request,
+        permission=permission,
+        organization_id=organization_id or plugin.organization_id,
+    )
+    return plugin
+
+
 @router.post(
     "/system-plugins",
-    response_model=McpServerDefinition,
+    response_model=SystemPluginDefinition,
     summary="Create a global System Plugin definition",
 )
+async def create_system_plugin(
+    request: Request,
+    payload: CreateSystemPluginRequest,
+) -> SystemPluginDefinition:
+    await _require_identity_permission(request, permission="provider.mcp.write")
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.create_system_plugin(payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.post(
     "/mcp-servers",
     response_model=McpServerDefinition,
@@ -2834,9 +2880,30 @@ async def create_mcp_server(
 
 @router.post(
     "/organizations/{organization_id}/system-plugins",
-    response_model=McpServerDefinition,
+    response_model=SystemPluginDefinition,
     summary="Create an organization-scoped System Plugin definition",
 )
+async def create_organization_system_plugin(
+    request: Request,
+    organization_id: UUID,
+    payload: CreateSystemPluginRequest,
+) -> SystemPluginDefinition:
+    await _require_identity_permission(
+        request,
+        permission="provider.mcp.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.create_system_plugin(
+            payload,
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.post(
     "/organizations/{organization_id}/mcp-servers",
     response_model=McpServerDefinition,
@@ -2865,9 +2932,17 @@ async def create_organization_mcp_server(
 
 @router.get(
     "/system-plugins",
-    response_model=list[McpServerDefinition],
+    response_model=list[SystemPluginDefinition],
     summary="List global System Plugin definitions",
 )
+async def list_system_plugins(request: Request) -> list[SystemPluginDefinition]:
+    await _require_identity_permission(request, permission="provider.mcp.read")
+    try:
+        return await collab_svc.collaboration_service.list_system_plugins()
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get(
     "/mcp-servers",
     response_model=list[McpServerDefinition],
@@ -2883,9 +2958,27 @@ async def list_mcp_servers(request: Request) -> list[McpServerDefinition]:
 
 @router.get(
     "/organizations/{organization_id}/system-plugins",
-    response_model=list[McpServerDefinition],
+    response_model=list[SystemPluginDefinition],
     summary="List organization-scoped System Plugin definitions",
 )
+async def list_organization_system_plugins(
+    request: Request,
+    organization_id: UUID,
+) -> list[SystemPluginDefinition]:
+    await _require_identity_permission(
+        request,
+        permission="provider.mcp.read",
+        organization_id=organization_id,
+    )
+    try:
+        return await collab_svc.collaboration_service.list_system_plugins(
+            scope="organization",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get(
     "/organizations/{organization_id}/mcp-servers",
     response_model=list[McpServerDefinition],
@@ -2909,7 +3002,18 @@ async def list_organization_mcp_servers(
         raise _http_error(exc) from exc
 
 
-@router.get("/system-plugins/{server_id}", response_model=McpServerDefinition)
+@router.get("/system-plugins/{plugin_id}", response_model=SystemPluginDefinition)
+async def get_system_plugin(request: Request, plugin_id: UUID) -> SystemPluginDefinition:
+    try:
+        return await _load_system_plugin(
+            request,
+            plugin_id,
+            permission="provider.mcp.read",
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get("/mcp-servers/{server_id}", response_model=McpServerDefinition)
 async def get_mcp_server(request: Request, server_id: UUID) -> McpServerDefinition:
     try:
@@ -2923,9 +3027,25 @@ async def get_mcp_server(request: Request, server_id: UUID) -> McpServerDefiniti
 
 
 @router.get(
-    "/organizations/{organization_id}/system-plugins/{server_id}",
-    response_model=McpServerDefinition,
+    "/organizations/{organization_id}/system-plugins/{plugin_id}",
+    response_model=SystemPluginDefinition,
 )
+async def get_organization_system_plugin(
+    request: Request,
+    organization_id: UUID,
+    plugin_id: UUID,
+) -> SystemPluginDefinition:
+    try:
+        return await _load_system_plugin(
+            request,
+            plugin_id,
+            permission="provider.mcp.read",
+            organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get(
     "/organizations/{organization_id}/mcp-servers/{server_id}",
     response_model=McpServerDefinition,
@@ -2946,7 +3066,20 @@ async def get_organization_mcp_server(
         raise _http_error(exc) from exc
 
 
-@router.patch("/system-plugins/{server_id}", response_model=McpServerDefinition)
+@router.patch("/system-plugins/{plugin_id}", response_model=SystemPluginDefinition)
+async def update_system_plugin(
+    request: Request,
+    plugin_id: UUID,
+    payload: UpdateSystemPluginRequest,
+) -> SystemPluginDefinition:
+    await _load_system_plugin(request, plugin_id, permission="provider.mcp.write")
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.update_system_plugin(plugin_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.patch("/mcp-servers/{server_id}", response_model=McpServerDefinition)
 async def update_mcp_server(
     request: Request,
@@ -2962,9 +3095,28 @@ async def update_mcp_server(
 
 
 @router.patch(
-    "/organizations/{organization_id}/system-plugins/{server_id}",
-    response_model=McpServerDefinition,
+    "/organizations/{organization_id}/system-plugins/{plugin_id}",
+    response_model=SystemPluginDefinition,
 )
+async def update_organization_system_plugin(
+    request: Request,
+    organization_id: UUID,
+    plugin_id: UUID,
+    payload: UpdateSystemPluginRequest,
+) -> SystemPluginDefinition:
+    await _load_system_plugin(
+        request,
+        plugin_id,
+        permission="provider.mcp.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.update_system_plugin(plugin_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.patch(
     "/organizations/{organization_id}/mcp-servers/{server_id}",
     response_model=McpServerDefinition,
@@ -2988,7 +3140,20 @@ async def update_organization_mcp_server(
         raise _http_error(exc) from exc
 
 
-@router.delete("/system-plugins/{server_id}", response_model=dict)
+@router.delete("/system-plugins/{plugin_id}", response_model=dict)
+async def delete_system_plugin(
+    request: Request,
+    plugin_id: UUID,
+    payload: DeleteSystemPluginRequest = Body(...),
+) -> dict[str, bool | str]:
+    await _load_system_plugin(request, plugin_id, permission="provider.mcp.write")
+    payload = payload.model_copy(update={"actor": _resolve_global_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.delete_system_plugin(plugin_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.delete("/mcp-servers/{server_id}", response_model=dict)
 async def delete_mcp_server(
     request: Request,
@@ -3004,9 +3169,28 @@ async def delete_mcp_server(
 
 
 @router.delete(
-    "/organizations/{organization_id}/system-plugins/{server_id}",
+    "/organizations/{organization_id}/system-plugins/{plugin_id}",
     response_model=dict,
 )
+async def delete_organization_system_plugin(
+    request: Request,
+    organization_id: UUID,
+    plugin_id: UUID,
+    payload: DeleteSystemPluginRequest = Body(...),
+) -> dict[str, bool | str]:
+    await _load_system_plugin(
+        request,
+        plugin_id,
+        permission="provider.mcp.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.delete_system_plugin(plugin_id, payload)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.delete(
     "/organizations/{organization_id}/mcp-servers/{server_id}",
     response_model=dict,
@@ -3030,7 +3214,32 @@ async def delete_organization_mcp_server(
         raise _http_error(exc) from exc
 
 
-@router.post("/system-plugins/{server_id}/sync", response_model=McpServerSyncResult)
+@router.post("/system-plugins/{plugin_id}/sync", response_model=SystemPluginSyncResult)
+async def request_system_plugin_sync(
+    request: Request,
+    plugin_id: UUID,
+    payload: RequestSystemPluginSyncRequest,
+) -> SystemPluginSyncResult:
+    plugin = await _load_system_plugin(
+        request,
+        plugin_id,
+        permission="provider.mcp.validate",
+    )
+    actor = (
+        _resolve_organization_actor(request, payload.actor)
+        if plugin.organization_id is not None
+        else _resolve_global_actor(request, payload.actor)
+    )
+    payload = payload.model_copy(update={"actor": actor})
+    try:
+        return await collab_svc.collaboration_service.request_system_plugin_sync(
+            plugin_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.post("/mcp-servers/{server_id}/sync", response_model=McpServerSyncResult)
 async def request_mcp_server_sync(
     request: Request,
@@ -3058,9 +3267,31 @@ async def request_mcp_server_sync(
 
 
 @router.post(
-    "/organizations/{organization_id}/system-plugins/{server_id}/sync",
-    response_model=McpServerSyncResult,
+    "/organizations/{organization_id}/system-plugins/{plugin_id}/sync",
+    response_model=SystemPluginSyncResult,
 )
+async def request_organization_system_plugin_sync(
+    request: Request,
+    organization_id: UUID,
+    plugin_id: UUID,
+    payload: RequestSystemPluginSyncRequest,
+) -> SystemPluginSyncResult:
+    await _load_system_plugin(
+        request,
+        plugin_id,
+        permission="provider.mcp.validate",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(update={"actor": _resolve_organization_actor(request, payload.actor)})
+    try:
+        return await collab_svc.collaboration_service.request_system_plugin_sync(
+            plugin_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.post(
     "/organizations/{organization_id}/mcp-servers/{server_id}/sync",
     response_model=McpServerSyncResult,
@@ -3087,7 +3318,22 @@ async def request_organization_mcp_server_sync(
         raise _http_error(exc) from exc
 
 
-@router.get("/system-plugins/{server_id}/sync-jobs", response_model=list[McpServerSyncJob])
+@router.get("/system-plugins/{plugin_id}/sync-jobs", response_model=list[SystemPluginSyncJob])
+async def list_system_plugin_sync_jobs(
+    request: Request,
+    plugin_id: UUID,
+    limit: int = Query(default=20, ge=1, le=100),
+) -> list[SystemPluginSyncJob]:
+    await _load_system_plugin(request, plugin_id, permission="provider.mcp.read")
+    try:
+        return await collab_svc.collaboration_service.list_system_plugin_sync_jobs(
+            plugin_id,
+            limit=limit,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get("/mcp-servers/{server_id}/sync-jobs", response_model=list[McpServerSyncJob])
 async def list_mcp_server_sync_jobs(
     request: Request,
@@ -3105,9 +3351,30 @@ async def list_mcp_server_sync_jobs(
 
 
 @router.get(
-    "/organizations/{organization_id}/system-plugins/{server_id}/sync-jobs",
-    response_model=list[McpServerSyncJob],
+    "/organizations/{organization_id}/system-plugins/{plugin_id}/sync-jobs",
+    response_model=list[SystemPluginSyncJob],
 )
+async def list_organization_system_plugin_sync_jobs(
+    request: Request,
+    organization_id: UUID,
+    plugin_id: UUID,
+    limit: int = Query(default=20, ge=1, le=100),
+) -> list[SystemPluginSyncJob]:
+    await _load_system_plugin(
+        request,
+        plugin_id,
+        permission="provider.mcp.read",
+        organization_id=organization_id,
+    )
+    try:
+        return await collab_svc.collaboration_service.list_system_plugin_sync_jobs(
+            plugin_id,
+            limit=limit,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get(
     "/organizations/{organization_id}/mcp-servers/{server_id}/sync-jobs",
     response_model=list[McpServerSyncJob],
@@ -3133,7 +3400,21 @@ async def list_organization_mcp_server_sync_jobs(
         raise _http_error(exc) from exc
 
 
-@router.get("/system-plugins/{server_id}/tools", response_model=list[McpToolDefinition])
+@router.get(
+    "/system-plugins/{plugin_id}/tools",
+    response_model=list[SystemPluginCapabilityDefinition],
+)
+async def list_system_plugin_tools(
+    request: Request,
+    plugin_id: UUID,
+) -> list[SystemPluginCapabilityDefinition]:
+    await _load_system_plugin(request, plugin_id, permission="provider.mcp.read")
+    try:
+        return await collab_svc.collaboration_service.list_system_plugin_tools(plugin_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get("/mcp-servers/{server_id}/tools", response_model=list[McpToolDefinition])
 async def list_mcp_server_tools(request: Request, server_id: UUID) -> list[McpToolDefinition]:
     await _load_mcp_server(request, server_id, permission="provider.mcp.read")
@@ -3143,7 +3424,21 @@ async def list_mcp_server_tools(request: Request, server_id: UUID) -> list[McpTo
         raise _http_error(exc) from exc
 
 
-@router.get("/system-plugins/{server_id}/resources", response_model=list[McpResourceDefinition])
+@router.get(
+    "/system-plugins/{plugin_id}/resources",
+    response_model=list[SystemPluginCapabilityDefinition],
+)
+async def list_system_plugin_resources(
+    request: Request,
+    plugin_id: UUID,
+) -> list[SystemPluginCapabilityDefinition]:
+    await _load_system_plugin(request, plugin_id, permission="provider.mcp.read")
+    try:
+        return await collab_svc.collaboration_service.list_system_plugin_resources(plugin_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get("/mcp-servers/{server_id}/resources", response_model=list[McpResourceDefinition])
 async def list_mcp_server_resources(request: Request, server_id: UUID) -> list[McpResourceDefinition]:
     await _load_mcp_server(request, server_id, permission="provider.mcp.read")
@@ -3153,7 +3448,21 @@ async def list_mcp_server_resources(request: Request, server_id: UUID) -> list[M
         raise _http_error(exc) from exc
 
 
-@router.get("/system-plugins/{server_id}/prompts", response_model=list[McpPromptDefinition])
+@router.get(
+    "/system-plugins/{plugin_id}/prompts",
+    response_model=list[SystemPluginCapabilityDefinition],
+)
+async def list_system_plugin_prompts(
+    request: Request,
+    plugin_id: UUID,
+) -> list[SystemPluginCapabilityDefinition]:
+    await _load_system_plugin(request, plugin_id, permission="provider.mcp.read")
+    try:
+        return await collab_svc.collaboration_service.list_system_plugin_prompts(plugin_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get("/mcp-servers/{server_id}/prompts", response_model=list[McpPromptDefinition])
 async def list_mcp_server_prompts(request: Request, server_id: UUID) -> list[McpPromptDefinition]:
     await _load_mcp_server(request, server_id, permission="provider.mcp.read")
@@ -5706,9 +6015,20 @@ async def list_workspace_tools(
 
 @router.get(
     "/workspaces/{workspace_id}/system-plugins",
-    response_model=list[WorkspaceMcpServer],
+    response_model=list[WorkspaceSystemPlugin],
     summary="List System Plugin attachments for a workspace",
 )
+async def list_workspace_system_plugins(
+    request: Request,
+    workspace_id: UUID,
+) -> list[WorkspaceSystemPlugin]:
+    try:
+        await _require_workspace_membership(request, workspace_id)
+        return await collab_svc.collaboration_service.list_workspace_system_plugins(workspace_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get(
     "/workspaces/{workspace_id}/mcp-servers",
     response_model=list[WorkspaceMcpServer],
@@ -5727,9 +6047,20 @@ async def list_workspace_mcp_servers(
 
 @router.get(
     "/workspaces/{workspace_id}/plugin-capabilities/tools",
-    response_model=list[WorkspaceMcpTool],
+    response_model=list[WorkspacePluginTool],
     summary="List System Plugin tools available in a workspace",
 )
+async def list_workspace_plugin_tools(
+    request: Request,
+    workspace_id: UUID,
+) -> list[WorkspacePluginTool]:
+    try:
+        await _require_workspace_membership(request, workspace_id)
+        return await collab_svc.collaboration_service.list_workspace_plugin_tools(workspace_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get(
     "/workspaces/{workspace_id}/mcp-tools",
     response_model=list[WorkspaceMcpTool],
@@ -5748,9 +6079,20 @@ async def list_workspace_mcp_tools(
 
 @router.get(
     "/workspaces/{workspace_id}/plugin-capabilities/resources",
-    response_model=list[WorkspaceMcpResource],
+    response_model=list[WorkspacePluginResource],
     summary="List System Plugin resource references available in a workspace",
 )
+async def list_workspace_plugin_resources(
+    request: Request,
+    workspace_id: UUID,
+) -> list[WorkspacePluginResource]:
+    try:
+        await _require_workspace_membership(request, workspace_id)
+        return await collab_svc.collaboration_service.list_workspace_plugin_resources(workspace_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get(
     "/workspaces/{workspace_id}/mcp-resources",
     response_model=list[WorkspaceMcpResource],
@@ -5769,9 +6111,20 @@ async def list_workspace_mcp_resources(
 
 @router.get(
     "/workspaces/{workspace_id}/plugin-capabilities/prompts",
-    response_model=list[WorkspaceMcpPrompt],
+    response_model=list[WorkspacePluginPrompt],
     summary="List System Plugin prompt templates available in a workspace",
 )
+async def list_workspace_plugin_prompts(
+    request: Request,
+    workspace_id: UUID,
+) -> list[WorkspacePluginPrompt]:
+    try:
+        await _require_workspace_membership(request, workspace_id)
+        return await collab_svc.collaboration_service.list_workspace_plugin_prompts(workspace_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get(
     "/workspaces/{workspace_id}/mcp-prompts",
     response_model=list[WorkspaceMcpPrompt],
@@ -5789,10 +6142,48 @@ async def list_workspace_mcp_prompts(
 
 
 @router.put(
-    "/workspaces/{workspace_id}/system-plugins/{server_id}",
-    response_model=WorkspaceMcpServer,
+    "/workspaces/{workspace_id}/system-plugins/{plugin_id}",
+    response_model=WorkspaceSystemPlugin,
     summary="Attach a System Plugin to a workspace",
 )
+async def attach_workspace_system_plugin(
+    request: Request,
+    workspace_id: UUID,
+    plugin_id: UUID,
+    payload: AttachWorkspaceSystemPluginRequest,
+) -> WorkspaceSystemPlugin:
+    actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.mcp_servers.write",
+    )
+    if _plugin_attachment_enables_asset_persistence(payload.metadata):
+        await _require_workspace_permission(
+            request,
+            workspace_id,
+            permission="workspace.assets.publish",
+        )
+    payload = payload.model_copy(
+        update={
+            "plugin_id": plugin_id,
+            "actor": actor
+            or await _resolve_workspace_actor(
+                request,
+                payload.actor,
+                workspace_id=workspace_id,
+                auto_create=False,
+            ),
+        }
+    )
+    try:
+        return await collab_svc.collaboration_service.attach_workspace_system_plugin(
+            workspace_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.put(
     "/workspaces/{workspace_id}/mcp-servers/{server_id}",
     response_model=WorkspaceMcpServer,
@@ -5837,10 +6228,48 @@ async def attach_workspace_mcp_server(
 
 
 @router.patch(
-    "/workspaces/{workspace_id}/system-plugins/{server_id}",
-    response_model=WorkspaceMcpServer,
+    "/workspaces/{workspace_id}/system-plugins/{plugin_id}",
+    response_model=WorkspaceSystemPlugin,
     summary="Update a workspace System Plugin attachment",
 )
+async def update_workspace_system_plugin(
+    request: Request,
+    workspace_id: UUID,
+    plugin_id: UUID,
+    payload: UpdateWorkspaceSystemPluginRequest,
+) -> WorkspaceSystemPlugin:
+    actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.mcp_servers.write",
+    )
+    if _plugin_attachment_enables_asset_persistence(payload.metadata):
+        await _require_workspace_permission(
+            request,
+            workspace_id,
+            permission="workspace.assets.publish",
+        )
+    payload = payload.model_copy(
+        update={
+            "actor": actor
+            or await _resolve_workspace_actor(
+                request,
+                payload.actor,
+                workspace_id=workspace_id,
+                auto_create=False,
+            )
+        }
+    )
+    try:
+        return await collab_svc.collaboration_service.update_workspace_system_plugin(
+            workspace_id,
+            plugin_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.patch(
     "/workspaces/{workspace_id}/mcp-servers/{server_id}",
     response_model=WorkspaceMcpServer,
@@ -5885,10 +6314,42 @@ async def update_workspace_mcp_server(
 
 
 @router.delete(
-    "/workspaces/{workspace_id}/system-plugins/{server_id}",
+    "/workspaces/{workspace_id}/system-plugins/{plugin_id}",
     response_model=dict,
     summary="Detach a System Plugin from a workspace",
 )
+async def delete_workspace_system_plugin(
+    request: Request,
+    workspace_id: UUID,
+    plugin_id: UUID,
+    payload: DeleteWorkspaceSystemPluginRequest = Body(...),
+) -> dict[str, bool | str]:
+    actor = await _require_workspace_permission(
+        request,
+        workspace_id,
+        permission="workspace.mcp_servers.write",
+    )
+    payload = payload.model_copy(
+        update={
+            "actor": actor
+            or await _resolve_workspace_actor(
+                request,
+                payload.actor,
+                workspace_id=workspace_id,
+                auto_create=False,
+            )
+        }
+    )
+    try:
+        return await collab_svc.collaboration_service.delete_workspace_system_plugin(
+            workspace_id,
+            plugin_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.delete(
     "/workspaces/{workspace_id}/mcp-servers/{server_id}",
     response_model=dict,

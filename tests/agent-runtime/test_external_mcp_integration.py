@@ -24,6 +24,7 @@ for path in (_AGENT_RUNTIME_DIR, _CONTRACTS_DIR, _CORE_COLLAB_DIR, _TESTS_DIR):
 
 from agent_runtime.execution.mcp import McpExecutionBackend
 from agent_runtime.mcp_discovery import discover_mcp_capabilities
+from agent_runtime.mcp_sync_worker import McpSyncWorker
 from agent_runtime.runtime import render_prompt
 from open_talon_contracts.models import (
     ActorRef,
@@ -34,6 +35,7 @@ from open_talon_contracts.models import (
     AgentTaskRouting,
     ExecutionSpec,
     McpServerDefinition,
+    McpServerSyncJob,
     ParticipantProfile,
     Run,
     Task,
@@ -158,6 +160,65 @@ async def test_mcp_execution_backend_calls_full_featured_server_tool():
     assert test_server.state.tool_calls == [
         {"name": "echo", "arguments": {"text": "hello"}}
     ]
+
+
+@pytest.mark.asyncio
+async def test_mcp_sync_worker_persists_failure_without_replacing_capabilities(monkeypatch):
+    now = datetime.now(timezone.utc)
+    server_id = uuid4()
+    job_id = uuid4()
+    failed_jobs: list[tuple[object, str, str]] = []
+    completed_jobs: list[object] = []
+
+    class FakeKernel:
+        async def get_mcp_server(self, requested_server_id):
+            assert requested_server_id == server_id
+            return McpServerDefinition(
+                server_id=server_id,
+                server_key="broken_plugin",
+                display_name="Broken Plugin",
+                description="Fails discovery.",
+                transport_kind="streamable_http",
+                config={"url": "http://127.0.0.1:9/mcp"},
+                created_by=uuid4(),
+                created_at=now,
+                updated_by=uuid4(),
+                updated_at=now,
+            )
+
+        async def complete_mcp_server_sync_job(self, *args, **kwargs):
+            completed_jobs.append((args, kwargs))
+
+        async def fail_mcp_server_sync_job(self, requested_job_id, *, worker_id, error):
+            failed_jobs.append((requested_job_id, worker_id, error))
+
+        async def heartbeat_mcp_server_sync_job(self, *args, **kwargs):
+            raise AssertionError("heartbeat should be cancelled before its first sleep")
+
+    async def fake_discover(*args, **kwargs):
+        raise RuntimeError("discovery failed")
+
+    monkeypatch.setattr("agent_runtime.mcp_sync_worker.discover_mcp_capabilities", fake_discover)
+    worker = McpSyncWorker(
+        kernel=FakeKernel(),
+        settings=type("Settings", (), {"lease_heartbeat_seconds": 15, "lease_ttl_seconds": 60})(),
+        worker_id="sync-worker",
+    )
+    job = McpServerSyncJob(
+        job_id=job_id,
+        server_id=server_id,
+        status="claimed",
+        requested_by=uuid4(),
+        requested_at=now,
+        claimed_by_worker="sync-worker",
+        created_at=now,
+        updated_at=now,
+    )
+
+    await worker._process(job)  # noqa: SLF001
+
+    assert completed_jobs == []
+    assert failed_jobs == [(job_id, "sync-worker", "discovery failed")]
 
 
 @pytest.mark.asyncio

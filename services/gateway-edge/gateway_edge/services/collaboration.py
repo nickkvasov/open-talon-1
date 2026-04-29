@@ -55,6 +55,7 @@ from gateway_edge.models import (
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
     CreateMcpServerRequest,
+    CreateSystemPluginRequest,
     CancelMethodicExecutionRequest,
     CreateMethodicAssignmentRequest,
     CreateMethodicExecutionRequest,
@@ -79,12 +80,14 @@ from gateway_edge.models import (
     DeleteLlmProviderRequest,
     DeleteMemoryProviderRequest,
     DeleteMcpServerRequest,
+    DeleteSystemPluginRequest,
     DeleteParticipantRequest,
     DeleteRoleDefinitionRequest,
     DeleteSystemAgentRequest,
     DeleteSystemToolRequest,
     DeleteWorkspaceToolRequest,
     DeleteWorkspaceMcpServerRequest,
+    DeleteWorkspaceSystemPluginRequest,
     DeleteWorkspaceRequest,
     EventEnvelope,
     EvaluateMethodicStepRequest,
@@ -114,6 +117,7 @@ from gateway_edge.models import (
     RoleDefinition,
     PublishAssetFromGitRequest,
     RequestMcpServerSyncRequest,
+    RequestSystemPluginSyncRequest,
     RetrievalContextPack,
     RetrievalCorpus,
     RetrievalIngestionJob,
@@ -125,6 +129,10 @@ from gateway_edge.models import (
     PublishAgentBundleFromGitRequest,
     ResolvedAssetBinding,
     SystemToolDefinition,
+    SystemPluginCapabilityDefinition,
+    SystemPluginDefinition,
+    SystemPluginSyncJob,
+    SystemPluginSyncResult,
     Thread,
     ThreadDetail,
     TimelineMessage,
@@ -143,6 +151,7 @@ from gateway_edge.models import (
     UpdateLlmProviderRequest,
     UpdateMemoryProviderRequest,
     UpdateMcpServerRequest,
+    UpdateSystemPluginRequest,
     UpdateMemoryEntryRequest,
     UpdateOrganizationRequest,
     UpdateProjectRequest,
@@ -152,6 +161,7 @@ from gateway_edge.models import (
     RemoveProjectAccessRequest,
     UpdateWorkspaceToolRequest,
     UpdateWorkspaceMcpServerRequest,
+    UpdateWorkspaceSystemPluginRequest,
     Workspace,
     WorkspaceAsset,
     WorkspaceAssetVersion,
@@ -160,8 +170,13 @@ from gateway_edge.models import (
     WorkspaceMcpResource,
     WorkspaceMcpServer,
     WorkspaceMcpTool,
+    WorkspacePluginPrompt,
+    WorkspacePluginResource,
+    WorkspacePluginTool,
+    WorkspaceSystemPlugin,
     WorkspaceTool,
     AttachWorkspaceMcpServerRequest,
+    AttachWorkspaceSystemPluginRequest,
     ValidateAgentBundleFromGitRequest,
     AddOrganizationMemberRequest,
     RemoveOrganizationMemberRequest,
@@ -221,6 +236,298 @@ class CollaborationService:
         self._subscriptions.clear()
         self._kernel = None
         logger.info("Collaboration service stopped")
+
+    @staticmethod
+    def _with_system_plugin_backing_metadata(
+        metadata: dict[str, object],
+        backing_protocol: str,
+    ) -> dict[str, object]:
+        existing = metadata.get("system_plugin")
+        system_plugin_metadata = existing if isinstance(existing, dict) else {}
+        return {
+            **metadata,
+            "system_plugin": {
+                **system_plugin_metadata,
+                "backing_protocol": backing_protocol,
+            },
+        }
+
+    @staticmethod
+    def _system_plugin_from_mcp(server: McpServerDefinition) -> SystemPluginDefinition:
+        return SystemPluginDefinition(
+            plugin_id=server.server_id,
+            scope=server.scope,
+            organization_id=server.organization_id,
+            plugin_key=server.server_key,
+            display_name=server.display_name,
+            description=server.description,
+            backing_protocol="mcp",
+            backing_server_id=server.server_id,
+            transport_kind=server.transport_kind,
+            config=server.config,
+            secret_config=server.secret_config,
+            trust_level=server.trust_level,
+            enabled=server.enabled,
+            last_sync_status=server.last_sync_status,
+            last_sync_error=server.last_sync_error,
+            last_synced_at=server.last_synced_at,
+            created_by=server.created_by,
+            created_at=server.created_at,
+            updated_by=server.updated_by,
+            updated_at=server.updated_at,
+            metadata=server.metadata,
+        )
+
+    @staticmethod
+    def _mcp_create_from_system_plugin(
+        payload: CreateSystemPluginRequest,
+    ) -> CreateMcpServerRequest:
+        return CreateMcpServerRequest(
+            actor=payload.actor,
+            server_key=payload.plugin_key,
+            display_name=payload.display_name,
+            description=payload.description,
+            transport_kind=payload.transport_kind,
+            config=payload.config,
+            secret_config=payload.secret_config,
+            trust_level=payload.trust_level,
+            enabled=payload.enabled,
+            metadata=CollaborationService._with_system_plugin_backing_metadata(
+                payload.metadata,
+                payload.backing_protocol,
+            ),
+        )
+
+    @staticmethod
+    def _mcp_update_from_system_plugin(
+        payload: UpdateSystemPluginRequest,
+    ) -> UpdateMcpServerRequest:
+        metadata = payload.metadata
+        if metadata is not None or payload.backing_protocol is not None:
+            metadata = metadata or {}
+            if payload.backing_protocol is not None:
+                metadata = CollaborationService._with_system_plugin_backing_metadata(
+                    metadata,
+                    payload.backing_protocol,
+                )
+        return UpdateMcpServerRequest(
+            actor=payload.actor,
+            server_key=payload.plugin_key,
+            display_name=payload.display_name,
+            description=payload.description,
+            transport_kind=payload.transport_kind,
+            config=payload.config,
+            secret_config=payload.secret_config,
+            trust_level=payload.trust_level,
+            enabled=payload.enabled,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _system_plugin_sync_job_from_mcp(job: McpServerSyncJob) -> SystemPluginSyncJob:
+        return SystemPluginSyncJob(
+            job_id=job.job_id,
+            plugin_id=job.server_id,
+            backing_protocol="mcp",
+            backing_server_id=job.server_id,
+            status=job.status,
+            requested_by=job.requested_by,
+            requested_at=job.requested_at,
+            claimed_by_worker=job.claimed_by_worker,
+            lease_expires_at=job.lease_expires_at,
+            last_heartbeat_at=job.last_heartbeat_at,
+            attempt_count=job.attempt_count,
+            result=job.result,
+            error=job.error,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+            metadata=job.metadata,
+        )
+
+    @classmethod
+    def _system_plugin_sync_result_from_mcp(
+        cls,
+        result: McpServerSyncResult,
+    ) -> SystemPluginSyncResult:
+        return SystemPluginSyncResult(
+            plugin=cls._system_plugin_from_mcp(result.server),
+            job=cls._system_plugin_sync_job_from_mcp(result.job),
+        )
+
+    @staticmethod
+    def _workspace_system_plugin_from_mcp(server: WorkspaceMcpServer) -> WorkspaceSystemPlugin:
+        return WorkspaceSystemPlugin(
+            plugin_id=server.server_id,
+            plugin_key=server.server_key,
+            display_name=server.display_name,
+            description=server.description,
+            backing_protocol="mcp",
+            backing_server_id=server.server_id,
+            transport_kind=server.transport_kind,
+            trust_level=server.trust_level,
+            plugin_enabled=server.server_enabled,
+            enabled=server.enabled,
+            tools_enabled=server.tools_enabled,
+            resources_enabled=server.resources_enabled,
+            prompts_enabled=server.prompts_enabled,
+            sampling_enabled=server.sampling_enabled,
+            name_prefix=server.name_prefix,
+            tool_allowlist=server.tool_allowlist,
+            tool_denylist=server.tool_denylist,
+            resource_allowlist=server.resource_allowlist,
+            prompt_allowlist=server.prompt_allowlist,
+            attached_by=server.attached_by,
+            attached_at=server.attached_at,
+            updated_at=server.updated_at,
+            metadata=server.metadata,
+        )
+
+    @staticmethod
+    def _mcp_attach_from_workspace_system_plugin(
+        payload: AttachWorkspaceSystemPluginRequest,
+    ) -> AttachWorkspaceMcpServerRequest:
+        return AttachWorkspaceMcpServerRequest(
+            actor=payload.actor,
+            server_id=payload.plugin_id,
+            enabled=payload.enabled,
+            tools_enabled=payload.tools_enabled,
+            resources_enabled=payload.resources_enabled,
+            prompts_enabled=payload.prompts_enabled,
+            sampling_enabled=payload.sampling_enabled,
+            name_prefix=payload.name_prefix,
+            tool_allowlist=payload.tool_allowlist,
+            tool_denylist=payload.tool_denylist,
+            resource_allowlist=payload.resource_allowlist,
+            prompt_allowlist=payload.prompt_allowlist,
+            metadata=payload.metadata,
+        )
+
+    @staticmethod
+    def _mcp_update_from_workspace_system_plugin(
+        payload: UpdateWorkspaceSystemPluginRequest,
+    ) -> UpdateWorkspaceMcpServerRequest:
+        return UpdateWorkspaceMcpServerRequest(
+            actor=payload.actor,
+            enabled=payload.enabled,
+            tools_enabled=payload.tools_enabled,
+            resources_enabled=payload.resources_enabled,
+            prompts_enabled=payload.prompts_enabled,
+            sampling_enabled=payload.sampling_enabled,
+            name_prefix=payload.name_prefix,
+            tool_allowlist=payload.tool_allowlist,
+            tool_denylist=payload.tool_denylist,
+            resource_allowlist=payload.resource_allowlist,
+            prompt_allowlist=payload.prompt_allowlist,
+            metadata=payload.metadata,
+        )
+
+    @staticmethod
+    def _workspace_plugin_tool_from_mcp(tool: WorkspaceMcpTool) -> WorkspacePluginTool:
+        return WorkspacePluginTool(
+            plugin_id=tool.server_id,
+            plugin_key=tool.server_key,
+            plugin_display_name=tool.server_display_name,
+            kind="tool",
+            exposed_name=tool.exposed_name,
+            remote_name=tool.remote_name,
+            description=tool.description,
+            enabled=tool.enabled,
+            input_schema=tool.input_schema,
+            output_schema=tool.output_schema,
+            metadata=tool.metadata,
+        )
+
+    @staticmethod
+    def _workspace_plugin_resource_from_mcp(
+        resource: WorkspaceMcpResource,
+    ) -> WorkspacePluginResource:
+        return WorkspacePluginResource(
+            plugin_id=resource.server_id,
+            plugin_key=resource.server_key,
+            plugin_display_name=resource.server_display_name,
+            kind="resource",
+            exposed_name=resource.exposed_name,
+            remote_name=resource.remote_name,
+            description=resource.description,
+            enabled=resource.enabled,
+            uri=resource.uri,
+            mime_type=resource.mime_type,
+            metadata=resource.metadata,
+        )
+
+    @staticmethod
+    def _workspace_plugin_prompt_from_mcp(prompt: WorkspaceMcpPrompt) -> WorkspacePluginPrompt:
+        return WorkspacePluginPrompt(
+            plugin_id=prompt.server_id,
+            plugin_key=prompt.server_key,
+            plugin_display_name=prompt.server_display_name,
+            kind="prompt",
+            exposed_name=prompt.exposed_name,
+            remote_name=prompt.remote_name,
+            description=prompt.description,
+            enabled=prompt.enabled,
+            arguments_schema=prompt.arguments_schema,
+            metadata=prompt.metadata,
+        )
+
+    @staticmethod
+    def _plugin_tool_from_mcp(
+        server: McpServerDefinition,
+        tool: McpToolDefinition,
+    ) -> SystemPluginCapabilityDefinition:
+        return SystemPluginCapabilityDefinition(
+            plugin_id=server.server_id,
+            plugin_key=server.server_key,
+            kind="tool",
+            name=tool.tool_name,
+            remote_name=tool.tool_name,
+            display_name=tool.display_name,
+            description=tool.description,
+            input_schema=tool.input_schema,
+            output_schema=tool.output_schema,
+            capability_hash=tool.capability_hash,
+            discovered_at=tool.discovered_at,
+            metadata=tool.metadata,
+        )
+
+    @staticmethod
+    def _plugin_resource_from_mcp(
+        server: McpServerDefinition,
+        resource: McpResourceDefinition,
+    ) -> SystemPluginCapabilityDefinition:
+        return SystemPluginCapabilityDefinition(
+            plugin_id=server.server_id,
+            plugin_key=server.server_key,
+            kind="resource",
+            name=resource.name or resource.uri,
+            remote_name=resource.uri,
+            display_name=resource.name or None,
+            description=resource.description,
+            uri=resource.uri,
+            mime_type=resource.mime_type,
+            capability_hash=resource.capability_hash,
+            discovered_at=resource.discovered_at,
+            metadata=resource.metadata,
+        )
+
+    @staticmethod
+    def _plugin_prompt_from_mcp(
+        server: McpServerDefinition,
+        prompt: McpPromptDefinition,
+    ) -> SystemPluginCapabilityDefinition:
+        return SystemPluginCapabilityDefinition(
+            plugin_id=server.server_id,
+            plugin_key=server.server_key,
+            kind="prompt",
+            name=prompt.prompt_name,
+            remote_name=prompt.prompt_name,
+            display_name=prompt.prompt_name,
+            description=prompt.description,
+            arguments_schema=prompt.arguments_schema,
+            capability_hash=prompt.capability_hash,
+            discovered_at=prompt.discovered_at,
+            metadata=prompt.metadata,
+        )
 
     async def create_workspace(
         self,
@@ -623,6 +930,22 @@ class CollaborationService:
         assert result.server is not None
         return result.server
 
+    async def create_system_plugin(
+        self,
+        payload: CreateSystemPluginRequest,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> SystemPluginDefinition:
+        if payload.backing_protocol != "mcp":
+            raise ValueError(f"Unsupported System Plugin backing protocol {payload.backing_protocol!r}")
+        server = await self.create_mcp_server(
+            self._mcp_create_from_system_plugin(payload),
+            scope=scope,
+            organization_id=organization_id,
+        )
+        return self._system_plugin_from_mcp(server)
+
     async def list_system_agents(
         self,
         *,
@@ -673,11 +996,34 @@ class CollaborationService:
             organization_id=organization_id,
         )
 
+    async def list_system_plugins(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[SystemPluginDefinition]:
+        return [
+            self._system_plugin_from_mcp(server)
+            for server in await self.list_mcp_servers(
+                scope=scope,
+                organization_id=organization_id,
+            )
+        ]
+
     async def list_workspace_catalog_mcp_servers(
         self,
         workspace_id: UUID,
     ) -> list[McpServerDefinition]:
         return await self._require_kernel().list_workspace_catalog_mcp_servers(workspace_id)
+
+    async def list_workspace_catalog_system_plugins(
+        self,
+        workspace_id: UUID,
+    ) -> list[SystemPluginDefinition]:
+        return [
+            self._system_plugin_from_mcp(server)
+            for server in await self.list_workspace_catalog_mcp_servers(workspace_id)
+        ]
 
     async def get_llm_provider(self, provider_id: UUID) -> LlmProviderDefinition:
         provider = await self._require_kernel().get_llm_provider(provider_id)
@@ -697,6 +1043,9 @@ class CollaborationService:
             raise KeyError(f"MCP server {server_id} not found")
         return server
 
+    async def get_system_plugin(self, plugin_id: UUID) -> SystemPluginDefinition:
+        return self._system_plugin_from_mcp(await self.get_mcp_server(plugin_id))
+
     async def list_mcp_server_tools(self, server_id: UUID) -> list[McpToolDefinition]:
         return await self._require_kernel().list_mcp_server_tools(server_id)
 
@@ -706,12 +1055,56 @@ class CollaborationService:
     async def list_mcp_server_prompts(self, server_id: UUID) -> list[McpPromptDefinition]:
         return await self._require_kernel().list_mcp_server_prompts(server_id)
 
+    async def list_system_plugin_tools(
+        self,
+        plugin_id: UUID,
+    ) -> list[SystemPluginCapabilityDefinition]:
+        server = await self.get_mcp_server(plugin_id)
+        return [
+            self._plugin_tool_from_mcp(server, tool)
+            for tool in await self.list_mcp_server_tools(plugin_id)
+        ]
+
+    async def list_system_plugin_resources(
+        self,
+        plugin_id: UUID,
+    ) -> list[SystemPluginCapabilityDefinition]:
+        server = await self.get_mcp_server(plugin_id)
+        return [
+            self._plugin_resource_from_mcp(server, resource)
+            for resource in await self.list_mcp_server_resources(plugin_id)
+        ]
+
+    async def list_system_plugin_prompts(
+        self,
+        plugin_id: UUID,
+    ) -> list[SystemPluginCapabilityDefinition]:
+        server = await self.get_mcp_server(plugin_id)
+        return [
+            self._plugin_prompt_from_mcp(server, prompt)
+            for prompt in await self.list_mcp_server_prompts(plugin_id)
+        ]
+
     async def request_mcp_server_sync(
         self,
         server_id: UUID,
         payload: RequestMcpServerSyncRequest,
     ) -> McpServerSyncResult:
         return await self._require_kernel().request_mcp_server_sync(server_id, payload)
+
+    async def request_system_plugin_sync(
+        self,
+        plugin_id: UUID,
+        payload: RequestSystemPluginSyncRequest,
+    ) -> SystemPluginSyncResult:
+        result = await self.request_mcp_server_sync(
+            plugin_id,
+            RequestMcpServerSyncRequest(
+                actor=payload.actor,
+                metadata=payload.metadata,
+            ),
+        )
+        return self._system_plugin_sync_result_from_mcp(result)
 
     async def list_mcp_server_sync_jobs(
         self,
@@ -723,6 +1116,17 @@ class CollaborationService:
             server_id,
             limit=limit,
         )
+
+    async def list_system_plugin_sync_jobs(
+        self,
+        plugin_id: UUID,
+        *,
+        limit: int = 20,
+    ) -> list[SystemPluginSyncJob]:
+        return [
+            self._system_plugin_sync_job_from_mcp(job)
+            for job in await self.list_mcp_server_sync_jobs(plugin_id, limit=limit)
+        ]
 
     async def create_system_tool(
         self,
@@ -794,12 +1198,38 @@ class CollaborationService:
         assert result.server is not None
         return result.server
 
+    async def update_system_plugin(
+        self,
+        plugin_id: UUID,
+        payload: UpdateSystemPluginRequest,
+    ) -> SystemPluginDefinition:
+        if payload.backing_protocol is not None and payload.backing_protocol != "mcp":
+            raise ValueError(f"Unsupported System Plugin backing protocol {payload.backing_protocol!r}")
+        server = await self.update_mcp_server(
+            plugin_id,
+            self._mcp_update_from_system_plugin(payload),
+        )
+        return self._system_plugin_from_mcp(server)
+
     async def delete_mcp_server(
         self,
         server_id: UUID,
         payload: DeleteMcpServerRequest,
     ) -> dict[str, bool | str]:
         return await self._require_kernel().delete_mcp_server(server_id, payload)
+
+    async def delete_system_plugin(
+        self,
+        plugin_id: UUID,
+        payload: DeleteSystemPluginRequest,
+    ) -> dict[str, bool | str]:
+        result = await self.delete_mcp_server(
+            plugin_id,
+            DeleteMcpServerRequest(actor=payload.actor),
+        )
+        if "server_id" in result:
+            result = {**result, "plugin_id": result["server_id"]}
+        return result
 
     async def update_system_agent(
         self, agent_id: UUID, payload: UpdateSystemAgentRequest
@@ -1921,14 +2351,44 @@ class CollaborationService:
     async def list_workspace_mcp_servers(self, workspace_id: UUID) -> list[WorkspaceMcpServer]:
         return await self._require_kernel().list_workspace_mcp_servers(workspace_id)
 
+    async def list_workspace_system_plugins(
+        self,
+        workspace_id: UUID,
+    ) -> list[WorkspaceSystemPlugin]:
+        return [
+            self._workspace_system_plugin_from_mcp(server)
+            for server in await self.list_workspace_mcp_servers(workspace_id)
+        ]
+
     async def list_workspace_mcp_tools(self, workspace_id: UUID) -> list[WorkspaceMcpTool]:
         return await self._require_kernel().list_workspace_mcp_tools(workspace_id)
+
+    async def list_workspace_plugin_tools(self, workspace_id: UUID) -> list[WorkspacePluginTool]:
+        return [
+            self._workspace_plugin_tool_from_mcp(tool)
+            for tool in await self.list_workspace_mcp_tools(workspace_id)
+        ]
 
     async def list_workspace_mcp_resources(self, workspace_id: UUID) -> list[WorkspaceMcpResource]:
         return await self._require_kernel().list_workspace_mcp_resources(workspace_id)
 
+    async def list_workspace_plugin_resources(
+        self,
+        workspace_id: UUID,
+    ) -> list[WorkspacePluginResource]:
+        return [
+            self._workspace_plugin_resource_from_mcp(resource)
+            for resource in await self.list_workspace_mcp_resources(workspace_id)
+        ]
+
     async def list_workspace_mcp_prompts(self, workspace_id: UUID) -> list[WorkspaceMcpPrompt]:
         return await self._require_kernel().list_workspace_mcp_prompts(workspace_id)
+
+    async def list_workspace_plugin_prompts(self, workspace_id: UUID) -> list[WorkspacePluginPrompt]:
+        return [
+            self._workspace_plugin_prompt_from_mcp(prompt)
+            for prompt in await self.list_workspace_mcp_prompts(workspace_id)
+        ]
 
     async def attach_workspace_mcp_server(
         self,
@@ -1938,6 +2398,17 @@ class CollaborationService:
         result = await self._require_kernel().attach_workspace_mcp_server(workspace_id, payload)
         assert result.binding is not None
         return result.binding
+
+    async def attach_workspace_system_plugin(
+        self,
+        workspace_id: UUID,
+        payload: AttachWorkspaceSystemPluginRequest,
+    ) -> WorkspaceSystemPlugin:
+        server = await self.attach_workspace_mcp_server(
+            workspace_id,
+            self._mcp_attach_from_workspace_system_plugin(payload),
+        )
+        return self._workspace_system_plugin_from_mcp(server)
 
     async def update_workspace_mcp_server(
         self,
@@ -1953,6 +2424,19 @@ class CollaborationService:
         assert result.binding is not None
         return result.binding
 
+    async def update_workspace_system_plugin(
+        self,
+        workspace_id: UUID,
+        plugin_id: UUID,
+        payload: UpdateWorkspaceSystemPluginRequest,
+    ) -> WorkspaceSystemPlugin:
+        server = await self.update_workspace_mcp_server(
+            workspace_id,
+            plugin_id,
+            self._mcp_update_from_workspace_system_plugin(payload),
+        )
+        return self._workspace_system_plugin_from_mcp(server)
+
     async def delete_workspace_mcp_server(
         self,
         workspace_id: UUID,
@@ -1964,6 +2448,21 @@ class CollaborationService:
             server_id,
             payload,
         )
+
+    async def delete_workspace_system_plugin(
+        self,
+        workspace_id: UUID,
+        plugin_id: UUID,
+        payload: DeleteWorkspaceSystemPluginRequest,
+    ) -> dict[str, bool | str]:
+        result = await self.delete_workspace_mcp_server(
+            workspace_id,
+            plugin_id,
+            DeleteWorkspaceMcpServerRequest(actor=payload.actor),
+        )
+        if "server_id" in result:
+            result = {**result, "plugin_id": result["server_id"]}
+        return result
 
     async def attach_workspace_tool(
         self,

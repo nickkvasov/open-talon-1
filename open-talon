@@ -37,13 +37,19 @@ load_local_env() {
   : "${OIDC_ISSUER_URL:=${OPEN_TALON_OIDC_ISSUER_URL}}"
   : "${OIDC_CLIENT_ID_TUI:=${OPEN_TALON_OIDC_CLIENT_ID}}"
   : "${OIDC_AUDIENCE:=${OIDC_CLIENT_ID_TUI}}"
+  : "${SEARXNG_PORT:=8082}"
+  : "${SEARXNG_BASE_URL:=http://127.0.0.1:${SEARXNG_PORT}}"
+  : "${SEARXNG_PUBLIC_URL:=${SEARXNG_BASE_URL%/}/}"
   export \
     OPEN_TALON_OIDC_ISSUER_URL \
     OPEN_TALON_OIDC_CLIENT_ID \
     AUTH_MODE \
     OIDC_ISSUER_URL \
     OIDC_CLIENT_ID_TUI \
-    OIDC_AUDIENCE
+    OIDC_AUDIENCE \
+    SEARXNG_PORT \
+    SEARXNG_BASE_URL \
+    SEARXNG_PUBLIC_URL
 }
 
 ensure_python() {
@@ -203,11 +209,30 @@ except Exception:
 PY
 }
 
+searxng_ready() {
+  local base_url="${SEARXNG_BASE_URL:-http://127.0.0.1:${SEARXNG_PORT:-8082}}"
+  SEARXNG_PROBE_BASE_URL="${base_url%/}" "${PYTHON_BIN}" - <<'PY'
+import os
+import urllib.request
+
+base_url = os.environ["SEARXNG_PROBE_BASE_URL"].rstrip("/")
+for path in ("/healthz", "/"):
+    try:
+        with urllib.request.urlopen(f"{base_url}{path}", timeout=3) as response:
+            if response.status == 200:
+                raise SystemExit(0)
+    except Exception:
+        pass
+raise SystemExit(1)
+PY
+}
+
 start_cmd() {
   ensure_python
   load_local_env
   local gateway_startup_wait_seconds="${OPEN_TALON_GATEWAY_STARTUP_WAIT_SECONDS:-60}"
   local oidc_startup_wait_seconds="${OPEN_TALON_OIDC_STARTUP_WAIT_SECONDS:-60}"
+  local searxng_startup_wait_seconds="${OPEN_TALON_SEARXNG_STARTUP_WAIT_SECONDS:-60}"
   local enable_memgraph=0
   local enable_web_search=0
   while (($# > 0)); do
@@ -259,6 +284,19 @@ start_cmd() {
     fi
     docker compose up -d "${services[@]}"
   )
+
+  if ((enable_web_search)); then
+    for _ in $(seq 1 "${searxng_startup_wait_seconds}"); do
+      if searxng_ready; then
+        break
+      fi
+      sleep 1
+    done
+    if ! searxng_ready; then
+      echo "SearXNG failed to become ready: ${SEARXNG_BASE_URL}" >&2
+      exit 1
+    fi
+  fi
 
   if [[ -f "${GATEWAY_PID_FILE}" ]]; then
     EXISTING_PID="$(cat "${GATEWAY_PID_FILE}")"
@@ -406,7 +444,7 @@ stop_cmd() {
   echo "Stopping infrastructure services..."
   (
     cd "${ROOT_DIR}/infrastructure"
-    docker compose down
+    docker compose --profile mem0-graph --profile web-search down
   )
 }
 

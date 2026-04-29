@@ -49,7 +49,7 @@ Current behavior:
 - scope changes publish `notifications/tools/list_changed` and `notifications/resources/list_changed`
 - it exposes read-only session resources at `ot://session/identity`, `ot://session/permissions`, and `ot://session/scope`
 
-System Plugins are managed through `/v1/system-plugins` and workspace plugin attachments. They are backed by external MCP servers in v1, but they are separate from this gateway-mounted MCP adapter.
+System Plugins are managed through `/v1/system-plugins` and workspace plugin attachments. The public API exposes plugin fields such as `plugin_id`, `plugin_key`, and `backing_protocol`; external MCP servers remain the v1 backing protocol and are separate from this gateway-mounted MCP adapter.
 
 Relevant settings:
 

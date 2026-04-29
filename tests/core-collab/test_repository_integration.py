@@ -33,18 +33,26 @@ from open_talon_contracts.models import (
     AuditEventDraft,
     GitRepository,
     LlmProviderDefinition,
+    McpPromptDefinition,
+    McpResourceDefinition,
+    McpServerDefinition,
+    McpToolDefinition,
     Organization,
     OrganizationMembership,
+    ParticipantInput,
     Project,
     ProjectAccessBinding,
+    RequestMcpServerSyncRequest,
     ResolvedAssetBinding,
     Workspace,
     WorkspaceHarness,
     WorkspaceMethodology,
     WorkspaceAsset,
     WorkspaceAssetVersion,
+    WorkspaceMcpServer,
 )
 from support.model_constants import TEST_EXPLICIT_OLLAMA_MODEL
+from core_collab.kernel import CollaborationKernel
 from core_collab.migrations import apply_pending_migrations
 from core_collab.repository import CollaborationRepository, UserRecord
 
@@ -156,6 +164,327 @@ async def test_repository_llm_provider_round_trips_and_finds_referencing_agents(
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM system_agents WHERE agent_id = $1", agent_id)
             await conn.execute("DELETE FROM llm_providers WHERE provider_id = $1", provider_id)
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_repository_mcp_sync_replaces_capabilities_and_workspace_plugin_metadata():
+    try:
+        pool = await asyncpg.create_pool(dsn=_postgres_dsn(), min_size=1, max_size=2)
+    except Exception as exc:  # pragma: no cover - integration environment dependent
+        pytest.skip(f"Postgres not available for repository integration test: {exc}")
+
+    repository = CollaborationRepository(pool)
+    await apply_pending_migrations(pool)
+    kernel = CollaborationKernel(repository)
+
+    now = datetime.now(timezone.utc)
+    owner_id = uuid4()
+    organization_id = uuid4()
+    project_id = uuid4()
+    workspace_id = uuid4()
+    server_id = uuid4()
+    organization = Organization(
+        organization_id=organization_id,
+        slug=f"system-plugin-repo-{organization_id.hex[:8]}",
+        name="System Plugin Repository Integration",
+        created_by=owner_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    project = Project(
+        project_id=project_id,
+        organization_id=organization_id,
+        slug="system-plugin-project",
+        name="System Plugin Project",
+        created_by=owner_id,
+        creator_user_id=owner_id,
+        owner_user_id=owner_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    workspace = Workspace(
+        workspace_id=workspace_id,
+        organization_id=organization_id,
+        project_id=project_id,
+        name="System Plugin Workspace",
+        description="Workspace for repository-backed plugin integration.",
+        owner_user_id=owner_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    server = McpServerDefinition(
+        server_id=server_id,
+        scope="organization",
+        organization_id=organization_id,
+        server_key="repo_web_search",
+        display_name="Repository Web Search",
+        description="Repository integration System Plugin backing server.",
+        transport_kind="streamable_http",
+        config={"url": "http://127.0.0.1:8181/mcp"},
+        trust_level="sandboxed",
+        enabled=True,
+        created_by=owner_id,
+        created_at=now,
+        updated_by=owner_id,
+        updated_at=now,
+        metadata={"system_plugin": {"backing_protocol": "mcp"}},
+    )
+
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await repository.upsert_user(
+                    conn,
+                    UserRecord(
+                        user_id=owner_id,
+                        display_name="Plugin Owner",
+                        created_at=now,
+                        updated_at=now,
+                        metadata={},
+                    ),
+                )
+                await repository.upsert_organization(conn, organization)
+                await repository.upsert_organization_membership(
+                    conn,
+                    OrganizationMembership(
+                        organization_id=organization_id,
+                        user_id=owner_id,
+                        role="owner",
+                        joined_at=now,
+                        updated_at=now,
+                        metadata={},
+                    ),
+                )
+                await repository.upsert_project(conn, project)
+                await repository.upsert_workspace(conn, workspace)
+                await repository.upsert_mcp_server(conn, server)
+
+        requested = await kernel.request_mcp_server_sync(
+            server_id,
+            RequestMcpServerSyncRequest(
+                actor=ParticipantInput(
+                    participant_id=owner_id,
+                    participant_type="user",
+                    user_id=owner_id,
+                    display_name="Plugin Owner",
+                ),
+                metadata={"source": "repository-integration"},
+            ),
+        )
+        assert requested.server.last_sync_status == "queued"
+        assert requested.job.metadata == {"source": "repository-integration"}
+
+        claimed = await kernel.claim_next_mcp_server_sync_job(worker_id="repo-test-worker")
+        assert claimed is not None
+        assert claimed.server_id == server_id
+        assert claimed.status == "claimed"
+        running_server = await repository.fetch_mcp_server(server_id)
+        assert running_server is not None
+        assert running_server.last_sync_status == "running"
+
+        completed = await kernel.complete_mcp_server_sync_job(
+            claimed.job_id,
+            worker_id="repo-test-worker",
+            tools=[
+                McpToolDefinition(
+                    server_id=uuid4(),
+                    tool_name="search",
+                    display_name="Search",
+                    description="Search the web.",
+                    input_schema={"type": "object", "properties": {"query": {"type": "string"}}},
+                    output_schema={"type": "object"},
+                    capability_hash="search-v1",
+                    discovered_at=now,
+                    metadata={"kind": "search"},
+                ),
+                McpToolDefinition(
+                    server_id=uuid4(),
+                    tool_name="fetch",
+                    display_name="Fetch",
+                    description="Fetch a URL.",
+                    input_schema={"type": "object", "properties": {"url": {"type": "string"}}},
+                    output_schema={"type": "object"},
+                    capability_hash="fetch-v1",
+                    discovered_at=now,
+                    metadata={"kind": "fetch"},
+                ),
+            ],
+            resources=[
+                McpResourceDefinition(
+                    server_id=uuid4(),
+                    uri="ot://web-search/recent",
+                    name="recent",
+                    description="Recent web-search state.",
+                    mime_type="application/json",
+                    capability_hash="recent-v1",
+                    discovered_at=now,
+                    metadata={"kind": "resource"},
+                )
+            ],
+            prompts=[
+                McpPromptDefinition(
+                    server_id=uuid4(),
+                    prompt_name="summarize_search",
+                    description="Summarize web-search results.",
+                    arguments_schema={"type": "object"},
+                    capability_hash="prompt-v1",
+                    discovered_at=now,
+                    metadata={"kind": "prompt"},
+                )
+            ],
+            metadata={"validated": True},
+        )
+        assert completed.server.last_sync_status == "completed"
+        assert completed.server.last_synced_at is not None
+        assert completed.job.result == {
+            "tool_count": 2,
+            "resource_count": 1,
+            "prompt_count": 1,
+            "validated": True,
+        }
+        assert {tool.tool_name for tool in await repository.list_mcp_server_tools(server_id)} == {
+            "fetch",
+            "search",
+        }
+
+        replacement = await kernel.request_mcp_server_sync(
+            server_id,
+            RequestMcpServerSyncRequest(
+                actor=ParticipantInput(
+                    participant_id=owner_id,
+                    participant_type="user",
+                    user_id=owner_id,
+                    display_name="Plugin Owner",
+                ),
+                metadata={"source": "replacement"},
+            ),
+        )
+        replacement_claim = await kernel.claim_next_mcp_server_sync_job(
+            worker_id="repo-test-worker"
+        )
+        assert replacement_claim is not None
+        assert replacement_claim.job_id == replacement.job.job_id
+        await kernel.complete_mcp_server_sync_job(
+            replacement_claim.job_id,
+            worker_id="repo-test-worker",
+            tools=[
+                McpToolDefinition(
+                    server_id=uuid4(),
+                    tool_name="search_and_fetch",
+                    display_name="Search and Fetch",
+                    description="Search then fetch top results.",
+                    input_schema={"type": "object"},
+                    output_schema={"type": "object"},
+                    capability_hash="search-and-fetch-v1",
+                    discovered_at=now,
+                    metadata={"kind": "combined"},
+                )
+            ],
+            resources=[],
+            prompts=[],
+        )
+        assert [
+            tool.tool_name for tool in await repository.list_mcp_server_tools(server_id)
+        ] == ["search_and_fetch"]
+        assert await repository.list_mcp_server_resources(server_id) == []
+        assert await repository.list_mcp_server_prompts(server_id) == []
+
+        failed_request = await kernel.request_mcp_server_sync(
+            server_id,
+            RequestMcpServerSyncRequest(
+                actor=ParticipantInput(
+                    participant_id=owner_id,
+                    participant_type="user",
+                    user_id=owner_id,
+                    display_name="Plugin Owner",
+                ),
+                metadata={"source": "failure"},
+            ),
+        )
+        failed_claim = await kernel.claim_next_mcp_server_sync_job(
+            worker_id="repo-test-worker"
+        )
+        assert failed_claim is not None
+        assert failed_claim.job_id == failed_request.job.job_id
+        failed = await kernel.fail_mcp_server_sync_job(
+            failed_claim.job_id,
+            worker_id="repo-test-worker",
+            error="MCP initialize failed",
+        )
+        assert failed.server.last_sync_status == "failed"
+        assert failed.server.last_sync_error == "MCP initialize failed"
+        assert failed.job.status == "failed"
+        assert failed.job.error == "MCP initialize failed"
+        assert [
+            tool.tool_name for tool in await repository.list_mcp_server_tools(server_id)
+        ] == ["search_and_fetch"]
+
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await repository.upsert_workspace_mcp_server(
+                    conn,
+                    workspace_id=workspace_id,
+                    binding=WorkspaceMcpServer(
+                        server_id=server_id,
+                        server_key=server.server_key,
+                        display_name=server.display_name,
+                        description=server.description,
+                        transport_kind=server.transport_kind,
+                        trust_level=server.trust_level,
+                        server_enabled=True,
+                        enabled=True,
+                        tools_enabled=True,
+                        resources_enabled=False,
+                        prompts_enabled=False,
+                        sampling_enabled=False,
+                        name_prefix="web_",
+                        tool_allowlist=["search_and_fetch"],
+                        tool_denylist=[],
+                        resource_allowlist=[],
+                        prompt_allowlist=[],
+                        attached_by=owner_id,
+                        attached_at=now,
+                        updated_at=now,
+                        metadata={
+                            "persist_assets": False,
+                            "asset_candidate_output": "disabled",
+                        },
+                    ),
+                )
+
+        attachments = await repository.list_workspace_mcp_servers(workspace_id)
+        workspace_tools = await repository.list_workspace_mcp_tools(workspace_id)
+        assert len(attachments) == 1
+        assert attachments[0].server_id == server_id
+        assert attachments[0].server_key == "repo_web_search"
+        assert len(workspace_tools) == 1
+        assert workspace_tools[0].exposed_name == "web_search_and_fetch"
+        assert workspace_tools[0].remote_name == "search_and_fetch"
+        assert workspace_tools[0].metadata["kind"] == "combined"
+        assert workspace_tools[0].metadata["workspace_attachment"] == {
+            "persist_assets": False,
+            "asset_candidate_output": "disabled",
+        }
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM workspace_mcp_servers WHERE workspace_id = $1", workspace_id)
+            await conn.execute("DELETE FROM mcp_server_sync_jobs WHERE server_id = $1", server_id)
+            await conn.execute("DELETE FROM mcp_server_tools WHERE server_id = $1", server_id)
+            await conn.execute("DELETE FROM mcp_server_resources WHERE server_id = $1", server_id)
+            await conn.execute("DELETE FROM mcp_server_prompts WHERE server_id = $1", server_id)
+            await conn.execute("DELETE FROM mcp_servers WHERE server_id = $1", server_id)
+            await conn.execute("DELETE FROM workspaces WHERE workspace_id = $1", workspace_id)
+            await conn.execute("DELETE FROM projects WHERE project_id = $1", project_id)
+            await conn.execute(
+                "DELETE FROM organization_memberships WHERE organization_id = $1",
+                organization_id,
+            )
+            await conn.execute("DELETE FROM organizations WHERE organization_id = $1", organization_id)
+            await conn.execute("DELETE FROM users WHERE user_id = $1", owner_id)
         await pool.close()
 
 

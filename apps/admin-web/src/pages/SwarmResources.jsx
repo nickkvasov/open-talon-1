@@ -85,6 +85,9 @@ const defaultMcpServerData = () => ({
   command: ''
 });
 
+const systemPluginId = (plugin) => plugin.plugin_id || plugin.server_id;
+const systemPluginKey = (plugin) => plugin.plugin_key || plugin.server_key;
+
 export default function SwarmResources() {
   const api = useApi();
   const [agents, setAgents] = useState([]);
@@ -332,7 +335,7 @@ export default function SwarmResources() {
     setEditingMcpServer(server);
     setMcpModalMode('edit');
     setMcpServerData({
-      server_key: server.server_key,
+      server_key: systemPluginKey(server),
       display_name: server.display_name,
       description: server.description,
       transport_kind: server.transport_kind,
@@ -646,7 +649,7 @@ export default function SwarmResources() {
         : { url: mcpServerData.url };
       const payload = {
         actor: buildAdminActor(),
-        server_key: mcpServerData.server_key,
+        plugin_key: mcpServerData.server_key,
         display_name: mcpServerData.display_name,
         description: mcpServerData.description,
         transport_kind: mcpServerData.transport_kind,
@@ -666,7 +669,7 @@ export default function SwarmResources() {
           payload
         );
       } else {
-        await api.patch(mcpServerPath(editingMcpServer.server_id), payload);
+        await api.patch(mcpServerPath(systemPluginId(editingMcpServer)), payload);
       }
       setIsMcpModalOpen(false);
       resetMcpServerForm();
@@ -1149,7 +1152,7 @@ export default function SwarmResources() {
               <div className="p-8 text-slate-500 text-center italic">No System Plugins registered.</div>
             ) : (
               mcpServers.map(server => (
-                <div key={server.server_id} className="p-5 flex items-start justify-between hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors">
+                <div key={systemPluginId(server)} className="p-5 flex items-start justify-between hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors">
                   <div className="space-y-2 max-w-[70%]">
                     <div className="flex items-center gap-2">
                       <span className="font-bold text-slate-900 dark:text-white text-lg">{server.display_name}</span>
@@ -1170,7 +1173,7 @@ export default function SwarmResources() {
                     </div>
                     <p className="text-sm text-slate-500 dark:text-slate-400 line-clamp-1">{server.description}</p>
                     <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400 font-mono">
-                      <span>{server.server_key}</span>
+                      <span>{systemPluginKey(server)}</span>
                       {server.last_synced_at && <span>last synced {new Date(server.last_synced_at).toLocaleString()}</span>}
                     </div>
                     {server.last_sync_error && <p className="text-xs text-rose-500 line-clamp-1">{server.last_sync_error}</p>}
@@ -1178,7 +1181,7 @@ export default function SwarmResources() {
                   <div className="flex gap-2">
                     <button
                       type="button"
-                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleSyncMcpServer(server.server_id); }}
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleSyncMcpServer(systemPluginId(server)); }}
                       className="p-2 text-slate-400 hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 rounded-lg transition-all"
                       title="Sync Plugin Capabilities"
                     >
@@ -1194,7 +1197,7 @@ export default function SwarmResources() {
                     </button>
                     <button
                       type="button"
-                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteMcpServer(server.server_id); }}
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleDeleteMcpServer(systemPluginId(server)); }}
                       className="p-2 text-slate-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/30 rounded-lg transition-all"
                       title="Delete System Plugin"
                     >

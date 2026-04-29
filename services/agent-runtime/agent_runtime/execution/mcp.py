@@ -6,7 +6,12 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
-from open_talon_contracts.models import ExecutionHandle, ExecutionResult, ExecutionSpec
+from open_talon_contracts.models import (
+    ExecutionHandle,
+    ExecutionResult,
+    ExecutionSpec,
+    plugin_metadata_enables_asset_persistence,
+)
 
 from ..secrets import SecretResolver, build_default_secret_resolver, secret_references_from_config
 
@@ -272,16 +277,7 @@ class McpExecutionBackend:
         metadata = spec.metadata.get("mcp_workspace_attachment_metadata")
         if not isinstance(metadata, dict):
             metadata = {}
-        asset_persistence = metadata.get("asset_persistence")
-        enabled = any(
-            bool(metadata.get(key))
-            for key in (
-                "allow_asset_persistence",
-                "persist_assets_enabled",
-                "persist_fetched_pages_as_assets",
-            )
-        ) or (isinstance(asset_persistence, dict) and bool(asset_persistence.get("enabled")))
-        if not enabled:
+        if not plugin_metadata_enables_asset_persistence(metadata):
             raise ValueError(
                 "MCP tool requested asset persistence, but the workspace plugin attachment does not enable it"
             )

@@ -145,7 +145,7 @@ If you want the managed web-search System Plugin locally, start with:
 ./open-talon start --web-search
 ```
 
-That adds self-hosted SearXNG and the local `web-search-mcp` process. The seeded `web_search` System Plugin still must be synced and attached to a workspace explicitly before agents can use `search`, `fetch`, or `search_and_fetch`.
+That adds self-hosted SearXNG as the optional Docker Compose `searxng` container and starts the local `web-search-mcp` process after SearXNG is reachable. The seeded `web_search` System Plugin still must be synced and attached to a workspace explicitly before agents can use `search`, `fetch`, or `search_and_fetch`.
 
 ## 3. Check The Main Endpoints
 
@@ -626,7 +626,7 @@ Workspace harnesses include `moderation_policy` with `enabled`, `level` (`strict
 
 `Steward` and `Curator` use the managed `open_talon_control_plane` MCP server for gateway control-plane operations. The runtime mints OIDC client-credentials tokens from `agent_identities.secret_ref` when a private control-plane MCP tool is executed.
 
-System Plugins are managed separately from Open Talon tools. In v1 they are backed by external MCP servers stored in `mcp_servers`, but the public product surface is `/v1/system-plugins`. Register global or organization-scoped plugins with `/v1/system-plugins` or `/v1/organizations/{organization_id}/system-plugins`, sync their plugin capabilities with `POST /v1/system-plugins/{server_id}/sync`, then attach them to a workspace with `PUT /v1/workspaces/{workspace_id}/system-plugins/{server_id}`. Plugin tools, resources, and prompts are rendered in separate agent context sections and are not inserted into `system_tools`, not attached through `workspace_tools`, not published by Tinker, and not auto-attached to workspaces.
+System Plugins are managed separately from Open Talon tools. In v1 they are backed by external MCP servers stored in `mcp_servers`, but the public product surface is `/v1/system-plugins` and uses plugin fields such as `plugin_id`, `plugin_key`, and `backing_protocol`. Register global or organization-scoped plugins with `/v1/system-plugins` or `/v1/organizations/{organization_id}/system-plugins`, sync their plugin capabilities with `POST /v1/system-plugins/{plugin_id}/sync`, then attach them to a workspace with `PUT /v1/workspaces/{workspace_id}/system-plugins/{plugin_id}`. Plugin tools, resources, and prompts are rendered in separate agent context sections and are not inserted into `system_tools`, not attached through `workspace_tools`, not published by Tinker, and not auto-attached to workspaces.
 
 Useful routes:
 

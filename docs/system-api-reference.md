@@ -66,6 +66,7 @@ The repository also includes helper packages that matter when you are documentin
 | --- | --- | --- |
 | `services/workspace-memory` | memory-provider abstraction shared by gateway, core-collab, and runtime | active library, not a standalone service |
 | `services/web-search-mcp` | managed web-search System Plugin MCP service | optional local process started by `./open-talon start --web-search` |
+| `infrastructure` `searxng` | self-hosted search backend for the managed web-search System Plugin | optional Docker Compose container started by `./open-talon start --web-search` |
 | `services/generated-tools-builder` | OCI packaging and publish helpers for generated tools | active helper library used by Tinker flows |
 | `services/presence-directory` | Valkey-backed websocket presence state | active library used by `gateway-edge` |
 | `apps/web` | browser client for the legacy session-chat routes | static app mounted by `gateway-edge` at `/` when the directory is present |
@@ -734,21 +735,21 @@ Git-managed system and organization agent definitions are authored as modular bu
 | `DELETE` | `/v1/workspaces/{workspace_id}/tools/{tool_id}` | detach tool from workspace |
 | `POST` | `/v1/system-plugins` | create global System Plugin |
 | `GET` | `/v1/system-plugins` | list global System Plugins |
-| `GET` | `/v1/system-plugins/{server_id}` | get System Plugin |
-| `PATCH` | `/v1/system-plugins/{server_id}` | update System Plugin |
-| `DELETE` | `/v1/system-plugins/{server_id}` | delete System Plugin |
-| `POST` | `/v1/system-plugins/{server_id}/sync` | enqueue plugin capability sync |
-| `GET` | `/v1/system-plugins/{server_id}/sync-jobs` | list plugin sync jobs |
-| `GET` | `/v1/system-plugins/{server_id}/tools` | list discovered plugin tools |
-| `GET` | `/v1/system-plugins/{server_id}/resources` | list discovered plugin resources |
-| `GET` | `/v1/system-plugins/{server_id}/prompts` | list discovered plugin prompts |
+| `GET` | `/v1/system-plugins/{plugin_id}` | get System Plugin |
+| `PATCH` | `/v1/system-plugins/{plugin_id}` | update System Plugin |
+| `DELETE` | `/v1/system-plugins/{plugin_id}` | delete System Plugin |
+| `POST` | `/v1/system-plugins/{plugin_id}/sync` | enqueue plugin capability sync |
+| `GET` | `/v1/system-plugins/{plugin_id}/sync-jobs` | list plugin sync jobs |
+| `GET` | `/v1/system-plugins/{plugin_id}/tools` | list discovered plugin tools |
+| `GET` | `/v1/system-plugins/{plugin_id}/resources` | list discovered plugin resources |
+| `GET` | `/v1/system-plugins/{plugin_id}/prompts` | list discovered plugin prompts |
 | `POST` | `/v1/organizations/{organization_id}/system-plugins` | create organization-scoped System Plugin |
 | `GET` | `/v1/organizations/{organization_id}/system-plugins` | list organization-scoped System Plugins |
 | `GET` | `/v1/workspaces/{workspace_id}/catalog/system-plugins` | list System Plugins visible to workspace |
 | `GET` | `/v1/workspaces/{workspace_id}/system-plugins` | list workspace plugin attachments |
-| `PUT` | `/v1/workspaces/{workspace_id}/system-plugins/{server_id}` | attach System Plugin to workspace |
-| `PATCH` | `/v1/workspaces/{workspace_id}/system-plugins/{server_id}` | update plugin attachment |
-| `DELETE` | `/v1/workspaces/{workspace_id}/system-plugins/{server_id}` | detach System Plugin from workspace |
+| `PUT` | `/v1/workspaces/{workspace_id}/system-plugins/{plugin_id}` | attach System Plugin to workspace |
+| `PATCH` | `/v1/workspaces/{workspace_id}/system-plugins/{plugin_id}` | update plugin attachment |
+| `DELETE` | `/v1/workspaces/{workspace_id}/system-plugins/{plugin_id}` | detach System Plugin from workspace |
 | `GET` | `/v1/workspaces/{workspace_id}/plugin-capabilities/tools` | list workspace-visible plugin tools |
 | `GET` | `/v1/workspaces/{workspace_id}/plugin-capabilities/resources` | list workspace-visible plugin resources |
 | `GET` | `/v1/workspaces/{workspace_id}/plugin-capabilities/prompts` | list workspace-visible plugin prompts |

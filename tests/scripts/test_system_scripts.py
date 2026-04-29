@@ -17,6 +17,11 @@ def test_system_lifecycle_scripts_parse_and_are_executable() -> None:
         assert script_path.stat().st_mode & stat.S_IXUSR
         subprocess.run(["bash", "-n", str(script_path)], check=True)
 
+    launcher_path = ROOT_DIR / "open-talon"
+    assert launcher_path.exists()
+    assert launcher_path.stat().st_mode & stat.S_IXUSR
+    subprocess.run(["bash", "-n", str(launcher_path)], check=True)
+
     subprocess.run(
         [
             sys.executable,

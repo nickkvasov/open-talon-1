@@ -342,9 +342,9 @@ System Plugins use a separate external-capability model. In v1 each System Plugi
 - `mcp_server_tools`, `mcp_server_resources`, and `mcp_server_prompts`: discovered plugin capabilities cached from the backing MCP servers
 - `workspace_mcp_servers`: workspace-scoped plugin attachments that make selected capabilities visible to agents
 
-System Plugin capabilities are rendered and executed as external MCP-backed capabilities. They are never inserted into `system_tools`, never attached through `workspace_tools`, never published by Tinker, and never auto-attached to workspaces. The gateway-mounted `/v1/mcp` endpoint remains the inbound Open Talon system API adapter and does not import or proxy these external System Plugins.
+System Plugin capabilities are rendered and executed as external MCP-backed capabilities. The public API uses plugin-shaped fields such as `plugin_id`, `plugin_key`, and `backing_protocol`; MCP `server_id` and `server_key` remain protocol-specific backing details. System Plugins are never inserted into `system_tools`, never attached through `workspace_tools`, never published by Tinker, and never auto-attached to workspaces. The gateway-mounted `/v1/mcp` endpoint remains the inbound Open Talon system API adapter and does not import or proxy these external System Plugins.
 
-The managed `web_search` System Plugin is seeded globally. Start its local backing services with `./open-talon start --web-search`, then sync capabilities from the admin console or `POST /v1/system-plugins/{server_id}/sync`. It uses SearXNG for search and Crawl4AI for clean Markdown extraction. Parsed pages are returned by default; asset-candidate output is guarded by explicit plugin attachment metadata and `workspace.assets.publish`.
+The managed `web_search` System Plugin is seeded globally. Start its local backing services with `./open-talon start --web-search`, then sync capabilities from the admin console or `POST /v1/system-plugins/{plugin_id}/sync`. The launcher starts SearXNG as the optional Docker Compose `searxng` container under the `web-search` profile, waits for it to become reachable, and then starts the local `web-search-mcp` bridge process. It uses SearXNG for search and Crawl4AI for clean Markdown extraction. Parsed pages are returned by default; asset-candidate output is guarded by explicit plugin attachment metadata and `workspace.assets.publish`.
 
 This means a tool is defined once at the platform or organization layer, then added to any compatible workspace that wants to advertise it to attached agents.
 
@@ -419,14 +419,14 @@ Common tool endpoints:
 - `DELETE /v1/workspaces/{workspace_id}/tools/{tool_id}`: detach a tool from a workspace
 - `GET /v1/system-plugins`: list global System Plugin definitions
 - `POST /v1/system-plugins`: create a global System Plugin definition
-- `POST /v1/system-plugins/{server_id}/sync`: enqueue capability sync for a System Plugin
-- `GET /v1/system-plugins/{server_id}/tools`: list cached plugin tool capabilities
-- `GET /v1/system-plugins/{server_id}/resources`: list cached plugin resource capabilities
-- `GET /v1/system-plugins/{server_id}/prompts`: list cached plugin prompt capabilities
+- `POST /v1/system-plugins/{plugin_id}/sync`: enqueue capability sync for a System Plugin
+- `GET /v1/system-plugins/{plugin_id}/tools`: list cached plugin tool capabilities
+- `GET /v1/system-plugins/{plugin_id}/resources`: list cached plugin resource capabilities
+- `GET /v1/system-plugins/{plugin_id}/prompts`: list cached plugin prompt capabilities
 - `GET /v1/organizations/{organization_id}/system-plugins`: list organization-scoped System Plugin definitions
 - `POST /v1/organizations/{organization_id}/system-plugins`: create an organization-scoped System Plugin definition
 - `GET /v1/workspaces/{workspace_id}/system-plugins`: list System Plugin attachments for a workspace
-- `PUT /v1/workspaces/{workspace_id}/system-plugins/{server_id}`: attach a System Plugin to a workspace
+- `PUT /v1/workspaces/{workspace_id}/system-plugins/{plugin_id}`: attach a System Plugin to a workspace
 - `GET /v1/workspaces/{workspace_id}/plugin-capabilities/tools`: list workspace-visible plugin tools
 - `GET /v1/tool-generation/requests`: list tool-generation requests for admins
 - `GET /v1/threads/{thread_id}/tool-generation/requests`: list tool-generation requests for a thread
@@ -610,6 +610,7 @@ Local services:
 - `reconciler`: local worker that requeues expired leases and republishes wakeups
 - `retriever-worker`: local worker that extracts and indexes retrieval sources stored as immutable file assets
 - `web-search-mcp`: optional local System Plugin MCP service started with `./open-talon start --web-search`
+- `searxng`: optional Docker Compose container used by the managed `web_search` System Plugin
 - `postgres`: application database with `pgvector` enabled
 - `pgadmin`: pgAdmin 4 web UI for inspecting and querying the local Postgres instance
 - `kafka`: event bus for chat, collaboration, and agent-runtime traffic

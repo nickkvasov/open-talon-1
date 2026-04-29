@@ -47,6 +47,7 @@ from open_talon_contracts.models import (  # noqa: E402
     AgentInternalToolBinding,
     AgentMemoryPolicy,
     AgentRunResult,
+    AgentToolCallDraft,
     AgentToolUsePolicy,
     AssumeParticipantRoleRequest,
     ArtifactRef,
@@ -133,6 +134,7 @@ from open_talon_contracts.models import (  # noqa: E402
     WorkspaceMethodicStep,
     WorkspaceMethodology,
     WorkspaceModerationPolicy,
+    WorkspaceMcpTool,
     WorkspaceTool,
 )
 from core_collab.kernel import ANCHOR_AGENT_ID, CollaborationKernel  # noqa: E402
@@ -258,6 +260,7 @@ class FakeRepository:
         self._memory_providers = {postgres_provider.provider_id: postgres_provider}
         self._memory_provider_records = {}
         self._workspace_tools = {}
+        self._workspace_mcp_tools = {}
         self._agent_internal_tools = {}
         self._tool_calls = {}
         self._tool_generation_requests = {}
@@ -878,6 +881,35 @@ class FakeRepository:
         for tool in self._workspace_tools.get(workspace_id, []):
             if tool.name == tool_name:
                 return tool
+        return None
+
+    async def fetch_workspace_mcp_tool_by_name(self, workspace_id, tool_name):
+        for tool in self._workspace_mcp_tools.get(workspace_id, []):
+            if tool.exposed_name == tool_name:
+                return tool
+        return None
+
+    async def fetch_agent_internal_mcp_tool_by_name(self, system_agent_id, tool_name):
+        for binding in self._agent_internal_mcp_servers.values():
+            if binding.system_agent_id != system_agent_id:
+                continue
+            for tool in self._mcp_server_tools.get(binding.server_id, []):
+                exposed_name = f"{binding.name_prefix}{tool.tool_name}"
+                if exposed_name == tool_name:
+                    return WorkspaceMcpTool(
+                        server_id=binding.server_id,
+                        server_key=binding.server_key,
+                        server_display_name=binding.display_name,
+                        exposed_name=exposed_name,
+                        remote_name=tool.tool_name,
+                        description=tool.description,
+                        input_schema=tool.input_schema,
+                        output_schema=tool.output_schema,
+                        metadata={
+                            **tool.metadata,
+                            "workspace_attachment": binding.metadata,
+                        },
+                    )
         return None
 
     async def upsert_workspace_tool(self, conn, *, workspace_id, tool):
@@ -2917,6 +2949,140 @@ async def test_kernel_create_system_tool_rejects_local_process_for_untrusted_too
 
 
 @pytest.mark.asyncio
+async def test_queue_tool_call_for_system_plugin_uses_mcp_backend_without_system_tool_id():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    task_id = uuid4()
+    run_id = uuid4()
+    step_id = uuid4()
+    system_agent_id = uuid4()
+    participant_id = uuid4()
+    user_id = uuid4()
+    mcp_server_id = uuid4()
+
+    repository._agents[system_agent_id] = AgentDefinition(
+        agent_id=system_agent_id,
+        display_name="Plugin Agent",
+        description="Uses external System Plugins.",
+        role="assistant",
+        endpoint=AgentEndpoint(kind="local"),
+        system_prompt="Use attached capabilities only.",
+        created_by=user_id,
+        created_at=now,
+        updated_by=user_id,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, participant_id)] = ParticipantProfile(
+        participant_id=participant_id,
+        workspace_id=workspace_id,
+        participant_type="agent",
+        system_agent_id=system_agent_id,
+        display_name="Plugin Agent",
+        roles=["assistant"],
+        status="active",
+        visibility_scope="workspace",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._tasks[task_id] = Task(
+        task_id=task_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        title="Search the web",
+        requested_by=user_id,
+        status="claimed",
+        claimed_by=participant_id,
+        metadata={
+            "target_system_agent_id": str(system_agent_id),
+            "target_participant_id": str(participant_id),
+            "response_visibility": "workspace",
+        },
+        created_at=now,
+        updated_at=now,
+    )
+    repository._runs[run_id] = Run(
+        run_id=run_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        task_id=task_id,
+        participant_id=participant_id,
+        status="started",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._run_steps[step_id] = RunStep(
+        step_id=step_id,
+        run_id=run_id,
+        task_id=task_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        system_agent_id=system_agent_id,
+        status="claimed",
+        claimed_by_worker="agent-worker",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._workspace_mcp_tools[workspace_id] = [
+        WorkspaceMcpTool(
+            server_id=mcp_server_id,
+            server_key="web_search",
+            server_display_name="Web Search",
+            exposed_name="web_search",
+            remote_name="search",
+            description="Search the web through SearXNG.",
+            input_schema={"type": "object", "properties": {"query": {"type": "string"}}},
+            output_schema={"type": "object"},
+            metadata={
+                "workspace_attachment": {
+                    "persist_assets": False,
+                    "asset_candidate_output": "disabled",
+                }
+            },
+        )
+    ]
+
+    result = await kernel.queue_tool_calls_for_run_step(
+        step_id,
+        "agent-worker",
+        [
+            AgentToolCallDraft(
+                tool_name="web_search",
+                arguments={"query": "open talon system plugins"},
+                metadata={"source": "model"},
+            )
+        ],
+    )
+
+    queued_calls = repository._tool_calls[run_id]
+    assert result.step.status == "waiting_tools"
+    assert len(queued_calls) == 1
+    tool_call = queued_calls[0]
+    assert tool_call.tool_id is None
+    assert tool_call.tool_name == "web_search"
+    assert tool_call.metadata["tool_source"] == "mcp_server"
+    assert tool_call.metadata["mcp_server_key"] == "web_search"
+    assert tool_call.metadata["mcp_tool_name"] == "search"
+
+    execution_spec = ExecutionSpec.model_validate(tool_call.execution_spec)
+    assert execution_spec.handler_ref == "search"
+    assert execution_spec.inline_payload == {"query": "open talon system plugins"}
+    assert execution_spec.limits.network == "full"
+    assert execution_spec.limits.workspace_access == "none"
+    assert execution_spec.metadata["backend_kind"] == "mcp"
+    assert execution_spec.metadata["tool_source"] == "mcp_server"
+    assert execution_spec.metadata["mcp_server_id"] == str(mcp_server_id)
+    assert execution_spec.metadata["mcp_tool_name"] == "search"
+    assert execution_spec.metadata["mcp_workspace_attachment_metadata"] == {
+        "persist_assets": False,
+        "asset_candidate_output": "disabled",
+    }
+    assert "tool_id" not in execution_spec.metadata
+
+
+@pytest.mark.asyncio
 async def test_kernel_workspace_management_requires_admin_or_supervisor_role():
     repository = FakeRepository()
     kernel = CollaborationKernel(repository)
@@ -3116,6 +3282,16 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
         "iam.agent_identities.list",
         "methodics.resource_requests.approve",
     }.issubset({tool.tool_name for tool in repository._mcp_server_tools[control_plane.server_id]})
+    web_search = next(
+        server for server in repository._mcp_servers.values() if server.server_key == "web_search"
+    )
+    assert web_search.display_name == "Web Search"
+    assert web_search.transport_kind == "streamable_http"
+    assert web_search.config["url"] == "http://127.0.0.1:8181/mcp"
+    assert web_search.config["capabilities"] == ["search", "fetch", "search_and_fetch"]
+    assert web_search.last_sync_status == "not_synced"
+    assert web_search.metadata["system_plugin"] is True
+    assert web_search.metadata["backing_protocol"] == "mcp"
 
     steward = next(agent for agent in repository._agents.values() if agent.agent_key == "steward")
     steward_binding = repository._agent_internal_mcp_servers[

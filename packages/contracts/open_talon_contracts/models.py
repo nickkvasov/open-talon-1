@@ -42,6 +42,8 @@ AgentEndpointKind = Literal["local", "system", "remote"]
 ExecutionBackendKind = Literal["docker", "local_process", "mcp"]
 ToolTrustLevel = Literal["sandboxed", "trusted"]
 McpTransportKind = Literal["stdio", "streamable_http", "sse"]
+SystemPluginBackingProtocol = Literal["mcp"]
+SystemPluginCapabilityKind = Literal["tool", "resource", "prompt"]
 ExecutionWorkspaceRefMode = Literal["local_path"]
 NetworkPolicy = Literal["none", "full"]
 WorkspaceAccessMode = Literal["none", "read_only", "read_write"]
@@ -779,6 +781,30 @@ class McpServerDefinition(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class SystemPluginDefinition(BaseModel):
+    plugin_id: UUID
+    scope: RegistryScope = "global"
+    organization_id: UUID | None = None
+    plugin_key: str
+    display_name: str
+    description: str
+    backing_protocol: SystemPluginBackingProtocol = "mcp"
+    backing_server_id: UUID
+    transport_kind: McpTransportKind = "streamable_http"
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_config: dict[str, Any] = Field(default_factory=dict)
+    trust_level: ToolTrustLevel = "sandboxed"
+    enabled: bool = True
+    last_sync_status: str | None = None
+    last_sync_error: str | None = None
+    last_synced_at: datetime | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class McpToolDefinition(BaseModel):
     server_id: UUID
     tool_name: str
@@ -837,6 +863,53 @@ class RequestMcpServerSyncRequest(BaseModel):
 class McpServerSyncResult(BaseModel):
     server: McpServerDefinition
     job: McpServerSyncJob
+
+
+class SystemPluginCapabilityDefinition(BaseModel):
+    plugin_id: UUID
+    plugin_key: str
+    kind: SystemPluginCapabilityKind
+    name: str
+    remote_name: str
+    display_name: str | None = None
+    description: str = ""
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    output_schema: dict[str, Any] = Field(default_factory=dict)
+    uri: str | None = None
+    mime_type: str | None = None
+    arguments_schema: dict[str, Any] = Field(default_factory=dict)
+    capability_hash: str = ""
+    discovered_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SystemPluginSyncJob(BaseModel):
+    job_id: UUID
+    plugin_id: UUID
+    backing_protocol: SystemPluginBackingProtocol = "mcp"
+    backing_server_id: UUID
+    status: Literal["created", "claimed", "completed", "failed"] = "created"
+    requested_by: UUID
+    requested_at: datetime = Field(default_factory=utcnow)
+    claimed_by_worker: str | None = None
+    lease_expires_at: datetime | None = None
+    last_heartbeat_at: datetime | None = None
+    attempt_count: int = 0
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RequestSystemPluginSyncRequest(BaseModel):
+    actor: ParticipantInput
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SystemPluginSyncResult(BaseModel):
+    plugin: SystemPluginDefinition
+    job: SystemPluginSyncJob
 
 
 class WorkspaceMcpServer(BaseModel):
@@ -911,6 +984,78 @@ class WorkspaceMcpResource(WorkspaceMcpCapability):
 
 class WorkspaceMcpPrompt(WorkspaceMcpCapability):
     arguments_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceSystemPlugin(BaseModel):
+    plugin_id: UUID
+    plugin_key: str
+    display_name: str
+    description: str
+    backing_protocol: SystemPluginBackingProtocol = "mcp"
+    backing_server_id: UUID
+    transport_kind: McpTransportKind = "streamable_http"
+    trust_level: ToolTrustLevel = "sandboxed"
+    plugin_enabled: bool = True
+    enabled: bool = True
+    tools_enabled: bool = True
+    resources_enabled: bool = False
+    prompts_enabled: bool = False
+    sampling_enabled: bool = False
+    name_prefix: str = ""
+    tool_allowlist: list[str] = Field(default_factory=list)
+    tool_denylist: list[str] = Field(default_factory=list)
+    resource_allowlist: list[str] = Field(default_factory=list)
+    prompt_allowlist: list[str] = Field(default_factory=list)
+    attached_by: UUID
+    attached_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspacePluginCapability(BaseModel):
+    plugin_id: UUID
+    plugin_key: str
+    plugin_display_name: str
+    kind: SystemPluginCapabilityKind
+    exposed_name: str
+    remote_name: str
+    description: str = ""
+    enabled: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspacePluginTool(WorkspacePluginCapability):
+    kind: Literal["tool"] = "tool"
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    output_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspacePluginResource(WorkspacePluginCapability):
+    kind: Literal["resource"] = "resource"
+    uri: str
+    mime_type: str | None = None
+
+
+class WorkspacePluginPrompt(WorkspacePluginCapability):
+    kind: Literal["prompt"] = "prompt"
+    arguments_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+def plugin_metadata_enables_asset_persistence(metadata: dict[str, Any] | None) -> bool:
+    """Return whether a workspace plugin attachment authorizes page asset persistence."""
+    if not isinstance(metadata, dict):
+        return False
+    if any(
+        bool(metadata.get(key))
+        for key in (
+            "allow_asset_persistence",
+            "persist_assets_enabled",
+            "persist_fetched_pages_as_assets",
+        )
+    ):
+        return True
+    asset_persistence = metadata.get("asset_persistence")
+    return isinstance(asset_persistence, dict) and bool(asset_persistence.get("enabled"))
 
 
 class MemoryProviderHealthCheck(BaseModel):
@@ -2146,6 +2291,20 @@ class CreateMcpServerRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class CreateSystemPluginRequest(BaseModel):
+    actor: ParticipantInput
+    plugin_key: str = Field(validation_alias=AliasChoices("plugin_key", "server_key"))
+    display_name: str
+    description: str
+    backing_protocol: SystemPluginBackingProtocol = "mcp"
+    transport_kind: McpTransportKind = "streamable_http"
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_config: dict[str, Any] = Field(default_factory=dict)
+    trust_level: ToolTrustLevel = "sandboxed"
+    enabled: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class UpdateLlmProviderRequest(BaseModel):
     actor: ParticipantInput
     engine_id: str | None = None
@@ -2188,6 +2347,23 @@ class UpdateMcpServerRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class UpdateSystemPluginRequest(BaseModel):
+    actor: ParticipantInput
+    plugin_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("plugin_key", "server_key"),
+    )
+    display_name: str | None = None
+    description: str | None = None
+    backing_protocol: SystemPluginBackingProtocol | None = None
+    transport_kind: McpTransportKind | None = None
+    config: dict[str, Any] | None = None
+    secret_config: dict[str, Any] | None = None
+    trust_level: ToolTrustLevel | None = None
+    enabled: bool | None = None
+    metadata: dict[str, Any] | None = None
+
+
 class DeleteLlmProviderRequest(BaseModel):
     actor: ParticipantInput
 
@@ -2197,6 +2373,10 @@ class DeleteMemoryProviderRequest(BaseModel):
 
 
 class DeleteMcpServerRequest(BaseModel):
+    actor: ParticipantInput
+
+
+class DeleteSystemPluginRequest(BaseModel):
     actor: ParticipantInput
 
 
@@ -2232,6 +2412,44 @@ class UpdateWorkspaceMcpServerRequest(BaseModel):
 
 
 class DeleteWorkspaceMcpServerRequest(BaseModel):
+    actor: ParticipantInput
+
+
+class AttachWorkspaceSystemPluginRequest(BaseModel):
+    actor: ParticipantInput
+    plugin_id: UUID | None = Field(
+        default=None,
+        validation_alias=AliasChoices("plugin_id", "server_id"),
+    )
+    enabled: bool = True
+    tools_enabled: bool = True
+    resources_enabled: bool = False
+    prompts_enabled: bool = False
+    sampling_enabled: bool = False
+    name_prefix: str | None = None
+    tool_allowlist: list[str] = Field(default_factory=list)
+    tool_denylist: list[str] = Field(default_factory=list)
+    resource_allowlist: list[str] = Field(default_factory=list)
+    prompt_allowlist: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateWorkspaceSystemPluginRequest(BaseModel):
+    actor: ParticipantInput
+    enabled: bool | None = None
+    tools_enabled: bool | None = None
+    resources_enabled: bool | None = None
+    prompts_enabled: bool | None = None
+    sampling_enabled: bool | None = None
+    name_prefix: str | None = None
+    tool_allowlist: list[str] | None = None
+    tool_denylist: list[str] | None = None
+    resource_allowlist: list[str] | None = None
+    prompt_allowlist: list[str] | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class DeleteWorkspaceSystemPluginRequest(BaseModel):
     actor: ParticipantInput
 
 
