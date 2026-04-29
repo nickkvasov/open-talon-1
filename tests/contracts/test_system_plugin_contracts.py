@@ -15,6 +15,7 @@ from open_talon_contracts.models import (
     SystemPluginDefinition,
     SystemPluginSyncJob,
     SystemPluginSyncResult,
+    TargetRef,
     UpdateSystemPluginRequest,
     WorkspacePluginTool,
     WorkspaceSystemPlugin,
@@ -97,6 +98,14 @@ def test_workspace_system_plugin_attach_request_accepts_plugin_and_server_id_ali
     assert legacy_attach.plugin_id == legacy_server_id
     assert "server_id" not in public_attach.model_dump(mode="json")
     assert DeleteWorkspaceSystemPluginRequest(actor=actor).actor.participant_id == actor.participant_id
+
+
+def test_mcp_server_is_valid_collaboration_event_target() -> None:
+    server_id = uuid4()
+    target = TargetRef(type="mcp_server", id=server_id)
+
+    assert target.type == "mcp_server"
+    assert target.id == server_id
 
 
 def test_system_plugin_response_models_serialize_plugin_surface_without_mcp_server_fields() -> None:

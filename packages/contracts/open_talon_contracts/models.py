@@ -208,6 +208,7 @@ class TargetRef(BaseModel):
         "participant",
         "run_step",
         "tool_call",
+        "mcp_server",
         "interaction_request",
         "interaction_request_target",
         "interaction_answer",
