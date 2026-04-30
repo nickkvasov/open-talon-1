@@ -19,10 +19,22 @@ test.beforeEach(async ({ page }) => {
   await signInIfNeeded(page);
 });
 
-test('organizations can be created and memberships can be added and removed', async ({ page }) => {
+test('organizations can be created and memberships can be added and removed', async ({
+  page,
+  browser,
+  baseURL,
+}) => {
   const organizationName = uniqueName('playwright-org-admin');
   const organizationSlug = organizationName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-  const currentUser = await getCurrentUser(page);
+  const secondaryContext = await browser.newContext({ baseURL });
+  const secondaryPage = await secondaryContext.newPage();
+  attachBrowserLogging(secondaryPage);
+  await signInIfNeeded(secondaryPage, {
+    username: process.env.ADMIN_WEB_E2E_SECONDARY_USERNAME || 'user1',
+    password: process.env.ADMIN_WEB_E2E_SECONDARY_PASSWORD || 'user12345',
+  });
+  const secondaryUser = await getCurrentUser(secondaryPage);
+  await secondaryContext.close();
 
   await openAdminPage(page, /^organizations$/i, /^organizations$/i);
 
@@ -41,14 +53,14 @@ test('organizations can be created and memberships can be added and removed', as
   await expect(organizationButton).toBeVisible();
   await organizationButton.click();
 
-  await membershipForm.locator('input').first().fill(currentUser.user_id);
+  await membershipForm.locator('input').first().fill(secondaryUser.user_id);
   await membershipForm.locator('select').selectOption('member');
   await membershipForm.locator('button[type="submit"]').click();
 
-  const membershipRow = page.getByText(currentUser.user_id, { exact: true }).locator('xpath=ancestor::div[contains(@class,"px-4")][1]');
+  const membershipRow = page.getByText(secondaryUser.user_id, { exact: true }).locator('xpath=ancestor::div[contains(@class,"px-4")][1]');
   await expect(membershipRow).toBeVisible();
   await membershipRow.locator('button').click();
-  await expect(page.getByText(currentUser.user_id, { exact: true })).not.toBeVisible();
+  await expect(page.getByText(secondaryUser.user_id, { exact: true })).not.toBeVisible();
 });
 
 test('workspaces support editing and role override management', async ({ page }) => {

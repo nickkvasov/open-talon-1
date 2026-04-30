@@ -968,6 +968,12 @@ def test_tinker_can_generate_and_execute_fibonacci_tool_on_live_system(
                     "name": f"Tinker Workspace {test_suffix}",
                     "description": "Real system test workspace.",
                     "actor": admin_actor,
+                    "harness": {
+                        "moderation_policy": {
+                            "enabled": False,
+                            "level": "open",
+                        },
+                    },
                     "metadata": {"system_test": True},
                 },
             )

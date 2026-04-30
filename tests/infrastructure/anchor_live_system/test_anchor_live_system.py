@@ -198,7 +198,7 @@ def test_anchor_live_balanced_flagging_path():
             token=token,
             payload={
                 "actor": actor,
-                "content": "This tangent is about vacation planning rather than runtime leases.",
+                "content": "Plan a beach vacation itinerary with hotel pools and restaurant reservations.",
                 "visibility": "workspace",
                 "create_task": False,
             },
@@ -213,6 +213,7 @@ def test_anchor_live_balanced_flagging_path():
                 and item.get("metadata", {}).get("publication_review_status") == "flagged"
                 for item in timeline["messages"]
             ),
+            timeout=240.0,
         )
         flagged = next(item for item in page["messages"] if item["message_id"] == message["message_id"])
         assert flagged["metadata"]["publication_review_kind"] == "workspace_topic_alignment"

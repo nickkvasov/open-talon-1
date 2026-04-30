@@ -635,14 +635,41 @@ class ManagedSystemDefaultsRepairer:
             return
 
         curator_agent = self._curator_agent_for_organization(organization, now=now)
-        await self._repository.upsert_system_agent(conn, curator_agent)
-        await self._repository.upsert_iam_role_definition(
-            conn,
-            self._curator_iam_role_for_organization(
-                organization.organization_id,
-                now=now,
-            ),
+        existing_curator = await self._find_system_agent_by_key(
+            scope="organization",
+            organization_id=organization.organization_id,
+            agent_key="curator",
         )
+        if existing_curator is not None:
+            curator_agent = curator_agent.model_copy(
+                update={
+                    "agent_id": existing_curator.agent_id,
+                    "active_agent_version_id": existing_curator.active_agent_version_id,
+                    "created_by": existing_curator.created_by,
+                    "created_at": existing_curator.created_at,
+                    "metadata": {**existing_curator.metadata, **curator_agent.metadata},
+                }
+            )
+        await self._repository.upsert_system_agent(conn, curator_agent)
+        curator_role = self._curator_iam_role_for_organization(
+            organization.organization_id,
+            now=now,
+        )
+        existing_curator_role = await self._find_iam_role_definition_by_name(
+            subject_kind="agent",
+            scope="organization",
+            organization_id=organization.organization_id,
+            name=curator_role.name,
+        )
+        if existing_curator_role is not None:
+            curator_role = curator_role.model_copy(
+                update={
+                    "role_id": existing_curator_role.role_id,
+                    "created_at": existing_curator_role.created_at,
+                    "metadata": {**existing_curator_role.metadata, **curator_role.metadata},
+                }
+            )
+        await self._repository.upsert_iam_role_definition(conn, curator_role)
         await self._repository.upsert_participant(
             conn,
             self._operations_participant_for_agent(
@@ -775,6 +802,27 @@ class ManagedSystemDefaultsRepairer:
                     organization_id=organization_id,
                 )
                 if server.server_key == server_key
+            ),
+            None,
+        )
+
+    async def _find_iam_role_definition_by_name(
+        self,
+        *,
+        subject_kind: str,
+        scope: str,
+        organization_id: UUID | None,
+        name: str,
+    ) -> IamRoleDefinition | None:
+        return next(
+            (
+                role
+                for role in await self._repository.list_iam_role_definitions(
+                    subject_kind=subject_kind,
+                    scope=scope,
+                    organization_id=organization_id,
+                )
+                if role.name == name
             ),
             None,
         )
@@ -1035,13 +1083,17 @@ class ManagedSystemDefaultsRepairer:
             scope="global",
             organization_id=None,
             display_name="Tinker",
-            description="Builds new agent-usable tools on demand, validates them, and submits them for approval.",
-            role="tool generation agent",
+            description=(
+                "Builds new agent-usable tools from workspace requests, validates generated "
+                "tools, and submits reviewable revisions for catalog approval."
+            ),
+            role="generated tool authoring and validation agent",
             capabilities=[
-                "tool_generation",
-                "tool_validation",
-                "tool_catalog",
-                "tool_authoring",
+                "generates new agent-usable tools from workspace requests",
+                "checks whether existing tools already satisfy a request",
+                "validates generated tools before approval",
+                "submits generated tool revisions for catalog review",
+                "reports trust network and workspace-access rationale for generated tools",
             ],
             endpoint=AgentEndpoint(
                 kind="system",
@@ -1136,15 +1188,17 @@ class ManagedSystemDefaultsRepairer:
             scope="global",
             organization_id=None,
             display_name="Steward",
-            description="Manages Open Talon platform operations through authorized control-plane APIs.",
-            role="platform steward",
+            description=(
+                "Manages platform-wide Open Talon operations through authorized control-plane "
+                "APIs and private MCP tools."
+            ),
+            role="platform operations steward",
             capabilities=[
-                "platform_operations",
-                "runtime_operations",
-                "audit_verification",
-                "catalog_management",
-                "provider_management",
-                "tool_generation_review",
+                "manages platform operations through authorized control-plane tools",
+                "reviews platform runtime and audit health",
+                "coordinates system-wide catalog and provider administration",
+                "repairs managed administration contexts when authorized",
+                "keeps tenant IAM audit and secret boundaries explicit",
             ],
             endpoint=AgentEndpoint(
                 kind="system",

@@ -282,6 +282,18 @@ def _principal_actor(
     )
 
 
+def _request_actor_or_default(
+    request: Request,
+    actor: ParticipantInput | None = None,
+) -> ParticipantInput:
+    fallback = actor or ParticipantInput(
+        participant_id=uuid4(),
+        participant_type="user",
+        display_name="request",
+    )
+    return _principal_actor(request, fallback)
+
+
 async def _require_identity_permission(
     request: Request,
     *,
@@ -4951,7 +4963,7 @@ async def update_library(
 async def delete_library(
     request: Request,
     library_id: UUID,
-    payload: DeleteLibraryRequest,
+    payload: DeleteLibraryRequest | None = Body(default=None),
 ) -> dict[str, bool | str]:
     try:
         library = await _require_library_visibility(
@@ -4961,7 +4973,7 @@ async def delete_library(
         )
         actor = await _require_library_scope_actor(
             request,
-            payload.actor,
+            _request_actor_or_default(request, payload.actor if payload is not None else None),
             permission="library.write",
             organization_id=library.organization_id,
             project_id=library.project_id,
@@ -4969,7 +4981,10 @@ async def delete_library(
         )
         return await collab_svc.collaboration_service.delete_library(
             library_id,
-            payload.model_copy(update={"actor": actor}),
+            DeleteLibraryRequest(
+                actor=actor,
+                metadata=payload.metadata if payload is not None else {},
+            ),
         )
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -5513,6 +5528,8 @@ async def _get_retrieval_context_pack(
     if workspace_id is not None and expected_organization_id is None:
         workspace = await collab_svc.collaboration_service.get_workspace(workspace_id)
         expected_organization_id = workspace.workspace.organization_id
+        if project_id is None:
+            project_id = workspace.workspace.project_id
     if (
         context_pack.scope != scope
         or context_pack.organization_id != expected_organization_id

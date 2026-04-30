@@ -139,7 +139,12 @@ from open_talon_contracts.models import (  # noqa: E402
 )
 from core_collab.kernel import ANCHOR_AGENT_ID, CollaborationKernel  # noqa: E402
 from core_collab.repository import CollaborationRepository  # noqa: E402
-from core_collab.system_defaults import CONDUCTOR_AGENT_ID, ManagedSystemDefaultsRepairer  # noqa: E402
+from core_collab.system_defaults import (  # noqa: E402
+    CONDUCTOR_AGENT_ID,
+    ManagedSystemDefaultsRepairer,
+    curator_iam_role_for_organization,
+    curator_agent_for_organization,
+)
 
 
 class _FakeTransaction:
@@ -498,6 +503,25 @@ class FakeRepository:
 
     async def upsert_iam_role_definition(self, conn, role):
         self._iam_roles[role.role_id] = role
+
+    async def list_iam_role_definitions(
+        self,
+        *,
+        subject_kind: str,
+        scope: str | None = None,
+        organization_id=None,
+    ):
+        return [
+            role
+            for role in self._iam_roles.values()
+            if role.subject_kind == subject_kind
+            and (scope is None or role.scope == scope)
+            and (
+                scope is None
+                or (scope == "global" and role.organization_id is None)
+                or (scope == "organization" and role.organization_id == organization_id)
+            )
+        ]
 
     async def upsert_agent_internal_mcp_server(self, conn, *, binding: AgentInternalMcpServer):
         self._agent_internal_mcp_servers[(binding.system_agent_id, binding.server_id)] = binding
@@ -3226,6 +3250,12 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
         "conductor",
     }.issubset(agent_keys)
     assert any(agent.display_name == "Reasoning Planner" for agent in repository._agents.values())
+    tinker = next(agent for agent in repository._agents.values() if agent.agent_key == "tinker")
+    assert tinker.role == "generated tool authoring and validation agent"
+    assert "validates generated tools before approval" in tinker.capabilities
+    steward = next(agent for agent in repository._agents.values() if agent.agent_key == "steward")
+    assert steward.role == "platform operations steward"
+    assert "reviews platform runtime and audit health" in steward.capabilities
     methodologist = next(
         agent for agent in repository._agents.values() if agent.agent_key == "methodologist"
     )
@@ -3309,7 +3339,6 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
         {tool.tool_name for tool in repository._mcp_server_tools[retriever_plugin.server_id]}
     )
 
-    steward = next(agent for agent in repository._agents.values() if agent.agent_key == "steward")
     steward_binding = repository._agent_internal_mcp_servers[
         (steward.agent_id, control_plane.server_id)
     ]
@@ -3364,6 +3393,64 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
         "methodics.read",
         "methodics.execute",
     ]
+
+
+@pytest.mark.asyncio
+async def test_managed_system_defaults_repairer_reuses_existing_org_curator_by_key():
+    repository = FakeRepository()
+    default_organization = next(
+        organization
+        for organization in repository._organizations.values()
+        if organization.slug == "default"
+    )
+    legacy_created_at = datetime.now(timezone.utc) - timedelta(days=1)
+    legacy_curator = curator_agent_for_organization(
+        default_organization,
+        now=legacy_created_at,
+    ).model_copy(
+        update={
+            "agent_id": uuid4(),
+            "metadata": {"legacy": True},
+        }
+    )
+    legacy_curator_role = curator_iam_role_for_organization(
+        default_organization.organization_id,
+        now=legacy_created_at,
+    ).model_copy(
+        update={
+            "role_id": uuid4(),
+            "metadata": {"legacy": True},
+        }
+    )
+    repository._agents[legacy_curator.agent_id] = legacy_curator
+    repository._iam_roles[legacy_curator_role.role_id] = legacy_curator_role
+
+    await ManagedSystemDefaultsRepairer(repository).repair()
+
+    curator_agents = [
+        agent
+        for agent in repository._agents.values()
+        if agent.scope == "organization"
+        and agent.organization_id == default_organization.organization_id
+        and agent.agent_key == "curator"
+    ]
+    assert len(curator_agents) == 1
+    assert curator_agents[0].agent_id == legacy_curator.agent_id
+    assert curator_agents[0].created_at == legacy_created_at
+    assert curator_agents[0].metadata["legacy"] is True
+    assert curator_agents[0].metadata["managed"] is True
+    curator_roles = [
+        role
+        for role in repository._iam_roles.values()
+        if role.scope == "organization"
+        and role.organization_id == default_organization.organization_id
+        and role.name == "organization_curator"
+    ]
+    assert len(curator_roles) == 1
+    assert curator_roles[0].role_id == legacy_curator_role.role_id
+    assert curator_roles[0].created_at == legacy_created_at
+    assert curator_roles[0].metadata["legacy"] is True
+    assert curator_roles[0].metadata["managed"] is True
 
 
 def _workspace_actor_with_methodics_permissions() -> ParticipantInput:

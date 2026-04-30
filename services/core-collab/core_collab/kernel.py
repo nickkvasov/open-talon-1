@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 import re
 import sys
-from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
+from uuid import UUID, uuid4
 
 import asyncpg
 from open_talon_contracts.oci_registry import (
@@ -229,6 +229,13 @@ from .contracts import (
     GitRepository,
 )
 from .repository import CollaborationRepository, UserRecord
+from .library_indexing import (
+    bind_source_version_to_job,
+    build_library_corpus,
+    build_library_index_record,
+    find_library_corpus,
+    library_item_source_id,
+)
 from .results import (
     AgentDefinitionCommandResult,
     AgentIdentityCommandResult,
@@ -2989,7 +2996,6 @@ class CollaborationKernel:
         if not items:
             return LibraryCommandResult(library=library, jobs=[])
         now = self._now()
-        corpus_name = f"library:{library.library_id}"
         if payload.profile_id is not None:
             profile = await self._repository.fetch_retrieval_profile(payload.profile_id)
             if profile is None:
@@ -3006,112 +3012,51 @@ class CollaborationKernel:
                 left_project_id=profile.project_id,
                 right_project_id=library.project_id,
             )
-        existing_corpus = next(
-            (
-                corpus
-                for corpus in await self._repository.list_retrieval_corpora(
-                    scope=library.scope,
-                    organization_id=library.organization_id,
-                    project_id=library.project_id,
-                    workspace_id=library.workspace_id,
-                )
-                if corpus.metadata.get("library_id") == str(library.library_id)
-            ),
-            None,
-        )
-        corpus = (
-            existing_corpus.model_copy(
-                update={
-                    "default_profile_id": payload.profile_id or existing_corpus.default_profile_id,
-                    "updated_at": now,
-                }
-            )
-            if existing_corpus is not None
-            else RetrievalCorpus(
-                corpus_id=uuid4(),
+        existing_corpus = find_library_corpus(
+            await self._repository.list_retrieval_corpora(
                 scope=library.scope,
                 organization_id=library.organization_id,
                 project_id=library.project_id,
                 workspace_id=library.workspace_id,
-                name=corpus_name,
-                description=f"Retriever corpus for library {library.name}.",
-                default_profile_id=payload.profile_id,
-                created_by=payload.actor.participant_id,
-                created_at=now,
-                updated_at=now,
-                metadata={"library_id": str(library.library_id), "library_slug": library.slug},
-            )
+            ),
+            library,
+        )
+        corpus = build_library_corpus(
+            library=library,
+            existing_corpus=existing_corpus,
+            profile_id=payload.profile_id,
+            actor_id=payload.actor.participant_id,
+            now=now,
         )
         jobs: list[RetrievalIngestionJob] = []
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 await self._repository.upsert_retrieval_corpus(conn, corpus)
                 for item in items:
-                    source = RetrievalSource(
-                        source_id=uuid5(NAMESPACE_URL, f"open-talon:library-item-source:{item.item_id}"),
-                        corpus_id=corpus.corpus_id,
-                        scope=library.scope,
-                        organization_id=library.organization_id,
-                        project_id=library.project_id,
-                        workspace_id=library.workspace_id,
-                        asset_id=item.asset_id,
-                        active_asset_version_id=item.active_asset_version_id,
-                        title=item.title,
-                        source_type=item.item_kind,
-                        content_type=item.content_type,
-                        created_by=payload.actor.participant_id,
-                        created_at=now,
-                        updated_at=now,
-                        metadata={
-                            **item.metadata,
-                            "library_id": str(library.library_id),
-                            "library_item_id": str(item.item_id),
-                        },
-                    )
-                    await self._repository.upsert_retrieval_source(conn, source)
-                    if source.active_asset_version_id is None:
-                        raise ValueError(f"Library item {item.item_id} has no active asset version")
-                    source_version = RetrievalSourceVersion(
-                        source_version_id=uuid4(),
-                        source_id=source.source_id,
-                        asset_version_id=source.active_asset_version_id,
-                        version=await self._repository.next_retrieval_source_version(
+                    record = build_library_index_record(
+                        library=library,
+                        item=item,
+                        corpus=corpus,
+                        source_version_number=await self._repository.next_retrieval_source_version(
                             conn,
-                            source_id=source.source_id,
+                            source_id=library_item_source_id(item.item_id),
                         ),
-                        ingestion_job_id=None,
-                        created_by=payload.actor.participant_id,
-                        created_at=now,
-                        metadata={"library_item_id": str(item.item_id)},
+                        profile_id=payload.profile_id,
+                        actor_id=payload.actor.participant_id,
+                        now=now,
+                        metadata=payload.metadata,
                     )
-                    await self._repository.upsert_retrieval_source_version(conn, source_version)
-                    job = RetrievalIngestionJob(
-                        job_id=uuid4(),
-                        corpus_id=corpus.corpus_id,
-                        source_id=source.source_id,
-                        source_version_id=source_version.source_version_id,
-                        profile_id=payload.profile_id or corpus.default_profile_id,
-                        scope=library.scope,
-                        organization_id=library.organization_id,
-                        project_id=library.project_id,
-                        workspace_id=library.workspace_id,
-                        status="queued",
-                        stage="queued",
-                        requested_by=payload.actor.participant_id,
-                        created_at=now,
-                        updated_at=now,
-                        metadata={
-                            **payload.metadata,
-                            "library_id": str(library.library_id),
-                            "library_item_id": str(item.item_id),
-                        },
+                    await self._repository.upsert_retrieval_source(conn, record.source)
+                    await self._repository.upsert_retrieval_source_version(
+                        conn,
+                        record.source_version,
                     )
-                    await self._repository.upsert_retrieval_ingestion_job(conn, job)
-                    source_version = source_version.model_copy(
-                        update={"ingestion_job_id": job.job_id}
+                    await self._repository.upsert_retrieval_ingestion_job(conn, record.job)
+                    await self._repository.upsert_retrieval_source_version(
+                        conn,
+                        bind_source_version_to_job(record.source_version, record.job),
                     )
-                    await self._repository.upsert_retrieval_source_version(conn, source_version)
-                    jobs.append(job)
+                    jobs.append(record.job)
         return LibraryCommandResult(library=library, jobs=jobs)
 
     async def create_retrieval_profile(

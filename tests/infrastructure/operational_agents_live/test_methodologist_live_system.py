@@ -60,20 +60,29 @@ def _insert_retriever_context_pack(
     with psycopg.connect(postgres_dsn()) as conn:
         with conn.cursor() as cur:
             cur.execute(
+                "SELECT project_id FROM workspaces WHERE workspace_id = %s::uuid",
+                (workspace_id,),
+            )
+            project_row = cur.fetchone()
+            if project_row is None:
+                raise AssertionError(f"Workspace {workspace_id} not found")
+            project_id = str(project_row[0])
+            cur.execute(
                 """
                 INSERT INTO retrieval_context_packs (
-                    context_pack_id, run_id, scope, organization_id, workspace_id,
+                    context_pack_id, run_id, scope, organization_id, project_id, workspace_id,
                     profile_id, query, content, token_count, hits, created_by, created_at,
                     metadata
                 )
                 VALUES (
-                    %s::uuid, NULL, 'workspace', %s::uuid, %s::uuid,
+                    %s::uuid, NULL, 'workspace', %s::uuid, %s::uuid, %s::uuid,
                     NULL, %s, %s, %s, %s::jsonb, %s::uuid, NOW(), %s::jsonb
                 )
                 """,
                 (
                     context_pack_id,
                     organization_id,
+                    project_id,
                     workspace_id,
                     "evidence-backed incident learning methodology",
                     content,

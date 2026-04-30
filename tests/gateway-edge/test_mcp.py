@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from gateway_edge.config import settings
 from gateway_edge.mcp_api import OPERATION_REGISTRY, notification_hub
-from gateway_edge.models import AuthContext
+from gateway_edge.models import AuthContext, Library, LibraryItem, RetrievalIngestionJob
 
 
 def _oidc_context(*, roles: list[str], user_id=None) -> AuthContext:
@@ -85,6 +86,139 @@ def test_mcp_library_operations_declare_scopes_and_permissions() -> None:
         assert operation.required_permission_type == "workspace"
         assert operation.required_permission == "library.attach"
         assert operation.requires_workspace_actor is True
+
+
+async def test_mcp_library_and_retriever_tools_execute_with_scoped_actor(
+    client,
+    mock_collaboration_service,
+    monkeypatch,
+) -> None:
+    organization_id = mock_collaboration_service.default_organization.organization_id
+    admin = _oidc_context(roles=["admin"]).model_copy(update={"platform_admin": True})
+    _patch_oidc_tokens(monkeypatch, {"admin-token": admin})
+    now = datetime.now(timezone.utc)
+    library = Library(
+        library_id=uuid4(),
+        scope="organization",
+        organization_id=organization_id,
+        slug="mcp-library",
+        name="MCP Library",
+        created_by=admin.user_id,
+        created_at=now,
+        updated_by=admin.user_id,
+        updated_at=now,
+        metadata={},
+    )
+    item = LibraryItem(
+        item_id=uuid4(),
+        library_id=library.library_id,
+        asset_id=uuid4(),
+        active_asset_version_id=uuid4(),
+        item_kind="text",
+        title="MCP Note",
+        content_type="text/markdown",
+        created_by=admin.user_id,
+        created_at=now,
+        updated_by=admin.user_id,
+        updated_at=now,
+        metadata={},
+    )
+    job = RetrievalIngestionJob(
+        job_id=uuid4(),
+        corpus_id=uuid4(),
+        source_id=uuid4(),
+        source_version_id=uuid4(),
+        scope="organization",
+        organization_id=organization_id,
+        requested_by=admin.user_id,
+        created_at=now,
+        updated_at=now,
+        metadata={"library_id": str(library.library_id)},
+    )
+    captured: dict[str, object] = {}
+
+    async def create_library(*, scope, organization_id=None, project_id=None, workspace_id=None, payload):
+        captured["create_library"] = (scope, organization_id, project_id, workspace_id, payload)
+        return library
+
+    async def list_libraries(
+        *,
+        scope=None,
+        organization_id=None,
+        project_id=None,
+        workspace_id=None,
+        include_archived=False,
+        include_workspace_attachments=False,
+    ):
+        captured["list_libraries"] = (
+            scope,
+            organization_id,
+            project_id,
+            workspace_id,
+            include_archived,
+            include_workspace_attachments,
+        )
+        return [library]
+
+    async def create_library_text_item(library_id, payload):
+        captured["create_text_item"] = (library_id, payload)
+        return item
+
+    async def index_library(library_id, payload):
+        captured["index_library"] = (library_id, payload)
+        return [job]
+
+    mock_collaboration_service.create_library = create_library
+    mock_collaboration_service.list_libraries = list_libraries
+    mock_collaboration_service.create_library_text_item = create_library_text_item
+    mock_collaboration_service.index_library = index_library
+
+    session_id = await _mcp_initialize(client, token="admin-token")
+    scope_response = await _mcp_tool_call(
+        client,
+        token="admin-token",
+        session_id=session_id,
+        name="session.set_scope",
+        arguments={"scope": "organization", "organization_id": str(organization_id)},
+    )
+    create_response = await _mcp_tool_call(
+        client,
+        token="admin-token",
+        session_id=session_id,
+        name="library.libraries.create",
+        arguments={"name": "MCP Library", "slug": "mcp-library"},
+    )
+    text_response = await _mcp_tool_call(
+        client,
+        token="admin-token",
+        session_id=session_id,
+        name="library.items.create_text",
+        arguments={
+            "library_id": str(library.library_id),
+            "title": "MCP Note",
+            "content": "# MCP Note",
+        },
+    )
+    index_response = await _mcp_tool_call(
+        client,
+        token="admin-token",
+        session_id=session_id,
+        name="retriever.library.index",
+        arguments={"library_id": str(library.library_id), "item_ids": [str(item.item_id)]},
+    )
+
+    assert scope_response.json()["result"]["isError"] is False
+    assert create_response.json()["result"]["isError"] is False
+    assert create_response.json()["result"]["structuredContent"]["library_id"] == str(library.library_id)
+    assert text_response.json()["result"]["isError"] is False
+    assert text_response.json()["result"]["structuredContent"]["item_id"] == str(item.item_id)
+    assert index_response.json()["result"]["isError"] is False
+    assert index_response.json()["result"]["structuredContent"][0]["job_id"] == str(job.job_id)
+    assert captured["create_library"][:4] == ("organization", organization_id, None, None)
+    assert captured["create_library"][4].actor.user_id == admin.user_id
+    assert captured["create_text_item"][0] == library.library_id
+    assert captured["create_text_item"][1].actor.user_id == admin.user_id
+    assert captured["index_library"][1].item_ids == [item.item_id]
 
 
 def test_mcp_methodics_operations_declare_workspace_scope_and_permissions() -> None:

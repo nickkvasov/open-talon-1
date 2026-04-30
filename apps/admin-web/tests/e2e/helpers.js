@@ -45,7 +45,7 @@ export async function openAdminPage(page, linkName, headingName) {
 }
 
 export function uniqueName(prefix) {
-  return `${prefix}-${Date.now()}`;
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export function buildAdminActor() {
