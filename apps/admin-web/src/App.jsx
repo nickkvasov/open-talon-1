@@ -10,6 +10,7 @@ import IdentityManager from './pages/IdentityManager';
 import Organizations from './pages/Organizations';
 import SwarmResources from './pages/SwarmResources';
 import Workspaces from './pages/Workspaces';
+import Libraries from './pages/Libraries';
 import Providers from './pages/Providers';
 import ApiKeys from './pages/ApiKeys';
 import ToolGenerationRequests from './pages/ToolGenerationRequests';
@@ -54,6 +55,7 @@ const App = () => {
             <Route path="/organizations" element={<Organizations />} />
             <Route path="/swarm" element={<SwarmResources />} />
             <Route path="/workspaces" element={<Workspaces />} />
+            <Route path="/libraries" element={<Libraries />} />
             <Route path="/providers" element={<Providers />} />
             <Route path="/tool-generation" element={<ToolGenerationRequests />} />
             <Route path="/api-keys" element={<ApiKeys />} />

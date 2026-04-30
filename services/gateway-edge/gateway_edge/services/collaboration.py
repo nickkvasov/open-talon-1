@@ -41,6 +41,7 @@ from gateway_edge.models import (
     AgentGitWorktreeSession,
     AgentIdentity,
     AgentIdentityProvisioningResult,
+    AttachLibraryToWorkspaceRequest,
     AttachWorkspaceToolRequest,
     AssetLink,
     BindAgentRoleRequest,
@@ -49,6 +50,9 @@ from gateway_edge.models import (
     CreateAgentGitWorktreeSessionRequest,
     CreateAgentParticipantRequest,
     CreateAgentIdentityRequest,
+    CreateLibraryItemRequest,
+    CreateLibraryRequest,
+    CreateLibraryTextItemRequest,
     CreateInteractionAnswerRequest,
     CreateInteractionRequestsRequest,
     CreateIamRoleRequest,
@@ -78,6 +82,7 @@ from gateway_edge.models import (
     CreateThreadRequest,
     CreateWorkspaceRequest,
     DeleteLlmProviderRequest,
+    DeleteLibraryRequest,
     DeleteMemoryProviderRequest,
     DeleteMcpServerRequest,
     DeleteSystemPluginRequest,
@@ -92,7 +97,11 @@ from gateway_edge.models import (
     EventEnvelope,
     EvaluateMethodicStepRequest,
     GitRepository,
+    IndexLibraryRequest,
     InteractionRequestDetail,
+    Library,
+    LibraryItem,
+    LibraryWorkspaceAttachment,
     LinkAssetRequest,
     MemoryEntry,
     MemoryProviderDefinition,
@@ -143,6 +152,8 @@ from gateway_edge.models import (
     UpdateInteractionRequestRequest,
     UpdateAgentIdentityStatusRequest,
     UpdateIamRoleRequest,
+    UpdateLibraryItemRequest,
+    UpdateLibraryRequest,
     UpdateWorkspaceRequest,
     UpdateSystemAgentRequest,
     UpsertRoleDefinitionRequest,
@@ -1250,7 +1261,7 @@ class CollaborationService:
         *,
         scope: str,
         organization_id: UUID | None = None,
-        workspace_id: UUID | None,
+        workspace_id: UUID | None = None,
         payload: CreateGitRepositoryRequest,
     ) -> GitRepository:
         await self._git_publish.validate_repository(payload.local_path)
@@ -1745,19 +1756,28 @@ class CollaborationService:
         *,
         scope: str,
         organization_id: UUID | None = None,
-        workspace_id: UUID | None,
+        project_id: UUID | None = None,
+        workspace_id: UUID | None = None,
         payload: UploadFileAssetRequest,
         filename: str,
         content: bytes,
     ) -> WorkspaceAssetVersion:
         resolved_organization_id = organization_id
+        resolved_project_id = project_id
         if scope == "workspace" and resolved_organization_id is None and workspace_id is not None:
             workspace = await self._require_kernel().get_workspace_detail(workspace_id)
             resolved_organization_id = workspace.workspace.organization_id
+            resolved_project_id = workspace.workspace.project_id
+        if scope == "project" and resolved_organization_id is None and project_id is not None:
+            project = await self._require_kernel().get_project(project_id)
+            if project is None:
+                raise KeyError(f"Project {project_id} not found")
+            resolved_organization_id = project.organization_id
         content_type = payload.content_type or self._content_type_for_path(filename)
         object_key = self._direct_asset_object_key(
             scope=scope,
             organization_id=resolved_organization_id,
+            project_id=resolved_project_id,
             workspace_id=workspace_id,
             logical_name=payload.logical_name,
             filename=filename,
@@ -1770,6 +1790,7 @@ class CollaborationService:
         result = await self._require_kernel().publish_asset_from_upload(
             scope=scope,
             organization_id=resolved_organization_id,
+            project_id=resolved_project_id,
             workspace_id=workspace_id,
             payload=payload.model_copy(
                 update={
@@ -1795,11 +1816,13 @@ class CollaborationService:
         *,
         scope: str | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[WorkspaceAsset]:
         return await self._require_kernel().list_workspace_assets(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
 
@@ -1821,17 +1844,228 @@ class CollaborationService:
             raise KeyError(f"Asset version {asset_version_id} not found")
         return await self._storage.get_object(object_key=version.object_key)
 
+    async def create_library(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None = None,
+        project_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        payload: CreateLibraryRequest,
+    ) -> Library:
+        result = await self._require_kernel().create_library(
+            scope=scope,
+            organization_id=organization_id,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            payload=payload,
+        )
+        assert result.library is not None
+        return result.library
+
+    async def list_libraries(
+        self,
+        *,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+        project_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        include_archived: bool = False,
+        include_workspace_attachments: bool = False,
+    ) -> list[Library]:
+        return await self._require_kernel().list_libraries(
+            scope=scope,
+            organization_id=organization_id,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            include_archived=include_archived,
+            include_workspace_attachments=include_workspace_attachments,
+        )
+
+    async def get_library(self, library_id: UUID) -> Library | None:
+        return await self._require_kernel().get_library(library_id)
+
+    async def update_library(
+        self,
+        library_id: UUID,
+        payload: UpdateLibraryRequest,
+    ) -> Library:
+        result = await self._require_kernel().update_library(library_id, payload)
+        assert result.library is not None
+        return result.library
+
+    async def delete_library(
+        self,
+        library_id: UUID,
+        payload: DeleteLibraryRequest,
+    ) -> dict[str, bool | str]:
+        return await self._require_kernel().delete_library(library_id, payload)
+
+    async def create_library_item(
+        self,
+        library_id: UUID,
+        payload: CreateLibraryItemRequest,
+    ) -> LibraryItem:
+        result = await self._require_kernel().create_library_item(library_id, payload)
+        assert result.item is not None
+        return result.item
+
+    async def create_library_text_item(
+        self,
+        library_id: UUID,
+        payload: CreateLibraryTextItemRequest,
+    ) -> LibraryItem:
+        content = payload.content.encode("utf-8")
+        filename = payload.logical_name or f"{self._safe_filename(payload.title)}.md"
+        return await self.upload_library_item_content(
+            library_id,
+            actor=payload.actor,
+            title=payload.title,
+            filename=filename,
+            content=content,
+            item_kind=payload.item_kind,
+            logical_name=payload.logical_name,
+            logical_path=payload.logical_path,
+            source_uri=payload.source_uri,
+            content_type=payload.content_type,
+            metadata=payload.metadata,
+        )
+
+    async def upload_library_item_content(
+        self,
+        library_id: UUID,
+        *,
+        actor: ParticipantInput,
+        title: str,
+        filename: str,
+        content: bytes,
+        item_kind: str,
+        logical_name: str | None = None,
+        logical_path: str | None = None,
+        source_uri: str | None = None,
+        content_type: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> LibraryItem:
+        library = await self.get_library(library_id)
+        if library is None:
+            raise KeyError(f"Library {library_id} not found")
+        metadata = metadata or {}
+        storage_actor = self._actor_with_permission(actor, "workspace.assets.publish")
+        logical_name = logical_name or f"library-{library_id}-{self._safe_filename(title)}"
+        version = await self.upload_file_asset(
+            scope=library.scope,
+            organization_id=library.organization_id,
+            project_id=library.project_id,
+            workspace_id=library.workspace_id,
+            payload=UploadFileAssetRequest(
+                actor=storage_actor,
+                asset_type="file",
+                logical_name=logical_name,
+                logical_path=logical_path,
+                title=title,
+                description=None,
+                content_type=content_type,
+                metadata={**metadata, "library_id": str(library_id)},
+            ),
+            filename=filename,
+            content=content,
+        )
+        result = await self._require_kernel().create_library_item(
+            library_id,
+            CreateLibraryItemRequest(
+                actor=actor,
+                asset_id=version.asset_id,
+                asset_version_id=version.asset_version_id,
+                item_kind=item_kind,
+                title=title,
+                source_uri=source_uri,
+                content_type=version.content_type,
+                metadata=metadata,
+            ),
+        )
+        assert result.item is not None
+        return result.item
+
+    async def list_library_items(
+        self,
+        library_id: UUID,
+        *,
+        include_archived: bool = False,
+    ) -> list[LibraryItem]:
+        return await self._require_kernel().list_library_items(
+            library_id,
+            include_archived=include_archived,
+        )
+
+    async def get_library_item(self, item_id: UUID) -> LibraryItem | None:
+        return await self._require_kernel().get_library_item(item_id)
+
+    async def update_library_item(
+        self,
+        item_id: UUID,
+        payload: UpdateLibraryItemRequest,
+    ) -> LibraryItem:
+        result = await self._require_kernel().update_library_item(item_id, payload)
+        assert result.item is not None
+        return result.item
+
+    async def get_library_item_download_url(
+        self,
+        item_id: UUID,
+    ) -> str:
+        item = await self.get_library_item(item_id)
+        if item is None:
+            raise KeyError(f"Library item {item_id} not found")
+        return await self.get_asset_download_url(
+            item.asset_id,
+            asset_version_id=item.active_asset_version_id,
+        )
+
+    async def attach_library_to_workspace(
+        self,
+        workspace_id: UUID,
+        library_id: UUID,
+        payload: AttachLibraryToWorkspaceRequest,
+    ) -> LibraryWorkspaceAttachment:
+        result = await self._require_kernel().attach_library_to_workspace(
+            workspace_id,
+            library_id,
+            payload,
+        )
+        assert result.attachment is not None
+        return result.attachment
+
+    async def delete_library_workspace_attachment(
+        self,
+        workspace_id: UUID,
+        library_id: UUID,
+    ) -> dict[str, bool | str]:
+        return await self._require_kernel().delete_library_workspace_attachment(
+            workspace_id,
+            library_id,
+        )
+
+    async def index_library(
+        self,
+        library_id: UUID,
+        payload: IndexLibraryRequest,
+    ) -> list[RetrievalIngestionJob]:
+        result = await self._require_kernel().index_library(library_id, payload)
+        return result.jobs
+
     async def create_retrieval_profile(
         self,
         *,
         scope: str,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
         payload: CreateRetrievalProfileRequest,
     ) -> RetrievalProfile:
         result = await self._require_kernel().create_retrieval_profile(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
             payload=payload,
         )
@@ -1843,11 +2077,13 @@ class CollaborationService:
         *,
         scope: str | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[RetrievalProfile]:
         return await self._require_kernel().list_retrieval_profiles(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
 
@@ -1856,12 +2092,14 @@ class CollaborationService:
         *,
         scope: str,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
         payload: CreateRetrievalCorpusRequest,
     ) -> RetrievalCorpus:
         result = await self._require_kernel().create_retrieval_corpus(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
             payload=payload,
         )
@@ -1873,11 +2111,13 @@ class CollaborationService:
         *,
         scope: str | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[RetrievalCorpus]:
         return await self._require_kernel().list_retrieval_corpora(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
 
@@ -1886,12 +2126,14 @@ class CollaborationService:
         *,
         scope: str,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
         payload: CreateRetrievalSourceRequest,
     ) -> RetrievalSource:
         result = await self._require_kernel().create_retrieval_source(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
             payload=payload,
         )
@@ -1904,12 +2146,14 @@ class CollaborationService:
         corpus_id: UUID | None = None,
         scope: str | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[RetrievalSource]:
         return await self._require_kernel().list_retrieval_sources(
             corpus_id=corpus_id,
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
 
@@ -1933,6 +2177,7 @@ class CollaborationService:
         source_id: UUID | None = None,
         scope: str | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
         status: str | None = None,
     ) -> list[RetrievalIngestionJob]:
@@ -1941,6 +2186,7 @@ class CollaborationService:
             source_id=source_id,
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
             status=status,
         )
@@ -1956,6 +2202,7 @@ class CollaborationService:
         *,
         scope: str,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
         payload: RunRetrievalSearchRequest,
         embedding_vector: list[float] | None = None,
@@ -1965,6 +2212,7 @@ class CollaborationService:
         return await self._require_kernel().run_retrieval_search(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
             payload=payload,
             embedding_vector=embedding_vector,
@@ -1977,6 +2225,7 @@ class CollaborationService:
         *,
         scope: str,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
         payload: CreateRetrievalContextPackRequest,
         embedding_vector: list[float] | None = None,
@@ -1986,6 +2235,7 @@ class CollaborationService:
         result = await self._require_kernel().create_retrieval_context_pack(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
             payload=payload,
             embedding_vector=embedding_vector,
@@ -3128,6 +3378,18 @@ class CollaborationService:
         lowered = path.lower()
         if lowered.endswith(".md"):
             return "text/markdown"
+        if lowered.endswith(".html") or lowered.endswith(".htm"):
+            return "text/html"
+        if lowered.endswith(".pdf"):
+            return "application/pdf"
+        if lowered.endswith(".png"):
+            return "image/png"
+        if lowered.endswith(".jpg") or lowered.endswith(".jpeg"):
+            return "image/jpeg"
+        if lowered.endswith(".gif"):
+            return "image/gif"
+        if lowered.endswith(".svg"):
+            return "image/svg+xml"
         if lowered.endswith(".json"):
             return "application/json"
         if lowered.endswith(".yaml") or lowered.endswith(".yml"):
@@ -3135,6 +3397,20 @@ class CollaborationService:
         if lowered.endswith(".txt"):
             return "text/plain"
         return "application/octet-stream"
+
+    @staticmethod
+    def _safe_filename(value: str) -> str:
+        normalized = "".join(
+            character.lower() if character.isalnum() else "-"
+            for character in value.strip()
+        ).strip("-")
+        return normalized or "item"
+
+    @staticmethod
+    def _actor_with_permission(actor: ParticipantInput, permission: str) -> ParticipantInput:
+        permissions = set(actor.iam_permissions)
+        permissions.add(permission)
+        return actor.model_copy(update={"iam_permissions": sorted(permissions)})
 
     @staticmethod
     def _asset_object_key(
@@ -3161,6 +3437,7 @@ class CollaborationService:
         *,
         scope: str,
         organization_id: UUID | None,
+        project_id: UUID | None,
         workspace_id: UUID | None,
         logical_name: str,
         filename: str,
@@ -3171,6 +3448,8 @@ class CollaborationService:
             prefix = "global"
         elif scope == "organization":
             prefix = f"organizations/{organization_id}"
+        elif scope == "project":
+            prefix = f"organizations/{organization_id}/projects/{project_id}"
         else:
             prefix = f"organizations/{organization_id}/workspaces/{workspace_id}"
         return f"{prefix}/files/{normalized_name}/{uuid4()}/{file_name}"

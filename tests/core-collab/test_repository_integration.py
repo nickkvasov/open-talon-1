@@ -32,6 +32,7 @@ from open_talon_contracts.models import (
     AssetLink,
     AuditEventDraft,
     GitRepository,
+    Library,
     LlmProviderDefinition,
     McpPromptDefinition,
     McpResourceDefinition,
@@ -964,6 +965,143 @@ async def test_repository_project_access_round_trip_and_filters_workspaces():
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM organizations WHERE organization_id = $1", organization_id)
             await conn.execute("DELETE FROM users WHERE user_id = ANY($1::uuid[])", [owner_id, viewer_id, outsider_id])
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_repository_libraries_allow_reused_slugs_across_owner_scopes():
+    try:
+        pool = await asyncpg.create_pool(dsn=_postgres_dsn(), min_size=1, max_size=2)
+    except Exception as exc:  # pragma: no cover - integration environment dependent
+        pytest.skip(f"Postgres not available for repository integration test: {exc}")
+
+    repository = CollaborationRepository(pool)
+    await apply_pending_migrations(pool)
+
+    now = datetime.now(timezone.utc)
+    organization_id = uuid4()
+    owner_id = uuid4()
+    project_a_id = uuid4()
+    project_b_id = uuid4()
+    workspace_a_id = uuid4()
+    workspace_b_id = uuid4()
+
+    organization = Organization(
+        organization_id=organization_id,
+        slug=f"library-it-{organization_id.hex[:8]}",
+        name="Library Integration",
+        created_by=owner_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    project_a = Project(
+        project_id=project_a_id,
+        organization_id=organization_id,
+        slug="project-a",
+        name="Project A",
+        created_by=owner_id,
+        creator_user_id=owner_id,
+        owner_user_id=owner_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    project_b = Project(
+        project_id=project_b_id,
+        organization_id=organization_id,
+        slug="project-b",
+        name="Project B",
+        created_by=owner_id,
+        creator_user_id=owner_id,
+        owner_user_id=owner_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    workspace_a = Workspace(
+        workspace_id=workspace_a_id,
+        organization_id=organization_id,
+        project_id=project_a_id,
+        name="Workspace A",
+        created_at=now,
+        updated_at=now,
+    )
+    workspace_b = Workspace(
+        workspace_id=workspace_b_id,
+        organization_id=organization_id,
+        project_id=project_b_id,
+        name="Workspace B",
+        created_at=now,
+        updated_at=now,
+    )
+
+    def _library(
+        *,
+        scope: str,
+        project_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+    ) -> Library:
+        return Library(
+            library_id=uuid4(),
+            scope=scope,
+            organization_id=organization_id,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            slug="references",
+            name="References",
+            created_by=owner_id,
+            created_at=now,
+            updated_by=owner_id,
+            updated_at=now,
+            metadata={},
+        )
+
+    libraries = [
+        _library(scope="organization"),
+        _library(scope="project", project_id=project_a_id),
+        _library(scope="project", project_id=project_b_id),
+        _library(scope="workspace", project_id=project_a_id, workspace_id=workspace_a_id),
+        _library(scope="workspace", project_id=project_b_id, workspace_id=workspace_b_id),
+    ]
+
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await repository.upsert_organization(conn, organization)
+                await repository.upsert_project(conn, project_a)
+                await repository.upsert_project(conn, project_b)
+                await repository.upsert_workspace(conn, workspace_a)
+                await repository.upsert_workspace(conn, workspace_b)
+                for library in libraries:
+                    await repository.upsert_library(conn, library)
+
+        assert len(
+            await repository.list_libraries(
+                scope="project",
+                organization_id=organization_id,
+                project_id=project_a_id,
+            )
+        ) == 1
+        assert len(
+            await repository.list_libraries(
+                scope="workspace",
+                organization_id=organization_id,
+                project_id=project_a_id,
+                workspace_id=workspace_a_id,
+            )
+        ) == 1
+
+        with pytest.raises(asyncpg.UniqueViolationError):
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    await repository.upsert_library(
+                        conn,
+                        _library(scope="project", project_id=project_a_id),
+                    )
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM organizations WHERE organization_id = $1", organization_id)
         await pool.close()
 
 

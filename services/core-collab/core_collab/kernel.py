@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import logging
 from pathlib import Path
+import re
 import sys
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -53,6 +54,7 @@ from .contracts import (
     AuditEventPage,
     AttachWorkspaceMcpServerRequest,
     AttachWorkspaceToolRequest,
+    AttachLibraryToWorkspaceRequest,
     AssumeParticipantRoleRequest,
     Artifact,
     AssetLink,
@@ -62,6 +64,8 @@ from .contracts import (
     CreateAgentParticipantRequest,
     CreateAgentIdentityRequest,
     CreateGitRepositoryRequest,
+    CreateLibraryItemRequest,
+    CreateLibraryRequest,
     CreateIamRoleRequest,
     CreateInteractionAnswerRequest,
     CreateInteractionQuestionRequest,
@@ -92,6 +96,7 @@ from .contracts import (
     CreateThreadRequest,
     CreateWorkspaceRequest,
     DeleteLlmProviderRequest,
+    DeleteLibraryRequest,
     DeleteMemoryProviderRequest,
     DeleteMcpServerRequest,
     DeleteParticipantRequest,
@@ -106,6 +111,7 @@ from .contracts import (
     EventEnvelope,
     GeneratedToolManifest,
     GeneratedToolValidationReport,
+    IndexLibraryRequest,
     InteractionAnswer,
     InteractionQuestion,
     InteractionRequest,
@@ -185,6 +191,11 @@ from .contracts import (
     UpdateInteractionRequestRequest,
     UpdateIamRoleRequest,
     LinkAssetRequest,
+    Library,
+    LibraryItem,
+    LibraryWorkspaceAttachment,
+    UpdateLibraryItemRequest,
+    UpdateLibraryRequest,
     UpdateLlmProviderRequest,
     UpdateMemoryProviderRequest,
     UpdateMcpServerRequest,
@@ -226,6 +237,7 @@ from .results import (
     IamRoleCommandResult,
     InteractionRequestCommandResult,
     LeaseReconciliationResult,
+    LibraryCommandResult,
     LlmProviderCommandResult,
     MemoryCommandResult,
     MemoryProviderCommandResult,
@@ -2364,14 +2376,21 @@ class CollaborationKernel:
         *,
         scope: str,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None,
         payload: CreateGitRepositoryRequest,
     ) -> GitRepositoryCommandResult:
         organization = await self._resolve_scope_organization(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
+        if scope == "workspace" and project_id is None and workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+            project_id = workspace.project_id
         if workspace_id is not None:
             workspace = await self._repository.fetch_workspace(workspace_id)
             if workspace is None:
@@ -2407,6 +2426,7 @@ class CollaborationKernel:
         *,
         scope: str,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[GitRepository]:
         await self._resolve_scope_organization(
@@ -2432,7 +2452,8 @@ class CollaborationKernel:
         *,
         scope: str,
         organization_id: UUID | None = None,
-        workspace_id: UUID | None,
+        project_id: UUID | None = None,
+        workspace_id: UUID | None = None,
         payload: PublishAssetFromGitRequest,
         storage_backend: str,
         bucket: str,
@@ -2444,8 +2465,14 @@ class CollaborationKernel:
         organization = await self._resolve_scope_organization(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
+        if scope == "workspace" and project_id is None and workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+            project_id = workspace.project_id
         if workspace_id is not None:
             workspace = await self._repository.fetch_workspace(workspace_id)
             if workspace is None:
@@ -2476,6 +2503,7 @@ class CollaborationKernel:
         asset = await self._repository.fetch_workspace_asset_by_logical_name(
             scope=scope,
             organization_id=organization.organization_id if organization is not None else None,
+            project_id=project_id,
             workspace_id=workspace_id,
             logical_name=payload.logical_name,
         )
@@ -2483,6 +2511,7 @@ class CollaborationKernel:
             asset = WorkspaceAsset(
                 asset_id=uuid4(),
                 organization_id=organization.organization_id if organization is not None else None,
+                project_id=project_id,
                 workspace_id=workspace_id,
                 scope=scope,
                 asset_type=payload.asset_type,
@@ -2542,7 +2571,8 @@ class CollaborationKernel:
         *,
         scope: str,
         organization_id: UUID | None = None,
-        workspace_id: UUID | None,
+        project_id: UUID | None = None,
+        workspace_id: UUID | None = None,
         payload: UploadFileAssetRequest,
         storage_backend: str,
         bucket: str,
@@ -2554,8 +2584,14 @@ class CollaborationKernel:
         organization = await self._resolve_scope_organization(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
+        if scope == "workspace" and project_id is None and workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+            project_id = workspace.project_id
         if workspace_id is not None:
             workspace = await self._repository.fetch_workspace(workspace_id)
             if workspace is None:
@@ -2569,6 +2605,7 @@ class CollaborationKernel:
         asset = await self._repository.fetch_workspace_asset_by_logical_name(
             scope=scope,
             organization_id=organization.organization_id if organization is not None else None,
+            project_id=project_id,
             workspace_id=workspace_id,
             logical_name=payload.logical_name,
         )
@@ -2576,6 +2613,7 @@ class CollaborationKernel:
             asset = WorkspaceAsset(
                 asset_id=uuid4(),
                 organization_id=organization.organization_id if organization is not None else None,
+                project_id=project_id,
                 workspace_id=workspace_id,
                 scope=scope,
                 asset_type=payload.asset_type,
@@ -2632,12 +2670,14 @@ class CollaborationKernel:
         *,
         scope: str | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[WorkspaceAsset]:
         if scope is not None:
             await self._resolve_scope_organization(
                 scope=scope,
                 organization_id=organization_id,
+                project_id=project_id,
                 workspace_id=workspace_id,
             )
         if workspace_id is not None:
@@ -2647,6 +2687,7 @@ class CollaborationKernel:
         return await self._repository.list_workspace_assets(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
 
@@ -2668,24 +2709,437 @@ class CollaborationKernel:
     ) -> WorkspaceAssetVersion | None:
         return await self._repository.fetch_workspace_asset_version(asset_version_id)
 
+    async def create_library(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None = None,
+        project_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        payload: CreateLibraryRequest,
+    ) -> LibraryCommandResult:
+        owner = await self._resolve_library_owner(
+            scope=scope,
+            organization_id=organization_id,
+            project_id=project_id,
+            workspace_id=workspace_id,
+        )
+        now = self._now()
+        slug = self._normalize_library_slug(payload.slug or payload.name)
+        library = Library(
+            library_id=uuid4(),
+            scope=scope,
+            organization_id=owner[0],
+            project_id=owner[1],
+            workspace_id=owner[2],
+            slug=slug,
+            name=payload.name,
+            description=payload.description,
+            status="active",
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            await self._repository.upsert_library(conn, library)
+        return LibraryCommandResult(library=library)
+
+    async def list_libraries(
+        self,
+        *,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+        project_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        include_archived: bool = False,
+        include_workspace_attachments: bool = False,
+    ) -> list[Library]:
+        if scope is not None:
+            await self._resolve_library_owner(
+                scope=scope,
+                organization_id=organization_id,
+                project_id=project_id,
+                workspace_id=workspace_id,
+            )
+        elif workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+        return await self._repository.list_libraries(
+            scope=scope,
+            organization_id=organization_id,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            include_archived=include_archived,
+            include_workspace_attachments=include_workspace_attachments,
+        )
+
+    async def get_library(self, library_id: UUID) -> Library | None:
+        return await self._repository.fetch_library(library_id)
+
+    async def update_library(
+        self,
+        library_id: UUID,
+        payload: UpdateLibraryRequest,
+    ) -> LibraryCommandResult:
+        existing = await self._repository.fetch_library(library_id)
+        if existing is None:
+            raise KeyError(f"Library {library_id} not found")
+        update: dict[str, object] = {
+            "updated_by": payload.actor.participant_id,
+            "updated_at": self._now(),
+        }
+        if payload.slug is not None:
+            update["slug"] = self._normalize_library_slug(payload.slug)
+        if payload.name is not None:
+            update["name"] = payload.name
+        if payload.description is not None:
+            update["description"] = payload.description
+        if payload.status is not None:
+            update["status"] = payload.status
+        if payload.metadata is not None:
+            update["metadata"] = {**existing.metadata, **payload.metadata}
+        library = existing.model_copy(update=update)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            await self._repository.upsert_library(conn, library)
+        return LibraryCommandResult(library=library)
+
+    async def delete_library(
+        self,
+        library_id: UUID,
+        payload: DeleteLibraryRequest,
+    ) -> dict[str, bool | str]:
+        await self.update_library(
+            library_id,
+            UpdateLibraryRequest(
+                actor=payload.actor,
+                status="archived",
+                metadata=payload.metadata,
+            ),
+        )
+        return {"deleted": True, "library_id": str(library_id)}
+
+    async def create_library_item(
+        self,
+        library_id: UUID,
+        payload: CreateLibraryItemRequest,
+    ) -> LibraryCommandResult:
+        library = await self._repository.fetch_library(library_id)
+        if library is None:
+            raise KeyError(f"Library {library_id} not found")
+        if library.status == "archived":
+            raise ValueError(f"Library {library_id} is archived")
+        asset = await self._repository.fetch_workspace_asset(payload.asset_id)
+        if asset is None:
+            raise KeyError(f"Workspace asset {payload.asset_id} not found")
+        self._require_same_retrieval_scope(
+            left_name="Workspace asset",
+            left_id=asset.asset_id,
+            left_scope=asset.scope,
+            left_organization_id=asset.organization_id,
+            left_workspace_id=asset.workspace_id,
+            right_scope=library.scope,
+            right_organization_id=library.organization_id,
+            right_workspace_id=library.workspace_id,
+            left_project_id=asset.project_id,
+            right_project_id=library.project_id,
+        )
+        asset_version = await self._resolve_asset_version_for_source(
+            asset_id=asset.asset_id,
+            asset_version_id=payload.asset_version_id,
+        )
+        now = self._now()
+        item = LibraryItem(
+            item_id=uuid4(),
+            library_id=library.library_id,
+            asset_id=asset.asset_id,
+            active_asset_version_id=asset_version.asset_version_id,
+            item_kind=payload.item_kind,
+            title=payload.title,
+            source_uri=payload.source_uri,
+            content_type=payload.content_type or asset_version.content_type,
+            status="active",
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            await self._repository.upsert_library_item(conn, item)
+        return LibraryCommandResult(library=library, item=item)
+
+    async def list_library_items(
+        self,
+        library_id: UUID,
+        *,
+        include_archived: bool = False,
+    ) -> list[LibraryItem]:
+        if await self._repository.fetch_library(library_id) is None:
+            raise KeyError(f"Library {library_id} not found")
+        return await self._repository.list_library_items(
+            library_id,
+            include_archived=include_archived,
+        )
+
+    async def get_library_item(self, item_id: UUID) -> LibraryItem | None:
+        return await self._repository.fetch_library_item(item_id)
+
+    async def update_library_item(
+        self,
+        item_id: UUID,
+        payload: UpdateLibraryItemRequest,
+    ) -> LibraryCommandResult:
+        existing = await self._repository.fetch_library_item(item_id)
+        if existing is None:
+            raise KeyError(f"Library item {item_id} not found")
+        update: dict[str, object] = {
+            "updated_by": payload.actor.participant_id,
+            "updated_at": self._now(),
+        }
+        if payload.title is not None:
+            update["title"] = payload.title
+        if payload.status is not None:
+            update["status"] = payload.status
+        if payload.metadata is not None:
+            update["metadata"] = {**existing.metadata, **payload.metadata}
+        item = existing.model_copy(update=update)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            await self._repository.upsert_library_item(conn, item)
+        return LibraryCommandResult(item=item)
+
+    async def attach_library_to_workspace(
+        self,
+        workspace_id: UUID,
+        library_id: UUID,
+        payload: AttachLibraryToWorkspaceRequest,
+    ) -> LibraryCommandResult:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        library = await self._repository.fetch_library(library_id)
+        if library is None:
+            raise KeyError(f"Library {library_id} not found")
+        if library.scope == "workspace":
+            raise ValueError("Workspace-owned libraries do not need explicit workspace attachment")
+        if library.organization_id != workspace.organization_id:
+            raise ValueError("Library and workspace must belong to the same organization")
+        if library.scope == "project" and library.project_id != workspace.project_id:
+            raise ValueError("Project library can only attach to workspaces in the same project")
+        now = self._now()
+        existing = await self._repository.fetch_library_workspace_attachment(
+            workspace_id=workspace_id,
+            library_id=library_id,
+        )
+        attachment = LibraryWorkspaceAttachment(
+            attachment_id=existing.attachment_id if existing is not None else uuid4(),
+            library_id=library.library_id,
+            workspace_id=workspace.workspace_id,
+            organization_id=workspace.organization_id,
+            project_id=workspace.project_id,
+            enabled=payload.enabled,
+            attached_by=existing.attached_by if existing is not None else payload.actor.participant_id,
+            attached_at=existing.attached_at if existing is not None else now,
+            updated_at=now,
+            metadata={
+                **(existing.metadata if existing is not None else {}),
+                **payload.metadata,
+            },
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            await self._repository.upsert_library_workspace_attachment(conn, attachment)
+        return LibraryCommandResult(library=library, attachment=attachment)
+
+    async def delete_library_workspace_attachment(
+        self,
+        workspace_id: UUID,
+        library_id: UUID,
+    ) -> dict[str, bool | str]:
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            deleted = await self._repository.delete_library_workspace_attachment(
+                conn,
+                workspace_id=workspace_id,
+                library_id=library_id,
+            )
+        if not deleted:
+            raise KeyError(f"Library attachment {library_id} not found in workspace {workspace_id}")
+        return {"deleted": True, "workspace_id": str(workspace_id), "library_id": str(library_id)}
+
+    async def index_library(
+        self,
+        library_id: UUID,
+        payload: IndexLibraryRequest,
+    ) -> LibraryCommandResult:
+        library = await self._repository.fetch_library(library_id)
+        if library is None:
+            raise KeyError(f"Library {library_id} not found")
+        if library.status == "archived":
+            raise ValueError(f"Library {library_id} is archived")
+        items = await self._repository.list_library_items(
+            library_id,
+            item_ids=payload.item_ids or None,
+            include_archived=False,
+        )
+        if payload.item_ids and len(items) != len(set(payload.item_ids)):
+            found = {item.item_id for item in items}
+            missing = [str(item_id) for item_id in payload.item_ids if item_id not in found]
+            raise KeyError(f"Library items not found: {missing}")
+        if not items:
+            return LibraryCommandResult(library=library, jobs=[])
+        now = self._now()
+        corpus_name = f"library:{library.library_id}"
+        if payload.profile_id is not None:
+            profile = await self._repository.fetch_retrieval_profile(payload.profile_id)
+            if profile is None:
+                raise KeyError(f"Retrieval profile {payload.profile_id} not found")
+            self._require_same_retrieval_scope(
+                left_name="Retrieval profile",
+                left_id=profile.profile_id,
+                left_scope=profile.scope,
+                left_organization_id=profile.organization_id,
+                left_workspace_id=profile.workspace_id,
+                right_scope=library.scope,
+                right_organization_id=library.organization_id,
+                right_workspace_id=library.workspace_id,
+                left_project_id=profile.project_id,
+                right_project_id=library.project_id,
+            )
+        existing_corpus = next(
+            (
+                corpus
+                for corpus in await self._repository.list_retrieval_corpora(
+                    scope=library.scope,
+                    organization_id=library.organization_id,
+                    project_id=library.project_id,
+                    workspace_id=library.workspace_id,
+                )
+                if corpus.metadata.get("library_id") == str(library.library_id)
+            ),
+            None,
+        )
+        corpus = (
+            existing_corpus.model_copy(
+                update={
+                    "default_profile_id": payload.profile_id or existing_corpus.default_profile_id,
+                    "updated_at": now,
+                }
+            )
+            if existing_corpus is not None
+            else RetrievalCorpus(
+                corpus_id=uuid4(),
+                scope=library.scope,
+                organization_id=library.organization_id,
+                project_id=library.project_id,
+                workspace_id=library.workspace_id,
+                name=corpus_name,
+                description=f"Retriever corpus for library {library.name}.",
+                default_profile_id=payload.profile_id,
+                created_by=payload.actor.participant_id,
+                created_at=now,
+                updated_at=now,
+                metadata={"library_id": str(library.library_id), "library_slug": library.slug},
+            )
+        )
+        jobs: list[RetrievalIngestionJob] = []
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_retrieval_corpus(conn, corpus)
+                for item in items:
+                    source = RetrievalSource(
+                        source_id=uuid5(NAMESPACE_URL, f"open-talon:library-item-source:{item.item_id}"),
+                        corpus_id=corpus.corpus_id,
+                        scope=library.scope,
+                        organization_id=library.organization_id,
+                        project_id=library.project_id,
+                        workspace_id=library.workspace_id,
+                        asset_id=item.asset_id,
+                        active_asset_version_id=item.active_asset_version_id,
+                        title=item.title,
+                        source_type=item.item_kind,
+                        content_type=item.content_type,
+                        created_by=payload.actor.participant_id,
+                        created_at=now,
+                        updated_at=now,
+                        metadata={
+                            **item.metadata,
+                            "library_id": str(library.library_id),
+                            "library_item_id": str(item.item_id),
+                        },
+                    )
+                    await self._repository.upsert_retrieval_source(conn, source)
+                    if source.active_asset_version_id is None:
+                        raise ValueError(f"Library item {item.item_id} has no active asset version")
+                    source_version = RetrievalSourceVersion(
+                        source_version_id=uuid4(),
+                        source_id=source.source_id,
+                        asset_version_id=source.active_asset_version_id,
+                        version=await self._repository.next_retrieval_source_version(
+                            conn,
+                            source_id=source.source_id,
+                        ),
+                        ingestion_job_id=None,
+                        created_by=payload.actor.participant_id,
+                        created_at=now,
+                        metadata={"library_item_id": str(item.item_id)},
+                    )
+                    await self._repository.upsert_retrieval_source_version(conn, source_version)
+                    job = RetrievalIngestionJob(
+                        job_id=uuid4(),
+                        corpus_id=corpus.corpus_id,
+                        source_id=source.source_id,
+                        source_version_id=source_version.source_version_id,
+                        profile_id=payload.profile_id or corpus.default_profile_id,
+                        scope=library.scope,
+                        organization_id=library.organization_id,
+                        project_id=library.project_id,
+                        workspace_id=library.workspace_id,
+                        status="queued",
+                        stage="queued",
+                        requested_by=payload.actor.participant_id,
+                        created_at=now,
+                        updated_at=now,
+                        metadata={
+                            **payload.metadata,
+                            "library_id": str(library.library_id),
+                            "library_item_id": str(item.item_id),
+                        },
+                    )
+                    await self._repository.upsert_retrieval_ingestion_job(conn, job)
+                    source_version = source_version.model_copy(
+                        update={"ingestion_job_id": job.job_id}
+                    )
+                    await self._repository.upsert_retrieval_source_version(conn, source_version)
+                    jobs.append(job)
+        return LibraryCommandResult(library=library, jobs=jobs)
+
     async def create_retrieval_profile(
         self,
         *,
         scope: str,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
         payload: CreateRetrievalProfileRequest,
     ) -> RetrievalCommandResult:
         organization = await self._resolve_scope_organization(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
+        if scope == "workspace" and project_id is None and workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+            project_id = workspace.project_id
         now = self._now()
         profile = RetrievalProfile(
             profile_id=uuid4(),
             scope=scope,
             organization_id=organization.organization_id if organization is not None else None,
+            project_id=project_id,
             workspace_id=workspace_id,
             name=payload.name,
             description=payload.description,
@@ -2721,17 +3175,20 @@ class CollaborationKernel:
         *,
         scope: str | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[RetrievalProfile]:
         if scope is not None:
             await self._resolve_scope_organization(
                 scope=scope,
                 organization_id=organization_id,
+                project_id=project_id,
                 workspace_id=workspace_id,
             )
         return await self._repository.list_retrieval_profiles(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
 
@@ -2745,14 +3202,21 @@ class CollaborationKernel:
         *,
         scope: str,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
         payload: CreateRetrievalCorpusRequest,
     ) -> RetrievalCommandResult:
         organization = await self._resolve_scope_organization(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
+        if scope == "workspace" and project_id is None and workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+            project_id = workspace.project_id
         if payload.default_profile_id is not None:
             profile = await self._repository.fetch_retrieval_profile(
                 payload.default_profile_id
@@ -2768,12 +3232,15 @@ class CollaborationKernel:
                 right_scope=scope,
                 right_organization_id=organization.organization_id if organization else None,
                 right_workspace_id=workspace_id,
+                left_project_id=profile.project_id,
+                right_project_id=project_id,
             )
         now = self._now()
         corpus = RetrievalCorpus(
             corpus_id=uuid4(),
             scope=scope,
             organization_id=organization.organization_id if organization is not None else None,
+            project_id=project_id,
             workspace_id=workspace_id,
             name=payload.name,
             description=payload.description,
@@ -2792,17 +3259,20 @@ class CollaborationKernel:
         *,
         scope: str | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[RetrievalCorpus]:
         if scope is not None:
             await self._resolve_scope_organization(
                 scope=scope,
                 organization_id=organization_id,
+                project_id=project_id,
                 workspace_id=workspace_id,
             )
         return await self._repository.list_retrieval_corpora(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
 
@@ -2814,14 +3284,21 @@ class CollaborationKernel:
         *,
         scope: str,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
         payload: CreateRetrievalSourceRequest,
     ) -> RetrievalCommandResult:
         organization = await self._resolve_scope_organization(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
+        if scope == "workspace" and project_id is None and workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+            project_id = workspace.project_id
         corpus = await self._repository.fetch_retrieval_corpus(payload.corpus_id)
         if corpus is None:
             raise KeyError(f"Retrieval corpus {payload.corpus_id} not found")
@@ -2834,6 +3311,8 @@ class CollaborationKernel:
             right_scope=scope,
             right_organization_id=organization.organization_id if organization else None,
             right_workspace_id=workspace_id,
+            left_project_id=corpus.project_id,
+            right_project_id=project_id,
         )
         asset = await self._repository.fetch_workspace_asset(payload.asset_id)
         if asset is None:
@@ -2847,6 +3326,8 @@ class CollaborationKernel:
             right_scope=scope,
             right_organization_id=organization.organization_id if organization else None,
             right_workspace_id=workspace_id,
+            left_project_id=asset.project_id,
+            right_project_id=project_id,
         )
         asset_version = await self._resolve_asset_version_for_source(
             asset_id=asset.asset_id,
@@ -2857,6 +3338,7 @@ class CollaborationKernel:
             corpus_id=corpus.corpus_id,
             scope=scope,
             organization_id=organization.organization_id if organization else None,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
         existing = next(
@@ -2868,6 +3350,7 @@ class CollaborationKernel:
             corpus_id=corpus.corpus_id,
             scope=scope,
             organization_id=organization.organization_id if organization is not None else None,
+            project_id=project_id,
             workspace_id=workspace_id,
             asset_id=asset.asset_id,
             active_asset_version_id=asset_version.asset_version_id,
@@ -2892,18 +3375,21 @@ class CollaborationKernel:
         corpus_id: UUID | None = None,
         scope: str | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[RetrievalSource]:
         if scope is not None:
             await self._resolve_scope_organization(
                 scope=scope,
                 organization_id=organization_id,
+                project_id=project_id,
                 workspace_id=workspace_id,
             )
         return await self._repository.list_retrieval_sources(
             corpus_id=corpus_id,
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
 
@@ -2959,6 +3445,8 @@ class CollaborationKernel:
                 right_scope=corpus.scope,
                 right_organization_id=corpus.organization_id,
                 right_workspace_id=corpus.workspace_id,
+                left_project_id=profile.project_id,
+                right_project_id=corpus.project_id,
             )
         now = self._now()
         job_id = uuid4()
@@ -2992,6 +3480,7 @@ class CollaborationKernel:
                     profile_id=payload.profile_id or corpus.default_profile_id,
                     scope=corpus.scope,
                     organization_id=corpus.organization_id,
+                    project_id=corpus.project_id,
                     workspace_id=corpus.workspace_id,
                     status="queued",
                     stage="queued",
@@ -3018,6 +3507,7 @@ class CollaborationKernel:
         source_id: UUID | None = None,
         scope: str | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
         status: str | None = None,
     ) -> list[RetrievalIngestionJob]:
@@ -3025,6 +3515,7 @@ class CollaborationKernel:
             await self._resolve_scope_organization(
                 scope=scope,
                 organization_id=organization_id,
+                project_id=project_id,
                 workspace_id=workspace_id,
             )
         return await self._repository.list_retrieval_ingestion_jobs(
@@ -3032,6 +3523,7 @@ class CollaborationKernel:
             source_id=source_id,
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
             status=status,
         )
@@ -3041,6 +3533,7 @@ class CollaborationKernel:
         *,
         scope: str,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
         payload: RunRetrievalSearchRequest,
         embedding_vector: list[float] | None = None,
@@ -3050,13 +3543,20 @@ class CollaborationKernel:
         organization = await self._resolve_scope_organization(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
+        if scope == "workspace" and project_id is None and workspace_id is not None:
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+            project_id = workspace.project_id
         if payload.provider_overrides and "retrieval.admin" not in payload.actor.iam_permissions:
             raise PermissionError("retrieval.admin is required for provider overrides")
         corpora = await self._resolve_retrieval_corpora_for_search(
             scope=scope,
             organization_id=organization.organization_id if organization else None,
+            project_id=project_id,
             workspace_id=workspace_id,
             corpus_ids=payload.corpus_ids,
         )
@@ -3073,6 +3573,7 @@ class CollaborationKernel:
             run_kind="search",
             scope=scope,
             organization_id=organization.organization_id if organization else None,
+            project_id=project_id,
             workspace_id=workspace_id,
             profile_id=profile.profile_id if profile is not None else None,
             query=payload.query,
@@ -3086,23 +3587,33 @@ class CollaborationKernel:
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
-                hits = await self._repository.search_retrieval_chunks(
-                    query=payload.query,
-                    corpus_ids=[corpus.corpus_id for corpus in corpora],
-                    scope=scope,
-                    organization_id=organization.organization_id if organization else None,
-                    workspace_id=workspace_id,
-                    limit=top_k,
-                    strategy=strategy,
-                    metadata_filters=payload.metadata_filters,
-                    embedding_vector=embedding_vector,
-                    embedding_provider_key=embedding_provider_key,
-                    embedding_model=embedding_model,
-                    vector_weight=vector_weight,
-                    keyword_weight=keyword_weight,
-                    conn=conn,
-                    lock_chunks=True,
-                )
+                hits: list[RetrievalSearchHit] = []
+                for group in self._retrieval_corpus_scope_groups(corpora):
+                    group_hits = await self._repository.search_retrieval_chunks(
+                        query=payload.query,
+                        corpus_ids=[corpus.corpus_id for corpus in group["corpora"]],
+                        scope=group["scope"],
+                        organization_id=group["organization_id"],
+                        project_id=group["project_id"],
+                        workspace_id=group["workspace_id"],
+                        limit=top_k,
+                        strategy=strategy,
+                        metadata_filters=payload.metadata_filters,
+                        embedding_vector=embedding_vector,
+                        embedding_provider_key=embedding_provider_key,
+                        embedding_model=embedding_model,
+                        vector_weight=vector_weight,
+                        keyword_weight=keyword_weight,
+                        conn=conn,
+                        lock_chunks=True,
+                    )
+                    hits.extend(group_hits)
+                hits = sorted(
+                    hits,
+                    key=lambda hit: (hit.score if hit.score is not None else 0.0),
+                    reverse=True,
+                )[:top_k]
+                hits = [hit.model_copy(update={"rank": index + 1}) for index, hit in enumerate(hits)]
                 await self._repository.upsert_retrieval_run(conn, run)
                 for hit in hits:
                     await self._repository.upsert_retrieval_hit(
@@ -3133,6 +3644,7 @@ class CollaborationKernel:
         *,
         scope: str,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
         payload: CreateRetrievalContextPackRequest,
         embedding_vector: list[float] | None = None,
@@ -3142,6 +3654,7 @@ class CollaborationKernel:
         search = await self.run_retrieval_search(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
             payload=RunRetrievalSearchRequest(
                 actor=payload.actor,
@@ -11090,18 +11603,67 @@ class CollaborationKernel:
             raise ValueError("Organization-scoped resources require an organization_id")
 
     @staticmethod
+    def _normalize_library_slug(value: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+        if not normalized:
+            raise ValueError("Library slug must contain at least one letter or number")
+        return normalized
+
+    async def _resolve_library_owner(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID | None,
+        project_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+    ) -> tuple[UUID, UUID | None, UUID | None]:
+        if scope == "global":
+            raise ValueError("Libraries must belong to an organization, project, or workspace")
+        organization = await self._resolve_scope_organization(
+            scope=scope,
+            organization_id=organization_id,
+            project_id=project_id,
+            workspace_id=workspace_id,
+        )
+        if organization is None:
+            raise ValueError("Libraries require an organization owner")
+        if scope == "organization":
+            return organization.organization_id, None, None
+        if scope == "project":
+            if project_id is None:
+                raise ValueError("Project libraries require project_id")
+            return organization.organization_id, project_id, None
+        if scope == "workspace":
+            if workspace_id is None:
+                raise ValueError("Workspace libraries require workspace_id")
+            workspace = await self._repository.fetch_workspace(workspace_id)
+            if workspace is None:
+                raise KeyError(f"Workspace {workspace_id} not found")
+            return workspace.organization_id, workspace.project_id, workspace.workspace_id
+        raise ValueError(f"Unsupported library scope {scope!r}")
+
+    @staticmethod
     def _validate_asset_scope(
         *,
         scope: str,
         organization_id: UUID | None,
-        workspace_id: UUID | None,
+        project_id: UUID | None = None,
+        workspace_id: UUID | None = None,
     ) -> None:
-        if scope not in {"global", "organization", "workspace"}:
+        if scope not in {"global", "organization", "project", "workspace"}:
             raise ValueError(f"Unsupported asset scope {scope!r}")
-        if scope == "global" and (organization_id is not None or workspace_id is not None):
-            raise ValueError("Global scope resources cannot include organization_id or workspace_id")
-        if scope == "organization" and (organization_id is None or workspace_id is not None):
-            raise ValueError("Organization scope resources require organization_id and forbid workspace_id")
+        if scope == "global" and (
+            organization_id is not None or project_id is not None or workspace_id is not None
+        ):
+            raise ValueError("Global scope resources cannot include organization_id, project_id, or workspace_id")
+        if scope == "organization" and (
+            organization_id is None or project_id is not None or workspace_id is not None
+        ):
+            raise ValueError("Organization scope resources require organization_id and forbid project_id/workspace_id")
+        if scope == "project" and (
+            organization_id is None or project_id is None or workspace_id is not None
+        ):
+            raise ValueError("Project scope resources require organization_id/project_id and forbid workspace_id")
         if scope == "workspace" and workspace_id is None:
             raise ValueError("Workspace scope resources require a workspace_id")
 
@@ -11186,10 +11748,13 @@ class CollaborationKernel:
         right_scope: str,
         right_organization_id: UUID | None,
         right_workspace_id: UUID | None,
+        left_project_id: UUID | None = None,
+        right_project_id: UUID | None = None,
     ) -> None:
         if (
             left_scope != right_scope
             or left_organization_id != right_organization_id
+            or left_project_id != right_project_id
             or left_workspace_id != right_workspace_id
         ):
             raise ValueError(
@@ -11222,35 +11787,114 @@ class CollaborationKernel:
         *,
         scope: str,
         organization_id: UUID | None,
+        project_id: UUID | None,
         workspace_id: UUID | None,
         corpus_ids: list[UUID],
     ) -> list[RetrievalCorpus]:
         if corpus_ids:
             corpora: list[RetrievalCorpus] = []
+            visible_library_ids: set[str] | None = None
             for corpus_id in corpus_ids:
                 corpus = await self._repository.fetch_retrieval_corpus(corpus_id)
                 if corpus is None:
                     raise KeyError(f"Retrieval corpus {corpus_id} not found")
-                self._require_same_retrieval_scope(
-                    left_name="Retrieval corpus",
-                    left_id=corpus.corpus_id,
-                    left_scope=corpus.scope,
-                    left_organization_id=corpus.organization_id,
-                    left_workspace_id=corpus.workspace_id,
-                    right_scope=scope,
-                    right_organization_id=organization_id,
-                    right_workspace_id=workspace_id,
+                same_scope = (
+                    corpus.scope == scope
+                    and corpus.organization_id == organization_id
+                    and corpus.project_id == project_id
+                    and corpus.workspace_id == workspace_id
                 )
+                if not same_scope:
+                    library_id = corpus.metadata.get("library_id")
+                    if scope != "workspace" or workspace_id is None or not isinstance(library_id, str):
+                        self._require_same_retrieval_scope(
+                            left_name="Retrieval corpus",
+                            left_id=corpus.corpus_id,
+                            left_scope=corpus.scope,
+                            left_organization_id=corpus.organization_id,
+                            left_workspace_id=corpus.workspace_id,
+                            right_scope=scope,
+                            right_organization_id=organization_id,
+                            right_workspace_id=workspace_id,
+                            left_project_id=corpus.project_id,
+                            right_project_id=project_id,
+                        )
+                    if visible_library_ids is None:
+                        visible_libraries = await self._repository.list_libraries(
+                            scope="workspace",
+                            organization_id=organization_id,
+                            project_id=project_id,
+                            workspace_id=workspace_id,
+                            include_workspace_attachments=True,
+                        )
+                        visible_library_ids = {
+                            str(library.library_id) for library in visible_libraries
+                        }
+                    if library_id not in visible_library_ids:
+                        raise ValueError(
+                            f"Retrieval corpus {corpus.corpus_id} is not visible in workspace scope"
+                        )
                 corpora.append(corpus)
             return corpora
         corpora = await self._repository.list_retrieval_corpora(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
+        if scope == "workspace" and workspace_id is not None:
+            visible_libraries = await self._repository.list_libraries(
+                scope="workspace",
+                organization_id=organization_id,
+                project_id=project_id,
+                workspace_id=workspace_id,
+                include_workspace_attachments=True,
+            )
+            seen_corpus_ids = {corpus.corpus_id for corpus in corpora}
+            for library in visible_libraries:
+                library_corpora = await self._repository.list_retrieval_corpora(
+                    scope=library.scope,
+                    organization_id=library.organization_id,
+                    project_id=library.project_id,
+                    workspace_id=library.workspace_id,
+                )
+                for corpus in library_corpora:
+                    if (
+                        corpus.metadata.get("library_id") == str(library.library_id)
+                        and corpus.corpus_id not in seen_corpus_ids
+                    ):
+                        corpora.append(corpus)
+                        seen_corpus_ids.add(corpus.corpus_id)
         if not corpora:
             raise KeyError(f"No retrieval corpora found for {scope!r} scope")
         return corpora
+
+    @staticmethod
+    def _retrieval_corpus_scope_groups(
+        corpora: list[RetrievalCorpus],
+    ) -> list[dict[str, object]]:
+        groups: dict[
+            tuple[str, UUID | None, UUID | None, UUID | None],
+            list[RetrievalCorpus],
+        ] = {}
+        for corpus in corpora:
+            key = (
+                corpus.scope,
+                corpus.organization_id,
+                corpus.project_id,
+                corpus.workspace_id,
+            )
+            groups.setdefault(key, []).append(corpus)
+        return [
+            {
+                "scope": key[0],
+                "organization_id": key[1],
+                "project_id": key[2],
+                "workspace_id": key[3],
+                "corpora": value,
+            }
+            for key, value in groups.items()
+        ]
 
     async def _resolve_retrieval_profile_for_search(
         self,
@@ -11272,6 +11916,8 @@ class CollaborationKernel:
                 right_scope=first.scope,
                 right_organization_id=first.organization_id,
                 right_workspace_id=first.workspace_id,
+                left_project_id=profile.project_id,
+                right_project_id=first.project_id,
             )
             return profile
         default_profile_id = next(
@@ -11330,6 +11976,7 @@ class CollaborationKernel:
             run_id=run.run_id,
             scope=run.scope,
             organization_id=run.organization_id,
+            project_id=run.project_id,
             workspace_id=run.workspace_id,
             profile_id=run.profile_id,
             query=query,
@@ -11346,11 +11993,13 @@ class CollaborationKernel:
         *,
         scope: str,
         organization_id: UUID | None,
-        workspace_id: UUID | None,
+        project_id: UUID | None = None,
+        workspace_id: UUID | None = None,
     ) -> Organization | None:
         self._validate_asset_scope(
             scope=scope,
             organization_id=organization_id,
+            project_id=project_id,
             workspace_id=workspace_id,
         )
         if scope == "global":
@@ -11362,6 +12011,10 @@ class CollaborationKernel:
             if organization_id is not None and workspace.organization_id != organization_id:
                 raise ValueError(
                     f"Workspace {workspace_id} does not belong to organization {organization_id}"
+                )
+            if project_id is not None and workspace.project_id != project_id:
+                raise ValueError(
+                    f"Workspace {workspace_id} does not belong to project {project_id}"
                 )
             if not hasattr(self._repository, "fetch_organization"):
                 return Organization(
@@ -11380,6 +12033,29 @@ class CollaborationKernel:
             organization = await self._repository.fetch_organization(workspace.organization_id)
             if organization is None:
                 raise KeyError(f"Organization {workspace.organization_id} not found")
+            return organization
+        if project_id is not None:
+            project = await self._repository.fetch_project(project_id)
+            if project is None:
+                raise KeyError(f"Project {project_id} not found")
+            if organization_id is not None and project.organization_id != organization_id:
+                raise ValueError(
+                    f"Project {project_id} does not belong to organization {organization_id}"
+                )
+            if not hasattr(self._repository, "fetch_organization"):
+                return Organization(
+                    organization_id=project.organization_id,
+                    slug="default",
+                    name="Default Organization",
+                    description="Implicit test organization",
+                    created_by=project.created_by,
+                    created_at=project.created_at,
+                    updated_at=project.updated_at,
+                    metadata={},
+                )
+            organization = await self._repository.fetch_organization(project.organization_id)
+            if organization is None:
+                raise KeyError(f"Organization {project.organization_id} not found")
             return organization
         assert organization_id is not None
         if not hasattr(self._repository, "fetch_organization"):

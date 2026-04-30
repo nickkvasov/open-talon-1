@@ -102,6 +102,21 @@ def test_retrieval_service_migration_declares_scoped_tables_and_indexes() -> Non
     assert "REFERENCES workspace_asset_versions(asset_version_id)" in sql
 
 
+def test_library_project_scope_migration_declares_owner_scopes_and_tables() -> None:
+    sql = (
+        MIGRATIONS_DIR / "20260430003453_add_library_and_project_retrieval_scopes.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS libraries" in sql
+    assert "CREATE TABLE IF NOT EXISTS library_items" in sql
+    assert "CREATE TABLE IF NOT EXISTS library_workspace_attachments" in sql
+    assert "scope = 'project'" in sql
+    assert "ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(project_id)" in sql
+    assert "idx_libraries_scope_owner_slug" in sql
+    assert "library_items_kind_check" in sql
+    assert "idx_library_workspace_attachments_workspace_library" in sql
+
+
 def test_methodics_execution_migration_declares_execution_tables_and_indexes() -> None:
     sql = (
         MIGRATIONS_DIR / "20260427191618_add_methodics_execution_state.sql"

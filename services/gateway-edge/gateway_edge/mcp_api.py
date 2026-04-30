@@ -30,9 +30,13 @@ from gateway_edge.models import (
     AuditEventPage,
     AuditExportRequest,
     CancelMethodicExecutionRequest,
+    AttachLibraryToWorkspaceRequest,
     CreateMethodicAssignmentRequest,
     CreateAgentGitWorktreeSessionRequest,
     CreateGitRepositoryRequest,
+    CreateLibraryItemRequest,
+    CreateLibraryRequest,
+    CreateLibraryTextItemRequest,
     CreateInteractionRequest,
     CreateMemoryEntryRequest,
     CreateMethodicExecutionRequest,
@@ -45,6 +49,10 @@ from gateway_edge.models import (
     CreateWorkspaceRequest,
     EvaluateMethodicStepRequest,
     GitRepository,
+    IndexLibraryRequest,
+    Library,
+    LibraryItem,
+    LibraryWorkspaceAttachment,
     MemoryEntry,
     LlmProviderDefinition,
     MemoryProviderDefinition,
@@ -64,6 +72,7 @@ from gateway_edge.models import (
     RemoveProjectAccessRequest,
     RetrievalContextPack,
     RetrievalCorpus,
+    RetrievalIngestionJob,
     RetrievalSearchResponse,
     RetrievalSource,
     RunRetrievalSearchRequest,
@@ -73,6 +82,8 @@ from gateway_edge.models import (
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    UpdateLibraryItemRequest,
+    UpdateLibraryRequest,
     UpdateProjectRequest,
     UpsertProjectAccessRequest,
     Workspace,
@@ -218,6 +229,78 @@ class RetrievalSearchArgs(BaseModel):
     include_context: bool = False
     context_token_budget: int | None = Field(default=None, ge=1)
     provider_overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+class LibraryCreateArgs(BaseModel):
+    slug: str | None = None
+    name: str
+    description: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LibraryRefArgs(BaseModel):
+    library_id: UUID
+
+
+class LibraryUpdateArgs(BaseModel):
+    library_id: UUID
+    slug: str | None = None
+    name: str | None = None
+    description: str | None = None
+    status: Literal["active", "archived"] | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class LibraryItemsListArgs(BaseModel):
+    library_id: UUID
+    include_archived: bool = False
+
+
+class LibraryItemCreateArgs(BaseModel):
+    library_id: UUID
+    asset_id: UUID
+    asset_version_id: UUID | None = None
+    item_kind: Literal["file", "text", "webpage", "image", "diagram", "other"] = "file"
+    title: str
+    source_uri: str | None = None
+    content_type: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LibraryTextItemCreateArgs(BaseModel):
+    library_id: UUID
+    title: str
+    content: str
+    item_kind: Literal["text", "webpage", "diagram", "other"] = "text"
+    logical_name: str | None = None
+    logical_path: str | None = None
+    source_uri: str | None = None
+    content_type: str = "text/markdown"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LibraryItemRefArgs(BaseModel):
+    item_id: UUID
+
+
+class LibraryAttachmentArgs(BaseModel):
+    library_id: UUID
+    workspace_id: UUID | None = None
+    enabled: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LibraryIndexArgs(BaseModel):
+    library_id: UUID
+    item_ids: list[UUID] = Field(default_factory=list)
+    profile_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrieverJobsListArgs(BaseModel):
+    corpus_id: UUID | None = None
+    source_id: UUID | None = None
+    status: str | None = None
 
 
 class RetrievalContextPackCreateArgs(BaseModel):
@@ -1202,25 +1285,217 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             requires_workspace_actor=True,
             handler_name="handle_memory_thread_search",
         ),
-        "retrieval.corpora.list": OperationDefinition(
-            name="retrieval.corpora.list",
-            description="List retrieval corpora visible in the active global, organization, or workspace scope.",
+        "library.libraries.list": OperationDefinition(
+            name="library.libraries.list",
+            description="List libraries in the active organization, project, or workspace scope.",
             input_model=EmptyArgs,
-            output_schema=_type_schema(list[RetrievalCorpus]),
-            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            output_schema=_type_schema(list[Library]),
+            allowed_scopes=frozenset({"organization", "project", "workspace"}),
+            required_permission_type="identity",
+            required_permission="library.read",
+            required_project_permission="library.read",
+            requires_workspace_actor=True,
+            handler_name="handle_library_libraries_list",
+        ),
+        "library.libraries.create": OperationDefinition(
+            name="library.libraries.create",
+            description="Create a library in the active organization, project, or workspace scope.",
+            input_model=LibraryCreateArgs,
+            output_schema=_type_schema(Library),
+            allowed_scopes=frozenset({"organization", "project", "workspace"}),
+            required_permission_type="identity",
+            required_permission="library.write",
+            required_project_permission="library.write",
+            requires_workspace_actor=True,
+            handler_name="handle_library_libraries_create",
+        ),
+        "library.libraries.get": OperationDefinition(
+            name="library.libraries.get",
+            description="Read one visible library.",
+            input_model=LibraryRefArgs,
+            output_schema=_type_schema(Library),
+            allowed_scopes=frozenset({"organization", "project", "workspace"}),
+            required_permission_type="identity",
+            required_permission="library.read",
+            required_project_permission="library.read",
+            requires_workspace_actor=True,
+            handler_name="handle_library_libraries_get",
+        ),
+        "library.libraries.update": OperationDefinition(
+            name="library.libraries.update",
+            description="Update a visible library.",
+            input_model=LibraryUpdateArgs,
+            output_schema=_type_schema(Library),
+            allowed_scopes=frozenset({"organization", "project", "workspace"}),
+            required_permission_type="identity",
+            required_permission="library.write",
+            required_project_permission="library.write",
+            requires_workspace_actor=True,
+            handler_name="handle_library_libraries_update",
+        ),
+        "library.libraries.archive": OperationDefinition(
+            name="library.libraries.archive",
+            description="Archive a visible library.",
+            input_model=LibraryRefArgs,
+            output_schema=_type_schema(Library),
+            allowed_scopes=frozenset({"organization", "project", "workspace"}),
+            required_permission_type="identity",
+            required_permission="library.write",
+            required_project_permission="library.write",
+            requires_workspace_actor=True,
+            handler_name="handle_library_libraries_archive",
+        ),
+        "library.items.list": OperationDefinition(
+            name="library.items.list",
+            description="List items in a visible library.",
+            input_model=LibraryItemsListArgs,
+            output_schema=_type_schema(list[LibraryItem]),
+            allowed_scopes=frozenset({"organization", "project", "workspace"}),
+            required_permission_type="identity",
+            required_permission="library.read",
+            required_project_permission="library.read",
+            requires_workspace_actor=True,
+            handler_name="handle_library_items_list",
+        ),
+        "library.items.create": OperationDefinition(
+            name="library.items.create",
+            description="Add an existing immutable asset to a library.",
+            input_model=LibraryItemCreateArgs,
+            output_schema=_type_schema(LibraryItem),
+            allowed_scopes=frozenset({"organization", "project", "workspace"}),
+            required_permission_type="identity",
+            required_permission="library.write",
+            required_project_permission="library.write",
+            requires_workspace_actor=True,
+            handler_name="handle_library_items_create",
+        ),
+        "library.items.create_text": OperationDefinition(
+            name="library.items.create_text",
+            description="Create a text or markdown library item.",
+            input_model=LibraryTextItemCreateArgs,
+            output_schema=_type_schema(LibraryItem),
+            allowed_scopes=frozenset({"organization", "project", "workspace"}),
+            required_permission_type="identity",
+            required_permission="library.write",
+            required_project_permission="library.write",
+            requires_workspace_actor=True,
+            handler_name="handle_library_items_create_text",
+        ),
+        "library.items.download_url": OperationDefinition(
+            name="library.items.download_url",
+            description="Generate an authorized download URL for a library item.",
+            input_model=LibraryItemRefArgs,
+            output_schema=_type_schema(dict[str, str]),
+            allowed_scopes=frozenset({"organization", "project", "workspace"}),
+            required_permission_type="identity",
+            required_permission="library.read",
+            required_project_permission="library.read",
+            requires_workspace_actor=True,
+            handler_name="handle_library_items_download_url",
+        ),
+        "library.workspace_attachments.attach": OperationDefinition(
+            name="library.workspace_attachments.attach",
+            description="Attach an organization or project library to a workspace.",
+            input_model=LibraryAttachmentArgs,
+            output_schema=_type_schema(LibraryWorkspaceAttachment),
+            allowed_scopes=frozenset({"workspace"}),
+            required_permission_type="workspace",
+            required_permission="library.attach",
+            requires_workspace_actor=True,
+            handler_name="handle_library_workspace_attachments_attach",
+        ),
+        "library.workspace_attachments.detach": OperationDefinition(
+            name="library.workspace_attachments.detach",
+            description="Detach a library from a workspace.",
+            input_model=LibraryAttachmentArgs,
+            output_schema=_type_schema(dict[str, str | bool]),
+            allowed_scopes=frozenset({"workspace"}),
+            required_permission_type="workspace",
+            required_permission="library.attach",
+            requires_workspace_actor=True,
+            handler_name="handle_library_workspace_attachments_detach",
+        ),
+        "retriever.library.index": OperationDefinition(
+            name="retriever.library.index",
+            description="Queue explicit Retriever indexing for one library.",
+            input_model=LibraryIndexArgs,
+            output_schema=_type_schema(list[RetrievalIngestionJob]),
+            allowed_scopes=frozenset({"organization", "project", "workspace"}),
+            required_permission_type="identity",
+            required_permission="library.index",
+            required_project_permission="library.index",
+            requires_workspace_actor=True,
+            handler_name="handle_retriever_library_index",
+        ),
+        "retriever.ingestion_jobs.list": OperationDefinition(
+            name="retriever.ingestion_jobs.list",
+            description="List Retriever ingestion jobs in the active scope.",
+            input_model=RetrieverJobsListArgs,
+            output_schema=_type_schema(list[RetrievalIngestionJob]),
+            allowed_scopes=frozenset({"global", "organization", "project", "workspace"}),
             required_permission_type="identity",
             required_permission="retrieval.read",
+            required_project_permission="retrieval.read",
+            requires_workspace_actor=True,
+            handler_name="handle_retriever_ingestion_jobs_list",
+        ),
+        "retriever.search": OperationDefinition(
+            name="retriever.search",
+            description="Search indexed Retriever corpora and return cited hits.",
+            input_model=RetrievalSearchArgs,
+            output_schema=_type_schema(RetrievalSearchResponse),
+            allowed_scopes=frozenset({"global", "organization", "project", "workspace"}),
+            required_permission_type="identity",
+            required_permission="retrieval.search",
+            required_project_permission="retrieval.search",
+            requires_workspace_actor=True,
+            handler_name="handle_retrieval_search",
+        ),
+        "retriever.context_pack.create": OperationDefinition(
+            name="retriever.context_pack.create",
+            description="Create a cited Retriever context pack.",
+            input_model=RetrievalContextPackCreateArgs,
+            output_schema=_type_schema(RetrievalContextPack),
+            allowed_scopes=frozenset({"global", "organization", "project", "workspace"}),
+            required_permission_type="identity",
+            required_permission="retrieval.search",
+            required_project_permission="retrieval.search",
+            requires_workspace_actor=True,
+            handler_name="handle_retrieval_context_pack_create",
+        ),
+        "retriever.context_pack.get": OperationDefinition(
+            name="retriever.context_pack.get",
+            description="Read a Retriever context pack.",
+            input_model=RetrievalContextPackGetArgs,
+            output_schema=_type_schema(RetrievalContextPack),
+            allowed_scopes=frozenset({"global", "organization", "project", "workspace"}),
+            required_permission_type="identity",
+            required_permission="retrieval.read",
+            required_project_permission="retrieval.read",
+            requires_workspace_actor=True,
+            handler_name="handle_retrieval_context_pack_get",
+        ),
+        "retrieval.corpora.list": OperationDefinition(
+            name="retrieval.corpora.list",
+            description="List retrieval corpora visible in the active global, organization, project, or workspace scope.",
+            input_model=EmptyArgs,
+            output_schema=_type_schema(list[RetrievalCorpus]),
+            allowed_scopes=frozenset({"global", "organization", "project", "workspace"}),
+            required_permission_type="identity",
+            required_permission="retrieval.read",
+            required_project_permission="retrieval.read",
             requires_workspace_actor=True,
             handler_name="handle_retrieval_corpora_list",
         ),
         "retrieval.sources.list": OperationDefinition(
             name="retrieval.sources.list",
-            description="List retrieval sources visible in the active global, organization, or workspace scope.",
+            description="List retrieval sources visible in the active global, organization, project, or workspace scope.",
             input_model=RetrievalSourcesListArgs,
             output_schema=_type_schema(list[RetrievalSource]),
-            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            allowed_scopes=frozenset({"global", "organization", "project", "workspace"}),
             required_permission_type="identity",
             required_permission="retrieval.read",
+            required_project_permission="retrieval.read",
             requires_workspace_actor=True,
             handler_name="handle_retrieval_sources_list",
         ),
@@ -1229,9 +1504,10 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             description="Search retrieval corpora and return cited hits.",
             input_model=RetrievalSearchArgs,
             output_schema=_type_schema(RetrievalSearchResponse),
-            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            allowed_scopes=frozenset({"global", "organization", "project", "workspace"}),
             required_permission_type="identity",
             required_permission="retrieval.search",
+            required_project_permission="retrieval.search",
             requires_workspace_actor=True,
             handler_name="handle_retrieval_search",
         ),
@@ -1240,9 +1516,10 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             description="Create a cited retrieval context pack in the active scope.",
             input_model=RetrievalContextPackCreateArgs,
             output_schema=_type_schema(RetrievalContextPack),
-            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            allowed_scopes=frozenset({"global", "organization", "project", "workspace"}),
             required_permission_type="identity",
             required_permission="retrieval.search",
+            required_project_permission="retrieval.search",
             requires_workspace_actor=True,
             handler_name="handle_retrieval_context_pack_create",
         ),
@@ -1251,9 +1528,10 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             description="Read a retrieval context pack in the active scope.",
             input_model=RetrievalContextPackGetArgs,
             output_schema=_type_schema(RetrievalContextPack),
-            allowed_scopes=frozenset({"global", "organization", "workspace"}),
+            allowed_scopes=frozenset({"global", "organization", "project", "workspace"}),
             required_permission_type="identity",
             required_permission="retrieval.read",
+            required_project_permission="retrieval.read",
             requires_workspace_actor=True,
             handler_name="handle_retrieval_context_pack_get",
         ),
@@ -1893,17 +2171,270 @@ async def handle_memory_thread_search(
     )
 
 
-async def _active_retrieval_scope(
+async def _active_library_scope(
     ctx: McpApiContext,
-) -> tuple[str, UUID | None, UUID | None]:
-    if ctx.active_scope_kind == "global":
-        return "global", None, None
+) -> tuple[str, UUID, UUID | None, UUID | None]:
     if ctx.active_scope_kind == "organization" and ctx.active_scope_id is not None:
-        return "organization", ctx.active_scope_id, None
+        return "organization", ctx.active_scope_id, None, None
+    if ctx.active_scope_kind == "project" and ctx.active_scope_id is not None:
+        project = await collab_svc.collaboration_service.get_project(ctx.active_scope_id)
+        return "project", project.organization_id, project.project_id, None
     if ctx.active_scope_kind == "workspace" and ctx.active_scope_id is not None:
         detail = await collab_svc.collaboration_service.get_workspace(ctx.active_scope_id)
-        return "workspace", detail.workspace.organization_id, ctx.active_scope_id
-    raise ValueError("Retrieval MCP operations require global, organization, or workspace scope")
+        return (
+            "workspace",
+            detail.workspace.organization_id,
+            detail.workspace.project_id,
+            detail.workspace.workspace_id,
+        )
+    raise ValueError("Library MCP operations require organization, project, or workspace scope")
+
+
+async def _library_actor(ctx: McpApiContext) -> ParticipantInput:
+    if ctx.active_scope_kind == "workspace":
+        return await ctx.resolve_workspace_actor(auto_create=False)
+    return ctx.identity_actor()
+
+
+async def _visible_library_or_raise(ctx: McpApiContext, library_id: UUID) -> Library:
+    scope, organization_id, project_id, workspace_id = await _active_library_scope(ctx)
+    visible = await collab_svc.collaboration_service.list_libraries(
+        scope=scope,
+        organization_id=organization_id,
+        project_id=project_id,
+        workspace_id=workspace_id,
+        include_workspace_attachments=workspace_id is not None,
+    )
+    for library in visible:
+        if library.library_id == library_id:
+            return library
+    raise KeyError(f"Library {library_id} not found in active scope")
+
+
+async def _attachable_library_or_raise(ctx: McpApiContext, library_id: UUID) -> Library:
+    library = await collab_svc.collaboration_service.get_library(library_id)
+    if library is None:
+        raise KeyError(f"Library {library_id} not found")
+    if library.scope == "workspace":
+        raise ValueError("Workspace-owned libraries do not need explicit workspace attachment")
+    if library.scope == "project" and library.project_id is not None:
+        project = await collab_svc.collaboration_service.get_project(library.project_id)
+        await ctx.require_project_permission(project, permission="library.read")
+        return library
+    await authorization_engine.authorize(
+        "mcp.library.attachable_library",
+        {
+            "auth_context": ctx.auth_context,
+            "permission_type": "identity",
+            "permission": "library.read",
+            "organization_id": library.organization_id,
+        },
+    )
+    return library
+
+
+async def handle_library_libraries_list(ctx: McpApiContext, _: EmptyArgs) -> list[Library]:
+    scope, organization_id, project_id, workspace_id = await _active_library_scope(ctx)
+    return await collab_svc.collaboration_service.list_libraries(
+        scope=scope,
+        organization_id=organization_id,
+        project_id=project_id,
+        workspace_id=workspace_id,
+        include_workspace_attachments=workspace_id is not None,
+    )
+
+
+async def handle_library_libraries_create(
+    ctx: McpApiContext,
+    args: LibraryCreateArgs,
+) -> Library:
+    scope, organization_id, project_id, workspace_id = await _active_library_scope(ctx)
+    actor = await _library_actor(ctx)
+    return await collab_svc.collaboration_service.create_library(
+        scope=scope,
+        organization_id=organization_id,
+        project_id=project_id,
+        workspace_id=workspace_id,
+        payload=CreateLibraryRequest(actor=actor, **args.model_dump()),
+    )
+
+
+async def handle_library_libraries_get(
+    ctx: McpApiContext,
+    args: LibraryRefArgs,
+) -> Library:
+    return await _visible_library_or_raise(ctx, args.library_id)
+
+
+async def handle_library_libraries_update(
+    ctx: McpApiContext,
+    args: LibraryUpdateArgs,
+) -> Library:
+    await _visible_library_or_raise(ctx, args.library_id)
+    actor = await _library_actor(ctx)
+    return await collab_svc.collaboration_service.update_library(
+        args.library_id,
+        UpdateLibraryRequest(
+            actor=actor,
+            **args.model_dump(exclude={"library_id"}),
+        ),
+    )
+
+
+async def handle_library_libraries_archive(
+    ctx: McpApiContext,
+    args: LibraryRefArgs,
+) -> Library:
+    await _visible_library_or_raise(ctx, args.library_id)
+    actor = await _library_actor(ctx)
+    return await collab_svc.collaboration_service.update_library(
+        args.library_id,
+        UpdateLibraryRequest(actor=actor, status="archived"),
+    )
+
+
+async def handle_library_items_list(
+    ctx: McpApiContext,
+    args: LibraryItemsListArgs,
+) -> list[LibraryItem]:
+    await _visible_library_or_raise(ctx, args.library_id)
+    return await collab_svc.collaboration_service.list_library_items(
+        args.library_id,
+        include_archived=args.include_archived,
+    )
+
+
+async def handle_library_items_create(
+    ctx: McpApiContext,
+    args: LibraryItemCreateArgs,
+) -> LibraryItem:
+    await _visible_library_or_raise(ctx, args.library_id)
+    actor = await _library_actor(ctx)
+    return await collab_svc.collaboration_service.create_library_item(
+        args.library_id,
+        CreateLibraryItemRequest(
+            actor=actor,
+            **args.model_dump(exclude={"library_id"}),
+        ),
+    )
+
+
+async def handle_library_items_create_text(
+    ctx: McpApiContext,
+    args: LibraryTextItemCreateArgs,
+) -> LibraryItem:
+    await _visible_library_or_raise(ctx, args.library_id)
+    actor = await _library_actor(ctx)
+    return await collab_svc.collaboration_service.create_library_text_item(
+        args.library_id,
+        CreateLibraryTextItemRequest(
+            actor=actor,
+            **args.model_dump(exclude={"library_id"}),
+        ),
+    )
+
+
+async def handle_library_items_download_url(
+    ctx: McpApiContext,
+    args: LibraryItemRefArgs,
+) -> dict[str, str]:
+    item = await collab_svc.collaboration_service.get_library_item(args.item_id)
+    if item is None:
+        raise KeyError(f"Library item {args.item_id} not found")
+    await _visible_library_or_raise(ctx, item.library_id)
+    url = await collab_svc.collaboration_service.get_library_item_download_url(args.item_id)
+    return {"url": url}
+
+
+async def handle_library_workspace_attachments_attach(
+    ctx: McpApiContext,
+    args: LibraryAttachmentArgs,
+) -> LibraryWorkspaceAttachment:
+    if ctx.active_scope_kind != "workspace" or ctx.active_scope_id is None:
+        raise ValueError("Library attachment requires active workspace scope")
+    workspace_id = args.workspace_id or ctx.active_scope_id
+    if workspace_id != ctx.active_scope_id:
+        raise PermissionError("Attachment workspace must match active workspace scope")
+    await _attachable_library_or_raise(ctx, args.library_id)
+    actor = await ctx.resolve_workspace_actor(auto_create=False)
+    return await collab_svc.collaboration_service.attach_library_to_workspace(
+        workspace_id,
+        args.library_id,
+        AttachLibraryToWorkspaceRequest(
+            actor=actor,
+            enabled=args.enabled,
+            metadata=args.metadata,
+        ),
+    )
+
+
+async def handle_library_workspace_attachments_detach(
+    ctx: McpApiContext,
+    args: LibraryAttachmentArgs,
+) -> dict[str, bool | str]:
+    if ctx.active_scope_kind != "workspace" or ctx.active_scope_id is None:
+        raise ValueError("Library detachment requires active workspace scope")
+    workspace_id = args.workspace_id or ctx.active_scope_id
+    if workspace_id != ctx.active_scope_id:
+        raise PermissionError("Attachment workspace must match active workspace scope")
+    return await collab_svc.collaboration_service.delete_library_workspace_attachment(
+        workspace_id,
+        args.library_id,
+    )
+
+
+async def handle_retriever_library_index(
+    ctx: McpApiContext,
+    args: LibraryIndexArgs,
+) -> list[RetrievalIngestionJob]:
+    await _visible_library_or_raise(ctx, args.library_id)
+    actor = await _library_actor(ctx)
+    return await collab_svc.collaboration_service.index_library(
+        args.library_id,
+        IndexLibraryRequest(
+            actor=actor,
+            item_ids=args.item_ids,
+            profile_id=args.profile_id,
+            metadata=args.metadata,
+        ),
+    )
+
+
+async def handle_retriever_ingestion_jobs_list(
+    ctx: McpApiContext,
+    args: RetrieverJobsListArgs,
+) -> list[RetrievalIngestionJob]:
+    scope, organization_id, project_id, workspace_id = await _active_retrieval_scope(ctx)
+    return await collab_svc.collaboration_service.list_retrieval_ingestion_jobs(
+        corpus_id=args.corpus_id,
+        source_id=args.source_id,
+        scope=scope,
+        organization_id=organization_id,
+        project_id=project_id,
+        workspace_id=workspace_id,
+        status=args.status,
+    )
+
+
+async def _active_retrieval_scope(
+    ctx: McpApiContext,
+) -> tuple[str, UUID | None, UUID | None, UUID | None]:
+    if ctx.active_scope_kind == "global":
+        return "global", None, None, None
+    if ctx.active_scope_kind == "organization" and ctx.active_scope_id is not None:
+        return "organization", ctx.active_scope_id, None, None
+    if ctx.active_scope_kind == "project" and ctx.active_scope_id is not None:
+        project = await collab_svc.collaboration_service.get_project(ctx.active_scope_id)
+        return "project", project.organization_id, project.project_id, None
+    if ctx.active_scope_kind == "workspace" and ctx.active_scope_id is not None:
+        detail = await collab_svc.collaboration_service.get_workspace(ctx.active_scope_id)
+        return (
+            "workspace",
+            detail.workspace.organization_id,
+            detail.workspace.project_id,
+            ctx.active_scope_id,
+        )
+    raise ValueError("Retrieval MCP operations require global, organization, project, or workspace scope")
 
 
 async def _retrieval_actor(
@@ -1917,7 +2448,7 @@ async def _retrieval_actor(
         actor = ctx.identity_actor()
     if not provider_overrides:
         return actor
-    _, organization_id, workspace_id = await _active_retrieval_scope(ctx)
+    _, organization_id, _, workspace_id = await _active_retrieval_scope(ctx)
     await authorization_engine.authorize(
         "mcp.retrieval.provider_overrides",
         {
@@ -1937,10 +2468,11 @@ async def handle_retrieval_corpora_list(
     ctx: McpApiContext,
     _: EmptyArgs,
 ) -> list[RetrievalCorpus]:
-    scope, organization_id, workspace_id = await _active_retrieval_scope(ctx)
+    scope, organization_id, project_id, workspace_id = await _active_retrieval_scope(ctx)
     return await collab_svc.collaboration_service.list_retrieval_corpora(
         scope=scope,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
 
@@ -1949,11 +2481,12 @@ async def handle_retrieval_sources_list(
     ctx: McpApiContext,
     args: RetrievalSourcesListArgs,
 ) -> list[RetrievalSource]:
-    scope, organization_id, workspace_id = await _active_retrieval_scope(ctx)
+    scope, organization_id, project_id, workspace_id = await _active_retrieval_scope(ctx)
     return await collab_svc.collaboration_service.list_retrieval_sources(
         corpus_id=args.corpus_id,
         scope=scope,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
 
@@ -1962,12 +2495,13 @@ async def handle_retrieval_search(
     ctx: McpApiContext,
     args: RetrievalSearchArgs,
 ) -> RetrievalSearchResponse:
-    scope, organization_id, workspace_id = await _active_retrieval_scope(ctx)
+    scope, organization_id, project_id, workspace_id = await _active_retrieval_scope(ctx)
     actor = await _retrieval_actor(ctx, provider_overrides=args.provider_overrides)
     payload = RunRetrievalSearchRequest(actor=actor, **args.model_dump())
     return await collab_svc.collaboration_service.run_retrieval_search(
         scope=scope,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
         payload=payload,
     )
@@ -1977,12 +2511,13 @@ async def handle_retrieval_context_pack_create(
     ctx: McpApiContext,
     args: RetrievalContextPackCreateArgs,
 ) -> RetrievalContextPack:
-    scope, organization_id, workspace_id = await _active_retrieval_scope(ctx)
+    scope, organization_id, project_id, workspace_id = await _active_retrieval_scope(ctx)
     actor = await _retrieval_actor(ctx, provider_overrides=args.provider_overrides)
     payload = CreateRetrievalContextPackRequest(actor=actor, **args.model_dump())
     return await collab_svc.collaboration_service.create_retrieval_context_pack(
         scope=scope,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
         payload=payload,
     )
@@ -1992,7 +2527,7 @@ async def handle_retrieval_context_pack_get(
     ctx: McpApiContext,
     args: RetrievalContextPackGetArgs,
 ) -> RetrievalContextPack:
-    scope, organization_id, workspace_id = await _active_retrieval_scope(ctx)
+    scope, organization_id, project_id, workspace_id = await _active_retrieval_scope(ctx)
     context_pack = await collab_svc.collaboration_service.get_retrieval_context_pack(
         args.context_pack_id
     )
@@ -2001,6 +2536,7 @@ async def handle_retrieval_context_pack_get(
     if (
         context_pack.scope != scope
         or context_pack.organization_id != organization_id
+        or context_pack.project_id != project_id
         or context_pack.workspace_id != workspace_id
     ):
         raise KeyError(f"Retrieval context pack {args.context_pack_id} not found")

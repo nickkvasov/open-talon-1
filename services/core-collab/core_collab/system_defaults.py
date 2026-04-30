@@ -46,6 +46,8 @@ METHODOLOGIST_AGENT_ID = UUID("44444444-4444-4444-4444-444444444447")
 CONDUCTOR_AGENT_ID = UUID("44444444-4444-4444-4444-444444444448")
 CONTROL_PLANE_MCP_SERVER_ID = UUID("66666666-6666-6666-6666-666666666666")
 WEB_SEARCH_PLUGIN_MCP_SERVER_ID = UUID("66666666-6666-6666-6666-666666666667")
+LIBRARY_PLUGIN_MCP_SERVER_ID = UUID("66666666-6666-6666-6666-666666666668")
+RETRIEVER_PLUGIN_MCP_SERVER_ID = UUID("66666666-6666-6666-6666-666666666669")
 PLATFORM_STEWARD_ROLE_ID = UUID("77777777-7777-7777-7777-777777777771")
 GLOBAL_CONDUCTOR_ROLE_ID = UUID("77777777-7777-7777-7777-777777777772")
 SYSTEM_ACTOR_ID = UUID("00000000-0000-0000-0000-000000000000")
@@ -94,6 +96,10 @@ _OPERATIONAL_AGENT_PERMISSIONS = [
     "asset_catalog.publish",
     "asset_catalog.link",
     "asset_catalog.activate",
+    "library.read",
+    "library.write",
+    "library.attach",
+    "library.index",
     "retrieval.read",
     "retrieval.write",
     "retrieval.search",
@@ -213,6 +219,28 @@ _CONTROL_PLANE_TOOL_DENYLIST = [
     "agent_git.file.delete",
     "agent_git.worktree.discard",
     "projects.access.remove",
+]
+
+_LIBRARY_PLUGIN_TOOL_NAMES = [
+    "library.libraries.list",
+    "library.libraries.create",
+    "library.libraries.get",
+    "library.libraries.update",
+    "library.libraries.archive",
+    "library.items.list",
+    "library.items.create",
+    "library.items.create_text",
+    "library.items.download_url",
+    "library.workspace_attachments.attach",
+    "library.workspace_attachments.detach",
+]
+
+_RETRIEVER_PLUGIN_TOOL_NAMES = [
+    "retriever.library.index",
+    "retriever.ingestion_jobs.list",
+    "retriever.search",
+    "retriever.context_pack.create",
+    "retriever.context_pack.get",
 ]
 
 _TINKER_INTERNAL_TOOL_SPECS = [
@@ -461,6 +489,40 @@ class ManagedSystemDefaultsRepairer:
         web_search = await self._web_search_mcp_server(now=now)
         await self._repository.upsert_mcp_server(conn, web_search)
         summary["mcp_servers"] += 1
+
+        library_plugin = await self._library_mcp_server(now=now)
+        await self._repository.upsert_mcp_server(conn, library_plugin)
+        await self._repository.replace_mcp_server_capabilities(
+            conn,
+            server_id=library_plugin.server_id,
+            tools=self._managed_plugin_tool_definitions(
+                server_id=library_plugin.server_id,
+                tool_names=_LIBRARY_PLUGIN_TOOL_NAMES,
+                description_prefix="Open Talon Library operation",
+                now=now,
+            ),
+            resources=[],
+            prompts=[],
+        )
+        summary["mcp_servers"] += 1
+        summary["mcp_tools"] += len(_LIBRARY_PLUGIN_TOOL_NAMES)
+
+        retriever_plugin = await self._retriever_mcp_server(now=now)
+        await self._repository.upsert_mcp_server(conn, retriever_plugin)
+        await self._repository.replace_mcp_server_capabilities(
+            conn,
+            server_id=retriever_plugin.server_id,
+            tools=self._managed_plugin_tool_definitions(
+                server_id=retriever_plugin.server_id,
+                tool_names=_RETRIEVER_PLUGIN_TOOL_NAMES,
+                description_prefix="Open Talon Retriever operation",
+                now=now,
+            ),
+            resources=[],
+            prompts=[],
+        )
+        summary["mcp_servers"] += 1
+        summary["mcp_tools"] += len(_RETRIEVER_PLUGIN_TOOL_NAMES)
 
         steward = next(
             agent for agent in global_agents if agent.agent_key == "steward"
@@ -1781,6 +1843,130 @@ class ManagedSystemDefaultsRepairer:
                 "metadata": {**existing.metadata, **server.metadata},
             }
         )
+
+    async def _library_mcp_server(self, *, now: datetime) -> McpServerDefinition:
+        existing = await self._find_mcp_server_by_key(
+            scope="global",
+            organization_id=None,
+            server_key="library",
+        )
+        server = McpServerDefinition(
+            server_id=LIBRARY_PLUGIN_MCP_SERVER_ID,
+            scope="global",
+            organization_id=None,
+            server_key="library",
+            display_name="Library",
+            description=(
+                "Managed System Plugin for durable organization, project, and workspace "
+                "reference libraries."
+            ),
+            transport_kind="streamable_http",
+            config={
+                "url": os.getenv("OPEN_TALON_LIBRARY_MCP_URL", "http://127.0.0.1:8000/v1/mcp"),
+                "auth": {"kind": "open_talon_agent_identity"},
+                "capabilities": ["libraries", "items", "attachments"],
+                "managed_static_capabilities": True,
+            },
+            secret_config={},
+            trust_level="trusted",
+            enabled=True,
+            last_sync_status="completed",
+            last_synced_at=now,
+            created_by=SYSTEM_ACTOR_ID,
+            created_at=now,
+            updated_by=SYSTEM_ACTOR_ID,
+            updated_at=now,
+            metadata={
+                "seeded": True,
+                "managed": True,
+                "system_plugin": True,
+                "plugin_key": "library",
+                "backing_protocol": "mcp",
+            },
+        )
+        if existing is None:
+            return server
+        return server.model_copy(
+            update={
+                "server_id": existing.server_id,
+                "created_by": existing.created_by,
+                "created_at": existing.created_at,
+                "metadata": {**existing.metadata, **server.metadata},
+            }
+        )
+
+    async def _retriever_mcp_server(self, *, now: datetime) -> McpServerDefinition:
+        existing = await self._find_mcp_server_by_key(
+            scope="global",
+            organization_id=None,
+            server_key="retriever",
+        )
+        server = McpServerDefinition(
+            server_id=RETRIEVER_PLUGIN_MCP_SERVER_ID,
+            scope="global",
+            organization_id=None,
+            server_key="retriever",
+            display_name="Retriever",
+            description=(
+                "Managed System Plugin for explicit library indexing, retrieval search, "
+                "and cited context packs."
+            ),
+            transport_kind="streamable_http",
+            config={
+                "url": os.getenv("OPEN_TALON_RETRIEVER_MCP_URL", "http://127.0.0.1:8000/v1/mcp"),
+                "auth": {"kind": "open_talon_agent_identity"},
+                "capabilities": ["index", "status", "search", "context_pack"],
+                "docling_serve_url": os.getenv("OPEN_TALON_DOCLING_SERVE_URL"),
+                "managed_static_capabilities": True,
+            },
+            secret_config={},
+            trust_level="trusted",
+            enabled=True,
+            last_sync_status="completed",
+            last_synced_at=now,
+            created_by=SYSTEM_ACTOR_ID,
+            created_at=now,
+            updated_by=SYSTEM_ACTOR_ID,
+            updated_at=now,
+            metadata={
+                "seeded": True,
+                "managed": True,
+                "system_plugin": True,
+                "plugin_key": "retriever",
+                "backing_protocol": "mcp",
+            },
+        )
+        if existing is None:
+            return server
+        return server.model_copy(
+            update={
+                "server_id": existing.server_id,
+                "created_by": existing.created_by,
+                "created_at": existing.created_at,
+                "metadata": {**existing.metadata, **server.metadata},
+            }
+        )
+
+    @staticmethod
+    def _managed_plugin_tool_definitions(
+        *,
+        server_id: UUID,
+        tool_names: list[str],
+        description_prefix: str,
+        now: datetime,
+    ) -> list[McpToolDefinition]:
+        return [
+            McpToolDefinition(
+                server_id=server_id,
+                tool_name=name,
+                display_name=name,
+                description=f"{description_prefix} {name}.",
+                capability_hash="managed",
+                discovered_at=now,
+                metadata={"seeded": True, "managed": True},
+            )
+            for name in tool_names
+        ]
 
     @staticmethod
     def _steward_internal_mcp_binding(

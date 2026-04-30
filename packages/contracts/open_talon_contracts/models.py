@@ -50,7 +50,11 @@ WorkspaceAccessMode = Literal["none", "read_only", "read_write"]
 ExecutionInvocationKind = Literal["tool_call"]
 ExecutionStatus = Literal["queued", "running", "completed", "failed", "cancelled", "timed_out"]
 RegistryScope = Literal["global", "organization"]
-AssetScope = Literal["global", "organization", "workspace"]
+AssetScope = Literal["global", "organization", "project", "workspace"]
+LibraryScope = Literal["organization", "project", "workspace"]
+LibraryStatus = Literal["active", "archived"]
+LibraryItemStatus = Literal["active", "archived"]
+LibraryItemKind = Literal["file", "text", "webpage", "image", "diagram", "other"]
 AssetStorageBackend = Literal["minio"]
 AssetTargetType = Literal["system_agent", "system_tool", "workspace", "workspace_tool"]
 RetrievalIngestionJobStatus = Literal["queued", "running", "completed", "failed"]
@@ -509,6 +513,53 @@ class ProjectAccessBinding(BaseModel):
             if self.system_agent_id is None or self.user_id is not None:
                 raise ValueError("Agent project access requires system_agent_id only")
         return self
+
+
+class Library(BaseModel):
+    library_id: UUID
+    scope: LibraryScope
+    organization_id: UUID
+    project_id: UUID | None = None
+    workspace_id: UUID | None = None
+    slug: str
+    name: str
+    description: str | None = None
+    status: LibraryStatus = "active"
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LibraryItem(BaseModel):
+    item_id: UUID
+    library_id: UUID
+    asset_id: UUID
+    active_asset_version_id: UUID | None = None
+    item_kind: LibraryItemKind = "file"
+    title: str
+    source_uri: str | None = None
+    content_type: str | None = None
+    status: LibraryItemStatus = "active"
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class LibraryWorkspaceAttachment(BaseModel):
+    attachment_id: UUID
+    library_id: UUID
+    workspace_id: UUID
+    organization_id: UUID
+    project_id: UUID
+    enabled: bool = True
+    attached_by: UUID
+    attached_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class OrganizationMembership(BaseModel):
@@ -1220,6 +1271,7 @@ class GitRepository(BaseModel):
 class WorkspaceAsset(BaseModel):
     asset_id: UUID
     organization_id: UUID | None = None
+    project_id: UUID | None = None
     workspace_id: UUID | None = None
     scope: AssetScope = "global"
     asset_type: str
@@ -1256,6 +1308,7 @@ class RetrievalCorpus(BaseModel):
     corpus_id: UUID
     scope: AssetScope = "global"
     organization_id: UUID | None = None
+    project_id: UUID | None = None
     workspace_id: UUID | None = None
     name: str
     description: str | None = None
@@ -1270,6 +1323,7 @@ class RetrievalProfile(BaseModel):
     profile_id: UUID
     scope: AssetScope = "global"
     organization_id: UUID | None = None
+    project_id: UUID | None = None
     workspace_id: UUID | None = None
     name: str
     description: str | None = None
@@ -1302,6 +1356,7 @@ class RetrievalSource(BaseModel):
     corpus_id: UUID
     scope: AssetScope = "global"
     organization_id: UUID | None = None
+    project_id: UUID | None = None
     workspace_id: UUID | None = None
     asset_id: UUID
     active_asset_version_id: UUID | None = None
@@ -1345,6 +1400,7 @@ class RetrievalChunk(BaseModel):
     source_version_id: UUID | None = None
     scope: AssetScope = "global"
     organization_id: UUID | None = None
+    project_id: UUID | None = None
     workspace_id: UUID | None = None
     chunk_kind: RetrievalChunkKind = "text"
     ordinal: int = 0
@@ -1377,6 +1433,7 @@ class RetrievalIngestionJob(BaseModel):
     profile_id: UUID | None = None
     scope: AssetScope = "global"
     organization_id: UUID | None = None
+    project_id: UUID | None = None
     workspace_id: UUID | None = None
     status: RetrievalIngestionJobStatus = "queued"
     stage: RetrievalIngestionStage = "queued"
@@ -1394,6 +1451,7 @@ class RetrievalSearchRequest(BaseModel):
     corpus_ids: list[UUID] = Field(default_factory=list)
     scope: AssetScope | None = None
     organization_id: UUID | None = None
+    project_id: UUID | None = None
     workspace_id: UUID | None = None
     profile_id: UUID | None = None
     strategy: RetrievalSearchStrategy | None = None
@@ -1417,6 +1475,7 @@ class RetrievalRun(BaseModel):
     run_kind: RetrievalRunKind = "search"
     scope: AssetScope = "global"
     organization_id: UUID | None = None
+    project_id: UUID | None = None
     workspace_id: UUID | None = None
     profile_id: UUID | None = None
     query: str | None = None
@@ -1431,6 +1490,7 @@ class RetrievalContextPack(BaseModel):
     run_id: UUID | None = None
     scope: AssetScope = "global"
     organization_id: UUID | None = None
+    project_id: UUID | None = None
     workspace_id: UUID | None = None
     profile_id: UUID | None = None
     query: str
@@ -2567,6 +2627,71 @@ class CreateGitRepositoryRequest(BaseModel):
     forgejo_url: str | None = None
     clone_url: str | None = None
     default_branch: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateLibraryRequest(BaseModel):
+    actor: ParticipantInput
+    slug: str | None = None
+    name: str
+    description: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateLibraryRequest(BaseModel):
+    actor: ParticipantInput
+    slug: str | None = None
+    name: str | None = None
+    description: str | None = None
+    status: LibraryStatus | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class DeleteLibraryRequest(BaseModel):
+    actor: ParticipantInput
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateLibraryItemRequest(BaseModel):
+    actor: ParticipantInput
+    asset_id: UUID
+    asset_version_id: UUID | None = None
+    item_kind: LibraryItemKind = "file"
+    title: str
+    source_uri: str | None = None
+    content_type: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateLibraryTextItemRequest(BaseModel):
+    actor: ParticipantInput
+    title: str
+    content: str
+    item_kind: LibraryItemKind = "text"
+    logical_name: str | None = None
+    logical_path: str | None = None
+    source_uri: str | None = None
+    content_type: str = "text/markdown"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateLibraryItemRequest(BaseModel):
+    actor: ParticipantInput
+    title: str | None = None
+    status: LibraryItemStatus | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class AttachLibraryToWorkspaceRequest(BaseModel):
+    actor: ParticipantInput
+    enabled: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class IndexLibraryRequest(BaseModel):
+    actor: ParticipantInput
+    item_ids: list[UUID] = Field(default_factory=list)
+    profile_id: UUID | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

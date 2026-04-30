@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Users, Bot, FolderKanban, KeySquare, Server, Building2, Wrench } from 'lucide-react';
+import { LayoutDashboard, Users, Bot, FolderKanban, KeySquare, Server, Building2, Wrench, BookOpen } from 'lucide-react';
 
 const navItems = [
   { path: '/dashboard', label: 'Overview', icon: LayoutDashboard },
@@ -8,6 +8,7 @@ const navItems = [
   { path: '/organizations', label: 'Organizations', icon: Building2 },
   { path: '/swarm', label: 'Swarm Resources', icon: Bot },
   { path: '/workspaces', label: 'Workspaces', icon: FolderKanban },
+  { path: '/libraries', label: 'Libraries', icon: BookOpen },
   { path: '/tool-generation', label: 'Tool Generation', icon: Wrench },
   { path: '/providers', label: 'Providers', icon: Server },
   { path: '/api-keys', label: 'API Keys', icon: KeySquare },

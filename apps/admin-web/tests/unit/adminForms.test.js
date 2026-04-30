@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  buildLibraryIndexPayload,
+  buildLibraryMutation,
+  buildLibraryTextItemPayload,
   buildProjectMutation,
   buildMemoryProviderPayload,
   buildProviderMutation,
@@ -178,6 +181,43 @@ test('buildProjectMutation serializes creator owner editor viewer access subject
     { system_agent_id: '44444444-4444-4444-4444-444444444444' },
   ]);
   assert.deepEqual(payload.metadata, { source: 'unit' });
+});
+
+test('buildLibraryMutation trims optional slug and parses metadata', () => {
+  const payload = buildLibraryMutation(actor, {
+    slug: ' references ',
+    name: 'References',
+    description: ' Shared reference store ',
+    metadata: '{"owner":"qa"}',
+  });
+
+  assert.equal(payload.slug, 'references');
+  assert.equal(payload.description, 'Shared reference store');
+  assert.deepEqual(payload.metadata, { owner: 'qa' });
+});
+
+test('buildLibraryTextItemPayload preserves content and defaults content type', () => {
+  const payload = buildLibraryTextItemPayload(actor, {
+    title: 'Architecture Note',
+    content: '# Note',
+    item_kind: 'text',
+    logical_name: '',
+    source_uri: ' https://example.test/note ',
+    content_type: '',
+    metadata: '{}',
+  });
+
+  assert.equal(payload.content, '# Note');
+  assert.equal(payload.content_type, 'text/markdown');
+  assert.equal(payload.logical_name, null);
+  assert.equal(payload.source_uri, 'https://example.test/note');
+});
+
+test('buildLibraryIndexPayload keeps indexing explicit', () => {
+  const payload = buildLibraryIndexPayload(actor, ['item-1', 'item-2']);
+
+  assert.deepEqual(payload.item_ids, ['item-1', 'item-2']);
+  assert.deepEqual(payload.metadata, {});
 });
 
 test('buildProviderMutation builds organization-scoped llm requests', () => {

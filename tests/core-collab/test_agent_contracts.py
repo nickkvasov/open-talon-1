@@ -3292,6 +3292,22 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
     assert web_search.last_sync_status == "not_synced"
     assert web_search.metadata["system_plugin"] is True
     assert web_search.metadata["backing_protocol"] == "mcp"
+    library_plugin = next(
+        server for server in repository._mcp_servers.values() if server.server_key == "library"
+    )
+    retriever_plugin = next(
+        server for server in repository._mcp_servers.values() if server.server_key == "retriever"
+    )
+    assert library_plugin.display_name == "Library"
+    assert retriever_plugin.display_name == "Retriever"
+    assert library_plugin.config["url"] == "http://127.0.0.1:8000/v1/mcp"
+    assert retriever_plugin.config["docling_serve_url"] is None
+    assert {"library.libraries.create", "library.items.create_text"}.issubset(
+        {tool.tool_name for tool in repository._mcp_server_tools[library_plugin.server_id]}
+    )
+    assert {"retriever.library.index", "retriever.search"}.issubset(
+        {tool.tool_name for tool in repository._mcp_server_tools[retriever_plugin.server_id]}
+    )
 
     steward = next(agent for agent in repository._agents.values() if agent.agent_key == "steward")
     steward_binding = repository._agent_internal_mcp_servers[

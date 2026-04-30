@@ -109,7 +109,7 @@ Important implications:
 - client apps should not treat `participant_id` as a global human identity
 - authenticated human requests may include an `actor` object for compatibility, but the gateway derives the effective human actor from the bearer token
 - agent identities authenticate with client credentials issued by the configured OIDC provider and are linked back to `system_agents` through `agent_identities`
-- when `MCP_ENABLED=true`, the gateway-mounted MCP server at `/v1/mcp` is OIDC-only and exposes permission-scoped system API operations across organization, project, workspace, thread, memory, retrieval, runtime overview, audit read/verify, catalog/provider lookup, IAM lookup, and agent authoring surfaces, not Open Talon catalog/runtime tools
+- when `MCP_ENABLED=true`, the gateway-mounted MCP server at `/v1/mcp` is OIDC-only and exposes permission-scoped system API operations across organization, project, workspace, thread, memory, library, retrieval/Retriever, runtime overview, audit read/verify, catalog/provider lookup, IAM lookup, and agent authoring surfaces, not Open Talon catalog/runtime tools
 - the managed `open_talon_control_plane` MCP server uses agent identity client credentials so operational agents can call allowlisted gateway MCP operations through runtime tool execution
 - the current MCP slice exposes read-only session resources at `ot://session/identity`, `ot://session/permissions`, and `ot://session/scope`
 - organization membership and membership roles live in Postgres, not in Keycloak claims
@@ -254,9 +254,9 @@ See [apps/admin-web/README.md](./apps/admin-web/README.md) for the full browser 
 
 The current defaults are aimed at a single medium-sized internal company deployment.
 
-- global reads and writes for system agents, system tools, global Git repositories, global file/retrieval flows, global asset publish/link/activate flows, provider management, and global IAM management require the matching global IAM permission or platform-admin bootstrap access
+- global reads and writes for system agents, system tools, global Git repositories, global file/retrieval flows, global asset publish/link/activate flows, provider management, library/Retriever plugin use, and global IAM management require the matching global IAM permission or platform-admin bootstrap access
 - organization CRUD, organization membership changes, and organization-scoped IAM management require the relevant organization permissions, which are granted by membership baseline roles or explicit IAM role bindings
-- workspace role-definition changes, workspace agent attachment/update/removal, workspace tool attach/update/delete, workspace Git repository creation, workspace asset publishing, and workspace retrieval operations require the matching workspace-scoped IAM permission together with participant attachment
+- workspace role-definition changes, workspace agent attachment/update/removal, workspace tool attach/update/delete, workspace Git repository creation, workspace asset publishing, workspace library management/attachments, and workspace retrieval operations require the matching workspace-scoped IAM permission together with participant attachment
 - Tinker approval requires both `tool_generation.review` and `tool_catalog.write` in the requested publication scope
 - human workspace access depends on organization membership first, then workspace participation
 - workspace catalogs resolve as the union of platform-global resources and same-organization resources
@@ -344,7 +344,7 @@ System Plugins use a separate external-capability model. In v1 each System Plugi
 
 System Plugin capabilities are rendered and executed as external MCP-backed capabilities. The public API uses plugin-shaped fields such as `plugin_id`, `plugin_key`, and `backing_protocol`; MCP `server_id` and `server_key` remain protocol-specific backing details. System Plugins are never inserted into `system_tools`, never attached through `workspace_tools`, never published by Tinker, and never auto-attached to workspaces. The gateway-mounted `/v1/mcp` endpoint remains the inbound Open Talon system API adapter and does not import or proxy these external System Plugins.
 
-The managed `web_search` System Plugin is seeded globally. Start its local backing services with `./open-talon start --web-search`, then sync capabilities from the admin console or `POST /v1/system-plugins/{plugin_id}/sync`. The launcher starts SearXNG as the optional Docker Compose `searxng` container under the `web-search` profile, waits for it to become reachable, and then starts the local `web-search-mcp` bridge process. It uses SearXNG for search and Crawl4AI for clean Markdown extraction. Parsed pages are returned by default; asset-candidate output is guarded by explicit plugin attachment metadata and `workspace.assets.publish`.
+The managed `web_search`, `library`, and `retriever` System Plugins are seeded globally. Start web search backing services with `./open-talon start --web-search`, then sync capabilities from the admin console or `POST /v1/system-plugins/{plugin_id}/sync`. The launcher starts SearXNG as the optional Docker Compose `searxng` container under the `web-search` profile, waits for it to become reachable, and then starts the local `web-search-mcp` bridge process. It uses SearXNG for search and Crawl4AI for clean Markdown extraction. Parsed pages are returned by default; asset-candidate output is guarded by explicit plugin attachment metadata and `workspace.assets.publish`. Library and Retriever use the gateway-mounted MCP adapter as managed plugin backends: `library.*` tools manage scoped libraries and items, while `retriever.*` tools explicitly index and search selected library content.
 
 This means a tool is defined once at the platform or organization layer, then added to any compatible workspace that wants to advertise it to attached agents.
 
@@ -436,8 +436,13 @@ Common file and retrieval endpoints:
 
 - `POST /v1/files`, `POST /v1/organizations/{organization_id}/files`, and `POST /v1/workspaces/{workspace_id}/files`: upload immutable file asset versions to MinIO-backed storage
 - `GET /v1/files`, `GET /v1/organizations/{organization_id}/files`, and `GET /v1/workspaces/{workspace_id}/files`: list visible file assets
-- `POST /v1/retrieval/corpora`, `POST /v1/organizations/{organization_id}/retrieval/corpora`, and `POST /v1/workspaces/{workspace_id}/retrieval/corpora`: create scoped retrieval corpora
-- `POST /v1/retrieval/sources`, `POST /v1/organizations/{organization_id}/retrieval/sources`, and `POST /v1/workspaces/{workspace_id}/retrieval/sources`: link file assets into corpora
+- `GET/POST /v1/organizations/{organization_id}/libraries`, `GET/POST /v1/organizations/{organization_id}/projects/{project_id}/libraries`, and `GET/POST /v1/workspaces/{workspace_id}/libraries`: manage multiple libraries owned by an organization, project, or workspace
+- `GET/POST /v1/libraries/{library_id}/items`, `POST /v1/libraries/{library_id}/items/upload`, and `POST /v1/libraries/{library_id}/items/text`: add immutable uploaded, text, webpage, picture, and diagram references to a library
+- `GET /v1/library-items/{item_id}/download`: generate an authorized library item download URL
+- `PUT/DELETE /v1/workspaces/{workspace_id}/library-attachments/{library_id}`: attach or detach organization/project libraries for workspace use
+- `POST /v1/libraries/{library_id}/index`: explicitly queue Retriever indexing for a library or selected library items
+- `POST /v1/retrieval/corpora`, `POST /v1/organizations/{organization_id}/retrieval/corpora`, `POST /v1/organizations/{organization_id}/projects/{project_id}/retrieval/corpora`, and `POST /v1/workspaces/{workspace_id}/retrieval/corpora`: create scoped retrieval corpora
+- `POST /v1/retrieval/sources`, `POST /v1/organizations/{organization_id}/retrieval/sources`, `POST /v1/organizations/{organization_id}/projects/{project_id}/retrieval/sources`, and `POST /v1/workspaces/{workspace_id}/retrieval/sources`: link file assets into corpora
 - `POST /v1/.../retrieval/corpora/{corpus_id}/jobs`: enqueue ingestion for a retrieval source version
 - `POST /v1/.../retrieval/search` and `POST /v1/.../retrieval/context-packs`: search indexed chunks and create cited context packs
 

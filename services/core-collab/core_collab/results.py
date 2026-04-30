@@ -13,6 +13,9 @@ from .contracts import (
     EventEnvelope,
     GitRepository,
     InteractionRequestDetail,
+    Library,
+    LibraryItem,
+    LibraryWorkspaceAttachment,
     LlmProviderDefinition,
     MemoryEntry,
     MemoryProviderDefinition,
@@ -171,6 +174,14 @@ class WorkspaceAssetCommandResult(CommandResult):
 
 
 @dataclass
+class LibraryCommandResult(CommandResult):
+    library: Library | None = None
+    item: LibraryItem | None = None
+    attachment: LibraryWorkspaceAttachment | None = None
+    jobs: list[RetrievalIngestionJob] = field(default_factory=list)
+
+
+@dataclass
 class RetrievalCommandResult(CommandResult):
     corpus: RetrievalCorpus | None = None
     profile: RetrievalProfile | None = None
@@ -241,6 +252,7 @@ __all__ = [
     "IamRoleCommandResult",
     "InteractionRequestCommandResult",
     "LeaseReconciliationResult",
+    "LibraryCommandResult",
     "LlmProviderCommandResult",
     "MemoryCommandResult",
     "MemoryProviderCommandResult",

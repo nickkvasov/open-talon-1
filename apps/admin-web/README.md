@@ -4,6 +4,8 @@ This app includes a Playwright browser suite that signs in through the default l
 
 Agent catalog management supports both manual database-backed definitions and Git-managed definitions. Git-managed agents are authored as Forgejo bundles and published through gateway APIs into the active `system_agents` projection with immutable `agent_definition_versions` history. The Swarm Resources page exposes validation, publish, archive upload, and version activation controls for Git-managed bundles.
 
+The Libraries page manages organization, project, and workspace libraries, adds text or uploaded file items, attaches organization/project libraries to workspaces, and queues explicit retriever indexing jobs.
+
 ## Prerequisites
 
 Start the local backend stack from the repo root:
@@ -111,6 +113,7 @@ For a deployed environment, replace the generated `runtime-config.json` with val
 - organization page load and membership management surface
 - API key create and revoke flow
 - project create with optional owner/editor/viewer seed bindings plus workspace create and delete flow inside the selected organization
+- library scoped create/list, text/upload item add, workspace attachment, and manual indexing controls
 - swarm resource `Platform Global` and `Organization` scope switching
 - swarm resource agent create/delete flow
 - swarm resource tool create/delete flow

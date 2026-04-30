@@ -44,12 +44,46 @@ def test_mcp_retrieval_operations_declare_scopes_and_permissions() -> None:
         "retrieval.search",
         "retrieval.context_pack.create",
         "retrieval.context_pack.get",
+        "retriever.ingestion_jobs.list",
+        "retriever.search",
+        "retriever.context_pack.create",
+        "retriever.context_pack.get",
     }
 
     for name in expected:
         operation = OPERATION_REGISTRY[name]
-        assert operation.allowed_scopes == frozenset({"global", "organization", "workspace"})
+        assert operation.allowed_scopes == frozenset({"global", "organization", "project", "workspace"})
         assert operation.required_permission in {"retrieval.read", "retrieval.search"}
+        assert operation.required_project_permission in {"retrieval.read", "retrieval.search"}
+        assert operation.requires_workspace_actor is True
+
+
+def test_mcp_library_operations_declare_scopes_and_permissions() -> None:
+    scoped_operations = {
+        "library.libraries.list": ("library.read", "library.read"),
+        "library.libraries.create": ("library.write", "library.write"),
+        "library.libraries.get": ("library.read", "library.read"),
+        "library.libraries.update": ("library.write", "library.write"),
+        "library.libraries.archive": ("library.write", "library.write"),
+        "library.items.list": ("library.read", "library.read"),
+        "library.items.create": ("library.write", "library.write"),
+        "library.items.create_text": ("library.write", "library.write"),
+        "library.items.download_url": ("library.read", "library.read"),
+        "retriever.library.index": ("library.index", "library.index"),
+    }
+
+    for name, (identity_permission, project_permission) in scoped_operations.items():
+        operation = OPERATION_REGISTRY[name]
+        assert operation.allowed_scopes == frozenset({"organization", "project", "workspace"})
+        assert operation.required_permission == identity_permission
+        assert operation.required_project_permission == project_permission
+        assert operation.requires_workspace_actor is True
+
+    for name in {"library.workspace_attachments.attach", "library.workspace_attachments.detach"}:
+        operation = OPERATION_REGISTRY[name]
+        assert operation.allowed_scopes == frozenset({"workspace"})
+        assert operation.required_permission_type == "workspace"
+        assert operation.required_permission == "library.attach"
         assert operation.requires_workspace_actor is True
 
 

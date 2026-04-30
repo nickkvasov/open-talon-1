@@ -46,6 +46,9 @@ from .contracts import (
     InteractionRequestTarget,
     HumanRoleBinding,
     IamRoleDefinition,
+    Library,
+    LibraryItem,
+    LibraryWorkspaceAttachment,
     Membership,
     MethodicExecution,
     MethodicExecutionAssignment,
@@ -1919,19 +1922,25 @@ class CollaborationRepository:
         self, conn: asyncpg.Connection, asset: WorkspaceAsset
     ) -> None:
         organization_id = asset.organization_id
+        project_id = asset.project_id
         if organization_id is None and asset.workspace_id is not None:
             organization_id = await self._workspace_organization_id(conn, asset.workspace_id)
+        if project_id is None and asset.workspace_id is not None:
+            project_id = await self._workspace_project_id(conn, asset.workspace_id)
+        if organization_id is None and project_id is not None:
+            organization_id = await self._project_organization_id(conn, project_id)
         if organization_id is None and asset.scope == "organization":
             organization_id = await self._default_organization_id(conn)
         await conn.execute(
             """
             INSERT INTO workspace_assets (
-                asset_id, organization_id, workspace_id, scope, asset_type, logical_name, logical_path,
+                asset_id, organization_id, project_id, workspace_id, scope, asset_type, logical_name, logical_path,
                 title, description, created_by, created_at, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             ON CONFLICT (asset_id) DO UPDATE
                 SET organization_id = EXCLUDED.organization_id,
+                    project_id = EXCLUDED.project_id,
                     workspace_id = EXCLUDED.workspace_id,
                     scope = EXCLUDED.scope,
                     asset_type = EXCLUDED.asset_type,
@@ -1944,6 +1953,7 @@ class CollaborationRepository:
             """,
             asset.asset_id,
             organization_id,
+            project_id,
             asset.workspace_id,
             asset.scope,
             asset.asset_type,
@@ -2133,6 +2143,38 @@ class CollaborationRepository:
             return await self._default_organization_id(conn)
         return row["organization_id"]
 
+    async def _workspace_project_id(
+        self,
+        conn: asyncpg.Connection | asyncpg.Pool,
+        workspace_id: UUID,
+    ) -> UUID | None:
+        row = await conn.fetchrow(
+            """
+            SELECT project_id
+            FROM workspaces
+            WHERE workspace_id = $1
+            """,
+            workspace_id,
+        )
+        return row["project_id"] if row is not None else None
+
+    async def _project_organization_id(
+        self,
+        conn: asyncpg.Connection | asyncpg.Pool,
+        project_id: UUID,
+    ) -> UUID:
+        row = await conn.fetchrow(
+            """
+            SELECT organization_id
+            FROM projects
+            WHERE project_id = $1
+            """,
+            project_id,
+        )
+        if row is None:
+            raise ValueError(f"Project {project_id} not found")
+        return row["organization_id"]
+
     async def _asset_organization_id(
         self,
         conn: asyncpg.Connection | asyncpg.Pool,
@@ -2152,11 +2194,14 @@ class CollaborationRepository:
         self,
         *,
         organization_id: UUID | None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
         asset_id: UUID | None = None,
     ) -> UUID | None:
         if organization_id is not None:
             return organization_id
+        if project_id is not None:
+            return await self._project_organization_id(self._pool, project_id)
         if workspace_id is not None:
             return await self._workspace_organization_id(self._pool, workspace_id)
         if asset_id is not None:
@@ -2170,11 +2215,14 @@ class CollaborationRepository:
         scope: str,
         organization_id: UUID | None,
         workspace_id: UUID | None,
+        project_id: UUID | None = None,
     ) -> UUID | None:
         if scope == "global":
             return None
         if organization_id is not None:
             return organization_id
+        if project_id is not None:
+            return await self._project_organization_id(conn, project_id)
         if workspace_id is not None:
             return await self._workspace_organization_id(conn, workspace_id)
         if scope == "organization":
@@ -4009,7 +4057,7 @@ class CollaborationRepository:
     async def fetch_workspace_asset(self, asset_id: UUID) -> WorkspaceAsset | None:
         row = await self._pool.fetchrow(
             """
-            SELECT asset_id, organization_id, workspace_id, scope, asset_type, logical_name, logical_path,
+            SELECT asset_id, organization_id, project_id, workspace_id, scope, asset_type, logical_name, logical_path,
                    title, description, created_by, created_at, updated_at, metadata
             FROM workspace_assets
             WHERE asset_id = $1
@@ -4024,17 +4072,22 @@ class CollaborationRepository:
         scope: str,
         organization_id: UUID | None,
         workspace_id: UUID | None,
+        project_id: UUID | None = None,
         logical_name: str,
     ) -> WorkspaceAsset | None:
         effective_organization_id = organization_id
-        if scope in {"organization", "workspace"}:
+        effective_project_id = project_id
+        if scope in {"organization", "project", "workspace"}:
             effective_organization_id = await self._effective_organization_filter(
                 organization_id=organization_id,
+                project_id=project_id,
                 workspace_id=workspace_id,
             )
+        if scope == "workspace" and workspace_id is not None and effective_project_id is None:
+            effective_project_id = await self._workspace_project_id(self._pool, workspace_id)
         row = await self._pool.fetchrow(
             """
-            SELECT asset_id, organization_id, workspace_id, scope, asset_type, logical_name, logical_path,
+            SELECT asset_id, organization_id, project_id, workspace_id, scope, asset_type, logical_name, logical_path,
                    title, description, created_by, created_at, updated_at, metadata
             FROM workspace_assets
             WHERE scope = $1
@@ -4043,13 +4096,18 @@ class CollaborationRepository:
                  OR organization_id = $2
               )
               AND (
-                    ($3::uuid IS NULL AND workspace_id IS NULL)
-                 OR workspace_id = $3
+                    ($3::uuid IS NULL AND project_id IS NULL)
+                 OR project_id = $3
               )
-              AND logical_name = $4
+              AND (
+                    ($4::uuid IS NULL AND workspace_id IS NULL)
+                 OR workspace_id = $4
+              )
+              AND logical_name = $5
             """,
             scope,
             effective_organization_id,
+            effective_project_id,
             workspace_id,
             logical_name,
         )
@@ -4060,17 +4118,21 @@ class CollaborationRepository:
         *,
         scope: str | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[WorkspaceAsset]:
         effective_organization_id = organization_id
-        if scope in {None, "organization", "workspace"} and workspace_id is not None:
+        effective_project_id = project_id
+        if scope in {None, "organization", "project", "workspace"} and workspace_id is not None:
             effective_organization_id = await self._effective_organization_filter(
                 organization_id=organization_id,
+                project_id=project_id,
                 workspace_id=workspace_id,
             )
+            effective_project_id = await self._workspace_project_id(self._pool, workspace_id)
         rows = await self._pool.fetch(
             """
-            SELECT asset_id, organization_id, workspace_id, scope, asset_type, logical_name, logical_path,
+            SELECT asset_id, organization_id, project_id, workspace_id, scope, asset_type, logical_name, logical_path,
                    title, description, created_by, created_at, updated_at, metadata
             FROM workspace_assets
             WHERE ($1::text IS NULL OR scope = $1)
@@ -4079,13 +4141,18 @@ class CollaborationRepository:
                  OR organization_id = $2
               )
               AND (
-                    ($3::uuid IS NULL AND workspace_id IS NULL)
-                 OR workspace_id = $3
+                    ($3::uuid IS NULL AND project_id IS NULL)
+                 OR project_id = $3
+              )
+              AND (
+                    ($4::uuid IS NULL AND workspace_id IS NULL)
+                 OR workspace_id = $4
               )
             ORDER BY created_at ASC
             """,
             scope,
             effective_organization_id,
+            effective_project_id,
             workspace_id,
         )
         return [self._workspace_asset_from_row(row) for row in rows]
@@ -4104,21 +4171,329 @@ class CollaborationRepository:
         )
         return [self._workspace_asset_version_from_row(row) for row in rows]
 
+    async def upsert_library(self, conn: asyncpg.Connection, library: Library) -> None:
+        organization_id = library.organization_id
+        project_id = library.project_id
+        if library.scope in {"project", "workspace"} and project_id is None and library.workspace_id is not None:
+            project_id = await self._workspace_project_id(conn, library.workspace_id)
+        if organization_id is None:
+            organization_id = await self._effective_organization_for_scope(
+                conn,
+                scope=library.scope,
+                organization_id=library.organization_id,
+                project_id=project_id,
+                workspace_id=library.workspace_id,
+            )
+        await conn.execute(
+            """
+            INSERT INTO libraries (
+                library_id, scope, organization_id, project_id, workspace_id, slug, name,
+                description, status, created_by, created_at, updated_by, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (library_id) DO UPDATE
+                SET scope = EXCLUDED.scope,
+                    organization_id = EXCLUDED.organization_id,
+                    project_id = EXCLUDED.project_id,
+                    workspace_id = EXCLUDED.workspace_id,
+                    slug = EXCLUDED.slug,
+                    name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    status = EXCLUDED.status,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            library.library_id,
+            library.scope,
+            organization_id,
+            project_id,
+            library.workspace_id,
+            library.slug,
+            library.name,
+            library.description,
+            library.status,
+            library.created_by,
+            library.created_at,
+            library.updated_by,
+            library.updated_at,
+            self._json_dumps(library.metadata),
+        )
+
+    async def fetch_library(self, library_id: UUID) -> Library | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT library_id, scope, organization_id, project_id, workspace_id, slug, name,
+                   description, status, created_by, created_at, updated_by, updated_at, metadata
+            FROM libraries
+            WHERE library_id = $1
+            """,
+            library_id,
+        )
+        return self._library_from_row(row) if row else None
+
+    async def fetch_library_by_slug(
+        self,
+        *,
+        scope: str,
+        organization_id: UUID,
+        project_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        slug: str,
+    ) -> Library | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT library_id, scope, organization_id, project_id, workspace_id, slug, name,
+                   description, status, created_by, created_at, updated_by, updated_at, metadata
+            FROM libraries
+            WHERE scope = $1
+              AND organization_id = $2
+              AND (($3::uuid IS NULL AND project_id IS NULL) OR project_id = $3)
+              AND (($4::uuid IS NULL AND workspace_id IS NULL) OR workspace_id = $4)
+              AND slug = $5
+            """,
+            scope,
+            organization_id,
+            project_id,
+            workspace_id,
+            slug,
+        )
+        return self._library_from_row(row) if row else None
+
+    async def list_libraries(
+        self,
+        *,
+        scope: str | None = None,
+        organization_id: UUID | None = None,
+        project_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        include_archived: bool = False,
+        include_workspace_attachments: bool = False,
+    ) -> list[Library]:
+        effective_organization_id = organization_id
+        effective_project_id = project_id
+        if workspace_id is not None:
+            if effective_organization_id is None:
+                effective_organization_id = await self._workspace_organization_id(self._pool, workspace_id)
+            if effective_project_id is None:
+                effective_project_id = await self._workspace_project_id(self._pool, workspace_id)
+        rows = await self._pool.fetch(
+            """
+            WITH directly_owned AS (
+                SELECT l.library_id, l.scope, l.organization_id, l.project_id, l.workspace_id,
+                       l.slug, l.name, l.description, l.status, l.created_by, l.created_at,
+                       l.updated_by, l.updated_at, l.metadata
+                FROM libraries l
+                WHERE ($1::text IS NULL OR l.scope = $1)
+                  AND (($2::uuid IS NULL AND l.organization_id IS NULL) OR l.organization_id = $2)
+                  AND (($3::uuid IS NULL AND l.project_id IS NULL) OR l.project_id = $3)
+                  AND (($4::uuid IS NULL AND l.workspace_id IS NULL) OR l.workspace_id = $4)
+                  AND ($5::boolean OR l.status <> 'archived')
+            ),
+            attached AS (
+                SELECT l.library_id, l.scope, l.organization_id, l.project_id, l.workspace_id,
+                       l.slug, l.name, l.description, l.status, l.created_by, l.created_at,
+                       l.updated_by, l.updated_at, l.metadata
+                FROM library_workspace_attachments a
+                JOIN libraries l ON l.library_id = a.library_id
+                WHERE $6::boolean
+                  AND $4::uuid IS NOT NULL
+                  AND a.workspace_id = $4
+                  AND a.enabled = TRUE
+                  AND ($5::boolean OR l.status <> 'archived')
+            )
+            SELECT DISTINCT ON (library_id) *
+            FROM (
+                SELECT * FROM directly_owned
+                UNION ALL
+                SELECT * FROM attached
+            ) visible
+            ORDER BY library_id, created_at ASC
+            """,
+            scope,
+            effective_organization_id,
+            effective_project_id,
+            workspace_id,
+            include_archived,
+            include_workspace_attachments,
+        )
+        return [self._library_from_row(row) for row in rows]
+
+    async def upsert_library_item(self, conn: asyncpg.Connection, item: LibraryItem) -> None:
+        await conn.execute(
+            """
+            INSERT INTO library_items (
+                item_id, library_id, asset_id, active_asset_version_id, item_kind,
+                title, source_uri, content_type, status, created_by, created_at,
+                updated_by, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (item_id) DO UPDATE
+                SET library_id = EXCLUDED.library_id,
+                    asset_id = EXCLUDED.asset_id,
+                    active_asset_version_id = EXCLUDED.active_asset_version_id,
+                    item_kind = EXCLUDED.item_kind,
+                    title = EXCLUDED.title,
+                    source_uri = EXCLUDED.source_uri,
+                    content_type = EXCLUDED.content_type,
+                    status = EXCLUDED.status,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            item.item_id,
+            item.library_id,
+            item.asset_id,
+            item.active_asset_version_id,
+            item.item_kind,
+            item.title,
+            item.source_uri,
+            item.content_type,
+            item.status,
+            item.created_by,
+            item.created_at,
+            item.updated_by,
+            item.updated_at,
+            self._json_dumps(item.metadata),
+        )
+
+    async def fetch_library_item(self, item_id: UUID) -> LibraryItem | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT item_id, library_id, asset_id, active_asset_version_id, item_kind,
+                   title, source_uri, content_type, status, created_by, created_at,
+                   updated_by, updated_at, metadata
+            FROM library_items
+            WHERE item_id = $1
+            """,
+            item_id,
+        )
+        return self._library_item_from_row(row) if row else None
+
+    async def list_library_items(
+        self,
+        library_id: UUID,
+        *,
+        item_ids: Sequence[UUID] | None = None,
+        include_archived: bool = False,
+    ) -> list[LibraryItem]:
+        rows = await self._pool.fetch(
+            """
+            SELECT item_id, library_id, asset_id, active_asset_version_id, item_kind,
+                   title, source_uri, content_type, status, created_by, created_at,
+                   updated_by, updated_at, metadata
+            FROM library_items
+            WHERE library_id = $1
+              AND ($2::uuid[] IS NULL OR item_id = ANY($2::uuid[]))
+              AND ($3::boolean OR status <> 'archived')
+            ORDER BY created_at ASC
+            """,
+            library_id,
+            list(item_ids) if item_ids else None,
+            include_archived,
+        )
+        return [self._library_item_from_row(row) for row in rows]
+
+    async def upsert_library_workspace_attachment(
+        self,
+        conn: asyncpg.Connection,
+        attachment: LibraryWorkspaceAttachment,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO library_workspace_attachments (
+                attachment_id, library_id, workspace_id, organization_id, project_id,
+                enabled, attached_by, attached_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (workspace_id, library_id) DO UPDATE
+                SET enabled = EXCLUDED.enabled,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            attachment.attachment_id,
+            attachment.library_id,
+            attachment.workspace_id,
+            attachment.organization_id,
+            attachment.project_id,
+            attachment.enabled,
+            attachment.attached_by,
+            attachment.attached_at,
+            attachment.updated_at,
+            self._json_dumps(attachment.metadata),
+        )
+
+    async def fetch_library_workspace_attachment(
+        self,
+        *,
+        workspace_id: UUID,
+        library_id: UUID,
+    ) -> LibraryWorkspaceAttachment | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT attachment_id, library_id, workspace_id, organization_id, project_id,
+                   enabled, attached_by, attached_at, updated_at, metadata
+            FROM library_workspace_attachments
+            WHERE workspace_id = $1 AND library_id = $2
+            """,
+            workspace_id,
+            library_id,
+        )
+        return self._library_workspace_attachment_from_row(row) if row else None
+
+    async def list_library_workspace_attachments(
+        self,
+        workspace_id: UUID,
+        *,
+        enabled_only: bool = False,
+    ) -> list[LibraryWorkspaceAttachment]:
+        rows = await self._pool.fetch(
+            """
+            SELECT attachment_id, library_id, workspace_id, organization_id, project_id,
+                   enabled, attached_by, attached_at, updated_at, metadata
+            FROM library_workspace_attachments
+            WHERE workspace_id = $1
+              AND ($2::boolean = FALSE OR enabled = TRUE)
+            ORDER BY attached_at ASC
+            """,
+            workspace_id,
+            enabled_only,
+        )
+        return [self._library_workspace_attachment_from_row(row) for row in rows]
+
+    async def delete_library_workspace_attachment(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        workspace_id: UUID,
+        library_id: UUID,
+    ) -> bool:
+        status = await conn.execute(
+            """
+            DELETE FROM library_workspace_attachments
+            WHERE workspace_id = $1 AND library_id = $2
+            """,
+            workspace_id,
+            library_id,
+        )
+        return status.endswith("1")
+
     async def upsert_retrieval_profile(
         self, conn: asyncpg.Connection, profile: RetrievalProfile
     ) -> None:
         organization_id = profile.organization_id
-        if profile.scope in {"organization", "workspace"}:
+        if profile.scope in {"organization", "project", "workspace"}:
             organization_id = await self._effective_organization_for_scope(
                 conn,
                 scope=profile.scope,
                 organization_id=profile.organization_id,
+                project_id=profile.project_id,
                 workspace_id=profile.workspace_id,
             )
         await conn.execute(
             """
             INSERT INTO retrieval_profiles (
-                profile_id, scope, organization_id, workspace_id, name, description,
+                profile_id, scope, organization_id, project_id, workspace_id, name, description,
                 embedding_provider_key, embedding_model, embedding_dimension,
                 vision_provider_key, vision_model, visual_extraction_enabled,
                 vector_store_provider_key, chunking_strategy, chunk_size_tokens,
@@ -4127,17 +4502,18 @@ class CollaborationRepository:
                 citation_strictness, created_by, created_at, updated_at, metadata
             )
             VALUES (
-                $1, $2, $3, $4, $5, $6,
-                $7, $8, $9,
-                $10, $11, $12,
-                $13, $14, $15,
-                $16, $17, $18, $19,
-                $20, $21, $22, $23,
-                $24, $25, $26, $27, $28
+                $1, $2, $3, $4, $5, $6, $7,
+                $8, $9, $10,
+                $11, $12, $13,
+                $14, $15, $16,
+                $17, $18, $19, $20,
+                $21, $22, $23, $24,
+                $25, $26, $27, $28, $29
             )
             ON CONFLICT (profile_id) DO UPDATE
                 SET scope = EXCLUDED.scope,
                     organization_id = EXCLUDED.organization_id,
+                    project_id = EXCLUDED.project_id,
                     workspace_id = EXCLUDED.workspace_id,
                     name = EXCLUDED.name,
                     description = EXCLUDED.description,
@@ -4165,6 +4541,7 @@ class CollaborationRepository:
             profile.profile_id,
             profile.scope,
             organization_id,
+            profile.project_id,
             profile.workspace_id,
             profile.name,
             profile.description,
@@ -4196,23 +4573,25 @@ class CollaborationRepository:
         self, conn: asyncpg.Connection, corpus: RetrievalCorpus
     ) -> None:
         organization_id = corpus.organization_id
-        if corpus.scope in {"organization", "workspace"}:
+        if corpus.scope in {"organization", "project", "workspace"}:
             organization_id = await self._effective_organization_for_scope(
                 conn,
                 scope=corpus.scope,
                 organization_id=corpus.organization_id,
+                project_id=corpus.project_id,
                 workspace_id=corpus.workspace_id,
             )
         await conn.execute(
             """
             INSERT INTO retrieval_corpora (
-                corpus_id, scope, organization_id, workspace_id, name, description,
+                corpus_id, scope, organization_id, project_id, workspace_id, name, description,
                 default_profile_id, created_by, created_at, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (corpus_id) DO UPDATE
                 SET scope = EXCLUDED.scope,
                     organization_id = EXCLUDED.organization_id,
+                    project_id = EXCLUDED.project_id,
                     workspace_id = EXCLUDED.workspace_id,
                     name = EXCLUDED.name,
                     description = EXCLUDED.description,
@@ -4223,6 +4602,7 @@ class CollaborationRepository:
             corpus.corpus_id,
             corpus.scope,
             organization_id,
+            corpus.project_id,
             corpus.workspace_id,
             corpus.name,
             corpus.description,
@@ -4237,25 +4617,27 @@ class CollaborationRepository:
         self, conn: asyncpg.Connection, source: RetrievalSource
     ) -> None:
         organization_id = source.organization_id
-        if source.scope in {"organization", "workspace"}:
+        if source.scope in {"organization", "project", "workspace"}:
             organization_id = await self._effective_organization_for_scope(
                 conn,
                 scope=source.scope,
                 organization_id=source.organization_id,
+                project_id=source.project_id,
                 workspace_id=source.workspace_id,
             )
         await conn.execute(
             """
             INSERT INTO retrieval_sources (
-                source_id, corpus_id, scope, organization_id, workspace_id, asset_id,
+                source_id, corpus_id, scope, organization_id, project_id, workspace_id, asset_id,
                 active_asset_version_id, title, source_type, content_type,
                 created_by, created_at, updated_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             ON CONFLICT (source_id) DO UPDATE
                 SET corpus_id = EXCLUDED.corpus_id,
                     scope = EXCLUDED.scope,
                     organization_id = EXCLUDED.organization_id,
+                    project_id = EXCLUDED.project_id,
                     workspace_id = EXCLUDED.workspace_id,
                     asset_id = EXCLUDED.asset_id,
                     active_asset_version_id = EXCLUDED.active_asset_version_id,
@@ -4269,6 +4651,7 @@ class CollaborationRepository:
             source.corpus_id,
             source.scope,
             organization_id,
+            source.project_id,
             source.workspace_id,
             source.asset_id,
             source.active_asset_version_id,
@@ -4331,24 +4714,25 @@ class CollaborationRepository:
         self, conn: asyncpg.Connection, job: RetrievalIngestionJob
     ) -> None:
         organization_id = job.organization_id
-        if job.scope in {"organization", "workspace"}:
+        if job.scope in {"organization", "project", "workspace"}:
             organization_id = await self._effective_organization_for_scope(
                 conn,
                 scope=job.scope,
                 organization_id=job.organization_id,
+                project_id=job.project_id,
                 workspace_id=job.workspace_id,
             )
         await conn.execute(
             """
             INSERT INTO retrieval_ingestion_jobs (
                 job_id, corpus_id, source_id, source_version_id, profile_id,
-                scope, organization_id, workspace_id, status, stage, requested_by,
+                scope, organization_id, project_id, workspace_id, status, stage, requested_by,
                 started_at, completed_at, error, created_at, updated_at, metadata
             )
             VALUES (
                 $1, $2, $3, $4, $5,
-                $6, $7, $8, $9, $10, $11,
-                $12, $13, $14, $15, $16, $17
+                $6, $7, $8, $9, $10, $11, $12,
+                $13, $14, $15, $16, $17, $18
             )
             ON CONFLICT (job_id) DO UPDATE
                 SET corpus_id = EXCLUDED.corpus_id,
@@ -4357,6 +4741,7 @@ class CollaborationRepository:
                     profile_id = EXCLUDED.profile_id,
                     scope = EXCLUDED.scope,
                     organization_id = EXCLUDED.organization_id,
+                    project_id = EXCLUDED.project_id,
                     workspace_id = EXCLUDED.workspace_id,
                     status = EXCLUDED.status,
                     stage = EXCLUDED.stage,
@@ -4373,6 +4758,7 @@ class CollaborationRepository:
             job.profile_id,
             job.scope,
             organization_id,
+            job.project_id,
             job.workspace_id,
             job.status,
             job.stage,
@@ -4403,27 +4789,29 @@ class CollaborationRepository:
         self, conn: asyncpg.Connection, chunk: RetrievalChunk
     ) -> None:
         organization_id = chunk.organization_id
-        if chunk.scope in {"organization", "workspace"}:
+        if chunk.scope in {"organization", "project", "workspace"}:
             organization_id = await self._effective_organization_for_scope(
                 conn,
                 scope=chunk.scope,
                 organization_id=chunk.organization_id,
+                project_id=chunk.project_id,
                 workspace_id=chunk.workspace_id,
             )
         await conn.execute(
             """
             INSERT INTO retrieval_chunks (
                 chunk_id, corpus_id, source_id, source_version_id, scope, organization_id,
-                workspace_id, chunk_kind, ordinal, content, summary, token_count,
+                project_id, workspace_id, chunk_kind, ordinal, content, summary, token_count,
                 content_hash, citation, created_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             ON CONFLICT (chunk_id) DO UPDATE
                 SET corpus_id = EXCLUDED.corpus_id,
                     source_id = EXCLUDED.source_id,
                     source_version_id = EXCLUDED.source_version_id,
                     scope = EXCLUDED.scope,
                     organization_id = EXCLUDED.organization_id,
+                    project_id = EXCLUDED.project_id,
                     workspace_id = EXCLUDED.workspace_id,
                     chunk_kind = EXCLUDED.chunk_kind,
                     ordinal = EXCLUDED.ordinal,
@@ -4440,6 +4828,7 @@ class CollaborationRepository:
             chunk.source_version_id,
             chunk.scope,
             organization_id,
+            chunk.project_id,
             chunk.workspace_id,
             chunk.chunk_kind,
             chunk.ordinal,
@@ -4497,24 +4886,26 @@ class CollaborationRepository:
         self, conn: asyncpg.Connection, run: RetrievalRun
     ) -> None:
         organization_id = run.organization_id
-        if run.scope in {"organization", "workspace"}:
+        if run.scope in {"organization", "project", "workspace"}:
             organization_id = await self._effective_organization_for_scope(
                 conn,
                 scope=run.scope,
                 organization_id=run.organization_id,
+                project_id=run.project_id,
                 workspace_id=run.workspace_id,
             )
         await conn.execute(
             """
             INSERT INTO retrieval_runs (
-                run_id, run_kind, scope, organization_id, workspace_id, profile_id,
+                run_id, run_kind, scope, organization_id, project_id, workspace_id, profile_id,
                 query, status, created_by, created_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (run_id) DO UPDATE
                 SET run_kind = EXCLUDED.run_kind,
                     scope = EXCLUDED.scope,
                     organization_id = EXCLUDED.organization_id,
+                    project_id = EXCLUDED.project_id,
                     workspace_id = EXCLUDED.workspace_id,
                     profile_id = EXCLUDED.profile_id,
                     query = EXCLUDED.query,
@@ -4525,6 +4916,7 @@ class CollaborationRepository:
             run.run_kind,
             run.scope,
             organization_id,
+            run.project_id,
             run.workspace_id,
             run.profile_id,
             run.query,
@@ -4571,24 +4963,26 @@ class CollaborationRepository:
         self, conn: asyncpg.Connection, context_pack: RetrievalContextPack
     ) -> None:
         organization_id = context_pack.organization_id
-        if context_pack.scope in {"organization", "workspace"}:
+        if context_pack.scope in {"organization", "project", "workspace"}:
             organization_id = await self._effective_organization_for_scope(
                 conn,
                 scope=context_pack.scope,
                 organization_id=context_pack.organization_id,
+                project_id=context_pack.project_id,
                 workspace_id=context_pack.workspace_id,
             )
         await conn.execute(
             """
             INSERT INTO retrieval_context_packs (
-                context_pack_id, run_id, scope, organization_id, workspace_id,
+                context_pack_id, run_id, scope, organization_id, project_id, workspace_id,
                 profile_id, query, content, token_count, hits, created_by, created_at, metadata
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             ON CONFLICT (context_pack_id) DO UPDATE
                 SET run_id = EXCLUDED.run_id,
                     scope = EXCLUDED.scope,
                     organization_id = EXCLUDED.organization_id,
+                    project_id = EXCLUDED.project_id,
                     workspace_id = EXCLUDED.workspace_id,
                     profile_id = EXCLUDED.profile_id,
                     query = EXCLUDED.query,
@@ -4601,6 +4995,7 @@ class CollaborationRepository:
             context_pack.run_id,
             context_pack.scope,
             organization_id,
+            context_pack.project_id,
             context_pack.workspace_id,
             context_pack.profile_id,
             context_pack.query,
@@ -4619,7 +5014,7 @@ class CollaborationRepository:
     ) -> RetrievalProfile | None:
         row = await self._pool.fetchrow(
             """
-            SELECT profile_id, scope, organization_id, workspace_id, name, description,
+            SELECT profile_id, scope, organization_id, project_id, workspace_id, name, description,
                    embedding_provider_key, embedding_model, embedding_dimension,
                    vision_provider_key, vision_model, visual_extraction_enabled,
                    vector_store_provider_key, chunking_strategy, chunk_size_tokens,
@@ -4638,17 +5033,21 @@ class CollaborationRepository:
         *,
         scope: str | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[RetrievalProfile]:
         effective_organization_id = organization_id
-        if scope in {None, "organization", "workspace"} and workspace_id is not None:
+        effective_project_id = project_id
+        if scope in {None, "organization", "project", "workspace"} and workspace_id is not None:
             effective_organization_id = await self._effective_organization_filter(
                 organization_id=organization_id,
+                project_id=project_id,
                 workspace_id=workspace_id,
             )
+            effective_project_id = await self._workspace_project_id(self._pool, workspace_id)
         rows = await self._pool.fetch(
             """
-            SELECT profile_id, scope, organization_id, workspace_id, name, description,
+            SELECT profile_id, scope, organization_id, project_id, workspace_id, name, description,
                    embedding_provider_key, embedding_model, embedding_dimension,
                    vision_provider_key, vision_model, visual_extraction_enabled,
                    vector_store_provider_key, chunking_strategy, chunk_size_tokens,
@@ -4658,11 +5057,13 @@ class CollaborationRepository:
             FROM retrieval_profiles
             WHERE ($1::text IS NULL OR scope = $1)
               AND (($2::uuid IS NULL AND organization_id IS NULL) OR organization_id = $2)
-              AND (($3::uuid IS NULL AND workspace_id IS NULL) OR workspace_id = $3)
+              AND (($3::uuid IS NULL AND project_id IS NULL) OR project_id = $3)
+              AND (($4::uuid IS NULL AND workspace_id IS NULL) OR workspace_id = $4)
             ORDER BY created_at ASC
             """,
             scope,
             effective_organization_id,
+            effective_project_id,
             workspace_id,
         )
         return [self._retrieval_profile_from_row(row) for row in rows]
@@ -4670,7 +5071,7 @@ class CollaborationRepository:
     async def fetch_retrieval_corpus(self, corpus_id: UUID) -> RetrievalCorpus | None:
         row = await self._pool.fetchrow(
             """
-            SELECT corpus_id, scope, organization_id, workspace_id, name, description,
+            SELECT corpus_id, scope, organization_id, project_id, workspace_id, name, description,
                    default_profile_id, created_by, created_at, updated_at, metadata
             FROM retrieval_corpora
             WHERE corpus_id = $1
@@ -4684,26 +5085,32 @@ class CollaborationRepository:
         *,
         scope: str | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[RetrievalCorpus]:
         effective_organization_id = organization_id
-        if scope in {None, "organization", "workspace"} and workspace_id is not None:
+        effective_project_id = project_id
+        if scope in {None, "organization", "project", "workspace"} and workspace_id is not None:
             effective_organization_id = await self._effective_organization_filter(
                 organization_id=organization_id,
+                project_id=project_id,
                 workspace_id=workspace_id,
             )
+            effective_project_id = await self._workspace_project_id(self._pool, workspace_id)
         rows = await self._pool.fetch(
             """
-            SELECT corpus_id, scope, organization_id, workspace_id, name, description,
+            SELECT corpus_id, scope, organization_id, project_id, workspace_id, name, description,
                    default_profile_id, created_by, created_at, updated_at, metadata
             FROM retrieval_corpora
             WHERE ($1::text IS NULL OR scope = $1)
               AND (($2::uuid IS NULL AND organization_id IS NULL) OR organization_id = $2)
-              AND (($3::uuid IS NULL AND workspace_id IS NULL) OR workspace_id = $3)
+              AND (($3::uuid IS NULL AND project_id IS NULL) OR project_id = $3)
+              AND (($4::uuid IS NULL AND workspace_id IS NULL) OR workspace_id = $4)
             ORDER BY created_at ASC
             """,
             scope,
             effective_organization_id,
+            effective_project_id,
             workspace_id,
         )
         return [self._retrieval_corpus_from_row(row) for row in rows]
@@ -4711,7 +5118,7 @@ class CollaborationRepository:
     async def fetch_retrieval_source(self, source_id: UUID) -> RetrievalSource | None:
         row = await self._pool.fetchrow(
             """
-            SELECT source_id, corpus_id, scope, organization_id, workspace_id, asset_id,
+            SELECT source_id, corpus_id, scope, organization_id, project_id, workspace_id, asset_id,
                    active_asset_version_id, title, source_type, content_type,
                    created_by, created_at, updated_at, metadata
             FROM retrieval_sources
@@ -4727,29 +5134,35 @@ class CollaborationRepository:
         corpus_id: UUID | None = None,
         scope: str | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> list[RetrievalSource]:
         effective_organization_id = organization_id
-        if scope in {None, "organization", "workspace"} and workspace_id is not None:
+        effective_project_id = project_id
+        if scope in {None, "organization", "project", "workspace"} and workspace_id is not None:
             effective_organization_id = await self._effective_organization_filter(
                 organization_id=organization_id,
+                project_id=project_id,
                 workspace_id=workspace_id,
             )
+            effective_project_id = await self._workspace_project_id(self._pool, workspace_id)
         rows = await self._pool.fetch(
             """
-            SELECT source_id, corpus_id, scope, organization_id, workspace_id, asset_id,
+            SELECT source_id, corpus_id, scope, organization_id, project_id, workspace_id, asset_id,
                    active_asset_version_id, title, source_type, content_type,
                    created_by, created_at, updated_at, metadata
             FROM retrieval_sources
             WHERE ($1::uuid IS NULL OR corpus_id = $1)
               AND ($2::text IS NULL OR scope = $2)
               AND (($3::uuid IS NULL AND organization_id IS NULL) OR organization_id = $3)
-              AND (($4::uuid IS NULL AND workspace_id IS NULL) OR workspace_id = $4)
+              AND (($4::uuid IS NULL AND project_id IS NULL) OR project_id = $4)
+              AND (($5::uuid IS NULL AND workspace_id IS NULL) OR workspace_id = $5)
             ORDER BY created_at ASC
             """,
             corpus_id,
             scope,
             effective_organization_id,
+            effective_project_id,
             workspace_id,
         )
         return [self._retrieval_source_from_row(row) for row in rows]
@@ -4789,7 +5202,7 @@ class CollaborationRepository:
         row = await self._pool.fetchrow(
             """
             SELECT job_id, corpus_id, source_id, source_version_id, profile_id,
-                   scope, organization_id, workspace_id, status, stage, requested_by,
+                   scope, organization_id, project_id, workspace_id, status, stage, requested_by,
                    started_at, completed_at, error, created_at, updated_at, metadata
             FROM retrieval_ingestion_jobs
             WHERE job_id = $1
@@ -4805,33 +5218,39 @@ class CollaborationRepository:
         source_id: UUID | None = None,
         scope: str | None = None,
         organization_id: UUID | None = None,
+        project_id: UUID | None = None,
         workspace_id: UUID | None = None,
         status: str | None = None,
     ) -> list[RetrievalIngestionJob]:
         effective_organization_id = organization_id
-        if scope in {None, "organization", "workspace"} and workspace_id is not None:
+        effective_project_id = project_id
+        if scope in {None, "organization", "project", "workspace"} and workspace_id is not None:
             effective_organization_id = await self._effective_organization_filter(
                 organization_id=organization_id,
+                project_id=project_id,
                 workspace_id=workspace_id,
             )
+            effective_project_id = await self._workspace_project_id(self._pool, workspace_id)
         rows = await self._pool.fetch(
             """
             SELECT job_id, corpus_id, source_id, source_version_id, profile_id,
-                   scope, organization_id, workspace_id, status, stage, requested_by,
+                   scope, organization_id, project_id, workspace_id, status, stage, requested_by,
                    started_at, completed_at, error, created_at, updated_at, metadata
             FROM retrieval_ingestion_jobs
             WHERE ($1::uuid IS NULL OR corpus_id = $1)
               AND ($2::uuid IS NULL OR source_id = $2)
               AND ($3::text IS NULL OR scope = $3)
               AND (($4::uuid IS NULL AND organization_id IS NULL) OR organization_id = $4)
-              AND (($5::uuid IS NULL AND workspace_id IS NULL) OR workspace_id = $5)
-              AND ($6::text IS NULL OR status = $6)
+              AND (($5::uuid IS NULL AND project_id IS NULL) OR project_id = $5)
+              AND (($6::uuid IS NULL AND workspace_id IS NULL) OR workspace_id = $6)
+              AND ($7::text IS NULL OR status = $7)
             ORDER BY created_at DESC
             """,
             corpus_id,
             source_id,
             scope,
             effective_organization_id,
+            effective_project_id,
             workspace_id,
             status,
         )
@@ -4860,7 +5279,7 @@ class CollaborationRepository:
             FROM candidate
             WHERE job.job_id = candidate.job_id
             RETURNING job.job_id, job.corpus_id, job.source_id, job.source_version_id, job.profile_id,
-                      job.scope, job.organization_id, job.workspace_id, job.status, job.stage,
+                      job.scope, job.organization_id, job.project_id, job.workspace_id, job.status, job.stage,
                       job.requested_by, job.started_at, job.completed_at, job.error,
                       job.created_at, job.updated_at, job.metadata
             """,
@@ -4884,7 +5303,7 @@ class CollaborationRepository:
             WHERE job_id = $1
               AND status = 'queued'
             RETURNING job_id, corpus_id, source_id, source_version_id, profile_id,
-                      scope, organization_id, workspace_id, status, stage,
+                      scope, organization_id, project_id, workspace_id, status, stage,
                       requested_by, started_at, completed_at, error,
                       created_at, updated_at, metadata
             """,
@@ -4916,7 +5335,7 @@ class CollaborationRepository:
                 metadata = COALESCE($7::jsonb, metadata)
             WHERE job_id = $1
             RETURNING job_id, corpus_id, source_id, source_version_id, profile_id,
-                      scope, organization_id, workspace_id, status, stage, requested_by,
+                      scope, organization_id, project_id, workspace_id, status, stage, requested_by,
                       started_at, completed_at, error, created_at, updated_at, metadata
             """,
             job_id,
@@ -4938,6 +5357,7 @@ class CollaborationRepository:
         organization_id: UUID | None,
         workspace_id: UUID | None,
         limit: int,
+        project_id: UUID | None = None,
         strategy: str = "hybrid",
         metadata_filters: dict[str, Any] | None = None,
         embedding_vector: Sequence[float] | None = None,
@@ -4949,11 +5369,15 @@ class CollaborationRepository:
         lock_chunks: bool = False,
     ) -> list[RetrievalSearchHit]:
         effective_organization_id = organization_id
-        if scope in {"organization", "workspace"}:
+        effective_project_id = project_id
+        if scope in {"organization", "project", "workspace"}:
             effective_organization_id = await self._effective_organization_filter(
                 organization_id=organization_id,
+                project_id=project_id,
                 workspace_id=workspace_id,
             )
+        if scope == "workspace" and workspace_id is not None and effective_project_id is None:
+            effective_project_id = await self._workspace_project_id(self._pool, workspace_id)
         vector_literal = self._vector_literal(embedding_vector) if embedding_vector else None
         chunk_lock_clause = "FOR KEY SHARE OF rc" if lock_chunks else ""
         executor = conn or self._pool
@@ -4965,44 +5389,46 @@ class CollaborationRepository:
             scored AS (
                 SELECT
                     rc.chunk_id, rc.corpus_id, rc.source_id, rc.source_version_id,
-                    rc.scope, rc.organization_id, rc.workspace_id, rc.chunk_kind,
+                    rc.scope, rc.organization_id, rc.project_id, rc.workspace_id, rc.chunk_kind,
                     rc.ordinal, rc.content, rc.summary, rc.token_count,
                     rc.content_hash, rc.citation, rc.created_at, rc.metadata,
                     CASE
-                        WHEN $9::text IN ('keyword', 'hybrid')
+                        WHEN $10::text IN ('keyword', 'hybrid')
                              AND rc.search_vector @@ query_value.tsq
                         THEN ts_rank_cd(rc.search_vector, query_value.tsq)
                         ELSE NULL
                     END AS keyword_score,
                     CASE
-                        WHEN $10::text IS NOT NULL AND re.embedding IS NOT NULL
-                        THEN 1.0 / (1.0 + (re.embedding <=> $10::vector))
+                        WHEN $11::text IS NOT NULL AND re.embedding IS NOT NULL
+                        THEN 1.0 / (1.0 + (re.embedding <=> $11::vector))
                         ELSE NULL
                     END AS vector_score
                 FROM retrieval_chunks rc
                 CROSS JOIN query_value
                 LEFT JOIN retrieval_embeddings re
                   ON re.chunk_id = rc.chunk_id
-                 AND ($11::text IS NULL OR re.provider_key = $11)
-                 AND ($12::text IS NULL OR re.model = $12)
+                 AND ($12::text IS NULL OR re.provider_key = $12)
+                 AND ($13::text IS NULL OR re.model = $13)
                 WHERE rc.scope = $2
                   AND (($3::uuid IS NULL AND rc.organization_id IS NULL) OR rc.organization_id = $3)
-                  AND (($4::uuid IS NULL AND rc.workspace_id IS NULL) OR rc.workspace_id = $4)
-                  AND ($5::uuid[] IS NULL OR rc.corpus_id = ANY($5::uuid[]))
-                  AND ($6::jsonb IS NULL OR rc.metadata @> $6::jsonb)
+                  AND (($4::uuid IS NULL AND rc.project_id IS NULL) OR rc.project_id = $4)
+                  AND (($5::uuid IS NULL AND rc.workspace_id IS NULL) OR rc.workspace_id = $5)
+                  AND ($6::uuid[] IS NULL OR rc.corpus_id = ANY($6::uuid[]))
+                  AND ($7::jsonb IS NULL OR rc.metadata @> $7::jsonb)
                 {chunk_lock_clause}
             )
             SELECT *,
-                   (COALESCE(vector_score, 0.0) * $7::double precision)
-                 + (COALESCE(keyword_score, 0.0) * $8::double precision) AS score
+                   (COALESCE(vector_score, 0.0) * $8::double precision)
+                 + (COALESCE(keyword_score, 0.0) * $9::double precision) AS score
             FROM scored
             WHERE keyword_score IS NOT NULL OR vector_score IS NOT NULL
             ORDER BY score DESC, ordinal ASC, chunk_id ASC
-            LIMIT $13
+            LIMIT $14
             """,
             query,
             scope,
             effective_organization_id,
+            effective_project_id,
             workspace_id,
             list(corpus_ids) if corpus_ids else None,
             self._json_dumps(metadata_filters) if metadata_filters else None,
@@ -5032,7 +5458,7 @@ class CollaborationRepository:
     async def fetch_retrieval_run(self, run_id: UUID) -> RetrievalRun | None:
         row = await self._pool.fetchrow(
             """
-            SELECT run_id, run_kind, scope, organization_id, workspace_id, profile_id,
+            SELECT run_id, run_kind, scope, organization_id, project_id, workspace_id, profile_id,
                    query, status, created_by, created_at, metadata
             FROM retrieval_runs
             WHERE run_id = $1
@@ -5046,7 +5472,7 @@ class CollaborationRepository:
     ) -> RetrievalContextPack | None:
         row = await self._pool.fetchrow(
             """
-            SELECT context_pack_id, run_id, scope, organization_id, workspace_id,
+            SELECT context_pack_id, run_id, scope, organization_id, project_id, workspace_id,
                    profile_id, query, content, token_count, hits, created_by, created_at, metadata
             FROM retrieval_context_packs
             WHERE context_pack_id = $1
@@ -7952,6 +8378,7 @@ class CollaborationRepository:
         return WorkspaceAsset(
             asset_id=row["asset_id"],
             organization_id=row["organization_id"],
+            project_id=row["project_id"],
             workspace_id=row["workspace_id"],
             scope=row["scope"],
             asset_type=row["asset_type"],
@@ -7987,11 +8414,67 @@ class CollaborationRepository:
         )
 
     @staticmethod
+    def _library_from_row(row: asyncpg.Record) -> Library:
+        return Library(
+            library_id=row["library_id"],
+            scope=row["scope"],
+            organization_id=row["organization_id"],
+            project_id=row["project_id"],
+            workspace_id=row["workspace_id"],
+            slug=row["slug"],
+            name=row["name"],
+            description=row["description"],
+            status=row["status"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_by=row["updated_by"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _library_item_from_row(row: asyncpg.Record) -> LibraryItem:
+        return LibraryItem(
+            item_id=row["item_id"],
+            library_id=row["library_id"],
+            asset_id=row["asset_id"],
+            active_asset_version_id=row["active_asset_version_id"],
+            item_kind=row["item_kind"],
+            title=row["title"],
+            source_uri=row["source_uri"],
+            content_type=row["content_type"],
+            status=row["status"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_by=row["updated_by"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _library_workspace_attachment_from_row(
+        row: asyncpg.Record,
+    ) -> LibraryWorkspaceAttachment:
+        return LibraryWorkspaceAttachment(
+            attachment_id=row["attachment_id"],
+            library_id=row["library_id"],
+            workspace_id=row["workspace_id"],
+            organization_id=row["organization_id"],
+            project_id=row["project_id"],
+            enabled=row["enabled"],
+            attached_by=row["attached_by"],
+            attached_at=row["attached_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
     def _retrieval_profile_from_row(row: asyncpg.Record) -> RetrievalProfile:
         return RetrievalProfile(
             profile_id=row["profile_id"],
             scope=row["scope"],
             organization_id=row["organization_id"],
+            project_id=row["project_id"],
             workspace_id=row["workspace_id"],
             name=row["name"],
             description=row["description"],
@@ -8025,6 +8508,7 @@ class CollaborationRepository:
             corpus_id=row["corpus_id"],
             scope=row["scope"],
             organization_id=row["organization_id"],
+            project_id=row["project_id"],
             workspace_id=row["workspace_id"],
             name=row["name"],
             description=row["description"],
@@ -8042,6 +8526,7 @@ class CollaborationRepository:
             corpus_id=row["corpus_id"],
             scope=row["scope"],
             organization_id=row["organization_id"],
+            project_id=row["project_id"],
             workspace_id=row["workspace_id"],
             asset_id=row["asset_id"],
             active_asset_version_id=row["active_asset_version_id"],
@@ -8084,6 +8569,7 @@ class CollaborationRepository:
             source_version_id=row["source_version_id"],
             scope=row["scope"],
             organization_id=row["organization_id"],
+            project_id=row["project_id"],
             workspace_id=row["workspace_id"],
             chunk_kind=row["chunk_kind"],
             ordinal=row["ordinal"],
@@ -8126,6 +8612,7 @@ class CollaborationRepository:
             profile_id=row["profile_id"],
             scope=row["scope"],
             organization_id=row["organization_id"],
+            project_id=row["project_id"],
             workspace_id=row["workspace_id"],
             status=row["status"],
             stage=row["stage"],
@@ -8145,6 +8632,7 @@ class CollaborationRepository:
             run_kind=row["run_kind"],
             scope=row["scope"],
             organization_id=row["organization_id"],
+            project_id=row["project_id"],
             workspace_id=row["workspace_id"],
             profile_id=row["profile_id"],
             query=row["query"],
@@ -8164,6 +8652,7 @@ class CollaborationRepository:
             run_id=row["run_id"],
             scope=row["scope"],
             organization_id=row["organization_id"],
+            project_id=row["project_id"],
             workspace_id=row["workspace_id"],
             profile_id=row["profile_id"],
             query=row["query"],

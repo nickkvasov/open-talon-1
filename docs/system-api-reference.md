@@ -235,7 +235,7 @@ Current MCP behavior:
 - successful scope changes emit `notifications/tools/list_changed` and `notifications/resources/list_changed`
 - the visible MCP operation set is filtered from the caller's existing IAM permissions, project-local `creator`/`owner`/`editor`/`viewer` permissions in project scope, and workspace participant attachment where the underlying API already requires it
 - successful operation calls return both a short text `content` summary and `structuredContent`; protocol/schema failures stay JSON-RPC errors
-- MCP exposes system API operations only; it does not expose `system_tools`, `workspace_tools`, Tinker-generated tools, System Plugins, or `agent-runtime` execution backends as imported MCP tools
+- MCP exposes system API operations only; it does not expose `system_tools`, `workspace_tools`, Tinker-generated tools, arbitrary System Plugins, or `agent-runtime` execution backends as imported MCP tools. The managed Library and Retriever System Plugins intentionally use this gateway MCP adapter as their backing surface.
 - System Plugins are the public external-capability layer. V1 stores them in `mcp_servers`, syncs discovered plugin capabilities into `mcp_server_tools`, `mcp_server_resources`, and `mcp_server_prompts`, and attaches them through `workspace_mcp_servers`. They are not imported into Open Talon `system_tools`, not published by Tinker, and not auto-attached to workspaces.
 
 Current MCP session resources:
@@ -288,6 +288,13 @@ Current MCP system API operations:
 - `retrieval.search`
 - `retrieval.context_pack.create`
 - `retrieval.context_pack.get`
+- `library.libraries.*`
+- `library.items.*`
+- `library.workspace_attachments.*`
+- `retriever.library.index`
+- `retriever.ingestion_jobs.list`
+- `retriever.search`
+- `retriever.context_pack.*`
 - `methodics.executions.create`
 - `methodics.executions.list`
 - `methodics.executions.get`
@@ -753,13 +760,36 @@ Git-managed system and organization agent definitions are authored as modular bu
 | `GET` | `/v1/workspaces/{workspace_id}/plugin-capabilities/tools` | list workspace-visible plugin tools |
 | `GET` | `/v1/workspaces/{workspace_id}/plugin-capabilities/resources` | list workspace-visible plugin resources |
 | `GET` | `/v1/workspaces/{workspace_id}/plugin-capabilities/prompts` | list workspace-visible plugin prompts |
+| `GET` | `/v1/organizations/{organization_id}/libraries` | list organization libraries |
+| `POST` | `/v1/organizations/{organization_id}/libraries` | create organization library |
+| `GET` | `/v1/organizations/{organization_id}/projects/{project_id}/libraries` | list project libraries |
+| `POST` | `/v1/organizations/{organization_id}/projects/{project_id}/libraries` | create project library |
+| `GET` | `/v1/workspaces/{workspace_id}/libraries` | list workspace-owned and attached libraries |
+| `POST` | `/v1/workspaces/{workspace_id}/libraries` | create workspace library |
+| `GET` | `/v1/libraries/{library_id}` | get a visible library |
+| `PATCH` | `/v1/libraries/{library_id}` | update library metadata or archive state |
+| `DELETE` | `/v1/libraries/{library_id}` | archive a library |
+| `GET` | `/v1/libraries/{library_id}/items` | list library items |
+| `POST` | `/v1/libraries/{library_id}/items` | add an existing immutable asset to a library |
+| `POST` | `/v1/libraries/{library_id}/items/upload` | upload and add a library file item |
+| `POST` | `/v1/libraries/{library_id}/items/text` | create and add a text or Markdown library item |
+| `GET` | `/v1/library-items/{item_id}/download` | presigned library item download URL |
+| `PUT` | `/v1/workspaces/{workspace_id}/library-attachments/{library_id}` | attach an org/project library to a workspace |
+| `DELETE` | `/v1/workspaces/{workspace_id}/library-attachments/{library_id}` | detach an org/project library from a workspace |
+| `POST` | `/v1/libraries/{library_id}/index` | explicitly queue Retriever indexing for library items |
 | `POST` | `/v1/workspaces/{workspace_id}/git-repositories` | register workspace Git repository |
 | `GET` | `/v1/workspaces/{workspace_id}/git-repositories` | list workspace Git repositories |
 | `POST` | `/v1/workspaces/{workspace_id}/assets/publish-from-git` | publish workspace asset version |
 
+### Library APIs
+
+Libraries are durable reference collections owned by exactly one organization, project, or workspace. Each owner can have many libraries, and library slugs are unique only inside that owner scope, so different projects or workspaces can reuse the same slug. Library items store their bytes as immutable MinIO-backed asset versions and can represent uploads, Markdown/text notes, webpage scraps, images, diagrams, or other reference material. Adding an item is store-first and does not automatically index it.
+
+Workspace library reads include workspace-owned libraries plus organization/project libraries explicitly attached through `/v1/workspaces/{workspace_id}/library-attachments/{library_id}`. Attachments require workspace `library.attach` permission and readable access to the source library. Library indexing is explicit through `/v1/libraries/{library_id}/index` or the managed Retriever plugin tools.
+
 ### Retrieval APIs
 
-Retrieval corpora, sources, jobs, runs, and context packs are scoped as `global`, `organization`, or `workspace`. Raw file bytes stay in MinIO as immutable `workspace_assets` versions; retrieval rows link back to `asset_id` and `asset_version_id`. Workspace retrieval requires participant attachment plus the matching retrieval permission.
+Retrieval corpora, sources, jobs, runs, and context packs are scoped as `global`, `organization`, `project`, or `workspace`. Raw file bytes stay in MinIO as immutable `workspace_assets` versions; retrieval rows link back to `asset_id` and `asset_version_id`. Workspace retrieval requires participant attachment plus the matching retrieval permission. Workspace search also includes indexed corpora for explicitly attached organization/project libraries.
 
 | Method | Path | Summary |
 | --- | --- | --- |
@@ -775,9 +805,10 @@ Retrieval corpora, sources, jobs, runs, and context packs are scoped as `global`
 | `POST` | `/v1/retrieval/context-packs` | create global cited context pack |
 | `GET` | `/v1/retrieval/context-packs/{context_pack_id}` | get global context pack |
 | `GET/POST` | `/v1/organizations/{organization_id}/retrieval/...` | organization-scoped equivalent routes |
+| `GET/POST` | `/v1/organizations/{organization_id}/projects/{project_id}/retrieval/...` | project-scoped equivalent routes |
 | `GET/POST` | `/v1/workspaces/{workspace_id}/retrieval/...` | workspace-scoped equivalent routes |
 
-The default vector backend is pgvector. The default embedding provider is configurable Ollama via `RETRIEVER_DEFAULT_EMBEDDING_PROVIDER`, `RETRIEVER_DEFAULT_EMBEDDING_MODEL`, and `RETRIEVER_OLLAMA_BASE_URL`. Visual extraction is disabled by default; when enabled, Retriever resolves the visual extraction LLM through the shared `llm_providers` engine registry, defaulting to `RETRIEVER_DEFAULT_VISION_ENGINE_ID=local-ollama`.
+The default vector backend is pgvector. The default embedding provider is configurable Ollama via `RETRIEVER_DEFAULT_EMBEDDING_PROVIDER`, `RETRIEVER_DEFAULT_EMBEDDING_MODEL`, and `RETRIEVER_OLLAMA_BASE_URL`. Visual extraction is disabled by default; when enabled, Retriever resolves the visual extraction LLM through the shared `llm_providers` engine registry, defaulting to `RETRIEVER_DEFAULT_VISION_ENGINE_ID=local-ollama`. If `OPEN_TALON_DOCLING_SERVE_URL` is configured, the managed Retriever plugin records the optional Docling Serve endpoint for downstream extraction support; ingestion still falls back to the existing local extraction path when that service is unavailable.
 
 ### Methodics Execution APIs
 

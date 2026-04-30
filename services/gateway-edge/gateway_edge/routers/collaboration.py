@@ -38,6 +38,7 @@ from gateway_edge.models import (
     AuditEventPage,
     AuditExportRequest,
     AuditExportResult,
+    AttachLibraryToWorkspaceRequest,
     AttachWorkspaceToolRequest,
     AttachWorkspaceMcpServerRequest,
     AttachWorkspaceSystemPluginRequest,
@@ -47,6 +48,9 @@ from gateway_edge.models import (
     CreateAgentParticipantRequest,
     CreateInteractionAnswerRequest,
     CreateInteractionRequestsRequest,
+    CreateLibraryItemRequest,
+    CreateLibraryRequest,
+    CreateLibraryTextItemRequest,
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
     CreateMcpServerRequest,
@@ -73,6 +77,7 @@ from gateway_edge.models import (
     CreateThreadRequest,
     CreateWorkspaceRequest,
     DeleteLlmProviderRequest,
+    DeleteLibraryRequest,
     DeleteMemoryProviderRequest,
     DeleteMcpServerRequest,
     DeleteSystemPluginRequest,
@@ -102,7 +107,11 @@ from gateway_edge.models import (
     LlmProviderDefinition,
     LlmProviderHealthReport,
     GitRepository,
+    IndexLibraryRequest,
     InteractionRequestDetail,
+    Library,
+    LibraryItem,
+    LibraryWorkspaceAttachment,
     LinkAssetRequest,
     Organization,
     OrganizationMembership,
@@ -137,6 +146,8 @@ from gateway_edge.models import (
     WorkspaceCommunicationLogPage,
     UpdateSystemAgentRequest,
     UpdateInteractionRequestRequest,
+    UpdateLibraryItemRequest,
+    UpdateLibraryRequest,
     UpsertRoleDefinitionRequest,
     UpdateSystemToolRequest,
     UpdateAgentParticipantRequest,
@@ -825,6 +836,7 @@ async def _require_retrieval_permission(
     *,
     permission: str,
     organization_id: UUID | None = None,
+    project_id: UUID | None = None,
     workspace_id: UUID | None = None,
 ) -> ParticipantInput | None:
     if workspace_id is not None:
@@ -833,6 +845,15 @@ async def _require_retrieval_permission(
             workspace_id,
             permission=permission,
         )
+    if project_id is not None:
+        await _load_project(
+            request,
+            project_id,
+            permission="retrieval.read",
+            organization_id=organization_id,
+            project_permission=permission,
+        )
+        return None
     if organization_id is not None:
         await _require_organization_membership(request, organization_id)
         await _require_identity_permission(
@@ -851,12 +872,14 @@ async def _resolve_retrieval_actor(
     *,
     permission: str,
     organization_id: UUID | None = None,
+    project_id: UUID | None = None,
     workspace_id: UUID | None = None,
 ) -> ParticipantInput:
     scoped_actor = await _require_retrieval_permission(
         request,
         permission=permission,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
     if scoped_actor is not None:
@@ -873,12 +896,104 @@ async def _resolve_retrieval_actor(
     return _resolve_global_actor(request, actor)
 
 
+async def _require_library_scope_actor(
+    request: Request,
+    actor: ParticipantInput,
+    *,
+    permission: str,
+    organization_id: UUID | None = None,
+    project_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+) -> ParticipantInput:
+    if workspace_id is not None:
+        scoped_actor = await _require_workspace_permission(
+            request,
+            workspace_id,
+            permission=permission,
+        )
+        if scoped_actor is not None:
+            return scoped_actor
+        return await _resolve_workspace_actor(
+            request,
+            actor,
+            workspace_id=workspace_id,
+            auto_create=False,
+        )
+    if project_id is not None:
+        project = await _load_project(
+            request,
+            project_id,
+            permission="library.read",
+            organization_id=organization_id,
+            project_permission=permission,
+        )
+        _ = project
+        return _resolve_organization_actor(request, actor)
+    if organization_id is not None:
+        await _require_organization_membership(request, organization_id)
+        await _require_identity_permission(
+            request,
+            permission=permission,
+            organization_id=organization_id,
+        )
+        return _resolve_organization_actor(request, actor)
+    await _require_identity_permission(request, permission=permission)
+    return _resolve_global_actor(request, actor)
+
+
+async def _require_library_visibility(
+    request: Request,
+    library_id: UUID,
+    *,
+    permission: str = "library.read",
+) -> Library:
+    library = await collab_svc.collaboration_service.get_library(library_id)
+    if library is None:
+        raise KeyError(f"Library {library_id} not found")
+    if library.scope == "workspace" and library.workspace_id is not None:
+        await _require_workspace_permission(
+            request,
+            library.workspace_id,
+            permission=permission,
+        )
+    elif library.scope == "project" and library.project_id is not None:
+        await _load_project(
+            request,
+            library.project_id,
+            permission="library.read",
+            organization_id=library.organization_id,
+            project_permission=permission,
+        )
+    else:
+        await _require_organization_membership(request, library.organization_id)
+        await _require_identity_permission(
+            request,
+            permission=permission,
+            organization_id=library.organization_id,
+        )
+    return library
+
+
+async def _require_library_item_visibility(
+    request: Request,
+    item_id: UUID,
+    *,
+    permission: str = "library.read",
+) -> LibraryItem:
+    item = await collab_svc.collaboration_service.get_library_item(item_id)
+    if item is None:
+        raise KeyError(f"Library item {item_id} not found")
+    await _require_library_visibility(request, item.library_id, permission=permission)
+    return item
+
+
 async def _apply_retrieval_provider_override_permission(
     request: Request,
     actor: ParticipantInput,
     provider_overrides: dict[str, object],
     *,
     organization_id: UUID | None = None,
+    project_id: UUID | None = None,
     workspace_id: UUID | None = None,
 ) -> ParticipantInput:
     if not provider_overrides:
@@ -887,6 +1002,7 @@ async def _apply_retrieval_provider_override_permission(
         request,
         permission="retrieval.admin",
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
     permissions = set(actor.iam_permissions)
@@ -4657,12 +4773,458 @@ async def get_file_download_url(
         raise _http_error(exc) from exc
 
 
+@router.post("/organizations/{organization_id}/libraries", response_model=Library)
+async def create_organization_library(
+    request: Request,
+    organization_id: UUID,
+    payload: CreateLibraryRequest,
+) -> Library:
+    try:
+        actor = await _require_library_scope_actor(
+            request,
+            payload.actor,
+            permission="library.write",
+            organization_id=organization_id,
+        )
+        return await collab_svc.collaboration_service.create_library(
+            scope="organization",
+            organization_id=organization_id,
+            payload=payload.model_copy(update={"actor": actor}),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/organizations/{organization_id}/libraries", response_model=list[Library])
+async def list_organization_libraries(
+    request: Request,
+    organization_id: UUID,
+    include_archived: bool = Query(default=False),
+) -> list[Library]:
+    try:
+        await _require_organization_membership(request, organization_id)
+        await _require_identity_permission(
+            request,
+            permission="library.read",
+            organization_id=organization_id,
+        )
+        return await collab_svc.collaboration_service.list_libraries(
+            scope="organization",
+            organization_id=organization_id,
+            include_archived=include_archived,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/organizations/{organization_id}/projects/{project_id}/libraries", response_model=Library)
+async def create_project_library(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+    payload: CreateLibraryRequest,
+) -> Library:
+    try:
+        actor = await _require_library_scope_actor(
+            request,
+            payload.actor,
+            permission="library.write",
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+        return await collab_svc.collaboration_service.create_library(
+            scope="project",
+            organization_id=organization_id,
+            project_id=project_id,
+            payload=payload.model_copy(update={"actor": actor}),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/organizations/{organization_id}/projects/{project_id}/libraries", response_model=list[Library])
+async def list_project_libraries(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+    include_archived: bool = Query(default=False),
+) -> list[Library]:
+    try:
+        await _load_project(
+            request,
+            project_id,
+            permission="library.read",
+            organization_id=organization_id,
+            project_permission="library.read",
+        )
+        return await collab_svc.collaboration_service.list_libraries(
+            scope="project",
+            organization_id=organization_id,
+            project_id=project_id,
+            include_archived=include_archived,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/workspaces/{workspace_id}/libraries", response_model=Library)
+async def create_workspace_library(
+    request: Request,
+    workspace_id: UUID,
+    payload: CreateLibraryRequest,
+) -> Library:
+    try:
+        actor = await _require_library_scope_actor(
+            request,
+            payload.actor,
+            permission="library.write",
+            workspace_id=workspace_id,
+        )
+        return await collab_svc.collaboration_service.create_library(
+            scope="workspace",
+            workspace_id=workspace_id,
+            payload=payload.model_copy(update={"actor": actor}),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/workspaces/{workspace_id}/libraries", response_model=list[Library])
+async def list_workspace_libraries(
+    request: Request,
+    workspace_id: UUID,
+    include_archived: bool = Query(default=False),
+) -> list[Library]:
+    try:
+        await _require_workspace_permission(
+            request,
+            workspace_id,
+            permission="library.read",
+        )
+        return await collab_svc.collaboration_service.list_libraries(
+            scope="workspace",
+            workspace_id=workspace_id,
+            include_archived=include_archived,
+            include_workspace_attachments=True,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/libraries/{library_id}", response_model=Library)
+async def get_library(request: Request, library_id: UUID) -> Library:
+    try:
+        return await _require_library_visibility(request, library_id)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch("/libraries/{library_id}", response_model=Library)
+async def update_library(
+    request: Request,
+    library_id: UUID,
+    payload: UpdateLibraryRequest,
+) -> Library:
+    try:
+        library = await _require_library_visibility(
+            request,
+            library_id,
+            permission="library.write",
+        )
+        actor = await _require_library_scope_actor(
+            request,
+            payload.actor,
+            permission="library.write",
+            organization_id=library.organization_id,
+            project_id=library.project_id,
+            workspace_id=library.workspace_id,
+        )
+        return await collab_svc.collaboration_service.update_library(
+            library_id,
+            payload.model_copy(update={"actor": actor}),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete("/libraries/{library_id}", response_model=dict)
+async def delete_library(
+    request: Request,
+    library_id: UUID,
+    payload: DeleteLibraryRequest,
+) -> dict[str, bool | str]:
+    try:
+        library = await _require_library_visibility(
+            request,
+            library_id,
+            permission="library.write",
+        )
+        actor = await _require_library_scope_actor(
+            request,
+            payload.actor,
+            permission="library.write",
+            organization_id=library.organization_id,
+            project_id=library.project_id,
+            workspace_id=library.workspace_id,
+        )
+        return await collab_svc.collaboration_service.delete_library(
+            library_id,
+            payload.model_copy(update={"actor": actor}),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/libraries/{library_id}/items", response_model=list[LibraryItem])
+async def list_library_items(
+    request: Request,
+    library_id: UUID,
+    include_archived: bool = Query(default=False),
+) -> list[LibraryItem]:
+    try:
+        await _require_library_visibility(request, library_id)
+        return await collab_svc.collaboration_service.list_library_items(
+            library_id,
+            include_archived=include_archived,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/libraries/{library_id}/items", response_model=LibraryItem)
+async def create_library_item(
+    request: Request,
+    library_id: UUID,
+    payload: CreateLibraryItemRequest,
+) -> LibraryItem:
+    try:
+        library = await _require_library_visibility(
+            request,
+            library_id,
+            permission="library.write",
+        )
+        actor = await _require_library_scope_actor(
+            request,
+            payload.actor,
+            permission="library.write",
+            organization_id=library.organization_id,
+            project_id=library.project_id,
+            workspace_id=library.workspace_id,
+        )
+        return await collab_svc.collaboration_service.create_library_item(
+            library_id,
+            payload.model_copy(update={"actor": actor}),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/libraries/{library_id}/items/text", response_model=LibraryItem)
+async def create_library_text_item(
+    request: Request,
+    library_id: UUID,
+    payload: CreateLibraryTextItemRequest,
+) -> LibraryItem:
+    try:
+        library = await _require_library_visibility(
+            request,
+            library_id,
+            permission="library.write",
+        )
+        actor = await _require_library_scope_actor(
+            request,
+            payload.actor,
+            permission="library.write",
+            organization_id=library.organization_id,
+            project_id=library.project_id,
+            workspace_id=library.workspace_id,
+        )
+        return await collab_svc.collaboration_service.create_library_text_item(
+            library_id,
+            payload.model_copy(update={"actor": actor}),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/libraries/{library_id}/items/upload", response_model=LibraryItem)
+async def upload_library_item(
+    request: Request,
+    library_id: UUID,
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    item_kind: str = Form(default="file"),
+    logical_name: str | None = Form(default=None),
+    logical_path: str | None = Form(default=None),
+    source_uri: str | None = Form(default=None),
+    content_type: str | None = Form(default=None),
+    actor_participant_id: UUID | None = Form(default=None),
+    actor_type: str = Form(default="user"),
+    actor_display_name: str = Form(default="uploader"),
+) -> LibraryItem:
+    try:
+        library = await _require_library_visibility(
+            request,
+            library_id,
+            permission="library.write",
+        )
+        actor = await _require_library_scope_actor(
+            request,
+            _form_actor(
+                actor_participant_id=actor_participant_id,
+                actor_type=actor_type,
+                actor_display_name=actor_display_name,
+            ),
+            permission="library.write",
+            organization_id=library.organization_id,
+            project_id=library.project_id,
+            workspace_id=library.workspace_id,
+        )
+        return await collab_svc.collaboration_service.upload_library_item_content(
+            library_id,
+            actor=actor,
+            title=title,
+            filename=file.filename or logical_name or title,
+            content=await file.read(),
+            item_kind=item_kind,
+            logical_name=logical_name,
+            logical_path=logical_path,
+            source_uri=source_uri,
+            content_type=content_type or file.content_type,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch("/library-items/{item_id}", response_model=LibraryItem)
+async def update_library_item(
+    request: Request,
+    item_id: UUID,
+    payload: UpdateLibraryItemRequest,
+) -> LibraryItem:
+    try:
+        item = await _require_library_item_visibility(
+            request,
+            item_id,
+            permission="library.write",
+        )
+        library = await collab_svc.collaboration_service.get_library(item.library_id)
+        assert library is not None
+        actor = await _require_library_scope_actor(
+            request,
+            payload.actor,
+            permission="library.write",
+            organization_id=library.organization_id,
+            project_id=library.project_id,
+            workspace_id=library.workspace_id,
+        )
+        return await collab_svc.collaboration_service.update_library_item(
+            item_id,
+            payload.model_copy(update={"actor": actor}),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/library-items/{item_id}/download", response_model=dict)
+async def get_library_item_download_url(
+    request: Request,
+    item_id: UUID,
+) -> dict[str, str]:
+    try:
+        await _require_library_item_visibility(request, item_id)
+        url = await collab_svc.collaboration_service.get_library_item_download_url(item_id)
+        return {"url": url}
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.put(
+    "/workspaces/{workspace_id}/library-attachments/{library_id}",
+    response_model=LibraryWorkspaceAttachment,
+)
+async def attach_library_to_workspace(
+    request: Request,
+    workspace_id: UUID,
+    library_id: UUID,
+    payload: AttachLibraryToWorkspaceRequest,
+) -> LibraryWorkspaceAttachment:
+    try:
+        await _require_library_visibility(
+            request,
+            library_id,
+            permission="library.read",
+        )
+        actor = await _require_library_scope_actor(
+            request,
+            payload.actor,
+            permission="library.attach",
+            workspace_id=workspace_id,
+        )
+        return await collab_svc.collaboration_service.attach_library_to_workspace(
+            workspace_id,
+            library_id,
+            payload.model_copy(update={"actor": actor}),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete("/workspaces/{workspace_id}/library-attachments/{library_id}", response_model=dict)
+async def detach_library_from_workspace(
+    request: Request,
+    workspace_id: UUID,
+    library_id: UUID,
+) -> dict[str, bool | str]:
+    try:
+        await _require_workspace_permission(
+            request,
+            workspace_id,
+            permission="library.attach",
+        )
+        return await collab_svc.collaboration_service.delete_library_workspace_attachment(
+            workspace_id,
+            library_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/libraries/{library_id}/index", response_model=list[RetrievalIngestionJob])
+async def index_library(
+    request: Request,
+    library_id: UUID,
+    payload: IndexLibraryRequest,
+) -> list[RetrievalIngestionJob]:
+    try:
+        library = await _require_library_visibility(
+            request,
+            library_id,
+            permission="library.index",
+        )
+        actor = await _require_library_scope_actor(
+            request,
+            payload.actor,
+            permission="library.index",
+            organization_id=library.organization_id,
+            project_id=library.project_id,
+            workspace_id=library.workspace_id,
+        )
+        return await collab_svc.collaboration_service.index_library(
+            library_id,
+            payload.model_copy(update={"actor": actor}),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 async def _create_retrieval_profile(
     request: Request,
     payload: CreateRetrievalProfileRequest,
     *,
     scope: str,
     organization_id: UUID | None = None,
+    project_id: UUID | None = None,
     workspace_id: UUID | None = None,
 ) -> RetrievalProfile:
     actor = await _resolve_retrieval_actor(
@@ -4670,11 +5232,13 @@ async def _create_retrieval_profile(
         payload.actor,
         permission="retrieval.write",
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
     return await collab_svc.collaboration_service.create_retrieval_profile(
         scope=scope,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
         payload=payload.model_copy(update={"actor": actor}),
     )
@@ -4685,17 +5249,20 @@ async def _list_retrieval_profiles(
     *,
     scope: str,
     organization_id: UUID | None = None,
+    project_id: UUID | None = None,
     workspace_id: UUID | None = None,
 ) -> list[RetrievalProfile]:
     await _require_retrieval_permission(
         request,
         permission="retrieval.read",
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
     return await collab_svc.collaboration_service.list_retrieval_profiles(
         scope=scope,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
 
@@ -4706,6 +5273,7 @@ async def _create_retrieval_corpus(
     *,
     scope: str,
     organization_id: UUID | None = None,
+    project_id: UUID | None = None,
     workspace_id: UUID | None = None,
 ) -> RetrievalCorpus:
     actor = await _resolve_retrieval_actor(
@@ -4713,11 +5281,13 @@ async def _create_retrieval_corpus(
         payload.actor,
         permission="retrieval.write",
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
     return await collab_svc.collaboration_service.create_retrieval_corpus(
         scope=scope,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
         payload=payload.model_copy(update={"actor": actor}),
     )
@@ -4728,17 +5298,20 @@ async def _list_retrieval_corpora(
     *,
     scope: str,
     organization_id: UUID | None = None,
+    project_id: UUID | None = None,
     workspace_id: UUID | None = None,
 ) -> list[RetrievalCorpus]:
     await _require_retrieval_permission(
         request,
         permission="retrieval.read",
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
     return await collab_svc.collaboration_service.list_retrieval_corpora(
         scope=scope,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
 
@@ -4749,6 +5322,7 @@ async def _create_retrieval_source(
     *,
     scope: str,
     organization_id: UUID | None = None,
+    project_id: UUID | None = None,
     workspace_id: UUID | None = None,
 ) -> RetrievalSource:
     await _require_file_asset_visibility(request, payload.asset_id)
@@ -4757,11 +5331,13 @@ async def _create_retrieval_source(
         payload.actor,
         permission="retrieval.write",
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
     return await collab_svc.collaboration_service.create_retrieval_source(
         scope=scope,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
         payload=payload.model_copy(update={"actor": actor}),
     )
@@ -4772,6 +5348,7 @@ async def _list_retrieval_sources(
     *,
     scope: str,
     organization_id: UUID | None = None,
+    project_id: UUID | None = None,
     workspace_id: UUID | None = None,
     corpus_id: UUID | None = None,
 ) -> list[RetrievalSource]:
@@ -4779,12 +5356,14 @@ async def _list_retrieval_sources(
         request,
         permission="retrieval.read",
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
     return await collab_svc.collaboration_service.list_retrieval_sources(
         corpus_id=corpus_id,
         scope=scope,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
 
@@ -4795,6 +5374,7 @@ async def _create_retrieval_job(
     payload: CreateRetrievalIngestionJobRequest,
     *,
     organization_id: UUID | None = None,
+    project_id: UUID | None = None,
     workspace_id: UUID | None = None,
 ) -> RetrievalIngestionJob:
     actor = await _resolve_retrieval_actor(
@@ -4802,6 +5382,7 @@ async def _create_retrieval_job(
         payload.actor,
         permission="retrieval.write",
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
     return await collab_svc.collaboration_service.create_retrieval_ingestion_job(
@@ -4815,6 +5396,7 @@ async def _list_retrieval_jobs(
     *,
     scope: str,
     organization_id: UUID | None = None,
+    project_id: UUID | None = None,
     workspace_id: UUID | None = None,
     corpus_id: UUID | None = None,
     source_id: UUID | None = None,
@@ -4824,6 +5406,7 @@ async def _list_retrieval_jobs(
         request,
         permission="retrieval.read",
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
     return await collab_svc.collaboration_service.list_retrieval_ingestion_jobs(
@@ -4831,6 +5414,7 @@ async def _list_retrieval_jobs(
         source_id=source_id,
         scope=scope,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
         status=status,
     )
@@ -4842,6 +5426,7 @@ async def _run_retrieval_search(
     *,
     scope: str,
     organization_id: UUID | None = None,
+    project_id: UUID | None = None,
     workspace_id: UUID | None = None,
 ) -> RetrievalSearchResponse:
     actor = await _resolve_retrieval_actor(
@@ -4849,6 +5434,7 @@ async def _run_retrieval_search(
         payload.actor,
         permission="retrieval.search",
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
     actor = await _apply_retrieval_provider_override_permission(
@@ -4856,11 +5442,13 @@ async def _run_retrieval_search(
         actor,
         payload.provider_overrides,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
     return await collab_svc.collaboration_service.run_retrieval_search(
         scope=scope,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
         payload=payload.model_copy(update={"actor": actor}),
     )
@@ -4872,6 +5460,7 @@ async def _create_retrieval_context_pack(
     *,
     scope: str,
     organization_id: UUID | None = None,
+    project_id: UUID | None = None,
     workspace_id: UUID | None = None,
 ) -> RetrievalContextPack:
     actor = await _resolve_retrieval_actor(
@@ -4879,6 +5468,7 @@ async def _create_retrieval_context_pack(
         payload.actor,
         permission="retrieval.search",
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
     actor = await _apply_retrieval_provider_override_permission(
@@ -4886,11 +5476,13 @@ async def _create_retrieval_context_pack(
         actor,
         payload.provider_overrides,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
     return await collab_svc.collaboration_service.create_retrieval_context_pack(
         scope=scope,
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
         payload=payload.model_copy(update={"actor": actor}),
     )
@@ -4902,12 +5494,14 @@ async def _get_retrieval_context_pack(
     *,
     scope: str,
     organization_id: UUID | None = None,
+    project_id: UUID | None = None,
     workspace_id: UUID | None = None,
 ) -> RetrievalContextPack:
     await _require_retrieval_permission(
         request,
         permission="retrieval.read",
         organization_id=organization_id,
+        project_id=project_id,
         workspace_id=workspace_id,
     )
     context_pack = await collab_svc.collaboration_service.get_retrieval_context_pack(
@@ -4922,6 +5516,7 @@ async def _get_retrieval_context_pack(
     if (
         context_pack.scope != scope
         or context_pack.organization_id != expected_organization_id
+        or context_pack.project_id != project_id
         or context_pack.workspace_id != workspace_id
     ):
         raise KeyError(f"Retrieval context pack {context_pack_id} not found")
@@ -5243,6 +5838,249 @@ async def get_organization_retrieval_context_pack(
             context_pack_id,
             scope="organization",
             organization_id=organization_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/projects/{project_id}/retrieval/profiles",
+    response_model=RetrievalProfile,
+)
+async def create_project_retrieval_profile(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+    payload: CreateRetrievalProfileRequest,
+) -> RetrievalProfile:
+    try:
+        return await _create_retrieval_profile(
+            request,
+            payload,
+            scope="project",
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/projects/{project_id}/retrieval/profiles",
+    response_model=list[RetrievalProfile],
+)
+async def list_project_retrieval_profiles(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+) -> list[RetrievalProfile]:
+    try:
+        return await _list_retrieval_profiles(
+            request,
+            scope="project",
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/projects/{project_id}/retrieval/corpora",
+    response_model=RetrievalCorpus,
+)
+async def create_project_retrieval_corpus(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+    payload: CreateRetrievalCorpusRequest,
+) -> RetrievalCorpus:
+    try:
+        return await _create_retrieval_corpus(
+            request,
+            payload,
+            scope="project",
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/projects/{project_id}/retrieval/corpora",
+    response_model=list[RetrievalCorpus],
+)
+async def list_project_retrieval_corpora(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+) -> list[RetrievalCorpus]:
+    try:
+        return await _list_retrieval_corpora(
+            request,
+            scope="project",
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/projects/{project_id}/retrieval/sources",
+    response_model=RetrievalSource,
+)
+async def create_project_retrieval_source(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+    payload: CreateRetrievalSourceRequest,
+) -> RetrievalSource:
+    try:
+        return await _create_retrieval_source(
+            request,
+            payload,
+            scope="project",
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/projects/{project_id}/retrieval/sources",
+    response_model=list[RetrievalSource],
+)
+async def list_project_retrieval_sources(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+    corpus_id: UUID | None = Query(default=None),
+) -> list[RetrievalSource]:
+    try:
+        return await _list_retrieval_sources(
+            request,
+            scope="project",
+            organization_id=organization_id,
+            project_id=project_id,
+            corpus_id=corpus_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/projects/{project_id}/retrieval/corpora/{corpus_id}/jobs",
+    response_model=RetrievalIngestionJob,
+)
+async def create_project_retrieval_job(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+    corpus_id: UUID,
+    payload: CreateRetrievalIngestionJobRequest,
+) -> RetrievalIngestionJob:
+    try:
+        return await _create_retrieval_job(
+            request,
+            corpus_id,
+            payload,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/projects/{project_id}/retrieval/jobs",
+    response_model=list[RetrievalIngestionJob],
+)
+async def list_project_retrieval_jobs(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+    corpus_id: UUID | None = Query(default=None),
+    source_id: UUID | None = Query(default=None),
+    status: str | None = Query(default=None),
+) -> list[RetrievalIngestionJob]:
+    try:
+        return await _list_retrieval_jobs(
+            request,
+            scope="project",
+            organization_id=organization_id,
+            project_id=project_id,
+            corpus_id=corpus_id,
+            source_id=source_id,
+            status=status,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/projects/{project_id}/retrieval/search",
+    response_model=RetrievalSearchResponse,
+)
+async def run_project_retrieval_search(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+    payload: RunRetrievalSearchRequest,
+) -> RetrievalSearchResponse:
+    try:
+        return await _run_retrieval_search(
+            request,
+            payload,
+            scope="project",
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/projects/{project_id}/retrieval/context-packs",
+    response_model=RetrievalContextPack,
+)
+async def create_project_retrieval_context_pack(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+    payload: CreateRetrievalContextPackRequest,
+) -> RetrievalContextPack:
+    try:
+        return await _create_retrieval_context_pack(
+            request,
+            payload,
+            scope="project",
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/projects/{project_id}/retrieval/context-packs/{context_pack_id}",
+    response_model=RetrievalContextPack,
+)
+async def get_project_retrieval_context_pack(
+    request: Request,
+    organization_id: UUID,
+    project_id: UUID,
+    context_pack_id: UUID,
+) -> RetrievalContextPack:
+    try:
+        return await _get_retrieval_context_pack(
+            request,
+            context_pack_id,
+            scope="project",
+            organization_id=organization_id,
+            project_id=project_id,
         )
     except Exception as exc:
         raise _http_error(exc) from exc

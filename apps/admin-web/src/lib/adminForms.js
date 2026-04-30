@@ -118,6 +118,37 @@ export function buildProjectMutation({
   return payload;
 }
 
+export function buildLibraryMutation(actor, formData) {
+  return {
+    actor,
+    slug: (formData.slug || '').trim() || null,
+    name: formData.name,
+    description: (formData.description || '').trim() || null,
+    metadata: parseJsonInput(formData.metadata, {}, 'Metadata'),
+  };
+}
+
+export function buildLibraryTextItemPayload(actor, formData) {
+  return {
+    actor,
+    title: formData.title,
+    content: formData.content,
+    item_kind: formData.item_kind || 'text',
+    logical_name: (formData.logical_name || '').trim() || null,
+    source_uri: (formData.source_uri || '').trim() || null,
+    content_type: (formData.content_type || '').trim() || 'text/markdown',
+    metadata: parseJsonInput(formData.metadata, {}, 'Metadata'),
+  };
+}
+
+export function buildLibraryIndexPayload(actor, itemIds = []) {
+  return {
+    actor,
+    item_ids: itemIds,
+    metadata: {},
+  };
+}
+
 function subjectRefsFromCsv(raw, key) {
   if (typeof raw !== 'string' || !raw.trim()) {
     return [];
