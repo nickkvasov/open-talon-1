@@ -6373,6 +6373,26 @@ class CollaborationRepository:
         )
         return self._research_dossier_note_from_row(row) if row else None
 
+    async def fetch_research_dossier_note_by_slug(
+        self,
+        notebook_id: UUID,
+        slug: str,
+    ) -> ResearchDossierNote | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT note_id, notebook_id, dossier_id, organization_id, note_kind,
+                   status, slug, title, body, summary, source_id, concept_id,
+                   citation_ids, related_note_ids, external_page_ref, external_url,
+                   created_by, created_at, updated_by, updated_at, metadata
+            FROM research_dossier_notes
+            WHERE notebook_id = $1
+              AND slug = $2
+            """,
+            notebook_id,
+            slug,
+        )
+        return self._research_dossier_note_from_row(row) if row else None
+
     async def list_research_dossier_notes(
         self,
         notebook_id: UUID,
@@ -6414,6 +6434,25 @@ class CollaborationRepository:
         )
         return self._research_dossier_concept_from_row(row) if row else None
 
+    async def fetch_research_dossier_concept_by_slug(
+        self,
+        notebook_id: UUID,
+        slug: str,
+    ) -> ResearchDossierConcept | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT concept_id, notebook_id, dossier_id, organization_id, slug, name,
+                   aliases, definition, status, confidence, source_ids, claim_ids,
+                   created_by, created_at, updated_by, updated_at, metadata
+            FROM research_dossier_concepts
+            WHERE notebook_id = $1
+              AND slug = $2
+            """,
+            notebook_id,
+            slug,
+        )
+        return self._research_dossier_concept_from_row(row) if row else None
+
     async def list_research_dossier_concepts(
         self,
         notebook_id: UUID,
@@ -6452,6 +6491,26 @@ class CollaborationRepository:
         )
         return self._research_dossier_claim_from_row(row) if row else None
 
+    async def fetch_research_dossier_claim_by_key(
+        self,
+        notebook_id: UUID,
+        claim_key: str,
+    ) -> ResearchDossierClaim | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT claim_id, notebook_id, dossier_id, organization_id, claim_key,
+                   statement, status, confidence, provenance, source_ids, citation_ids,
+                   context_pack_ids, contradicted_by_claim_ids, created_by, created_at,
+                   updated_by, updated_at, metadata
+            FROM research_dossier_claims
+            WHERE notebook_id = $1
+              AND claim_key = $2
+            """,
+            notebook_id,
+            claim_key,
+        )
+        return self._research_dossier_claim_from_row(row) if row else None
+
     async def list_research_dossier_claims(
         self,
         notebook_id: UUID,
@@ -6487,6 +6546,38 @@ class CollaborationRepository:
             WHERE link_id = $1
             """,
             link_id,
+        )
+        return self._research_dossier_link_from_row(row) if row else None
+
+    async def fetch_research_dossier_link_by_tuple(
+        self,
+        notebook_id: UUID,
+        *,
+        source_type: str,
+        source_ref_id: UUID,
+        target_type: str,
+        target_ref_id: UUID,
+        link_kind: str,
+    ) -> ResearchDossierLink | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT link_id, notebook_id, dossier_id, organization_id, source_type,
+                   source_ref_id, target_type, target_ref_id, link_kind, rationale,
+                   confidence, created_by, created_at, updated_by, updated_at, metadata
+            FROM research_dossier_links
+            WHERE notebook_id = $1
+              AND source_type = $2
+              AND source_ref_id = $3
+              AND target_type = $4
+              AND target_ref_id = $5
+              AND link_kind = $6
+            """,
+            notebook_id,
+            source_type,
+            source_ref_id,
+            target_type,
+            target_ref_id,
+            link_kind,
         )
         return self._research_dossier_link_from_row(row) if row else None
 

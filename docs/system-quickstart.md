@@ -164,10 +164,12 @@ development the launcher enables XWiki `superadmin` with
 replace those defaults with a managed XWiki account or OpenBao-backed provider
 secrets before running live sync.
 
-Run the real XWiki live test after the stack is up:
+Run the real XWiki live test after the stack is up, or let the live-test runner
+start the XWiki profile for that fraction:
 
 ```bash
 OPEN_TALON_RUN_XWIKI_LIVE=1 ./.venv/bin/python -m pytest -m integration tests/infrastructure/test_xwiki_dossier_live_system.py -q -s
+./scripts/run-live-tests.sh xwiki
 ```
 
 ## 3. Check The Main Endpoints
@@ -749,6 +751,8 @@ Operational-agent live wiring is also behind an explicit env gate:
 ```bash
 OPEN_TALON_RUN_OPERATIONAL_AGENTS_LIVE=1 \
   pytest -m integration tests/infrastructure/operational_agents_live -q -s
+./scripts/run-live-tests.sh default-stack
+./scripts/run-live-tests.sh all
 ```
 
 After schema, route, bootstrap, or managed-agent definition changes, run

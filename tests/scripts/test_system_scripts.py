@@ -11,7 +11,13 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 
 
 def test_system_lifecycle_scripts_parse_and_are_executable() -> None:
-    for script_name in ("dbmate.sh", "system-init.sh", "system-repair.sh", "system-reset.sh"):
+    for script_name in (
+        "dbmate.sh",
+        "run-live-tests.sh",
+        "system-init.sh",
+        "system-repair.sh",
+        "system-reset.sh",
+    ):
         script_path = ROOT_DIR / "scripts" / script_name
         assert script_path.exists()
         assert script_path.stat().st_mode & stat.S_IXUSR
@@ -29,6 +35,7 @@ def test_system_lifecycle_scripts_parse_and_are_executable() -> None:
             "py_compile",
             str(ROOT_DIR / "scripts" / "system_repair.py"),
             str(ROOT_DIR / "scripts" / "migrations.py"),
+            str(ROOT_DIR / "scripts" / "run_live_tests.py"),
         ],
         check=True,
     )

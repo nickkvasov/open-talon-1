@@ -6,10 +6,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from gateway_edge.config import settings
 from gateway_edge.models import (
+    AuthContext,
     MethodologyBlueprint,
     MethodologyBlueprintDetail,
     MethodologyBlueprintVersion,
+    OrganizationMembership,
     ResearchDossierGraph,
     ResearchDossierNavigationResult,
     ResearchDossierNote,
@@ -25,6 +28,54 @@ pytestmark = pytest.mark.asyncio
 
 
 DEFAULT_ORGANIZATION_ID = UUID("11111111-1111-1111-1111-111111111111")
+
+
+def _oidc_context(*, roles: list[str], user_id: UUID | None = None) -> AuthContext:
+    return AuthContext(
+        kind="oidc",
+        user_id=user_id or uuid4(),
+        issuer="http://issuer.test/realms/open-talon",
+        subject="subject-123",
+        email="nikolay@example.com",
+        display_name="Nikolay",
+        roles=roles,
+        claims={"sub": "subject-123"},
+    )
+
+
+def _patch_oidc_tokens(monkeypatch, token_map: dict[str, AuthContext]) -> None:
+    monkeypatch.setattr(settings, "auth_mode", "oidc")
+
+    async def _validate(token: str):
+        return token_map.get(token)
+
+    async def _sync(context):
+        return context
+
+    monkeypatch.setattr("gateway_edge.auth.middleware.validate_oidc_token", _validate)
+    monkeypatch.setattr("gateway_edge.auth.middleware.sync_oidc_auth_context", _sync)
+
+
+def _grant_organization_membership(
+    mock_collaboration_service,
+    *,
+    organization_id: UUID,
+    user_id: UUID,
+    role: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    membership = OrganizationMembership(
+        organization_id=organization_id,
+        user_id=user_id,
+        role=role,
+        joined_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    mock_collaboration_service.organization_memberships.setdefault(
+        str(organization_id),
+        {},
+    )[str(user_id)] = membership.model_dump(mode="json")
 
 
 def _blueprint_detail(
@@ -286,6 +337,125 @@ async def test_dossier_notebook_route_rejects_cross_org_dossier(
 
     assert response.status_code == 404
     mock_collaboration_service.get_research_dossier_notebook_detail.assert_not_awaited()
+
+
+async def test_dossier_notebook_routes_enforce_permission_matrix_and_org_scope(
+    client,
+    mock_collaboration_service,
+    actor_payload,
+    monkeypatch,
+):
+    owner = _oidc_context(roles=[])
+    member = _oidc_context(roles=[])
+    outsider = _oidc_context(roles=[])
+    _patch_oidc_tokens(
+        monkeypatch,
+        {
+            "owner-token": owner,
+            "member-token": member,
+            "outsider-token": outsider,
+        },
+    )
+    _grant_organization_membership(
+        mock_collaboration_service,
+        organization_id=DEFAULT_ORGANIZATION_ID,
+        user_id=owner.user_id,
+        role="owner",
+    )
+    _grant_organization_membership(
+        mock_collaboration_service,
+        organization_id=DEFAULT_ORGANIZATION_ID,
+        user_id=member.user_id,
+        role="member",
+    )
+
+    detail = _blueprint_detail()
+    dossier = detail.dossier
+    notebook_detail = _notebook_detail(dossier)
+    graph = ResearchDossierGraph(
+        dossier_id=dossier.dossier_id,
+        notebook_id=notebook_detail.notebook.notebook_id,
+        nodes=[{"type": "note", "id": str(notebook_detail.notes[0].note_id)}],
+        links=[],
+    )
+    navigation = ResearchDossierNavigationResult(
+        dossier_id=dossier.dossier_id,
+        notebook_id=notebook_detail.notebook.notebook_id,
+        query="home",
+        entry_notes=notebook_detail.notes,
+    )
+    sync_run = ResearchDossierSyncRun(
+        sync_run_id=uuid4(),
+        binding_id=notebook_detail.provider_bindings[0].binding_id,
+        notebook_id=notebook_detail.notebook.notebook_id,
+        dossier_id=dossier.dossier_id,
+        organization_id=dossier.organization_id,
+        status="completed",
+        stats={"pages_synced": 1},
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    mock_collaboration_service.get_research_dossier = AsyncMock(return_value=dossier)
+    mock_collaboration_service.get_research_dossier_notebook_detail = AsyncMock(
+        return_value=notebook_detail
+    )
+    mock_collaboration_service.get_research_dossier_graph = AsyncMock(
+        return_value=graph
+    )
+    mock_collaboration_service.navigate_research_dossier = AsyncMock(
+        return_value=navigation
+    )
+    mock_collaboration_service.sync_research_dossier_notebook = AsyncMock(
+        return_value=sync_run
+    )
+
+    owner_notebook = await client.get(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/notebook",
+        headers={"Authorization": "Bearer owner-token"},
+    )
+    member_graph = await client.get(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/graph",
+        headers={"Authorization": "Bearer member-token"},
+    )
+    member_navigate = await client.post(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/navigate",
+        headers={"Authorization": "Bearer member-token"},
+        json={"actor": actor_payload, "query": "home"},
+    )
+    member_sync = await client.post(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/sync",
+        headers={"Authorization": "Bearer member-token"},
+        json={"actor": actor_payload, "provider_key": "xwiki", "force": True},
+    )
+    owner_sync = await client.post(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/sync",
+        headers={"Authorization": "Bearer owner-token"},
+        json={"actor": actor_payload, "provider_key": "xwiki", "force": True},
+    )
+    outsider_notebook = await client.get(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/notebook",
+        headers={"Authorization": "Bearer outsider-token"},
+    )
+
+    assert owner_notebook.status_code == 200
+    assert member_graph.status_code == 200
+    assert member_navigate.status_code == 200
+    assert member_sync.status_code == 403
+    assert owner_sync.status_code == 200
+    assert outsider_notebook.status_code == 404
+    assert mock_collaboration_service.sync_research_dossier_notebook.await_count == 1
+
+    wrong_org_dossier = _blueprint_detail(organization_id=uuid4()).dossier
+    mock_collaboration_service.get_research_dossier = AsyncMock(
+        return_value=wrong_org_dossier
+    )
+    mock_collaboration_service.get_research_dossier_graph = AsyncMock()
+    cross_org_graph = await client.get(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{wrong_org_dossier.dossier_id}/graph",
+        headers={"Authorization": "Bearer owner-token"},
+    )
+    assert cross_org_graph.status_code == 404
+    mock_collaboration_service.get_research_dossier_graph.assert_not_awaited()
 
 
 async def test_methodology_read_routes_do_not_fabricate_actor_without_oidc(

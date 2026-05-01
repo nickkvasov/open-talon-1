@@ -48,3 +48,37 @@ pytest -m integration tests/infrastructure -q -s
 
 Markers are applied automatically by `tests/conftest.py` based on the test path.
 Individual tests can still add narrower markers when needed.
+
+## Live Suite Runner
+
+Use `scripts/run-live-tests.sh` for the real local live matrix. It centralizes
+the environment flags and stack profiles that were previously scattered across
+individual commands.
+
+```bash
+# Show runnable live suites and fractions.
+./scripts/run-live-tests.sh --list
+
+# Print the full live matrix without executing it.
+./scripts/run-live-tests.sh all --dry-run
+
+# Run all live suites sequentially.
+./scripts/run-live-tests.sh all
+
+# Run a fraction.
+./scripts/run-live-tests.sh default-stack
+./scripts/run-live-tests.sh providers
+./scripts/run-live-tests.sh xwiki
+```
+
+The runner has three stack modes:
+
+- `self`: the test fixture starts and stops its own stack.
+- `default`: the runner starts one shared `./open-talon start` stack for the
+  selected operational, Anchor, and Retriever suites.
+- `xwiki`: the runner starts one shared `./open-talon start --xwiki` stack and
+  supplies local XWiki live-test defaults.
+
+The `compose` suite runs the raw Docker Compose infrastructure smoke test and
+resets compose volumes through its fixture. Use named fractions when you need a
+bounded live check rather than the whole matrix.

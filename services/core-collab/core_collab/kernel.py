@@ -4163,10 +4163,14 @@ class CollaborationKernel:
         await self._require_dossier_write_actor(dossier, payload.actor)
         notebook = await self._require_research_dossier_notebook(dossier_id)
         now = self._now()
+        normalized_slug = self._normalize_library_slug(payload.slug)
         existing = (
             await self._repository.fetch_research_dossier_note(payload.note_id)
             if payload.note_id is not None
-            else None
+            else await self._repository.fetch_research_dossier_note_by_slug(
+                notebook.notebook_id,
+                normalized_slug,
+            )
         )
         if existing is not None and existing.notebook_id != notebook.notebook_id:
             raise KeyError(f"Research dossier note {payload.note_id} not found")
@@ -4178,7 +4182,7 @@ class CollaborationKernel:
             organization_id=dossier.organization_id,
             note_kind=payload.note_kind,
             status=payload.status,
-            slug=self._normalize_library_slug(payload.slug),
+            slug=normalized_slug,
             title=payload.title,
             body=payload.body,
             summary=payload.summary,
@@ -4223,10 +4227,14 @@ class CollaborationKernel:
         await self._require_dossier_write_actor(dossier, payload.actor)
         notebook = await self._require_research_dossier_notebook(dossier_id)
         now = self._now()
+        normalized_slug = self._normalize_library_slug(payload.slug)
         existing = (
             await self._repository.fetch_research_dossier_concept(payload.concept_id)
             if payload.concept_id is not None
-            else None
+            else await self._repository.fetch_research_dossier_concept_by_slug(
+                notebook.notebook_id,
+                normalized_slug,
+            )
         )
         if existing is not None and existing.notebook_id != notebook.notebook_id:
             raise KeyError(f"Research dossier concept {payload.concept_id} not found")
@@ -4243,7 +4251,7 @@ class CollaborationKernel:
             notebook_id=notebook.notebook_id,
             dossier_id=dossier.dossier_id,
             organization_id=dossier.organization_id,
-            slug=self._normalize_library_slug(payload.slug),
+            slug=normalized_slug,
             name=payload.name,
             aliases=list(payload.aliases),
             definition=payload.definition,
@@ -4289,7 +4297,14 @@ class CollaborationKernel:
         existing = (
             await self._repository.fetch_research_dossier_claim(payload.claim_id)
             if payload.claim_id is not None
-            else None
+            else (
+                await self._repository.fetch_research_dossier_claim_by_key(
+                    notebook.notebook_id,
+                    payload.claim_key,
+                )
+                if payload.claim_key is not None
+                else None
+            )
         )
         if existing is not None and existing.notebook_id != notebook.notebook_id:
             raise KeyError(f"Research dossier claim {payload.claim_id} not found")
@@ -4365,7 +4380,14 @@ class CollaborationKernel:
         existing = (
             await self._repository.fetch_research_dossier_link(payload.link_id)
             if payload.link_id is not None
-            else None
+            else await self._repository.fetch_research_dossier_link_by_tuple(
+                notebook.notebook_id,
+                source_type=payload.source_type,
+                source_ref_id=payload.source_ref_id,
+                target_type=payload.target_type,
+                target_ref_id=payload.target_ref_id,
+                link_kind=payload.link_kind,
+            )
         )
         if existing is not None and existing.notebook_id != notebook.notebook_id:
             raise KeyError(f"Research dossier link {payload.link_id} not found")

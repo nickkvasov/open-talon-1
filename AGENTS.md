@@ -231,7 +231,14 @@ pytest tests/core-collab -q
 pytest tests/tui -q
 pytest tests/business-cases -q
 pytest -m integration tests/infrastructure/test_infrastructure.py -v -s
+./scripts/run-live-tests.sh --list
+./scripts/run-live-tests.sh all
 ```
+
+Use `./scripts/run-live-tests.sh` for coordinated live runs. It provides
+fractions such as `core`, `agents`, `providers`, `default-stack`, `web-search`,
+and `knowledge`, and it owns the required environment gates and stack profiles
+for default, web-search, and XWiki live suites.
 
 If a change touches schema, repository, participant hydration, routing, or migrations:
 

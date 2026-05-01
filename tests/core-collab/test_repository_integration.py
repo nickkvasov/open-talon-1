@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime, timezone
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 import asyncpg
@@ -84,6 +85,122 @@ def _postgres_dsn() -> str:
     )
 
 
+def _dsn_with_database(dsn: str, database: str) -> str:
+    parsed = urlsplit(dsn)
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            f"/{database}",
+            parsed.query,
+            parsed.fragment,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_fresh_database_migration_chain_builds_xwiki_dossier_schema():
+    source_dsn = _postgres_dsn()
+    admin_dsn = _dsn_with_database(
+        source_dsn,
+        os.getenv("OPEN_TALON_TEST_POSTGRES_MAINTENANCE_DB", "postgres"),
+    )
+    database_name = f"open_talon_migration_xwiki_{uuid4().hex[:12]}"
+    admin_conn: asyncpg.Connection | None = None
+    pool: asyncpg.Pool | None = None
+    try:
+        admin_conn = await asyncpg.connect(dsn=admin_dsn)
+        await admin_conn.execute(f'CREATE DATABASE "{database_name}" TEMPLATE template0')
+        await admin_conn.close()
+        admin_conn = None
+        pool = await asyncpg.create_pool(
+            dsn=_dsn_with_database(source_dsn, database_name),
+            min_size=1,
+            max_size=2,
+        )
+    except Exception as exc:  # pragma: no cover - integration environment dependent
+        pytest.skip(f"Fresh Postgres migration-chain test unavailable: {exc}")
+    try:
+        await apply_pending_migrations(pool)
+        async with pool.acquire() as conn:
+            tables = {
+                row["table_name"]
+                for row in await conn.fetch(
+                    """
+                    SELECT table_name
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name LIKE 'research_dossier%'
+                    """
+                )
+            }
+            expected_tables = {
+                "research_dossiers",
+                "research_dossier_sources",
+                "research_dossier_events",
+                "research_dossier_notebooks",
+                "research_dossier_notes",
+                "research_dossier_concepts",
+                "research_dossier_claims",
+                "research_dossier_links",
+                "research_dossier_provider_bindings",
+                "research_dossier_provider_external_refs",
+                "research_dossier_sync_runs",
+                "research_dossier_health_checks",
+            }
+            assert expected_tables.issubset(tables)
+            seeded_agents = {
+                row["agent_key"]
+                for row in await conn.fetch(
+                    """
+                    SELECT agent_key
+                    FROM system_agents
+                    WHERE agent_key IN ('researcher', 'methodologist')
+                    """
+                )
+            }
+            assert seeded_agents == {"researcher", "methodologist"}
+            private_tools = {
+                row["tool_name"]
+                for row in await conn.fetch(
+                    """
+                    SELECT DISTINCT tool_name
+                    FROM (
+                        SELECT jsonb_array_elements_text(tool_allowlist) AS tool_name
+                        FROM agent_internal_mcp_servers
+                    ) AS allowed_tools
+                    WHERE tool_name IN (
+                        'methodology.dossiers.notes.upsert',
+                        'methodology.dossiers.concepts.upsert',
+                        'methodology.dossiers.navigate',
+                        'methodology.dossiers.sync',
+                        'methodology.blueprints.submit_draft'
+                    )
+                    """
+                )
+            }
+            assert {
+                "methodology.dossiers.notes.upsert",
+                "methodology.dossiers.concepts.upsert",
+                "methodology.dossiers.navigate",
+                "methodology.dossiers.sync",
+                "methodology.blueprints.submit_draft",
+            }.issubset(private_tools)
+    finally:
+        if pool is not None:
+            await pool.close()
+        try:
+            admin_conn = admin_conn or await asyncpg.connect(dsn=admin_dsn)
+            await admin_conn.execute(
+                f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)'
+            )
+        except Exception:
+            pass
+        finally:
+            if admin_conn is not None and not admin_conn.is_closed():
+                await admin_conn.close()
+
+
 @pytest.mark.asyncio
 async def test_repository_methodology_dossier_notebook_round_trips():
     try:
@@ -99,8 +216,9 @@ async def test_repository_methodology_dossier_notebook_round_trips():
         organization = await repository.fetch_organization(DEFAULT_ORGANIZATION_ID)
         assert organization is not None
         actor = ParticipantInput(
-            participant_id=uuid4(),
+            participant_id=organization.created_by,
             participant_type="user",
+            user_id=organization.created_by,
             display_name="Repository Methodology Owner",
         )
         blueprint_result = await kernel.create_methodology_blueprint(

@@ -858,6 +858,12 @@ class FakeRepository:
     async def fetch_research_dossier_note(self, note_id):
         return self._research_dossier_notes.get(note_id)
 
+    async def fetch_research_dossier_note_by_slug(self, notebook_id, slug):
+        for note in self._research_dossier_notes.values():
+            if note.notebook_id == notebook_id and note.slug == slug:
+                return note
+        return None
+
     async def list_research_dossier_notes(self, notebook_id, *, note_kind=None, status=None):
         notes = [
             note
@@ -871,6 +877,12 @@ class FakeRepository:
     async def fetch_research_dossier_concept(self, concept_id):
         return self._research_dossier_concepts.get(concept_id)
 
+    async def fetch_research_dossier_concept_by_slug(self, notebook_id, slug):
+        for concept in self._research_dossier_concepts.values():
+            if concept.notebook_id == notebook_id and concept.slug == slug:
+                return concept
+        return None
+
     async def list_research_dossier_concepts(self, notebook_id, *, status=None):
         concepts = [
             concept
@@ -883,6 +895,12 @@ class FakeRepository:
     async def fetch_research_dossier_claim(self, claim_id):
         return self._research_dossier_claims.get(claim_id)
 
+    async def fetch_research_dossier_claim_by_key(self, notebook_id, claim_key):
+        for claim in self._research_dossier_claims.values():
+            if claim.notebook_id == notebook_id and claim.claim_key == claim_key:
+                return claim
+        return None
+
     async def list_research_dossier_claims(self, notebook_id, *, status=None):
         claims = [
             claim
@@ -894,6 +912,28 @@ class FakeRepository:
 
     async def fetch_research_dossier_link(self, link_id):
         return self._research_dossier_links.get(link_id)
+
+    async def fetch_research_dossier_link_by_tuple(
+        self,
+        notebook_id,
+        *,
+        source_type,
+        source_ref_id,
+        target_type,
+        target_ref_id,
+        link_kind,
+    ):
+        for link in self._research_dossier_links.values():
+            if (
+                link.notebook_id == notebook_id
+                and link.source_type == source_type
+                and link.source_ref_id == source_ref_id
+                and link.target_type == target_type
+                and link.target_ref_id == target_ref_id
+                and link.link_kind == link_kind
+            ):
+                return link
+        return None
 
     async def list_research_dossier_links(self, notebook_id, *, link_kind=None):
         links = [
@@ -4248,6 +4288,188 @@ async def test_research_dossier_notebook_concepts_claims_links_health_and_sync()
             "research_dossier_notebook.synced",
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_research_dossier_notebook_upserts_are_idempotent_by_natural_keys():
+    repository, kernel, organization, _operations_workspace, actor = (
+        await _seed_methodology_world()
+    )
+    detail = await _create_methodology_blueprint_fixture(
+        repository,
+        kernel,
+        organization,
+        actor,
+    )
+    dossier = detail.dossier
+    source_result = await kernel.create_research_dossier_source(
+        dossier.dossier_id,
+        CreateResearchDossierSourceRequest(
+            actor=actor,
+            source_kind="webpage",
+            status="included",
+            title="Retry-safe evidence",
+            source_uri="https://example.test/retry-safe",
+            citation_id="S1",
+        ),
+    )
+    source = source_result.source
+    assert source is not None
+
+    first_concept = (
+        await kernel.upsert_research_dossier_concept(
+            dossier.dossier_id,
+            UpsertResearchDossierConceptRequest(
+                actor=actor,
+                slug="retry-safe-concept",
+                name="Retry-safe concept",
+                definition="Initial definition.",
+                status="candidate",
+                source_ids=[source.source_id],
+                metadata={"attempt": 1},
+            ),
+        )
+    ).concept
+    second_concept = (
+        await kernel.upsert_research_dossier_concept(
+            dossier.dossier_id,
+            UpsertResearchDossierConceptRequest(
+                actor=actor,
+                slug="retry-safe-concept",
+                name="Retry-safe concept updated",
+                definition="Updated definition.",
+                status="active",
+                confidence=0.91,
+                source_ids=[source.source_id],
+                metadata={"attempt": 2},
+            ),
+        )
+    ).concept
+    assert first_concept is not None
+    assert second_concept is not None
+    assert second_concept.concept_id == first_concept.concept_id
+    assert second_concept.created_at == first_concept.created_at
+    assert second_concept.definition == "Updated definition."
+    assert second_concept.metadata == {"attempt": 2}
+
+    first_note = (
+        await kernel.upsert_research_dossier_note(
+            dossier.dossier_id,
+            UpsertResearchDossierNoteRequest(
+                actor=actor,
+                note_kind="concept",
+                status="draft",
+                slug="retry-safe-note",
+                title="Retry-safe note",
+                body="Initial body.",
+                concept_id=second_concept.concept_id,
+                citation_ids=["S1"],
+            ),
+        )
+    ).note
+    second_note = (
+        await kernel.upsert_research_dossier_note(
+            dossier.dossier_id,
+            UpsertResearchDossierNoteRequest(
+                actor=actor,
+                note_kind="concept",
+                status="active",
+                slug="retry-safe-note",
+                title="Retry-safe note updated",
+                body="Updated body.",
+                concept_id=second_concept.concept_id,
+                citation_ids=["S1", "S2"],
+            ),
+        )
+    ).note
+    assert first_note is not None
+    assert second_note is not None
+    assert second_note.note_id == first_note.note_id
+    assert second_note.status == "active"
+    assert second_note.citation_ids == ["S1", "S2"]
+
+    first_claim = (
+        await kernel.upsert_research_dossier_claim(
+            dossier.dossier_id,
+            UpsertResearchDossierClaimRequest(
+                actor=actor,
+                claim_key="claim:retry-safe",
+                statement="Initial claim.",
+                status="draft",
+                source_ids=[source.source_id],
+                citation_ids=["S1"],
+            ),
+        )
+    ).claim
+    second_claim = (
+        await kernel.upsert_research_dossier_claim(
+            dossier.dossier_id,
+            UpsertResearchDossierClaimRequest(
+                actor=actor,
+                claim_key="claim:retry-safe",
+                statement="Updated claim.",
+                status="supported",
+                confidence=0.82,
+                source_ids=[source.source_id],
+                citation_ids=["S1"],
+            ),
+        )
+    ).claim
+    assert first_claim is not None
+    assert second_claim is not None
+    assert second_claim.claim_id == first_claim.claim_id
+    assert second_claim.statement == "Updated claim."
+
+    first_link = (
+        await kernel.upsert_research_dossier_link(
+            dossier.dossier_id,
+            UpsertResearchDossierLinkRequest(
+                actor=actor,
+                source_type="concept",
+                source_ref_id=second_concept.concept_id,
+                target_type="claim",
+                target_ref_id=second_claim.claim_id,
+                link_kind="supports",
+                rationale="Initial rationale.",
+            ),
+        )
+    ).link
+    second_link = (
+        await kernel.upsert_research_dossier_link(
+            dossier.dossier_id,
+            UpsertResearchDossierLinkRequest(
+                actor=actor,
+                source_type="concept",
+                source_ref_id=second_concept.concept_id,
+                target_type="claim",
+                target_ref_id=second_claim.claim_id,
+                link_kind="supports",
+                rationale="Updated rationale.",
+                confidence=0.75,
+            ),
+        )
+    ).link
+    assert first_link is not None
+    assert second_link is not None
+    assert second_link.link_id == first_link.link_id
+    assert second_link.rationale == "Updated rationale."
+
+    notebook = await kernel.get_research_dossier_notebook_detail(
+        dossier.dossier_id,
+        actor=actor,
+    )
+    assert [item.slug for item in notebook.concepts].count("retry-safe-concept") == 1
+    assert [item.slug for item in notebook.notes].count("retry-safe-note") == 1
+    assert [item.claim_key for item in notebook.claims].count("claim:retry-safe") == 1
+    assert len(
+        [
+            item
+            for item in notebook.links
+            if item.source_ref_id == second_concept.concept_id
+            and item.target_ref_id == second_claim.claim_id
+            and item.link_kind == "supports"
+        ]
+    ) == 1
 
 
 @pytest.mark.asyncio

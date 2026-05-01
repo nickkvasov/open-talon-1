@@ -1091,7 +1091,7 @@ Infra defaults are defined in `infrastructure/.env.example`, including:
 
 ## Pytest Orchestration
 
-`pytest.ini` excludes `integration` tests by default, so the maintained suite and the live infrastructure suite are two explicit commands. The Tinker coverage is split between an in-process business-case scenario and a real live integration path.
+`pytest.ini` excludes `integration` tests by default, so the maintained suite and the live infrastructure suite are explicit commands. Use the live-test runner when you need the real local matrix; it knows which suites self-manage `./open-talon`, which suites share a default stack, and which suites require optional profiles such as XWiki or web search.
 
 ```bash
 # Enable the repository virtual environment
@@ -1109,6 +1109,13 @@ pytest tests/business-cases -q
 # Infrastructure integration tests
 pytest -m integration tests/infrastructure/test_infrastructure.py -v -s
 
+# Show and run the live matrix or a fraction of it
+./scripts/run-live-tests.sh --list
+./scripts/run-live-tests.sh all --dry-run
+./scripts/run-live-tests.sh all
+./scripts/run-live-tests.sh default-stack
+./scripts/run-live-tests.sh providers
+
 # Live Tinker business-case scenario (in-process, fake repository)
 pytest tests/business-cases/test_tinker_tool_generation.py -q
 
@@ -1120,9 +1127,12 @@ pytest -m integration tests/infrastructure/test_agent_compaction_live_system.py 
 
 # Full test coverage: default suite plus integration suite
 pytest -q
-pytest -m integration tests/infrastructure/test_infrastructure.py -v -s
-pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s
+./scripts/run-live-tests.sh all
 ```
+
+Live runner fractions include `core`, `agents`, `providers`, `default-stack`,
+`web-search`, `knowledge`, and each individual suite name. The `compose` suite
+uses the raw Docker Compose fixture and resets compose volumes.
 
 ## AI Model Initialization Note
 

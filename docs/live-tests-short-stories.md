@@ -34,6 +34,20 @@ The protocol is simple:
 6. Assert durable side effects, not only transient events.
 7. Record failures as setup, protocol, or product behavior before changing code.
 
+For matrix runs, prefer the live-test runner:
+
+```bash
+./scripts/run-live-tests.sh --list
+./scripts/run-live-tests.sh all
+./scripts/run-live-tests.sh providers
+./scripts/run-live-tests.sh default-stack
+```
+
+The runner keeps suite fractions explicit: self-managed fixtures still own their
+own stack lifecycle, operational/Anchor/Retriever share one default stack phase,
+and XWiki runs under one `./open-talon start --xwiki` phase with local test
+credentials supplied by default.
+
 Anchor follows this protocol with:
 
 ```bash
