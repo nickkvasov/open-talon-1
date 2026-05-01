@@ -676,6 +676,23 @@ pytest tests/core-collab -q
 pytest tests/infrastructure/test_keycloak_local_config.py -q
 ```
 
+Broad merged-code verification usually uses this sequence:
+
+```bash
+pytest -q
+pytest -m integration -q -rs
+npm --prefix apps/admin-web run test:unit
+npm --prefix apps/admin-web run build
+./open-talon start
+pytest -m integration tests/core-collab/test_repository_integration.py -q -rs
+npm --prefix apps/admin-web run test:e2e
+```
+
+Repository integration tests need Postgres from the local stack. If they skip during
+the marker run because Postgres is down, start the stack and rerun
+`tests/core-collab/test_repository_integration.py` directly before treating the
+matrix as complete.
+
 Tinker-specific verification:
 
 ```bash
@@ -684,6 +701,22 @@ pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s
 ```
 
 The live Tinker system test is marked `integration`, so it is excluded from the default `pytest -q` run by `pytest.ini`. It expects the configured `OPEN_TALON_DEFAULT_REASONING_MODEL` to be available in the local Ollama instance.
+
+For live tests that prove model-backed worker behavior, use the infrastructure
+Ollama service started by `./open-talon start`. Anchor moderation and Retriever
+visual extraction are sensitive to local model latency: if the default
+`gemma4:31b` cannot respond within the live test window on a developer machine,
+restart with another explicit non-`latest` local model tag and record that choice
+with the result. The launcher sources `infrastructure/.env`, so put these
+overrides there or update the local persisted provider row before assuming a
+shell-prefix assignment changed the running stack:
+
+```bash
+OPEN_TALON_DEFAULT_REASONING_MODEL=<explicit-local-gemma-tag> \
+RETRIEVER_DEFAULT_VISION_MODEL=<explicit-local-gemma-tag> \
+AGENT_LOOP_MODEL_TIMEOUT_SECONDS=180 \
+  ./open-talon start
+```
 
 Operational-agent live wiring is also behind an explicit env gate:
 

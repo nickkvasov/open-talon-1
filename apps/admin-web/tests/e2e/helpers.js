@@ -176,7 +176,7 @@ export async function seedPendingApprovalToolGenerationRequest(
       description: 'Builds tools on demand and submits them for approval.',
       role: 'tool_generation_agent',
       capabilities: ['tool_generation'],
-      endpoint: { kind: 'local', model: 'gemma4:latest' },
+      endpoint: { kind: 'local', model: 'gemma4:31b' },
       system_prompt: 'Build tools carefully.',
       definition: { tool_generation_agent: true },
       metadata: { tool_generation_agent: true },

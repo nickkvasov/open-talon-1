@@ -113,6 +113,8 @@ Primary local flow:
 - Retriever visual extraction is a vision-LLM workload and should use the shared LLM engine registry. `RetrievalProfile.vision_provider_key` can refer to an engine id such as `local-ollama` or a provider key such as `openai` or `anthropic`; organization-scoped retrieval should include global plus same-organization LLM providers.
 - Retriever visual extraction must prove document understanding, not only object recognition. Chart tests should assert semantic facts such as chart title, labels, approximate values, peaks/highest values, trends, or comparisons rather than accepting vague phrases like "there is a chart."
 - Keep Retriever visual tests realistic but bounded. Prefer public, stable, rights-clear PDF fixtures with documented source/rights, then derive the relevant page or crop at test runtime instead of sending an entire multi-page report through a local vision model unless the test is explicitly about throughput.
+- Library is store-first and Retriever indexing is explicit. Adding uploads, Markdown/text, webpage scraps, images, or diagrams to a library must not enqueue ingestion unless the caller invokes the library index route or Retriever plugin tool.
+- Library/Retriever scope rules must be tested together: organization, project, and workspace libraries can reuse slugs across different owners, workspace search includes workspace libraries plus explicitly attached organization/project libraries, and cross-organization or cross-project attachments must be rejected.
 - `Methodologist` is a managed global specialist agent for evidence-backed methodology extraction and workspace template design. Keep it a normal `system_agents` definition with harness and interaction contract behavior; do not add Methodologist-specific runtime branches.
 - Methodologist outputs should separate source-grounded methodology basis, methodics, methods, tools, actors, and workspace templates. Source-derived claims need cited retrieval/source evidence, while inferred tools or implementation ideas must be labeled as inference or ideation.
 - `Conductor` is a separate managed global specialist for active workspace methodics execution. It must be explicitly attached through normal workspace agent attachment, and methodics execution must be explicitly started; workspace creation, Methodologist drafts, and methodics APIs must not auto-attach it.
@@ -120,6 +122,7 @@ Primary local flow:
 - Conductor uses dedicated `methodic_*` execution tables, targets only methodics task kinds, and sets `normal_message_fanout=false`. Start/cancel and resource request approval/rejection are human-gated. Conductor can read execution state, create assignments, evaluate DoD pass/fail/rework, advance steps, complete final reports, and create pending resource requests through its managed internal MCP binding, but its private allowlist must not include human-gated methodics control tools.
 - Local Ollama model roles are configured through `OPEN_TALON_DEFAULT_REASONING_MODEL`, `RETRIEVER_DEFAULT_EMBEDDING_MODEL`, and `RETRIEVER_DEFAULT_VISION_MODEL`. `REQUIRED_MODELS` is only an explicit bootstrap override for the Ollama service, not the canonical place to duplicate model roles.
 - Local live tests that use Ollama must use the infrastructure Ollama service from `infrastructure/docker-compose.yaml`; do not rely on a separately running host Ollama with different models.
+- Anchor and Retriever visual live tests are real model-path tests. On developer machines where the pinned default `gemma4:31b` cannot return within the live-test window, run the stack with another explicit non-`latest` local model tag and record that model choice in the test report instead of weakening assertions. Because `./open-talon` sources `infrastructure/.env`, update that local env file or the persisted local `llm_providers` row before trusting a shell-prefix override for `OPEN_TALON_DEFAULT_REASONING_MODEL`; do the same for `RETRIEVER_DEFAULT_VISION_MODEL` when Retriever visual tests need a smaller model.
 - Memory providers are persistent records in `memory_providers`; do not hardcode provider definitions in application logic after bootstrapping.
 - `system_agents`, `system_tools`, `llm_providers`, and `memory_providers` support `global` and `organization` scope; `git_repositories`, `workspace_assets`, and `asset_links` support `global`, `organization`, and `workspace` scope.
 - Local OpenBao uses persistent file storage under `infrastructure/data/openbao`; do not assume `docker compose down` clears local secrets.
@@ -259,6 +262,15 @@ If a change touches LLM provider resolution, local model defaults, Retriever ext
 - run `OPEN_TALON_RUN_RETRIEVER_LIVE=1 pytest -m integration tests/infrastructure/test_retriever_live_system.py -q -s` against the real local stack when PDF parsing, image understanding, OCR-like extraction, chart extraction, Ollama model roles, or Retriever ingestion behavior changes
 - live Retriever tests may need local-service access to Docker Compose Postgres, MinIO, and Ollama; if sandboxed execution fails with a local network or Docker socket permission error, rerun the same command with the required escalation rather than weakening the test
 
+If a change touches Library, Retriever plugin tools, library attachments, project retrieval scope, or library item storage:
+
+- inspect `packages/contracts`, `services/core-collab`, `services/gateway-edge`, `services/agent-runtime`, `db/migrations`, `apps/admin-web`, and the managed System Plugin defaults together
+- keep Library and Retriever as separate managed System Plugins; Library stores durable reference items, and Retriever creates corpora/sources/jobs only through explicit indexing
+- keep the library indexing policy testable outside the kernel when possible; corpus reuse, source id determinism, source-version/job binding, and payload metadata should have direct tests
+- verify `DELETE /v1/libraries/{library_id}` works for authenticated no-body clients as well as compatibility callers that still send an actor body
+- run `tests/core-collab/test_library_kernel.py`, `tests/gateway-edge/test_library_routes.py`, `tests/gateway-edge/test_mcp.py`, `tests/gateway-edge/test_system_plugins.py`, and relevant repository migration tests
+- run `OPEN_TALON_RUN_SYSTEM_PLUGINS_LIVE=1 pytest -m integration tests/infrastructure/test_system_plugins_live_system.py -q -s` and `OPEN_TALON_RUN_RETRIEVER_LIVE=1 pytest -m integration tests/infrastructure/test_retriever_live_system.py -q -s` against the real local stack when plugin registration, sync, attachment, indexing, or retrieval search changes
+
 If a change touches OIDC auth, Keycloak wiring, or TUI login/profile behavior:
 
 - run relevant `gateway-edge` auth tests
@@ -273,6 +285,8 @@ If a change touches the admin web, browser OIDC login, admin-browser routing, or
 - keep `apps/admin-web/public/runtime-config.json`, `apps/admin-web/README.md`, `README.md`, and `docs/system-quickstart.md` aligned
 - run `npm run build` in `apps/admin-web`
 - run admin-web e2e only with the local stack running; several live infrastructure suites stop the stack in teardown, so run `./open-talon start` again before `npm run test:e2e` if Keycloak or gateway was just torn down
+- admin e2e tests that remove or change organization membership should not mutate the currently signed-in admin user; sign in a secondary seeded user in a separate browser context first so the backend user row exists, then exercise membership changes on that secondary user
+- add a random suffix to browser-created names in addition to timestamps when parallel e2e workers can create resources in the same millisecond
 - run `npm run test:e2e` in `apps/admin-web` when browser behavior or destructive admin flows change
 
 If a change touches workspace authz, global admin routes, or workspace membership filtering:
@@ -314,6 +328,7 @@ If a change touches Tinker, tool generation, generated-tool approval, or interna
 - run `tests/gateway-edge/test_tool_generation.py`
 - run `tests/business-cases/test_tinker_tool_generation.py`
 - run `tests/agent-runtime/test_execution.py` when local helper execution or execution backends changed
+- Tinker live tests should disable workspace topic moderation unless the test is specifically about Anchor. Otherwise a slow or unavailable local moderation model can obscure the generated-tool/runtime behavior the Tinker test is meant to prove.
 - run `pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s` when the end-to-end Tinker/runtime path changes and the configured `OPEN_TALON_DEFAULT_REASONING_MODEL` is available in the infrastructure Ollama service
 
 If a change touches operational agents, managed administration contexts, agent-private MCP bindings, or control-plane MCP operations:
@@ -403,9 +418,11 @@ If a change touches Methodologist, Conductor, methodics execution, or other mana
 7. If LLM provider or secret behavior changes, inspect `llm_providers` migrations, gateway provider routes, runtime secret resolution, and local OpenBao wiring together.
 8. If Retriever ingestion or visual extraction changes, inspect `services/retriever`, retrieval contracts, retrieval repository/kernel methods, MinIO asset storage, pgvector persistence, and LLM provider resolution together.
 9. If operational-agent behavior changes, inspect gateway bootstrap, IAM bindings, MCP allowlists, `agent_identities`, workspace participant attachment, and runtime task claiming together.
-10. Update code to match the migrated schema.
-11. Run targeted tests.
-12. Run broader tests if the change affects shared contracts or persistence.
+10. Before merging local work into `main`, check `git branch --no-merged main` and the ancestry between candidate branches. If one unmerged branch already contains another, a single `git merge --ff-only <tip-branch>` into `main` is the cleanest way to bring both in.
+11. Keep the worktree clean before branch switching or merging; do not hide unrelated user edits in a merge.
+12. Update code to match the migrated schema.
+13. Run targeted tests.
+14. Run broader tests if the change affects shared contracts or persistence.
 
 ## Key Files
 

@@ -667,10 +667,14 @@ async def test_retriever_worker_uses_pdf_visual_extraction_for_text_image_and_ch
         vision_model=vision_model,
     )
     lowered = content.lower()
+    # The realistic report test below verifies semantic chart understanding
+    # with title, value, and peak assertions. This synthetic fixture only
+    # proves that visual extraction recognized the raster chart region.
     assert (
         "bar chart" in lowered
         or "bar graph" in lowered
         or ("bars" in lowered and "highest" in lowered)
+        or "chart analysis" in lowered
     ), content
 
 

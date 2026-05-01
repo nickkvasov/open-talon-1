@@ -82,4 +82,27 @@ What that result means:
 - the suppressed message stayed out of the communication log
 - balanced mode published immediately and later marked drift
 
+The April 30, 2026 merged-code run exposed a practical local-model lesson. The
+same Anchor balanced path timed out on one developer machine when the local stack
+used the pinned default `gemma4:31b`, then passed after restarting the stack with
+a smaller explicit non-`latest` local model tag and
+`AGENT_LOOP_MODEL_TIMEOUT_SECONDS=180`. The Retriever visual chart test exposed
+the same class of issue for vision extraction and should use a smaller explicit
+`RETRIEVER_DEFAULT_VISION_MODEL` tag on machines where the larger model times
+out. Because `./open-talon` sources `infrastructure/.env`, make sure the local
+env file or the persisted `llm_providers` row actually reflects the intended
+model before trusting a rerun. Treat these as local live-test configuration
+facts, not reasons to weaken assertions: the live suites are meant to prove that
+the real worker, provider, task completion, and durable metadata paths work
+together.
+
+For full matrix runs after merging branches into `main`, keep two details in the
+run log:
+
+- whether repository integration tests were rerun after starting Postgres, since
+  the marker suite will skip them when the stack is down
+- whether web-search live tests used `./open-talon start --web-search`, because
+  the managed web-search System Plugin needs the optional SearXNG and MCP bridge
+  services
+
 The longer operational-agent run history remains in [operational-agents-test-run-log-2026-04-26.md](./operational-agents-test-run-log-2026-04-26.md).

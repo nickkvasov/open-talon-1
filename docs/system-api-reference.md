@@ -768,7 +768,7 @@ Git-managed system and organization agent definitions are authored as modular bu
 | `POST` | `/v1/workspaces/{workspace_id}/libraries` | create workspace library |
 | `GET` | `/v1/libraries/{library_id}` | get a visible library |
 | `PATCH` | `/v1/libraries/{library_id}` | update library metadata or archive state |
-| `DELETE` | `/v1/libraries/{library_id}` | archive a library |
+| `DELETE` | `/v1/libraries/{library_id}` | archive a library; authenticated clients may omit the legacy actor body |
 | `GET` | `/v1/libraries/{library_id}/items` | list library items |
 | `POST` | `/v1/libraries/{library_id}/items` | add an existing immutable asset to a library |
 | `POST` | `/v1/libraries/{library_id}/items/upload` | upload and add a library file item |
@@ -786,6 +786,12 @@ Git-managed system and organization agent definitions are authored as modular bu
 Libraries are durable reference collections owned by exactly one organization, project, or workspace. Each owner can have many libraries, and library slugs are unique only inside that owner scope, so different projects or workspaces can reuse the same slug. Library items store their bytes as immutable MinIO-backed asset versions and can represent uploads, Markdown/text notes, webpage scraps, images, diagrams, or other reference material. Adding an item is store-first and does not automatically index it.
 
 Workspace library reads include workspace-owned libraries plus organization/project libraries explicitly attached through `/v1/workspaces/{workspace_id}/library-attachments/{library_id}`. Attachments require workspace `library.attach` permission and readable access to the source library. Library indexing is explicit through `/v1/libraries/{library_id}/index` or the managed Retriever plugin tools.
+
+Most library write routes still accept an explicit `actor` payload for
+compatibility with internal and scripted callers, but authenticated OIDC clients
+should rely on the gateway-derived principal where supported. `DELETE
+/v1/libraries/{library_id}` supports this no-body authenticated form and archives
+the library with the caller resolved from the request context.
 
 ### Retrieval APIs
 
