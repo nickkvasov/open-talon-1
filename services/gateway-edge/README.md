@@ -8,6 +8,7 @@ It exposes:
 - chat APIs with request/response and streaming flows
 - collaboration APIs for workspaces, threads, timelines, and presence
 - provider-neutral principal IAM APIs for human roles, agent roles, and agent identities
+- external-access APIs for external systems, accounts, participant grants, direct operations, and operation approvals
 - an MCP server at `/v1/mcp` that exposes permission-scoped Open Talon system API operations
 - admin APIs for API key management
 - a gateway-mounted browser session-chat UI at `/` when `apps/web` is present
@@ -51,6 +52,25 @@ Current behavior:
 
 System Plugins are managed through `/v1/system-plugins` and workspace plugin attachments. The public API exposes plugin fields such as `plugin_id`, `plugin_key`, and `backing_protocol`; external MCP servers remain the v1 backing protocol and are separate from this gateway-mounted MCP adapter.
 
+## External Access
+
+`gateway-edge` exposes `/v1/external-systems`,
+`/v1/workspaces/{workspace_id}/external-identity-grants`, direct external
+operation, and external operation approval routes. Route handlers resolve the
+OIDC principal, require `external.systems.*`, `external.grants.*`, or
+`external.operations.approve` where appropriate, and call `core-collab` for
+grant and approval state.
+
+Direct external operations are executed by
+[`gateway_edge/services/external_operations.py`](./gateway_edge/services/external_operations.py)
+after `core-collab` authorizes the executing workspace participant grant. The
+gateway uses the external system `operation_catalog`, resolves account or
+system credential references server-side, and redacts `secret_config` and
+`credential_ref` from returned Open Talon resolution objects.
+
+For the full route and operation-catalog reference, see
+[`docs/external-access.md`](../../docs/external-access.md).
+
 Relevant settings:
 
 - `MCP_ENABLED=true` mounts the MCP router; set it to `false` to disable the feature
@@ -82,6 +102,10 @@ pytest tests/gateway-edge -q
 # principal IAM and auth resolution
 pytest tests/gateway-edge/test_iam.py -q
 pytest tests/gateway-edge/test_identity_sync.py -q
+
+# external access routes and direct HTTP operation executor
+pytest tests/gateway-edge/test_external_access_routes.py -q
+pytest tests/gateway-edge/test_external_operation_executor.py -q
 
 # infrastructure integration
 pytest -m integration tests/infrastructure/test_infrastructure.py -v -s

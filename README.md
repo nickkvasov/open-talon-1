@@ -9,6 +9,7 @@ For coding-agent-specific project guidance, see [`AGENTS.md`](./AGENTS.md).
 - [docs/system-quickstart.md](./docs/system-quickstart.md): fastest path to a running local stack
 - [docs/system-api-reference.md](./docs/system-api-reference.md): current system and API reference for engineers and client builders
 - [docs/iam.md](./docs/iam.md): provider-neutral principal IAM model, permission catalog, and IAM APIs
+- [docs/external-access.md](./docs/external-access.md): external systems, participant-scoped identity grants, approvals, MCP external identity auth, and direct external operations
 - [docs/agent-operations-guide.md](./docs/agent-operations-guide.md): operating guide for software development agents and scripted test users
 - [docs/seeded-agents/README.md](./docs/seeded-agents/README.md): seeded-agent system concept plus one card per seeded agent, including idea, harness, live-test design, and tested behavior
 - [docs/tinker-tool-generation.md](./docs/tinker-tool-generation.md): Tinker request, approval, catalog, and live-test workflow
@@ -48,9 +49,9 @@ The typical flow is:
 
 | Component | Role today | Notes |
 | --- | --- | --- |
-| `services/gateway-edge` | public control plane and collaboration API | Owns REST, SSE, WebSocket, auth, admin, IAM, audit, collaboration, and session chat routes. |
-| `services/core-collab` | canonical collaboration and execution kernel | Owns Postgres persistence for workspaces, threads, participants, requests, tasks, runs, tool calls, memory, assets, and audit writes. |
-| `services/agent-runtime` | stateless execution plane | Runs the `agent-task-worker`, `agent-loop-worker`, `tool-worker`, `mcp-sync-worker`, and `reconciler`. |
+| `services/gateway-edge` | public control plane and collaboration API | Owns REST, SSE, WebSocket, auth, admin, IAM, audit, collaboration, external-access routes, direct external HTTP execution, and session chat routes. |
+| `services/core-collab` | canonical collaboration and execution kernel | Owns Postgres persistence for workspaces, threads, participants, requests, tasks, runs, tool calls, memory, assets, external grants/approval records, and audit writes. |
+| `services/agent-runtime` | stateless execution plane | Runs the `agent-task-worker`, `agent-loop-worker`, `tool-worker`, `mcp-sync-worker`, and `reconciler`, including MCP `auth.kind="external_identity"` grant resolution for outbound tool calls. |
 | `services/web-search-mcp` | managed web-search System Plugin | Exposes `search`, `fetch`, and `search_and_fetch` over MCP using self-hosted SearXNG and Crawl4AI. |
 | `services/retriever` | reusable retrieval ingestion worker | Claims retrieval ingestion jobs, reads versioned file assets from MinIO, extracts/chunks/embeds evidence, and writes chunks plus pgvector embeddings to Postgres. |
 | `services/workspace-memory` | shared memory-provider abstraction | Keeps Postgres canonical while letting Mem0 and optional Memgraph act as derived retrieval layers. |
@@ -345,6 +346,13 @@ System Plugins use a separate external-capability model. In v1 each System Plugi
 - `workspace_mcp_servers`: workspace-scoped plugin attachments that make selected capabilities visible to agents
 
 System Plugin capabilities are rendered and executed as external MCP-backed capabilities. The public API uses plugin-shaped fields such as `plugin_id`, `plugin_key`, and `backing_protocol`; MCP `server_id` and `server_key` remain protocol-specific backing details. System Plugins are never inserted into `system_tools`, never attached through `workspace_tools`, never published by Tinker, and never auto-attached to workspaces. The gateway-mounted `/v1/mcp` endpoint remains the inbound Open Talon system API adapter and does not import or proxy these external System Plugins.
+
+External identity grants are a separate control-plane layer for using an
+external account from a workspace participant. A System Plugin or external MCP
+server can still require `auth.kind="external_identity"` at runtime; that does
+not make plugin attachment an authorization grant. The executing participant
+must have an active `external_identity_grant`, and high-risk operations use
+dedicated external operation approvals.
 
 The managed `web_search`, `library`, and `retriever` System Plugins are seeded globally. Start web search backing services with `./open-talon start --web-search`, then sync capabilities from the admin console or `POST /v1/system-plugins/{plugin_id}/sync`. The launcher starts SearXNG as the optional Docker Compose `searxng` container under the `web-search` profile, waits for it to become reachable, and then starts the local `web-search-mcp` bridge process. It uses SearXNG for search and Crawl4AI for clean Markdown extraction. Parsed pages are returned by default; asset-candidate output is guarded by explicit plugin attachment metadata and `workspace.assets.publish`. Library and Retriever use the gateway-mounted MCP adapter as managed plugin backends: `library.*` tools manage scoped libraries and items, while `retriever.*` tools explicitly index and search selected library content.
 

@@ -8,6 +8,7 @@ For full current-state reference material, use:
 
 - [system-api-reference.md](./system-api-reference.md)
 - [iam.md](./iam.md)
+- [external-access.md](./external-access.md)
 - [agent-operations-guide.md](./agent-operations-guide.md)
 - [seeded-agents/README.md](./seeded-agents/README.md)
 
@@ -342,6 +343,7 @@ Current local hardening defaults:
 - the local Keycloak `admin` role acts as bootstrap platform-admin access, while steady-state authorization comes from Open Talon IAM permissions
 - global system-definition, global publish, provider-management, IAM-management, and runtime-overview APIs require the matching global IAM permission or bootstrap platform-admin access
 - organization CRUD, organization membership changes, and organization-scoped IAM management require organization permissions from membership baseline roles or explicit IAM role bindings
+- external system definitions, participant external identity grants, and external operation approvals require `external.systems.*`, `external.grants.*`, and `external.operations.approve`; workspace collaboration roles and capabilities do not create or approve external grants
 - Git-managed agent definitions use explicit validate/publish calls. Gateway compiles Forgejo bundles into `system_agents`, records immutable `agent_definition_versions`, and uses managed worktrees or archive upload for remote agent-authoring flows.
 - `GET /v1/workspaces` only returns workspaces where the authenticated human already has a participant
 - non-members should receive `404` for workspace, thread, memory, and workspace-scoped asset reads
@@ -374,6 +376,7 @@ Identity and execution boundaries:
 - agent identity/configuration is global in `system_agents`
 - Git-managed agent authoring is versioned in Forgejo and `agent_definition_versions`, but runtime execution still reads the active `system_agents` projection only.
 - workspace-local presence, collaboration roles, capabilities, and visibility live in `participants`
+- external access authority lives in `external_systems`, `external_accounts`, `external_identity_grants`, and `external_operation_requests`; grants are scoped to an attached `workspace_id + participant_id`
 - Postgres is the source of truth for collaboration and execution state
 - Kafka is the fanout and worker wake-up bus, not the canonical store
 
@@ -656,15 +659,30 @@ Workspace harnesses include `moderation_policy` with `enabled`, `level` (`strict
 
 System Plugins are managed separately from Open Talon tools. In v1 they are backed by external MCP servers stored in `mcp_servers`, but the public product surface is `/v1/system-plugins` and uses plugin fields such as `plugin_id`, `plugin_key`, and `backing_protocol`. Register global or organization-scoped plugins with `/v1/system-plugins` or `/v1/organizations/{organization_id}/system-plugins`, sync their plugin capabilities with `POST /v1/system-plugins/{plugin_id}/sync`, then attach them to a workspace with `PUT /v1/workspaces/{workspace_id}/system-plugins/{plugin_id}`. Plugin tools, resources, and prompts are rendered in separate agent context sections and are not inserted into `system_tools`, not attached through `workspace_tools`, not published by Tinker, and not auto-attached to workspaces.
 
+External access is managed separately from System Plugins and ordinary workspace
+collaboration. Platform or organization supervisors/admins define external
+systems and grant access to specific attached workspace participants. MCP
+servers configured with `auth.kind="external_identity"` and direct external
+operation routes both require an active grant for the executing participant.
+High-risk or destructive operations create approval requests unless the grant
+risk policy pre-approves the operation.
+
 Useful routes:
 
 ```text
 POST /v1/workspaces/{workspace_id}/agents
 POST /v1/threads/{thread_id}/messages
+POST /v1/organizations/{organization_id}/external-systems
+POST /v1/workspaces/{workspace_id}/external-identity-grants
+POST /v1/workspaces/{workspace_id}/external-systems/{system_id}/operations/{operation_key}
+POST /v1/workspaces/{workspace_id}/external-operation-requests/{operation_request_id}/approve
 GET /v1/threads/{thread_id}/tool-generation/requests
 POST /v1/tool-generation/revisions/{revision_id}/approve
 PUT /v1/workspaces/{workspace_id}/tools/{tool_id}
 ```
+
+For the external-access API and approval workflow, see
+[external-access.md](./external-access.md).
 
 For a deeper walkthrough, see [tinker-tool-generation.md](./tinker-tool-generation.md).
 

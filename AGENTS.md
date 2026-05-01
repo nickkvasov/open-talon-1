@@ -90,6 +90,15 @@ Primary local flow:
 - Organization CRUD and organization-scoped management routes require the relevant organization permission from baseline membership roles or explicit IAM role bindings, unless the caller is a platform admin.
 - Workspace role-definition changes, workspace participant-management, workspace tool management, workspace Git repository creation, and workspace asset publishing require the matching workspace-scoped IAM permission plus participant attachment.
 - Agent workspace visibility and runtime claimability must account for workspace participant attachment, not only project access bindings. `participants` is the workspace-local attachment/state record for humans and agents.
+- External system definitions, external identity grants, and external operation approvals are control-plane identity authority. Use `external.systems.read`, `external.systems.write`, `external.systems.validate`, `external.grants.read`, `external.grants.write`, and `external.operations.approve`; do not invent workspace-local collaboration permissions such as `workspace.external_identities.write`.
+- Workspace collaboration roles, capabilities, and workspace-admin labels must never grant external-system access or external grant management by themselves. A participant can use external access only when the executing workspace participant is attached to the workspace and has an active grant scoped to `workspace_id + participant_id`.
+- External access grants must remain workspace-participant scoped and keep normalized target links to `user_id` or `system_agent_id`. Do not authorize external operations from collaboration role names, capability text, metadata tags, or client-provided actor fields.
+- Pre-assigned external grants during participant attach/update APIs that expose `external_access_grants` require organization or global `external.grants.write`. Ordinary participant attachment callers without that permission must reject external grant fields rather than silently creating access.
+- MCP calls with `auth.kind="external_identity"` and direct external-operation APIs must resolve grants through the same external-access path. Missing, expired, revoked, inactive, wrong-workspace, or wrong-participant grants must fail authorization before any outbound operation is attempted.
+- High-risk or destructive external operations must create `external_operation_requests` unless the grant policy explicitly pre-approves that operation for that participant grant. Approval and rejection require `external.operations.approve`, not ordinary workspace participation.
+- Approved high-risk MCP operations park the tool call until approval and requeue it after approval. The resumed execution path must mark the operation request `completed` or `failed`; do not leave approved requests permanently pending after the operation finishes.
+- Keep external-operation authorization and durable state in `core-collab`, but keep generic outbound HTTP execution in `gateway-edge` services using the configured external-system operation catalog. Never return `secret_config`, `credential_ref`, bearer tokens, raw sensitive request payloads, or raw sensitive response payloads through operation results, approval metadata, or audit metadata.
+- Prefer workspace-path-scoped mutable external-access routes such as `/v1/workspaces/{workspace_id}/external-identity-grants/{grant_id}` and `/v1/workspaces/{workspace_id}/external-operation-requests/{operation_request_id}/approve`. Query-parameter workspace scoping on update, revoke, approve, and reject routes is easier to misuse and should only remain as a compatibility alias when needed.
 - Organization-scoped agents, tools, providers, repositories, and assets must stay inside the same organization as the consuming workspace.
 - Managed operational contexts must be seeded and repaired idempotently: `System Base / Administration / System Operations` for platform operations, and each non-system organization's `Administration / Organization Operations` context for organization operations.
 - Managed operational-agent identity bootstrap must validate live OIDC client-credentials authentication and repair stale or missing Keycloak clients/OpenBao secrets after local stack restarts or upgrades.
@@ -247,6 +256,19 @@ If a change touches schema, repository, participant hydration, routing, or migra
 - run migration-script coverage such as `tests/scripts/test_system_scripts.py` and `tests/core-collab/test_migration_files.py` when migration tooling or migration-file parsing changes
 - run `./scripts/dbmate.sh up` against the local stack when schema changes need to be applied before live tests
 - run full `pytest -q` when feasible
+
+If a change touches external systems, external identity grants, external operation requests, MCP external identity auth, or direct external-operation APIs:
+
+- inspect `packages/contracts`, `services/core-collab`, `services/gateway-edge`, `services/agent-runtime`, `db/migrations`, `apps/admin-web`, and relevant docs together
+- keep external-access domain logic in a focused service/module such as `core_collab.external_access`; avoid growing `CollaborationKernel` with large grant-resolution or approval-policy blocks once behavior has stabilized
+- cover ordinary workspace participant denial for create/update/revoke/approve, organization or platform admin success, own-active-grant visibility, tenant/workspace mismatch rejection, pre-assigned grant attach guards for humans and agents, and sanitized operation results
+- cover grant resolution for active, expired, revoked, inactive, wrong-workspace, and wrong-participant grants; collaboration roles and capabilities must not change the authorization outcome
+- cover approval policy behavior for high-risk operations, including request creation, approval, rejection, requeue after approval, and marking the request `completed` or `failed` after resumed execution
+- cover both MCP `auth.kind="external_identity"` and direct external-operation routes against the same grant-resolution semantics
+- cover external HTTP executor behavior with `httpx.MockTransport` or an equivalent fake provider, asserting credentials are used server-side but `secret_config`, `credential_ref`, bearer tokens, and raw sensitive payloads are not returned or stored in metadata
+- include repository or migration-backed coverage for active-grant filtering when local Postgres is available; local repository integration tests may skip cleanly when Postgres is not running
+- give test modules unique basenames across non-package test directories, especially when adding the same domain coverage under `tests/core-collab`, `tests/gateway-edge`, and `tests/agent-runtime`; duplicate module basenames can trigger pytest import-mismatch failures
+- run relevant `tests/core-collab`, `tests/gateway-edge`, `tests/agent-runtime`, migration-script coverage, `npm run build` in `apps/admin-web` when the admin surface changes, and local fake external-system integration tests when outbound execution behavior changes
 
 If a change touches layered memory, memory providers, Mem0, or graph-memory support:
 

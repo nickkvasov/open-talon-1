@@ -9,6 +9,7 @@ Use this guide when an agent needs to:
 - act as one or more human test users
 - authenticate as an agent identity through OIDC client credentials
 - drive workspaces, threads, requests, and answers through the HTTP APIs
+- use external systems only through supervisor/admin-granted participant grants
 - validate participant business-role routing and resumable collaboration
 - inspect collaboration logs and runtime outcomes
 
@@ -85,7 +86,19 @@ When acting as an authenticated human:
 - the gateway resolves the effective human actor
 - the `actor` field is compatibility input, not the source of truth
 
-### 5. Use Tracked Requests When You Need Deterministic Resume Behavior
+### 5. Use External Access Only Through Participant Grants
+
+External systems are not ordinary workspace tools. Before a human or agent tries
+to call a direct external operation or an MCP server with
+`auth.kind="external_identity"`, a platform or organization supervisor/admin
+must grant that exact workspace participant access through an
+`external_identity_grant`.
+
+Do not assume that a collaboration role such as `admin`, `supervisor`, or
+`backend_engineer` grants external access. Collaboration roles and capabilities
+are routing labels only.
+
+### 6. Use Tracked Requests When You Need Deterministic Resume Behavior
 
 Use plain messages when you only need general thread activity.
 
@@ -216,6 +229,9 @@ Check:
 | inspect persisted communication trail on disk | `OPEN_TALON_COMMUNICATION_LOG_DIR/<workspace_id>.jsonl` plus rotated siblings such as `.jsonl.1` |
 | inspect runtime queues/failures/tokens | `/v1/admin/runtime/overview` |
 | inspect org-scoped runtime queues/failures/tokens | `/v1/organizations/{organization_id}/runtime/overview` |
+| inspect own active external grants | `/v1/workspaces/{workspace_id}/external-identity-grants` |
+| run a direct external operation | `/v1/workspaces/{workspace_id}/external-systems/{system_id}/operations/{operation_key}` |
+| approve or reject external operation requests | `/v1/workspaces/{workspace_id}/external-operation-requests/{operation_request_id}/approve` or `/reject` |
 | inspect compliance/investigation events | `/v1/audit/events` |
 
 ## Request Construction Guidance
@@ -304,7 +320,11 @@ For both paths:
    - confirm finalized messages were persisted to disk
 8. `GET /v1/admin/runtime/overview`
    - confirm runnable or failed work when an agent should have resumed
-9. `GET /v1/audit/events`
+9. `GET /v1/workspaces/{workspace_id}/external-identity-grants`
+   - confirm the executing participant has an active grant before testing external operations
+10. `GET /v1/workspaces/{workspace_id}/external-operation-requests`
+   - confirm pending approval state when an external MCP tool call or direct operation is parked
+11. `GET /v1/audit/events`
    - inspect authorization or mutation history when needed, using the matching audit permissions for the target scope
 
 ## Common Mistakes
@@ -314,6 +334,8 @@ For both paths:
 - forgetting to select the intended organization before creating or listing workspaces in `tui2` or `user-client`
 - testing collaboration-role selection with explicit participant IDs
 - using `/v1/chat` for workflows that should use workspaces and threads
+- expecting ordinary workspace roles or capabilities to grant external system access
+- trying to self-grant external access from an ordinary workspace participant
 - expecting the communication log to include every internal runtime transition
 - forgetting that non-member workspace reads intentionally return `404`
 

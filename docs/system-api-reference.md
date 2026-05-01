@@ -23,6 +23,7 @@ This reference is written for two audiences:
 
 - [system-quickstart.md](./system-quickstart.md): fastest path to a running local stack
 - [iam.md](./iam.md): principal IAM model, permission catalog, and IAM API surface
+- [external-access.md](./external-access.md): external systems, participant-scoped identity grants, operation approvals, MCP external identity auth, and direct external operations
 - [agent-operations-guide.md](./agent-operations-guide.md): practical usage guide for software development agents and scripted clients
 - [seeded-agents/README.md](./seeded-agents/README.md): seeded-agent system concept, cards, harnesses, live-test design, and tested behavior
 - [db-migrations.md](./db-migrations.md): schema and migration workflow
@@ -129,6 +130,7 @@ The most important ownership rules are:
 - `interaction_requests` and related tables implement tracked, resumable question workflows
 - `tasks`, `runs`, `run_steps`, and `tool_calls` are durable execution records
 - `memory_entries` in Postgres are canonical memory; provider-specific projections are derived
+- `external_systems`, `external_accounts`, `external_identity_grants`, and `external_operation_requests` store control-plane external access authority and approval state
 - `audit_event_ledger` is the canonical append-only audit store
 - `collab_event_log` is the collaboration/event fanout stream, not the audit ledger
 
@@ -206,6 +208,7 @@ Current local development defaults use `AUTH_MODE=any`, with Keycloak as the def
 - global system-definition, provider-management, and IAM-management APIs require matching global IAM permissions or platform-admin bootstrap access
 - organization-scoped management flows require the relevant organization permissions, whether granted by membership baseline roles or explicit human or agent IAM role bindings
 - workspace role, agent, tool, repository, and asset-management flows require the matching workspace-scoped IAM permission together with participant attachment
+- external system definitions, participant grants, and external operation approvals require `external.systems.*`, `external.grants.*`, and `external.operations.approve`; workspace collaboration roles and capabilities do not grant external access
 - out-of-scope reads return `404`; in-scope requests without the required permission return `403`
 
 ### Auth And Session APIs
@@ -237,6 +240,7 @@ Current MCP behavior:
 - successful operation calls return both a short text `content` summary and `structuredContent`; protocol/schema failures stay JSON-RPC errors
 - MCP exposes system API operations only; it does not expose `system_tools`, `workspace_tools`, Tinker-generated tools, arbitrary System Plugins, or `agent-runtime` execution backends as imported MCP tools. The managed Library and Retriever System Plugins intentionally use this gateway MCP adapter as their backing surface.
 - System Plugins are the public external-capability layer. V1 stores them in `mcp_servers`, syncs discovered plugin capabilities into `mcp_server_tools`, `mcp_server_resources`, and `mcp_server_prompts`, and attaches them through `workspace_mcp_servers`. They are not imported into Open Talon `system_tools`, not published by Tinker, and not auto-attached to workspaces.
+- Runtime MCP server records can use `auth.kind="external_identity"` for outbound calls to external MCP services. That path resolves the executing workspace participant through `external_identity_grants`, creates `external_operation_requests` when approval is required, and is separate from this gateway-mounted `/v1/mcp` system API adapter.
 
 Current MCP session resources:
 
@@ -457,6 +461,11 @@ Important contracts:
 - `SystemToolDefinition`
 - `LlmProviderDefinition`
 - `MemoryProviderDefinition`
+- `ExternalSystemDefinition`
+- `ExternalAccount`
+- `ExternalIdentityGrant`
+- `ExternalOperationRequest`
+- `ExternalIdentityResolution`
 - `GitRepository`
 - `WorkspaceAsset`
 - `WorkspaceAssetVersion`
@@ -519,7 +528,7 @@ Main router groups:
 - `/health`, `/ready`
 - `/v1/me`
 - `/v1/chat`, `/v1/chat/stream`, `/v1/ws/chat/{session_id}`
-- `/v1/...` collaboration, memory, audit, assets, providers, and system definitions
+- `/v1/...` collaboration, memory, audit, assets, providers, external access, and system definitions
 - `/v1/admin/...`
 
 ### Actor Resolution
@@ -577,6 +586,7 @@ Current implementation snapshot from the FastAPI app:
   - `chat`
   - `collaboration`
   - `iam`
+  - `external_access`
   - `admin`
 
 For websocket truth, prefer [`services/gateway-edge/gateway_edge/routers/chat.py`](../services/gateway-edge/gateway_edge/routers/chat.py) and [`services/gateway-edge/gateway_edge/routers/collaboration.py`](../services/gateway-edge/gateway_edge/routers/collaboration.py).
@@ -707,6 +717,57 @@ System-agent definitions accept an optional typed `harness.compaction_policy` ob
 `Conductor` is a separate seeded global system agent for active workspace methodics execution. It is opt-in per workspace through normal agent attachment. If Conductor is not attached, `WorkspaceHarness.methodics` remains passive guidance and starting execution returns `409 Conflict`.
 
 Git-managed system and organization agent definitions are authored as modular bundles under `agents/<agent_key>/` and published through the gateway. The publish flow compiles the bundle into the existing `system_agents` runtime projection and writes immutable `agent_definition_versions` history. Runtime workers continue to read Postgres only; Forgejo and managed worktrees are authoring infrastructure, not runtime dependencies.
+
+### External Access APIs
+
+External access is control-plane authority for external systems, external
+accounts, participant-scoped grants, and operation approvals. The grant target
+is always an attached workspace participant (`workspace_id + participant_id`)
+with a normalized `user_id` or `system_agent_id` link for audit. Collaboration
+roles, participant capabilities, and workspace role definitions do not grant
+external access or grant-management authority.
+
+Direct external-operation APIs and runtime MCP `auth.kind="external_identity"`
+use the same grant resolver. If no active grant covers the executing
+participant and operation key, the operation fails before outbound network
+execution. `high` and `destructive` operations create
+`external_operation_requests` unless the grant risk policy pre-approves the
+operation. Approval or rejection requires `external.operations.approve`.
+
+The direct external-operation route can execute configured HTTP operations from
+`ExternalSystemDefinition.operation_catalog` after authorization succeeds. The
+gateway executes the HTTP call at the edge and returns `operation_result` on the
+`ExternalIdentityResolution`. If no matching HTTP operation is configured, the
+route returns only the authorization resolution.
+
+| Method | Path | Summary |
+| --- | --- | --- |
+| `POST` | `/v1/external-systems` | create global external system |
+| `POST` | `/v1/organizations/{organization_id}/external-systems` | create organization external system |
+| `GET` | `/v1/organizations/{organization_id}/external-systems` | list global plus organization-visible external systems |
+| `PATCH` | `/v1/external-systems/{system_id}` | update external system |
+| `DELETE` | `/v1/external-systems/{system_id}` | delete external system |
+| `POST` | `/v1/workspaces/{workspace_id}/external-accounts` | create external account reference for a visible system |
+| `PATCH` | `/v1/external-accounts/{account_id}?workspace_id=...` | update external account reference |
+| `POST` | `/v1/workspaces/{workspace_id}/external-identity-grants` | grant external access to a workspace participant |
+| `GET` | `/v1/workspaces/{workspace_id}/external-identity-grants` | list workspace grants; participants without `external.grants.read` see only their own active grants |
+| `PATCH` | `/v1/workspaces/{workspace_id}/external-identity-grants/{grant_id}` | update workspace external identity grant |
+| `DELETE` | `/v1/workspaces/{workspace_id}/external-identity-grants/{grant_id}` | revoke workspace external identity grant |
+| `POST` | `/v1/workspaces/{workspace_id}/external-systems/{system_id}/operations/{operation_key}` | authorize and optionally execute a direct external operation |
+| `GET` | `/v1/workspaces/{workspace_id}/external-operation-requests` | list external operation approval requests |
+| `POST` | `/v1/workspaces/{workspace_id}/external-operation-requests/{operation_request_id}/approve` | approve external operation request |
+| `POST` | `/v1/workspaces/{workspace_id}/external-operation-requests/{operation_request_id}/reject` | reject external operation request |
+
+Legacy query-scoped grant update/revoke and operation approve/reject routes
+remain compatibility aliases. Prefer workspace-path-scoped mutable routes.
+
+Agent participant attach and update requests accept optional
+`external_access_grants`. Those pre-assigned grants are created only when the
+caller has organization or global `external.grants.write`; ordinary workspace
+agent attachment without that permission rejects the external grant fields.
+
+For operation-catalog shape, risk policy keys, MCP external identity auth
+configuration, and focused tests, see [external-access.md](./external-access.md).
 
 ### Git Repositories, Assets, And Tool Attachments
 

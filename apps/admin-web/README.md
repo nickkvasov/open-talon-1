@@ -123,6 +123,11 @@ Current scope note:
 
 - the browser app uses OIDC login, but dedicated IAM role-management and machine-identity management screens are not part of this slice yet
 - use the documented `/v1/iam/...` APIs directly for human-role, agent-role, and machine-identity administration
+- dedicated external-access screens are not part of this slice yet; use
+  `/v1/external-systems`,
+  `/v1/workspaces/{workspace_id}/external-identity-grants`, and
+  `/v1/workspaces/{workspace_id}/external-operation-requests/...` directly for
+  supervisor/admin-managed external grants and approvals
 
 ## Notes
 

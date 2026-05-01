@@ -82,3 +82,26 @@ The runner has three stack modes:
 The `compose` suite runs the raw Docker Compose infrastructure smoke test and
 resets compose volumes through its fixture. Use named fractions when you need a
 bounded live check rather than the whole matrix.
+
+## External Access Coverage
+
+External system and participant-grant coverage is split by boundary:
+
+- `tests/core-collab/test_external_access.py`: grant authority, active-grant
+  resolution, risk-policy approval decisions, redaction, and operation-request
+  lifecycle.
+- `tests/gateway-edge/test_external_access_routes.py`: route guards, ordinary
+  participant denial, org/platform admin success, own-active-grant listing,
+  pre-assigned grant attach guards, and sanitized direct operation responses.
+- `tests/gateway-edge/test_external_operation_executor.py`: direct HTTP
+  operation catalog execution with fake transports and server-side credential
+  use.
+- `tests/agent-runtime/test_external_identity_mcp.py`: MCP
+  `auth.kind="external_identity"` header resolution, pending-approval parking,
+  and post-approval credential use.
+- `tests/core-collab/test_migration_files.py` and repository integration tests:
+  schema and SQL active-grant filtering.
+
+Use unique test module basenames across non-package test directories when adding
+more external-access coverage; duplicate names can trigger pytest
+import-mismatch failures.

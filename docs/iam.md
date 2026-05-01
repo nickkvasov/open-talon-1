@@ -188,6 +188,9 @@ Runtime MCP execution with `auth.kind="external_identity"` and direct external-o
 
 Direct external-operation APIs can execute configured HTTP operations from an external system's `operation_catalog` after authorization succeeds. The gateway performs the HTTP call at the edge using the resolved participant grant/account credentials, returns the external operation result to the caller, and redacts `secret_config`/`credential_ref` from the returned Open Talon resolution. If no HTTP operation is configured for the requested operation key, the API returns the authorization resolution without making an external call.
 
+For full route shape, operation-catalog examples, MCP external identity auth
+configuration, and tests, see [external-access.md](./external-access.md).
+
 Git-managed agent publishing uses the existing permission model: system-wide publish requires global `agent_catalog.write`, organization-wide publish requires organization-scoped `agent_catalog.write`, and Git repository registration requires `git_registry.write`. Agents can author files through gateway/MCP managed-worktree tools, but only gateway validation/publish writes `system_agents`.
 
 ## Role layers
@@ -242,6 +245,24 @@ Organization-scoped APIs:
 - `GET|POST /v1/organizations/{organization_id}/iam/agent-identities`
 
 Identity-specific follow-up routes such as role binding, rotate, disable, and enable operate on `/v1/iam/agent-identities/{agent_identity_id}/...` after the identity has been resolved.
+
+External-access control-plane APIs:
+
+- `POST /v1/external-systems`
+- `POST|GET /v1/organizations/{organization_id}/external-systems`
+- `PATCH|DELETE /v1/external-systems/{system_id}`
+- `POST /v1/workspaces/{workspace_id}/external-accounts`
+- `PATCH /v1/external-accounts/{account_id}?workspace_id=...`
+- `POST|GET /v1/workspaces/{workspace_id}/external-identity-grants`
+- `PATCH|DELETE /v1/workspaces/{workspace_id}/external-identity-grants/{grant_id}`
+- `POST /v1/workspaces/{workspace_id}/external-systems/{system_id}/operations/{operation_key}`
+- `GET /v1/workspaces/{workspace_id}/external-operation-requests`
+- `POST /v1/workspaces/{workspace_id}/external-operation-requests/{operation_request_id}/approve`
+- `POST /v1/workspaces/{workspace_id}/external-operation-requests/{operation_request_id}/reject`
+
+The legacy query-scoped grant update/revoke and operation approve/reject routes
+remain compatibility aliases, but new clients should use the workspace-path
+forms above.
 
 Current IAM management route guards:
 
@@ -348,6 +369,9 @@ This slice is API-first:
 - the backend IAM APIs are implemented and documented
 - the admin web continues to use OIDC login through the default provider
 - dedicated browser IAM management screens are not part of this slice yet
+- dedicated browser external-access screens are not part of this slice yet; use
+  the `/v1/external-systems`, workspace grant, and operation-request APIs
+  directly
 
 ## Audit
 

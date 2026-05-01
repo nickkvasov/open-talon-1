@@ -630,8 +630,16 @@ To make users and agents true peers, use the same core event types for both, but
 - invite/remove participants
 - approve whiteboard changes if governance requires it
 - approve final actions
+- grant, revoke, or approve external system identity access
 - change visibility level
 - archive a thread
+
+External system access is not an ordinary peer-collaboration capability. It is a
+control-plane decision made by platform or organization supervisors/admins and
+scoped to an attached workspace participant. Agents and humans may use only the
+external identities explicitly granted to their participant record, and
+high-risk operations should park behind a dedicated approval record instead of
+being inferred from collaboration roles.
 
 ## Recommended Interaction Pattern
 
