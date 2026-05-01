@@ -82,6 +82,12 @@ Examples:
 - `provider.mcp.read`
 - `provider.mcp.write`
 - `provider.mcp.validate`
+- `external.systems.read`
+- `external.systems.write`
+- `external.systems.validate`
+- `external.grants.read`
+- `external.grants.write`
+- `external.operations.approve`
 - `git_registry.read`
 - `git_registry.write`
 - `asset_catalog.read`
@@ -175,6 +181,12 @@ The MCP adapter uses those same agent permissions. It filters visible MCP operat
 Operational and managed specialist agents use this same model. `Tinker`, `Steward`, `Curator`, `Anchor`, `Researcher`, `Methodologist`, and `Conductor` are normal `system_agents` whose purpose is advertised through `display_name`, `role`, and `capabilities`; their authority comes from IAM bindings, project access, workspace participant attachment, task payloads, and private MCP/tool allowlists. Runtime workers stay generic and do not authorize or specialize behavior from agent keys, role text, capability text, or metadata tags. `Researcher` uses the managed `methodology_researcher` agent IAM role and private dossier MCP allowlist to build durable research dossiers from local libraries, Retriever context, database-visible context, and web follow-up sources inside one organization. `Conductor` is opt-in per workspace: attaching it enables targeted methodics tasks, but active execution still requires an explicit human methodics execution start call and otherwise the workspace has no methodics loop. The managed `workspace_conductor` agent IAM role allows Conductor to read/search workspace execution context and create pending resource requests after attachment; start/cancel and resource request approval/rejection remain human-gated.
 
 System Plugin management is separate from the gateway-mounted MCP adapter and from the Open Talon tool catalog. V1 stores System Plugins in `mcp_servers`, so global and organization plugin definitions, validation, and capability sync use `provider.mcp.*` permissions. Workspace plugin attachment uses `workspace.mcp_servers.write` after participant attachment. If an attachment enables parsed-page asset-candidate output, the caller also needs `workspace.assets.publish`. Do not use `tool_catalog.*` or `workspace.tools.write` to manage System Plugins.
+
+External identity grants are a separate control-plane authority. Global/platform admins and organization owners/admins can manage `external_systems`, `external_accounts`, and participant-scoped `external_identity_grants` through the `external.systems.*` and `external.grants.*` identity permissions. A grant targets one attached workspace participant (`workspace_id` plus `participant_id`) and records the normalized `user_id` or `system_agent_id`, external system, optional external account, allowed scopes/operations, risk policy, status, expiry, creator, and approver. Authorized callers can also pre-assign grants while attaching or updating an agent participant. Workspace collaboration roles, collaboration capabilities, and workspace-local role definitions do not grant external system access and do not grant grant-management authority.
+
+Runtime MCP execution with `auth.kind="external_identity"` and direct external-operation APIs both resolve the executing participant through the same active-grant check. If no active grant covers the operation, execution fails with a permission error. High-risk operations create `external_operation_requests` and thread-visible pending approval messages unless the participant grant's risk policy pre-approves the operation. Approving or rejecting those requests requires `external.operations.approve`; ordinary workspace participation is not enough. Grant update/revoke and operation approval routes are workspace-path scoped under `/v1/workspaces/{workspace_id}/...`; older query-scoped forms remain compatibility aliases.
+
+Direct external-operation APIs can execute configured HTTP operations from an external system's `operation_catalog` after authorization succeeds. The gateway performs the HTTP call at the edge using the resolved participant grant/account credentials, returns the external operation result to the caller, and redacts `secret_config`/`credential_ref` from the returned Open Talon resolution. If no HTTP operation is configured for the requested operation key, the API returns the authorization resolution without making an external call.
 
 Git-managed agent publishing uses the existing permission model: system-wide publish requires global `agent_catalog.write`, organization-wide publish requires organization-scoped `agent_catalog.write`, and Git repository registration requires `git_registry.write`. Agents can author files through gateway/MCP managed-worktree tools, but only gateway validation/publish writes `system_agents`.
 

@@ -122,6 +122,10 @@ class MockCollaborationService:
         self.human_role_bindings = {}
         self.agent_identities = {}
         self.agent_role_bindings = {}
+        self.external_systems = {}
+        self.external_accounts = {}
+        self.external_identity_grants = {}
+        self.external_operation_requests = {}
 
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
@@ -2022,6 +2026,471 @@ class MockCollaborationService:
         self.memory_providers.pop(str(provider_id), None)
         return {"deleted": True, "provider_id": str(provider_id)}
 
+    async def create_external_system(self, payload, *, scope="global", organization_id=None):
+        from gateway_edge.models import ExternalSystemDefinition
+
+        now = datetime.now(timezone.utc)
+        system = ExternalSystemDefinition(
+            system_id=uuid4(),
+            scope=scope,
+            organization_id=organization_id,
+            system_key=payload.system_key,
+            display_name=payload.display_name,
+            description=payload.description,
+            auth_kind=payload.auth_kind,
+            config=payload.config,
+            secret_config=payload.secret_config,
+            operation_catalog=payload.operation_catalog,
+            webhook_config=payload.webhook_config,
+            enabled=payload.enabled,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        self.external_systems[str(system.system_id)] = system
+        return system
+
+    async def list_external_systems(self, *, scope="global", organization_id=None):
+        return [
+            system
+            for system in self.external_systems.values()
+            if system.scope == scope and system.organization_id == organization_id
+        ]
+
+    async def get_external_system(self, system_id: UUID):
+        return self.external_systems.get(str(system_id))
+
+    async def update_external_system(self, system_id: UUID, payload):
+        system = self.external_systems.get(str(system_id))
+        if system is None:
+            raise KeyError(f"External system {system_id} not found")
+        updated = system.model_copy(
+            update={
+                "system_key": payload.system_key or system.system_key,
+                "display_name": payload.display_name or system.display_name,
+                "description": (
+                    payload.description
+                    if payload.description is not None
+                    else system.description
+                ),
+                "auth_kind": payload.auth_kind or system.auth_kind,
+                "config": payload.config if payload.config is not None else system.config,
+                "secret_config": (
+                    payload.secret_config
+                    if payload.secret_config is not None
+                    else system.secret_config
+                ),
+                "operation_catalog": (
+                    payload.operation_catalog
+                    if payload.operation_catalog is not None
+                    else system.operation_catalog
+                ),
+                "webhook_config": (
+                    payload.webhook_config
+                    if payload.webhook_config is not None
+                    else system.webhook_config
+                ),
+                "enabled": payload.enabled if payload.enabled is not None else system.enabled,
+                "updated_by": payload.actor.participant_id,
+                "updated_at": datetime.now(timezone.utc),
+                "metadata": (
+                    {**system.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else system.metadata
+                ),
+            }
+        )
+        self.external_systems[str(system_id)] = updated
+        return updated
+
+    async def delete_external_system(self, system_id: UUID, payload):
+        _ = payload
+        if str(system_id) not in self.external_systems:
+            raise KeyError(f"External system {system_id} not found")
+        self.external_systems.pop(str(system_id), None)
+        return {"deleted": True, "system_id": str(system_id)}
+
+    async def create_external_account(self, payload):
+        from gateway_edge.models import ExternalAccount
+
+        if str(payload.system_id) not in self.external_systems:
+            raise KeyError(f"External system {payload.system_id} not found")
+        now = datetime.now(timezone.utc)
+        account = ExternalAccount(
+            account_id=uuid4(),
+            system_id=payload.system_id,
+            owner_kind=payload.owner_kind,
+            user_id=payload.user_id,
+            system_agent_id=payload.system_agent_id,
+            external_subject=payload.external_subject,
+            display_name=payload.display_name,
+            scopes=payload.scopes,
+            credential_ref=payload.credential_ref,
+            expires_at=payload.expires_at,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        self.external_accounts[str(account.account_id)] = account
+        return account
+
+    async def list_external_accounts(
+        self,
+        *,
+        system_id: UUID | None = None,
+        user_id: UUID | None = None,
+        system_agent_id: UUID | None = None,
+        include_inactive: bool = False,
+    ):
+        return [
+            account
+            for account in self.external_accounts.values()
+            if (system_id is None or account.system_id == system_id)
+            and (user_id is None or account.user_id == user_id)
+            and (system_agent_id is None or account.system_agent_id == system_agent_id)
+            and (include_inactive or account.status == "active")
+        ]
+
+    async def get_external_account(self, account_id: UUID):
+        return self.external_accounts.get(str(account_id))
+
+    async def update_external_account(self, account_id: UUID, payload):
+        account = self.external_accounts.get(str(account_id))
+        if account is None:
+            raise KeyError(f"External account {account_id} not found")
+        updated = account.model_copy(
+            update={
+                "external_subject": (
+                    payload.external_subject
+                    if payload.external_subject is not None
+                    else account.external_subject
+                ),
+                "display_name": (
+                    payload.display_name
+                    if payload.display_name is not None
+                    else account.display_name
+                ),
+                "scopes": payload.scopes if payload.scopes is not None else account.scopes,
+                "credential_ref": (
+                    payload.credential_ref
+                    if payload.credential_ref is not None
+                    else account.credential_ref
+                ),
+                "status": payload.status or account.status,
+                "expires_at": (
+                    payload.expires_at if payload.expires_at is not None else account.expires_at
+                ),
+                "updated_by": payload.actor.participant_id,
+                "updated_at": datetime.now(timezone.utc),
+                "metadata": (
+                    {**account.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else account.metadata
+                ),
+            }
+        )
+        self.external_accounts[str(account_id)] = updated
+        return updated
+
+    def _external_system_visible_to_workspace(self, system, workspace_id: UUID) -> bool:
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            return False
+        return system.scope == "global" or system.organization_id == workspace.organization_id
+
+    def _active_external_grant(
+        self,
+        *,
+        workspace_id: UUID,
+        participant_id: UUID,
+        system_id: UUID,
+        operation_key: str | None = None,
+    ):
+        now = datetime.now(timezone.utc)
+        for grant in self.external_identity_grants.values():
+            if grant.workspace_id != workspace_id:
+                continue
+            if grant.participant_id != participant_id or grant.system_id != system_id:
+                continue
+            if grant.status != "active":
+                continue
+            if grant.expires_at is not None and grant.expires_at <= now:
+                continue
+            if operation_key and grant.allowed_operations and operation_key not in grant.allowed_operations:
+                continue
+            return grant
+        return None
+
+    async def create_external_identity_grant(self, workspace_id: UUID, payload):
+        from gateway_edge.models import ExternalIdentityGrant
+
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        participant = self.participants.get(str(workspace_id), {}).get(str(payload.participant_id))
+        if participant is None:
+            raise KeyError(f"Participant {payload.participant_id} not found")
+        system = self.external_systems.get(str(payload.system_id))
+        if system is None or not self._external_system_visible_to_workspace(system, workspace_id):
+            raise KeyError(f"External system {payload.system_id} not found")
+        if payload.account_id is not None and str(payload.account_id) not in self.external_accounts:
+            raise KeyError(f"External account {payload.account_id} not found")
+        now = datetime.now(timezone.utc)
+        grant = ExternalIdentityGrant(
+            grant_id=uuid4(),
+            workspace_id=workspace_id,
+            participant_id=participant.participant_id,
+            system_id=payload.system_id,
+            account_id=payload.account_id,
+            user_id=participant.user_id,
+            system_agent_id=participant.system_agent_id,
+            allowed_scopes=payload.allowed_scopes,
+            allowed_operations=payload.allowed_operations,
+            risk_policy=payload.risk_policy,
+            expires_at=payload.expires_at,
+            created_by=payload.actor.participant_id,
+            approved_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        self.external_identity_grants[str(grant.grant_id)] = grant
+        return grant
+
+    async def list_external_identity_grants(
+        self,
+        *,
+        workspace_id: UUID,
+        participant_id: UUID | None = None,
+        system_id: UUID | None = None,
+        include_inactive: bool = False,
+    ):
+        return [
+            grant
+            for grant in self.external_identity_grants.values()
+            if grant.workspace_id == workspace_id
+            and (participant_id is None or grant.participant_id == participant_id)
+            and (system_id is None or grant.system_id == system_id)
+            and (include_inactive or grant.status == "active")
+        ]
+
+    async def get_external_identity_grant(self, grant_id: UUID):
+        return self.external_identity_grants.get(str(grant_id))
+
+    async def update_external_identity_grant(self, grant_id: UUID, payload):
+        grant = self.external_identity_grants.get(str(grant_id))
+        if grant is None:
+            raise KeyError(f"External identity grant {grant_id} not found")
+        updated = grant.model_copy(
+            update={
+                "account_id": payload.account_id if payload.account_id is not None else grant.account_id,
+                "allowed_scopes": (
+                    payload.allowed_scopes
+                    if payload.allowed_scopes is not None
+                    else grant.allowed_scopes
+                ),
+                "allowed_operations": (
+                    payload.allowed_operations
+                    if payload.allowed_operations is not None
+                    else grant.allowed_operations
+                ),
+                "risk_policy": (
+                    payload.risk_policy if payload.risk_policy is not None else grant.risk_policy
+                ),
+                "status": payload.status or grant.status,
+                "expires_at": payload.expires_at if payload.expires_at is not None else grant.expires_at,
+                "updated_by": payload.actor.participant_id,
+                "updated_at": datetime.now(timezone.utc),
+                "metadata": (
+                    {**grant.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else grant.metadata
+                ),
+            }
+        )
+        self.external_identity_grants[str(grant_id)] = updated
+        return updated
+
+    async def delete_external_identity_grant(self, grant_id: UUID, payload):
+        grant = self.external_identity_grants.get(str(grant_id))
+        if grant is None:
+            raise KeyError(f"External identity grant {grant_id} not found")
+        revoked = grant.model_copy(
+            update={
+                "status": "revoked",
+                "updated_by": payload.actor.participant_id,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
+        self.external_identity_grants[str(grant_id)] = revoked
+        return revoked
+
+    @staticmethod
+    def _external_operation_requires_approval(grant, risk_level: str, operation_key: str) -> bool:
+        policy = grant.risk_policy or {}
+        if operation_key in set(policy.get("preapproved_operations") or []):
+            return False
+        if risk_level in set(policy.get("preapproved_risk_levels") or []):
+            return False
+        if operation_key in set(policy.get("approval_required_operations") or []):
+            return True
+        if operation_key in set(policy.get("require_approval_operations") or []):
+            return True
+        if risk_level in set(policy.get("approval_required_risk_levels") or []):
+            return True
+        if risk_level in set(policy.get("require_approval_risk_levels") or []):
+            return True
+        if bool(policy.get("require_approval")):
+            return True
+        return risk_level in {"high", "destructive"}
+
+    async def resolve_external_identity_for_operation(
+        self,
+        *,
+        workspace_id: UUID,
+        participant_id: UUID,
+        system_id: UUID,
+        operation_key: str,
+        risk_level: str = "low",
+        thread_id: UUID | None = None,
+        request_metadata: dict[str, object] | None = None,
+    ):
+        from gateway_edge.models import ExternalIdentityResolution, ExternalOperationRequest
+
+        workspace = self.workspaces.get(str(workspace_id))
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        participant = self.participants.get(str(workspace_id), {}).get(str(participant_id))
+        if participant is None:
+            raise PermissionError(
+                f"Workspace {workspace_id} requires an attached participant for this action"
+            )
+        system = self.external_systems.get(str(system_id))
+        if system is None or not self._external_system_visible_to_workspace(system, workspace_id):
+            raise KeyError(f"External system {system_id} not found")
+        grant = self._active_external_grant(
+            workspace_id=workspace_id,
+            participant_id=participant.participant_id,
+            system_id=system_id,
+            operation_key=operation_key,
+        )
+        if grant is None:
+            raise PermissionError(
+                f"No active external identity grant for participant {participant.participant_id}"
+            )
+        account = (
+            self.external_accounts.get(str(grant.account_id))
+            if grant.account_id is not None
+            else None
+        )
+        approval_required = self._external_operation_requires_approval(
+            grant,
+            risk_level,
+            operation_key,
+        )
+        now = datetime.now(timezone.utc)
+        operation_request = ExternalOperationRequest(
+            operation_request_id=uuid4(),
+            workspace_id=workspace_id,
+            thread_id=thread_id,
+            system_id=system_id,
+            grant_id=grant.grant_id,
+            participant_id=participant.participant_id,
+            user_id=participant.user_id,
+            system_agent_id=participant.system_agent_id,
+            operation_key=operation_key,
+            source="direct",
+            risk_level=risk_level,
+            status="pending_approval" if approval_required else "completed",
+            requested_by=participant.participant_id,
+            requested_at=now,
+            completed_at=None if approval_required else now,
+            request_metadata=request_metadata or {},
+            result_metadata={} if approval_required else {"outcome": "authorized"},
+            metadata={"external_system_key": system.system_key},
+        )
+        self.external_operation_requests[str(operation_request.operation_request_id)] = operation_request
+        return ExternalIdentityResolution(
+            system=system,
+            grant=grant,
+            account=account,
+            operation_request=operation_request,
+            approved=not approval_required,
+        )
+
+    async def execute_external_operation(self, workspace_id: UUID, system_id: UUID, payload):
+        from gateway_edge.models import ExternalIdentityResolution
+
+        resolution = await self.resolve_external_identity_for_operation(
+            workspace_id=workspace_id,
+            participant_id=payload.actor.participant_id,
+            system_id=system_id,
+            operation_key=payload.operation_key,
+            risk_level=payload.risk_level,
+            thread_id=payload.thread_id,
+            request_metadata={
+                **payload.metadata,
+                "argument_keys": sorted(payload.arguments.keys()),
+            },
+        )
+        return ExternalIdentityResolution(
+            system=resolution.system.model_copy(update={"secret_config": {}}),
+            grant=resolution.grant,
+            account=(
+                resolution.account.model_copy(update={"credential_ref": {}})
+                if resolution.account is not None
+                else None
+            ),
+            operation_request=resolution.operation_request,
+            approved=resolution.approved,
+        )
+
+    async def list_external_operation_requests(self, *, workspace_id: UUID, status: str | None = None):
+        return [
+            request
+            for request in self.external_operation_requests.values()
+            if request.workspace_id == workspace_id
+            and (status is None or request.status == status)
+        ]
+
+    async def get_external_operation_request(self, operation_request_id: UUID):
+        return self.external_operation_requests.get(str(operation_request_id))
+
+    async def approve_external_operation_request(self, operation_request_id: UUID, payload):
+        request = self.external_operation_requests.get(str(operation_request_id))
+        if request is None:
+            raise KeyError(f"External operation request {operation_request_id} not found")
+        approved = request.model_copy(
+            update={
+                "status": "approved",
+                "approved_by": payload.actor.participant_id,
+                "decided_at": datetime.now(timezone.utc),
+                "metadata": {**request.metadata, **payload.metadata},
+            }
+        )
+        self.external_operation_requests[str(operation_request_id)] = approved
+        return approved
+
+    async def reject_external_operation_request(self, operation_request_id: UUID, payload):
+        request = self.external_operation_requests.get(str(operation_request_id))
+        if request is None:
+            raise KeyError(f"External operation request {operation_request_id} not found")
+        rejected = request.model_copy(
+            update={
+                "status": "rejected",
+                "rejected_by": payload.actor.participant_id,
+                "decided_at": datetime.now(timezone.utc),
+                "metadata": {**request.metadata, **payload.metadata},
+            }
+        )
+        self.external_operation_requests[str(operation_request_id)] = rejected
+        return rejected
+
     async def upsert_role_definition(self, workspace_id: UUID, payload):
         from gateway_edge.models import RoleDefinition
 
@@ -2295,6 +2764,7 @@ class MockCollaborationService:
     async def create_agent_participant(self, workspace_id: UUID, payload):
         from gateway_edge.models import (
             AgentConfiguration,
+            CreateExternalIdentityGrantRequest,
             ParticipantProfile,
             ProjectAccessBinding,
         )
@@ -2358,9 +2828,26 @@ class MockCollaborationService:
                     metadata={"source": "workspace_agent_attachment"},
                 ),
             )
+        for assignment in payload.external_access_grants:
+            await self.create_external_identity_grant(
+                workspace_id,
+                CreateExternalIdentityGrantRequest(
+                    actor=payload.actor,
+                    participant_id=participant.participant_id,
+                    system_id=assignment.system_id,
+                    account_id=assignment.account_id,
+                    allowed_scopes=assignment.allowed_scopes,
+                    allowed_operations=assignment.allowed_operations,
+                    risk_policy=assignment.risk_policy,
+                    expires_at=assignment.expires_at,
+                    metadata=assignment.metadata,
+                ),
+            )
         return participant
 
     async def update_agent_participant(self, workspace_id: UUID, participant_id: UUID, payload):
+        from gateway_edge.models import CreateExternalIdentityGrantRequest
+
         workspace = self.workspaces.get(str(workspace_id))
         if workspace is None:
             raise KeyError(f"Workspace {workspace_id} not found")
@@ -2384,6 +2871,22 @@ class MockCollaborationService:
             }
         )
         participants[str(participant_id)] = updated
+        if payload.external_access_grants:
+            for assignment in payload.external_access_grants:
+                await self.create_external_identity_grant(
+                    workspace_id,
+                    CreateExternalIdentityGrantRequest(
+                        actor=payload.actor,
+                        participant_id=updated.participant_id,
+                        system_id=assignment.system_id,
+                        account_id=assignment.account_id,
+                        allowed_scopes=assignment.allowed_scopes,
+                        allowed_operations=assignment.allowed_operations,
+                        risk_policy=assignment.risk_policy,
+                        expires_at=assignment.expires_at,
+                        metadata=assignment.metadata,
+                    ),
+                )
         return updated
 
     async def create_thread(self, workspace_id: UUID, payload):
@@ -3393,6 +3896,7 @@ def patched(monkeypatch, mock_collaboration_service, mock_audit_service):
     fake_redis = _FakeRedis()
     monkeypatch.setattr("gateway_edge.services.collaboration.collaboration_service", mock_collaboration_service)
     monkeypatch.setattr("gateway_edge.routers.collaboration.collab_svc.collaboration_service", mock_collaboration_service)
+    monkeypatch.setattr("gateway_edge.routers.external_access.collab_svc.collaboration_service", mock_collaboration_service)
     monkeypatch.setattr("gateway_edge.services.iam.collaboration_service", mock_collaboration_service)
     monkeypatch.setattr("gateway_edge.mcp_api.collab_svc.collaboration_service", mock_collaboration_service)
     monkeypatch.setattr("gateway_edge.mcp_api.get_redis", AsyncMock(return_value=fake_redis))

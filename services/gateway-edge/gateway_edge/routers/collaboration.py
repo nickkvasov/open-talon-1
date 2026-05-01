@@ -1056,6 +1056,30 @@ async def _apply_retrieval_provider_override_permission(
     return actor.model_copy(update={"iam_permissions": sorted(permissions)})
 
 
+async def _apply_external_grant_write_permission_if_needed(
+    request: Request,
+    actor: ParticipantInput,
+    *,
+    workspace_id: UUID,
+    grants: object,
+) -> ParticipantInput:
+    if not grants:
+        return actor
+    workspace = await collab_svc.collaboration_service.get_workspace(workspace_id)
+    resolution = await authorization_engine.authorize(
+        "external.grants.write",
+        {
+            "auth_context": _request_auth_context(request),
+            "permission_type": "identity",
+            "permission": "external.grants.write",
+            "organization_id": workspace.workspace.organization_id,
+        },
+    )
+    permissions = set(actor.iam_permissions)
+    permissions.update(resolution.identity_permissions)
+    return actor.model_copy(update={"iam_permissions": sorted(permissions)})
+
+
 async def _resolve_methodics_actor(
     request: Request,
     actor: ParticipantInput,
@@ -7335,6 +7359,16 @@ async def create_agent_participant(
             )
         }
     )
+    payload = payload.model_copy(
+        update={
+            "actor": await _apply_external_grant_write_permission_if_needed(
+                request,
+                payload.actor,
+                workspace_id=workspace_id,
+                grants=payload.external_access_grants,
+            )
+        }
+    )
     logger.debug(
         "HTTP attach_agent_to_workspace workspace_id=%s actor=%s agent_id=%s",
         workspace_id,
@@ -7374,6 +7408,16 @@ async def update_agent_participant(
                 payload.actor,
                 workspace_id=workspace_id,
                 auto_create=False,
+            )
+        }
+    )
+    payload = payload.model_copy(
+        update={
+            "actor": await _apply_external_grant_write_permission_if_needed(
+                request,
+                payload.actor,
+                workspace_id=workspace_id,
+                grants=payload.external_access_grants,
             )
         }
     )

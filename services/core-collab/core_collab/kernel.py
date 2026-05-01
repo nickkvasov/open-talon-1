@@ -33,6 +33,12 @@ from open_talon_contracts.iam import (
     PROJECT_ROLE_BASE_PERMISSIONS,
 )
 
+from .external_access import (
+    external_operation_request_id_from_tool_metadata,
+    external_operation_request_metadata,
+    external_operation_requires_approval,
+    external_operation_result_metadata,
+)
 from .contracts import (
     ActorRef,
     AgentArtifactDraft,
@@ -76,6 +82,9 @@ from .contracts import (
     CreateInteractionRequestsRequest,
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
+    CreateExternalAccountRequest,
+    CreateExternalIdentityGrantRequest,
+    CreateExternalSystemRequest,
     CreateMcpServerRequest,
     CancelMethodicExecutionRequest,
     CreateMethodicAssignmentRequest,
@@ -103,6 +112,8 @@ from .contracts import (
     DeleteLlmProviderRequest,
     DeleteLibraryRequest,
     DeleteMemoryProviderRequest,
+    DeleteExternalIdentityGrantRequest,
+    DeleteExternalSystemRequest,
     DeleteMcpServerRequest,
     DeleteParticipantRequest,
     DeleteRoleDefinitionRequest,
@@ -114,6 +125,13 @@ from .contracts import (
     ExecutionWorkspaceRef,
     EvaluateMethodicStepRequest,
     EventEnvelope,
+    ExternalAccount,
+    ExternalIdentityGrantAssignment,
+    ExternalIdentityGrant,
+    ExternalIdentityResolution,
+    ExternalOperationRequest,
+    ExternalSystemDefinition,
+    ExecuteExternalOperationRequest,
     GeneratedToolManifest,
     GeneratedToolValidationReport,
     IndexLibraryRequest,
@@ -206,6 +224,7 @@ from .contracts import (
     Run,
     MarkResearchDossierReadyRequest,
     ReviewToolGenerationRevisionRequest,
+    ReviewExternalOperationRequest,
     ReviewMethodologyBlueprintVersionRequest,
     ReviewMethodicResourceRequest,
     RotateAgentIdentitySecretRequest,
@@ -224,6 +243,9 @@ from .contracts import (
     UpdateLibraryRequest,
     UpdateLlmProviderRequest,
     UpdateMemoryProviderRequest,
+    UpdateExternalAccountRequest,
+    UpdateExternalIdentityGrantRequest,
+    UpdateExternalSystemRequest,
     UpdateMcpServerRequest,
     UpdateOrganizationRequest,
     UpdateProjectRequest,
@@ -274,6 +296,7 @@ from .results import (
     AgentDefinitionCommandResult,
     AgentIdentityCommandResult,
     CommandResult,
+    ExternalAccessCommandResult,
     GitRepositoryCommandResult,
     IamRoleCommandResult,
     InteractionRequestCommandResult,
@@ -1855,6 +1878,827 @@ class CollaborationKernel:
             async with conn.transaction():
                 await self._repository.upsert_memory_provider(conn, provider)
         return MemoryProviderCommandResult(provider=provider)
+
+    async def create_external_system(
+        self,
+        payload: CreateExternalSystemRequest,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> ExternalAccessCommandResult:
+        self._require_actor_identity_permission(payload.actor, "external.systems.write")
+        self._validate_registry_scope(scope=scope, organization_id=organization_id)
+        now = self._now()
+        system = ExternalSystemDefinition(
+            system_id=uuid4(),
+            scope=scope,
+            organization_id=organization_id,
+            system_key=payload.system_key,
+            display_name=payload.display_name,
+            description=payload.description,
+            auth_kind=payload.auth_kind,
+            config=payload.config,
+            secret_config=payload.secret_config,
+            operation_catalog=payload.operation_catalog,
+            webhook_config=payload.webhook_config,
+            enabled=payload.enabled,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_external_system(conn, system)
+        return ExternalAccessCommandResult(system=system)
+
+    async def list_external_systems(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[ExternalSystemDefinition]:
+        self._validate_registry_scope(scope=scope, organization_id=organization_id)
+        return await self._repository.list_external_systems(
+            scope=scope,
+            organization_id=organization_id,
+        )
+
+    async def list_workspace_external_systems(
+        self,
+        workspace_id: UUID,
+    ) -> list[ExternalSystemDefinition]:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        systems = await self._repository.list_external_systems(scope="global")
+        systems.extend(
+            await self._repository.list_external_systems(
+                scope="organization",
+                organization_id=workspace.organization_id,
+            )
+        )
+        return systems
+
+    async def get_external_system(
+        self, system_id: UUID
+    ) -> ExternalSystemDefinition | None:
+        return await self._repository.fetch_external_system(system_id)
+
+    async def update_external_system(
+        self,
+        system_id: UUID,
+        payload: UpdateExternalSystemRequest,
+    ) -> ExternalAccessCommandResult:
+        self._require_actor_identity_permission(payload.actor, "external.systems.write")
+        existing = await self._repository.fetch_external_system(system_id)
+        if existing is None:
+            raise KeyError(f"External system {system_id} not found")
+        now = self._now()
+        updated = existing.model_copy(
+            update={
+                "system_key": payload.system_key or existing.system_key,
+                "display_name": payload.display_name or existing.display_name,
+                "description": (
+                    existing.description
+                    if payload.description is None
+                    else payload.description
+                ),
+                "auth_kind": payload.auth_kind or existing.auth_kind,
+                "config": existing.config if payload.config is None else payload.config,
+                "secret_config": (
+                    existing.secret_config
+                    if payload.secret_config is None
+                    else payload.secret_config
+                ),
+                "operation_catalog": (
+                    existing.operation_catalog
+                    if payload.operation_catalog is None
+                    else payload.operation_catalog
+                ),
+                "webhook_config": (
+                    existing.webhook_config
+                    if payload.webhook_config is None
+                    else payload.webhook_config
+                ),
+                "enabled": existing.enabled if payload.enabled is None else payload.enabled,
+                "updated_by": payload.actor.participant_id,
+                "updated_at": now,
+                "metadata": (
+                    {**existing.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else existing.metadata
+                ),
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_external_system(conn, updated)
+        return ExternalAccessCommandResult(system=updated)
+
+    async def delete_external_system(
+        self,
+        system_id: UUID,
+        payload: DeleteExternalSystemRequest,
+    ) -> dict[str, bool | str]:
+        self._require_actor_identity_permission(payload.actor, "external.systems.write")
+        existing = await self._repository.fetch_external_system(system_id)
+        if existing is None:
+            raise KeyError(f"External system {system_id} not found")
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                deleted = await self._repository.delete_external_system(
+                    conn,
+                    system_id=system_id,
+                )
+        return {"deleted": deleted, "system_id": str(system_id)}
+
+    async def create_external_account(
+        self,
+        payload: CreateExternalAccountRequest,
+    ) -> ExternalAccessCommandResult:
+        self._require_actor_identity_permission(payload.actor, "external.grants.write")
+        system = await self._repository.fetch_external_system(payload.system_id)
+        if system is None:
+            raise KeyError(f"External system {payload.system_id} not found")
+        self._validate_external_account_subject(payload)
+        now = self._now()
+        account = ExternalAccount(
+            account_id=uuid4(),
+            system_id=payload.system_id,
+            owner_kind=payload.owner_kind,
+            user_id=payload.user_id,
+            system_agent_id=payload.system_agent_id,
+            external_subject=payload.external_subject,
+            display_name=payload.display_name,
+            scopes=payload.scopes,
+            credential_ref=payload.credential_ref,
+            expires_at=payload.expires_at,
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_external_account(conn, account)
+        return ExternalAccessCommandResult(system=system, account=account)
+
+    async def update_external_account(
+        self,
+        account_id: UUID,
+        payload: UpdateExternalAccountRequest,
+    ) -> ExternalAccessCommandResult:
+        self._require_actor_identity_permission(payload.actor, "external.grants.write")
+        existing = await self._repository.fetch_external_account(account_id)
+        if existing is None:
+            raise KeyError(f"External account {account_id} not found")
+        system = await self._repository.fetch_external_system(existing.system_id)
+        if system is None:
+            raise KeyError(f"External system {existing.system_id} not found")
+        now = self._now()
+        updated = existing.model_copy(
+            update={
+                "external_subject": (
+                    existing.external_subject
+                    if payload.external_subject is None
+                    else payload.external_subject
+                ),
+                "display_name": (
+                    existing.display_name
+                    if payload.display_name is None
+                    else payload.display_name
+                ),
+                "scopes": existing.scopes if payload.scopes is None else payload.scopes,
+                "credential_ref": (
+                    existing.credential_ref
+                    if payload.credential_ref is None
+                    else payload.credential_ref
+                ),
+                "status": payload.status or existing.status,
+                "expires_at": (
+                    existing.expires_at if payload.expires_at is None else payload.expires_at
+                ),
+                "updated_by": payload.actor.participant_id,
+                "updated_at": now,
+                "metadata": (
+                    {**existing.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else existing.metadata
+                ),
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_external_account(conn, updated)
+        return ExternalAccessCommandResult(system=system, account=updated)
+
+    async def list_external_accounts(
+        self,
+        *,
+        system_id: UUID | None = None,
+        user_id: UUID | None = None,
+        system_agent_id: UUID | None = None,
+        include_inactive: bool = False,
+    ) -> list[ExternalAccount]:
+        return await self._repository.list_external_accounts(
+            system_id=system_id,
+            user_id=user_id,
+            system_agent_id=system_agent_id,
+            include_inactive=include_inactive,
+        )
+
+    async def get_external_account(self, account_id: UUID) -> ExternalAccount | None:
+        return await self._repository.fetch_external_account(account_id)
+
+    async def create_external_identity_grant(
+        self,
+        workspace_id: UUID,
+        payload: CreateExternalIdentityGrantRequest,
+    ) -> ExternalAccessCommandResult:
+        self._require_actor_identity_permission(payload.actor, "external.grants.write")
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        participant = await self._repository.fetch_participant(
+            workspace_id,
+            payload.participant_id,
+        )
+        if participant is None:
+            raise KeyError(f"Participant {payload.participant_id} not found")
+        now = self._now()
+        grant, system, account = await self._build_external_identity_grant(
+            workspace=workspace,
+            participant=participant,
+            assignment=ExternalIdentityGrantAssignment(
+                system_id=payload.system_id,
+                account_id=payload.account_id,
+                allowed_scopes=payload.allowed_scopes,
+                allowed_operations=payload.allowed_operations,
+                risk_policy=payload.risk_policy,
+                expires_at=payload.expires_at,
+                metadata=payload.metadata,
+            ),
+            actor=payload.actor,
+            timestamp=now,
+        )
+        actor_ref = self._actor_from_input(payload.actor)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_external_identity_grant(conn, grant)
+                event = await self._build_workspace_event(
+                    conn,
+                    workspace_id,
+                    "external_identity_grant.created",
+                    actor=actor_ref,
+                    target=TargetRef(
+                        type="external_identity_grant",
+                        id=grant.grant_id,
+                    ),
+                    payload=self._external_identity_grant_event_payload(
+                        grant,
+                        system=system,
+                        outcome="created",
+                    ),
+                    visibility="private",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        return ExternalAccessCommandResult(
+            system=system,
+            account=account,
+            grant=grant,
+            events=[event],
+        )
+
+    async def list_external_identity_grants(
+        self,
+        *,
+        workspace_id: UUID,
+        participant_id: UUID | None = None,
+        system_id: UUID | None = None,
+        include_inactive: bool = False,
+    ) -> list[ExternalIdentityGrant]:
+        return await self._repository.list_external_identity_grants(
+            workspace_id=workspace_id,
+            participant_id=participant_id,
+            system_id=system_id,
+            include_inactive=include_inactive,
+        )
+
+    async def get_external_identity_grant(
+        self,
+        grant_id: UUID,
+    ) -> ExternalIdentityGrant | None:
+        return await self._repository.fetch_external_identity_grant(grant_id)
+
+    async def update_external_identity_grant(
+        self,
+        grant_id: UUID,
+        payload: UpdateExternalIdentityGrantRequest,
+    ) -> ExternalAccessCommandResult:
+        self._require_actor_identity_permission(payload.actor, "external.grants.write")
+        existing = await self._repository.fetch_external_identity_grant(grant_id)
+        if existing is None:
+            raise KeyError(f"External identity grant {grant_id} not found")
+        workspace = await self._repository.fetch_workspace(existing.workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {existing.workspace_id} not found")
+        system = await self._repository.fetch_external_system(existing.system_id)
+        if system is None:
+            raise KeyError(f"External system {existing.system_id} not found")
+        if not self._resource_visible_to_workspace(
+            system.scope,
+            system.organization_id,
+            workspace,
+        ):
+            raise PermissionError(
+                f"External system {system.system_id} is not visible in workspace {workspace.workspace_id}"
+            )
+        account = None
+        if payload.account_id is not None:
+            account = await self._repository.fetch_external_account(payload.account_id)
+            if account is None:
+                raise KeyError(f"External account {payload.account_id} not found")
+            if account.system_id != existing.system_id:
+                raise ValueError("External account must belong to the grant external system")
+            self._validate_external_account_matches_grant(account, existing)
+        elif existing.account_id is not None:
+            account = await self._repository.fetch_external_account(existing.account_id)
+        now = self._now()
+        updated = existing.model_copy(
+            update={
+                "account_id": (
+                    existing.account_id
+                    if payload.account_id is None
+                    else payload.account_id
+                ),
+                "allowed_scopes": (
+                    existing.allowed_scopes
+                    if payload.allowed_scopes is None
+                    else payload.allowed_scopes
+                ),
+                "allowed_operations": (
+                    existing.allowed_operations
+                    if payload.allowed_operations is None
+                    else payload.allowed_operations
+                ),
+                "risk_policy": (
+                    existing.risk_policy
+                    if payload.risk_policy is None
+                    else payload.risk_policy
+                ),
+                "status": payload.status or existing.status,
+                "expires_at": (
+                    existing.expires_at if payload.expires_at is None else payload.expires_at
+                ),
+                "updated_by": payload.actor.participant_id,
+                "updated_at": now,
+                "metadata": (
+                    {**existing.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else existing.metadata
+                ),
+            }
+        )
+        actor_ref = self._actor_from_input(payload.actor)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_external_identity_grant(conn, updated)
+                event = await self._build_workspace_event(
+                    conn,
+                    updated.workspace_id,
+                    "external_identity_grant.updated",
+                    actor=actor_ref,
+                    target=TargetRef(
+                        type="external_identity_grant",
+                        id=updated.grant_id,
+                    ),
+                    payload=self._external_identity_grant_event_payload(
+                        updated,
+                        system=system,
+                        outcome="updated",
+                    ),
+                    visibility="private",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        return ExternalAccessCommandResult(
+            system=system,
+            account=account,
+            grant=updated,
+            events=[event],
+        )
+
+    async def delete_external_identity_grant(
+        self,
+        grant_id: UUID,
+        payload: DeleteExternalIdentityGrantRequest,
+    ) -> ExternalAccessCommandResult:
+        self._require_actor_identity_permission(payload.actor, "external.grants.write")
+        existing = await self._repository.fetch_external_identity_grant(grant_id)
+        if existing is None:
+            raise KeyError(f"External identity grant {grant_id} not found")
+        system = await self._repository.fetch_external_system(existing.system_id)
+        if system is None:
+            raise KeyError(f"External system {existing.system_id} not found")
+        now = self._now()
+        revoked = existing.model_copy(
+            update={
+                "status": "revoked",
+                "updated_by": payload.actor.participant_id,
+                "updated_at": now,
+            }
+        )
+        actor_ref = self._actor_from_input(payload.actor)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_external_identity_grant(conn, revoked)
+                event = await self._build_workspace_event(
+                    conn,
+                    revoked.workspace_id,
+                    "external_identity_grant.revoked",
+                    actor=actor_ref,
+                    target=TargetRef(
+                        type="external_identity_grant",
+                        id=revoked.grant_id,
+                    ),
+                    payload=self._external_identity_grant_event_payload(
+                        revoked,
+                        system=system,
+                        outcome="revoked",
+                    ),
+                    visibility="private",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+        return ExternalAccessCommandResult(system=system, grant=revoked, events=[event])
+
+    async def resolve_external_identity_for_operation(
+        self,
+        *,
+        workspace_id: UUID,
+        operation_key: str,
+        risk_level: str = "low",
+        source: str = "direct",
+        participant_id: UUID | None = None,
+        user_id: UUID | None = None,
+        system_agent_id: UUID | None = None,
+        system_id: UUID | None = None,
+        system_key: str | None = None,
+        thread_id: UUID | None = None,
+        tool_call_id: UUID | None = None,
+        requested_by: UUID | None = None,
+        request_metadata: dict[str, object] | None = None,
+    ) -> ExternalIdentityResolution:
+        workspace = await self._repository.fetch_workspace(workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {workspace_id} not found")
+        participant = await self._resolve_external_operation_participant(
+            workspace_id=workspace_id,
+            participant_id=participant_id,
+            user_id=user_id,
+            system_agent_id=system_agent_id,
+        )
+        system = await self._resolve_external_operation_system(
+            workspace=workspace,
+            system_id=system_id,
+            system_key=system_key,
+        )
+        if not system.enabled:
+            raise PermissionError(f"External system {system.system_id} is disabled")
+        now = self._now()
+        grant = await self._repository.fetch_active_external_identity_grant(
+            workspace_id=workspace_id,
+            participant_id=participant.participant_id,
+            system_id=system.system_id,
+            operation_key=operation_key,
+            now=now,
+        )
+        if grant is None:
+            raise PermissionError(
+                f"No active external identity grant for participant {participant.participant_id}"
+            )
+        account = (
+            await self._repository.fetch_external_account(grant.account_id)
+            if grant.account_id is not None
+            else None
+        )
+        existing_approval = None
+        if tool_call_id is not None:
+            existing_approval = (
+                await self._repository.fetch_approved_external_operation_request_for_tool_call(
+                    workspace_id=workspace_id,
+                    tool_call_id=tool_call_id,
+                    system_id=system.system_id,
+                    participant_id=participant.participant_id,
+                    operation_key=operation_key,
+                )
+            )
+        approval_required = (
+            existing_approval is None
+            and self._external_operation_requires_approval(
+                grant.risk_policy,
+                risk_level=risk_level,
+                operation_key=operation_key,
+            )
+        )
+        operation_request = existing_approval
+        message = None
+        events: list[EventEnvelope] = []
+        if operation_request is None:
+            operation_request = ExternalOperationRequest(
+                operation_request_id=uuid4(),
+                workspace_id=workspace_id,
+                thread_id=thread_id,
+                tool_call_id=tool_call_id,
+                system_id=system.system_id,
+                grant_id=grant.grant_id,
+                participant_id=participant.participant_id,
+                user_id=participant.user_id,
+                system_agent_id=participant.system_agent_id,
+                operation_key=operation_key,
+                source=source,
+                risk_level=risk_level,
+                status="pending_approval" if approval_required else "completed",
+                requested_by=requested_by or participant.participant_id,
+                requested_at=now,
+                completed_at=None if approval_required else now,
+                request_metadata=self._external_operation_request_metadata(
+                    request_metadata or {}
+                ),
+                result_metadata=(
+                    {}
+                    if approval_required
+                    else {
+                        "outcome": "authorized",
+                        "execution": "external_identity_resolved",
+                    }
+                ),
+                metadata={
+                    "external_system_key": system.system_key,
+                    "external_system_display_name": system.display_name,
+                },
+            )
+            async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+                async with conn.transaction():
+                    await self._repository.upsert_external_operation_request(
+                        conn,
+                        operation_request,
+                    )
+                    if approval_required and thread_id is not None:
+                        message, event = await self._create_external_operation_request_message(
+                            conn,
+                            operation_request=operation_request,
+                            system=system,
+                            participant=participant,
+                            timestamp=now,
+                        )
+                        events.append(event)
+        return ExternalIdentityResolution(
+            system=system,
+            grant=grant,
+            account=account,
+            operation_request=operation_request,
+            approved=not approval_required,
+        )
+
+    async def execute_external_operation(
+        self,
+        workspace_id: UUID,
+        system_id: UUID,
+        payload: ExecuteExternalOperationRequest,
+    ) -> ExternalAccessCommandResult:
+        participant = await self._repository.fetch_participant(
+            workspace_id,
+            payload.actor.participant_id,
+        )
+        if participant is None:
+            raise PermissionError(
+                f"Workspace {workspace_id} requires an attached participant for this action"
+            )
+        resolution = await self.resolve_external_identity_for_operation(
+            workspace_id=workspace_id,
+            participant_id=participant.participant_id,
+            system_id=system_id,
+            operation_key=payload.operation_key,
+            risk_level=payload.risk_level,
+            source="direct",
+            thread_id=payload.thread_id,
+            requested_by=payload.actor.participant_id,
+            request_metadata={
+                **payload.metadata,
+                "argument_keys": sorted(payload.arguments.keys()),
+            },
+        )
+        public_resolution = resolution.model_copy(
+            update={
+                "system": resolution.system.model_copy(update={"secret_config": {}}),
+                "account": (
+                    resolution.account.model_copy(update={"credential_ref": {}})
+                    if resolution.account is not None
+                    else None
+                ),
+            }
+        )
+        return ExternalAccessCommandResult(
+            system=public_resolution.system,
+            account=public_resolution.account,
+            grant=public_resolution.grant,
+            operation_request=public_resolution.operation_request,
+            resolution=public_resolution,
+        )
+
+    async def list_external_operation_requests(
+        self,
+        *,
+        workspace_id: UUID,
+        status: str | None = None,
+    ) -> list[ExternalOperationRequest]:
+        return await self._repository.list_external_operation_requests(
+            workspace_id=workspace_id,
+            status=status,
+        )
+
+    async def get_external_operation_request(
+        self,
+        operation_request_id: UUID,
+    ) -> ExternalOperationRequest | None:
+        return await self._repository.fetch_external_operation_request(
+            operation_request_id
+        )
+
+    async def approve_external_operation_request(
+        self,
+        operation_request_id: UUID,
+        payload: ReviewExternalOperationRequest,
+    ) -> ExternalAccessCommandResult:
+        self._require_actor_identity_permission(
+            payload.actor,
+            "external.operations.approve",
+        )
+        existing = await self._repository.fetch_external_operation_request(
+            operation_request_id
+        )
+        if existing is None:
+            raise KeyError(f"External operation request {operation_request_id} not found")
+        if existing.status != "pending_approval":
+            raise ValueError("Only pending external operation requests can be approved")
+        now = self._now()
+        approved = existing.model_copy(
+            update={
+                "status": "approved",
+                "approved_by": payload.actor.participant_id,
+                "decided_at": now,
+                "metadata": {**existing.metadata, **payload.metadata},
+            }
+        )
+        system = await self._repository.fetch_external_system(approved.system_id)
+        if system is None:
+            raise KeyError(f"External system {approved.system_id} not found")
+        events: list[EventEnvelope] = []
+        actor = self._actor_from_input(payload.actor)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_external_operation_request(conn, approved)
+                event = await self._build_workspace_event(
+                    conn,
+                    approved.workspace_id,
+                    "external_operation_request.approved",
+                    actor=actor,
+                    target=TargetRef(
+                        type="external_operation_request",
+                        id=approved.operation_request_id,
+                    ),
+                    payload=self._external_operation_event_payload(
+                        approved,
+                        system=system,
+                        outcome="approved",
+                    ),
+                    visibility="private",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+                events.append(event)
+                if approved.tool_call_id is not None:
+                    tool_call = await self._repository.fetch_tool_call(
+                        approved.tool_call_id
+                    )
+                    if tool_call is not None and tool_call.status == "pending_approval":
+                        metadata = {
+                            **tool_call.metadata,
+                            "external_operation_approval": {
+                                "operation_request_id": str(approved.operation_request_id),
+                                "system_id": str(approved.system_id),
+                                "operation_key": approved.operation_key,
+                                "approved_by": str(payload.actor.participant_id),
+                                "approved_at": now.isoformat(),
+                            },
+                        }
+                        await self._repository.upsert_tool_call(
+                            conn,
+                            tool_call.model_copy(
+                                update={
+                                    "status": "created",
+                                    "claimed_by_worker": None,
+                                    "lease_expires_at": None,
+                                    "last_heartbeat_at": None,
+                                    "execution_handle": None,
+                                    "next_retry_at": now,
+                                    "updated_at": now,
+                                    "metadata": metadata,
+                                }
+                            ),
+                        )
+        return ExternalAccessCommandResult(
+            system=system,
+            operation_request=approved,
+            events=events,
+        )
+
+    async def reject_external_operation_request(
+        self,
+        operation_request_id: UUID,
+        payload: ReviewExternalOperationRequest,
+    ) -> ExternalAccessCommandResult:
+        self._require_actor_identity_permission(
+            payload.actor,
+            "external.operations.approve",
+        )
+        existing = await self._repository.fetch_external_operation_request(
+            operation_request_id
+        )
+        if existing is None:
+            raise KeyError(f"External operation request {operation_request_id} not found")
+        if existing.status != "pending_approval":
+            raise ValueError("Only pending external operation requests can be rejected")
+        now = self._now()
+        rejected = existing.model_copy(
+            update={
+                "status": "rejected",
+                "rejected_by": payload.actor.participant_id,
+                "decided_at": now,
+                "metadata": {**existing.metadata, **payload.metadata},
+            }
+        )
+        system = await self._repository.fetch_external_system(rejected.system_id)
+        if system is None:
+            raise KeyError(f"External system {rejected.system_id} not found")
+        events: list[EventEnvelope] = []
+        actor = self._actor_from_input(payload.actor)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_external_operation_request(conn, rejected)
+                event = await self._build_workspace_event(
+                    conn,
+                    rejected.workspace_id,
+                    "external_operation_request.rejected",
+                    actor=actor,
+                    target=TargetRef(
+                        type="external_operation_request",
+                        id=rejected.operation_request_id,
+                    ),
+                    payload=self._external_operation_event_payload(
+                        rejected,
+                        system=system,
+                        outcome="rejected",
+                    ),
+                    visibility="private",
+                    timestamp=now,
+                )
+                await self._repository.record_event(conn, event)
+                events.append(event)
+                if rejected.tool_call_id is not None:
+                    tool_call = await self._repository.fetch_tool_call(
+                        rejected.tool_call_id
+                    )
+                    if tool_call is not None and tool_call.status == "pending_approval":
+                        await self._repository.upsert_tool_call(
+                            conn,
+                            tool_call.model_copy(
+                                update={
+                                    "status": "failed",
+                                    "error": "External operation request rejected",
+                                    "result": ToolCallResult(
+                                        error="External operation request rejected"
+                                    ),
+                                    "claimed_by_worker": None,
+                                    "lease_expires_at": None,
+                                    "last_heartbeat_at": None,
+                                    "execution_handle": None,
+                                    "next_retry_at": None,
+                                    "finished_at": now,
+                                    "updated_at": now,
+                                }
+                            ),
+                        )
+        return ExternalAccessCommandResult(
+            system=system,
+            operation_request=rejected,
+            events=events,
+        )
 
     async def create_mcp_server(
         self,
@@ -6631,6 +7475,24 @@ class CollaborationKernel:
             updated_at=now,
             metadata=participant_metadata,
         )
+        grant_specs: list[
+            tuple[ExternalIdentityGrant, ExternalSystemDefinition, ExternalAccount | None]
+        ] = []
+        if payload.external_access_grants:
+            self._require_actor_identity_permission(
+                payload.actor,
+                "external.grants.write",
+            )
+            for assignment in payload.external_access_grants:
+                grant_specs.append(
+                    await self._build_external_identity_grant(
+                        workspace=workspace,
+                        participant=participant,
+                        assignment=assignment,
+                        actor=payload.actor,
+                        timestamp=now,
+                    )
+                )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 await self._ensure_participant_identity(conn, participant)
@@ -6646,9 +7508,31 @@ class CollaborationKernel:
                     timestamp=now,
                 )
                 await self._repository.record_event(conn, event)
+                events = [event]
+                for grant, system, _account in grant_specs:
+                    await self._repository.upsert_external_identity_grant(conn, grant)
+                    grant_event = await self._build_workspace_event(
+                        conn,
+                        workspace_id,
+                        "external_identity_grant.created",
+                        actor=actor,
+                        target=TargetRef(
+                            type="external_identity_grant",
+                            id=grant.grant_id,
+                        ),
+                        payload=self._external_identity_grant_event_payload(
+                            grant,
+                            system=system,
+                            outcome="created",
+                        ),
+                        visibility="private",
+                        timestamp=now,
+                    )
+                    await self._repository.record_event(conn, grant_event)
+                    events.append(grant_event)
         return ParticipantCommandResult(
             participant=self._advertise_workspace_tools(participant, workspace_tools),
-            events=[event],
+            events=events,
         )
 
     async def update_agent_participant(
@@ -6693,6 +7577,24 @@ class CollaborationKernel:
                 ),
             }
         )
+        grant_specs: list[
+            tuple[ExternalIdentityGrant, ExternalSystemDefinition, ExternalAccount | None]
+        ] = []
+        if payload.external_access_grants:
+            self._require_actor_identity_permission(
+                payload.actor,
+                "external.grants.write",
+            )
+            for assignment in payload.external_access_grants:
+                grant_specs.append(
+                    await self._build_external_identity_grant(
+                        workspace=workspace,
+                        participant=updated,
+                        assignment=assignment,
+                        actor=payload.actor,
+                        timestamp=now,
+                    )
+                )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 await self._repository.upsert_participant(conn, updated)
@@ -6707,9 +7609,31 @@ class CollaborationKernel:
                     timestamp=now,
                 )
                 await self._repository.record_event(conn, event)
+                events = [event]
+                for grant, system, _account in grant_specs:
+                    await self._repository.upsert_external_identity_grant(conn, grant)
+                    grant_event = await self._build_workspace_event(
+                        conn,
+                        workspace_id,
+                        "external_identity_grant.created",
+                        actor=actor,
+                        target=TargetRef(
+                            type="external_identity_grant",
+                            id=grant.grant_id,
+                        ),
+                        payload=self._external_identity_grant_event_payload(
+                            grant,
+                            system=system,
+                            outcome="created",
+                        ),
+                        visibility="private",
+                        timestamp=now,
+                    )
+                    await self._repository.record_event(conn, grant_event)
+                    events.append(grant_event)
         return ParticipantCommandResult(
             participant=self._advertise_workspace_tools(updated, workspace_tools),
-            events=[event],
+            events=events,
         )
 
     async def create_thread(
@@ -7028,6 +7952,7 @@ class CollaborationKernel:
                         raise KeyError(
                             f"Tool {draft.tool_name!r} not found for system agent {step.system_agent_id} in workspace {task.workspace_id}"
                         )
+                    tool_call_id = uuid4()
                     execution_spec = (
                         self._build_tool_execution_spec(
                             tool=tool,
@@ -7043,8 +7968,18 @@ class CollaborationKernel:
                             source=mcp_source or "mcp_server",
                         )
                     )
+                    if mcp_tool is not None:
+                        execution_spec = execution_spec.model_copy(
+                            update={
+                                "metadata": {
+                                    **execution_spec.metadata,
+                                    "thread_id": str(task.thread_id),
+                                    "tool_call_id": str(tool_call_id),
+                                }
+                            }
+                        )
                     tool_call = ToolCall(
-                        tool_call_id=uuid4(),
+                        tool_call_id=tool_call_id,
                         run_id=run.run_id,
                         run_step_id=step.step_id,
                         task_id=task.task_id,
@@ -7266,6 +8201,73 @@ class CollaborationKernel:
             result=result,
             error=result.error,
             event_type="tool_call.completed",
+        )
+
+    async def mark_tool_call_pending_external_approval(
+        self,
+        tool_call_id: UUID,
+        worker_id: str,
+        result: ToolCallResult,
+    ) -> ToolCallCommandResult:
+        tool_call = await self._repository.fetch_tool_call(tool_call_id)
+        if tool_call is None:
+            raise KeyError(f"Tool call {tool_call_id} not found")
+        if tool_call.claimed_by_worker != worker_id:
+            raise ValueError(
+                f"Tool call {tool_call_id} is not claimed by worker {worker_id}"
+            )
+        step = await self._repository.fetch_run_step(tool_call.run_step_id)
+        run = await self._repository.fetch_run(tool_call.run_id)
+        task = await self._repository.fetch_task(tool_call.task_id)
+        if step is None or run is None or task is None:
+            raise KeyError(f"Tool call {tool_call_id} is missing execution state")
+        participant = await self._require_run_participant(
+            run=run,
+            task=task,
+            system_agent_id=tool_call.system_agent_id,
+        )
+        actor = ActorRef(type="agent", id=participant.participant_id)
+        now = self._now()
+        updated_tool_call = tool_call.model_copy(
+            update={
+                "status": "pending_approval",
+                "result": result,
+                "error": result.error,
+                "lease_expires_at": None,
+                "last_heartbeat_at": None,
+                "next_retry_at": None,
+                "claimed_by_worker": None,
+                "execution_handle": None,
+                "updated_at": now,
+                "metadata": {
+                    **tool_call.metadata,
+                    "external_operation_pending_approval": True,
+                },
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_tool_call(conn, updated_tool_call)
+                event = await self._build_thread_event(
+                    conn,
+                    task.workspace_id,
+                    task.thread_id,
+                    "tool_call.pending_approval",
+                    actor=actor,
+                    target=TargetRef(type="tool_call", id=tool_call_id),
+                    payload=updated_tool_call.model_dump(mode="json"),
+                    visibility="agents_only",
+                    timestamp=now,
+                    correlation_id=run.correlation_id,
+                    causation_id=task.task_id,
+                )
+                await self._repository.record_event(conn, event)
+        return ToolCallCommandResult(
+            tool_call=updated_tool_call,
+            step=step,
+            run=run,
+            task=task,
+            events=[event],
         )
 
     async def fail_tool_call(
@@ -11916,6 +12918,16 @@ class CollaborationKernel:
                     causation_id=task.task_id,
                 )
                 await self._repository.record_event(conn, completion_event)
+                external_completion_event = await self._finalize_external_operation_for_tool_call(
+                    conn,
+                    tool_call=updated_tool_call,
+                    status=status,
+                    result=result,
+                    actor=actor,
+                    timestamp=now,
+                )
+                if external_completion_event is not None:
+                    verification_events.append(external_completion_event)
                 remaining = await conn.fetchval(
                     """
                     SELECT COUNT(*)
@@ -11985,6 +12997,79 @@ class CollaborationKernel:
             task=task,
             events=([completion_event] if completion_event is not None else []) + verification_events,
         )
+
+    async def _finalize_external_operation_for_tool_call(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        tool_call: ToolCall,
+        status: str,
+        result: ToolCallResult,
+        actor: ActorRef,
+        timestamp: datetime,
+    ) -> EventEnvelope | None:
+        if status not in {"completed", "failed"}:
+            return None
+        operation_request_id = external_operation_request_id_from_tool_metadata(
+            tool_call.metadata
+        )
+        if operation_request_id is None:
+            return None
+        operation_request = await self._repository.fetch_external_operation_request(
+            operation_request_id
+        )
+        if operation_request is None:
+            return None
+        if (
+            operation_request.tool_call_id != tool_call.tool_call_id
+            or operation_request.workspace_id != tool_call.workspace_id
+            or operation_request.status != "approved"
+        ):
+            return None
+        system = await self._repository.fetch_external_system(
+            operation_request.system_id
+        )
+        if system is None:
+            raise KeyError(f"External system {operation_request.system_id} not found")
+        operation_status = "completed" if status == "completed" else "failed"
+        updated_request = operation_request.model_copy(
+            update={
+                "status": operation_status,
+                "completed_at": timestamp,
+                "result_metadata": {
+                    **operation_request.result_metadata,
+                    **external_operation_result_metadata(
+                        status=operation_status,
+                        tool_call_id=tool_call.tool_call_id,
+                        tool_name=tool_call.tool_name,
+                        result=result,
+                    ),
+                },
+            }
+        )
+        await self._repository.upsert_external_operation_request(
+            conn,
+            updated_request,
+        )
+        event = await self._build_workspace_event(
+            conn,
+            updated_request.workspace_id,
+            f"external_operation_request.{operation_status}",
+            actor=actor,
+            target=TargetRef(
+                type="external_operation_request",
+                id=updated_request.operation_request_id,
+            ),
+            payload=self._external_operation_event_payload(
+                updated_request,
+                system=system,
+                outcome=operation_status,
+            ),
+            visibility="private",
+            timestamp=timestamp,
+        )
+        await self._repository.record_event(conn, event)
+        return event
 
     def _build_tool_execution_spec(
         self,
@@ -13089,6 +14174,357 @@ class CollaborationKernel:
             actor,
             permission="workspace.tools.write",
         )
+
+    @staticmethod
+    def _require_actor_identity_permission(
+        actor: ParticipantInput,
+        permission: str,
+    ) -> None:
+        if permission not in set(actor.iam_permissions):
+            raise PermissionError(f"Identity permission {permission!r} required")
+
+    async def _build_external_identity_grant(
+        self,
+        *,
+        workspace: Workspace,
+        participant: ParticipantProfile,
+        assignment: ExternalIdentityGrantAssignment,
+        actor: ParticipantInput,
+        timestamp: datetime,
+    ) -> tuple[ExternalIdentityGrant, ExternalSystemDefinition, ExternalAccount | None]:
+        system = await self._repository.fetch_external_system(assignment.system_id)
+        if system is None:
+            raise KeyError(f"External system {assignment.system_id} not found")
+        if not self._resource_visible_to_workspace(
+            system.scope,
+            system.organization_id,
+            workspace,
+        ):
+            raise PermissionError(
+                f"External system {system.system_id} is not visible in workspace {workspace.workspace_id}"
+            )
+        account = None
+        if assignment.account_id is not None:
+            account = await self._repository.fetch_external_account(assignment.account_id)
+            if account is None:
+                raise KeyError(f"External account {assignment.account_id} not found")
+            if account.system_id != system.system_id:
+                raise ValueError("External account must belong to the grant external system")
+        if participant.user_id is None and participant.system_agent_id is None:
+            raise ValueError("External identity grants require a normalized user or agent participant")
+        grant = ExternalIdentityGrant(
+            grant_id=uuid4(),
+            workspace_id=workspace.workspace_id,
+            participant_id=participant.participant_id,
+            system_id=system.system_id,
+            account_id=account.account_id if account is not None else None,
+            user_id=participant.user_id,
+            system_agent_id=participant.system_agent_id,
+            allowed_scopes=assignment.allowed_scopes,
+            allowed_operations=assignment.allowed_operations,
+            risk_policy=assignment.risk_policy,
+            expires_at=assignment.expires_at,
+            created_by=actor.participant_id,
+            approved_by=actor.participant_id,
+            created_at=timestamp,
+            updated_by=actor.participant_id,
+            updated_at=timestamp,
+            metadata=assignment.metadata,
+        )
+        if account is not None:
+            self._validate_external_account_matches_grant(account, grant)
+        return grant, system, account
+
+    @staticmethod
+    def _validate_external_account_subject(payload: CreateExternalAccountRequest) -> None:
+        if payload.owner_kind == "user":
+            if payload.user_id is None or payload.system_agent_id is not None:
+                raise ValueError("User-owned external accounts require user_id only")
+            return
+        if payload.owner_kind == "agent":
+            if payload.system_agent_id is None or payload.user_id is not None:
+                raise ValueError("Agent-owned external accounts require system_agent_id only")
+            return
+        raise ValueError(f"Unsupported external account owner_kind {payload.owner_kind!r}")
+
+    @staticmethod
+    def _validate_external_account_matches_grant(
+        account: ExternalAccount,
+        grant: ExternalIdentityGrant,
+    ) -> None:
+        if account.owner_kind == "user" and account.user_id != grant.user_id:
+            raise ValueError("User-owned external account does not match grant target")
+        if account.owner_kind == "agent" and account.system_agent_id != grant.system_agent_id:
+            raise ValueError("Agent-owned external account does not match grant target")
+
+    async def _resolve_external_operation_participant(
+        self,
+        *,
+        workspace_id: UUID,
+        participant_id: UUID | None = None,
+        user_id: UUID | None = None,
+        system_agent_id: UUID | None = None,
+    ) -> ParticipantProfile:
+        participant = None
+        if participant_id is not None:
+            participant = await self._repository.fetch_participant(
+                workspace_id,
+                participant_id,
+            )
+        elif user_id is not None:
+            participant = await self._repository.fetch_user_participant(
+                workspace_id,
+                user_id,
+            )
+        elif system_agent_id is not None:
+            participant = await self._repository.fetch_agent_participant(
+                workspace_id,
+                system_agent_id,
+            )
+        if participant is None:
+            raise PermissionError(
+                f"Workspace {workspace_id} requires an attached participant for external operations"
+            )
+        if participant.status != "active":
+            raise PermissionError(
+                f"Participant {participant.participant_id} is not active in workspace {workspace_id}"
+            )
+        return participant
+
+    async def _resolve_external_operation_system(
+        self,
+        *,
+        workspace: Workspace,
+        system_id: UUID | None = None,
+        system_key: str | None = None,
+    ) -> ExternalSystemDefinition:
+        if system_id is not None:
+            system = await self._repository.fetch_external_system(system_id)
+        elif system_key:
+            system = await self._repository.fetch_external_system_by_key(
+                system_key=system_key,
+                organization_id=workspace.organization_id,
+            )
+        else:
+            raise ValueError("External operation requires system_id or system_key")
+        if system is None:
+            raise KeyError("External system not found")
+        if not self._resource_visible_to_workspace(
+            system.scope,
+            system.organization_id,
+            workspace,
+        ):
+            raise PermissionError(
+                f"External system {system.system_id} is not visible in workspace {workspace.workspace_id}"
+            )
+        return system
+
+    @staticmethod
+    def _external_operation_requires_approval(
+        risk_policy: dict[str, object],
+        *,
+        risk_level: str,
+        operation_key: str,
+    ) -> bool:
+        return external_operation_requires_approval(
+            risk_policy,
+            risk_level=risk_level,
+            operation_key=operation_key,
+        )
+
+    @classmethod
+    def _external_operation_request_metadata(
+        cls,
+        metadata: dict[str, object],
+    ) -> dict[str, object]:
+        return external_operation_request_metadata(metadata)
+
+    @classmethod
+    def _redact_sensitive_metadata(cls, value: object, *, depth: int = 0) -> object:
+        if depth > 4:
+            return "[redacted]"
+        sensitive_fragments = {
+            "authorization",
+            "token",
+            "secret",
+            "password",
+            "api_key",
+            "credential",
+            "bearer",
+        }
+        if isinstance(value, dict):
+            redacted: dict[str, object] = {}
+            for key, item in value.items():
+                key_text = str(key)
+                normalized = key_text.lower()
+                if any(fragment in normalized for fragment in sensitive_fragments):
+                    redacted[key_text] = "[redacted]"
+                else:
+                    redacted[key_text] = cls._redact_sensitive_metadata(
+                        item,
+                        depth=depth + 1,
+                    )
+            return redacted
+        if isinstance(value, list):
+            return [
+                cls._redact_sensitive_metadata(item, depth=depth + 1)
+                for item in value
+            ]
+        return value
+
+    @staticmethod
+    def _external_identity_grant_event_payload(
+        grant: ExternalIdentityGrant,
+        *,
+        system: ExternalSystemDefinition,
+        outcome: str,
+    ) -> dict[str, object]:
+        return {
+            "outcome": outcome,
+            "grant_id": str(grant.grant_id),
+            "workspace_id": str(grant.workspace_id),
+            "participant_id": str(grant.participant_id),
+            "user_id": str(grant.user_id) if grant.user_id is not None else None,
+            "system_agent_id": (
+                str(grant.system_agent_id)
+                if grant.system_agent_id is not None
+                else None
+            ),
+            "external_system_id": str(system.system_id),
+            "external_system_key": system.system_key,
+            "account_id": str(grant.account_id) if grant.account_id is not None else None,
+            "allowed_scopes": grant.allowed_scopes,
+            "allowed_operations": grant.allowed_operations,
+            "status": grant.status,
+            "expires_at": grant.expires_at.isoformat() if grant.expires_at else None,
+            "created_by": str(grant.created_by),
+            "approved_by": str(grant.approved_by) if grant.approved_by else None,
+        }
+
+    @staticmethod
+    def _external_operation_event_payload(
+        operation_request: ExternalOperationRequest,
+        *,
+        system: ExternalSystemDefinition,
+        outcome: str,
+    ) -> dict[str, object]:
+        return {
+            "outcome": outcome,
+            "operation_request_id": str(operation_request.operation_request_id),
+            "workspace_id": str(operation_request.workspace_id),
+            "thread_id": (
+                str(operation_request.thread_id)
+                if operation_request.thread_id is not None
+                else None
+            ),
+            "tool_call_id": (
+                str(operation_request.tool_call_id)
+                if operation_request.tool_call_id is not None
+                else None
+            ),
+            "external_system_id": str(system.system_id),
+            "external_system_key": system.system_key,
+            "grant_id": (
+                str(operation_request.grant_id)
+                if operation_request.grant_id is not None
+                else None
+            ),
+            "participant_id": str(operation_request.participant_id),
+            "user_id": (
+                str(operation_request.user_id)
+                if operation_request.user_id is not None
+                else None
+            ),
+            "system_agent_id": (
+                str(operation_request.system_agent_id)
+                if operation_request.system_agent_id is not None
+                else None
+            ),
+            "operation_key": operation_request.operation_key,
+            "source": operation_request.source,
+            "risk_level": operation_request.risk_level,
+            "status": operation_request.status,
+            "requested_by": str(operation_request.requested_by),
+            "approved_by": (
+                str(operation_request.approved_by)
+                if operation_request.approved_by is not None
+                else None
+            ),
+            "rejected_by": (
+                str(operation_request.rejected_by)
+                if operation_request.rejected_by is not None
+                else None
+            ),
+        }
+
+    async def _create_external_operation_request_message(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        operation_request: ExternalOperationRequest,
+        system: ExternalSystemDefinition,
+        participant: ParticipantProfile,
+        timestamp: datetime,
+    ) -> tuple[TimelineMessage, EventEnvelope]:
+        if operation_request.thread_id is None:
+            raise ValueError("External operation approval message requires a thread")
+        thread = await self._repository.fetch_thread(operation_request.thread_id)
+        if thread is None or thread.workspace_id != operation_request.workspace_id:
+            raise KeyError(f"Thread {operation_request.thread_id} not found")
+        actor = ActorRef(type=participant.participant_type, id=participant.participant_id)
+        content = (
+            "External operation approval required: "
+            f"{system.display_name} / {operation_request.operation_key} "
+            f"({operation_request.risk_level} risk)."
+        )
+        message = TimelineMessage(
+            message_id=uuid4(),
+            workspace_id=operation_request.workspace_id,
+            thread_id=operation_request.thread_id,
+            actor=actor,
+            visibility="workspace",
+            content=content,
+            status="completed",
+            sequence=await self._repository.next_thread_sequence(
+                conn,
+                operation_request.thread_id,
+            ),
+            created_at=timestamp,
+            updated_at=timestamp,
+            metadata={
+                "kind": "external_operation_approval_request",
+                "external_operation_request_id": str(
+                    operation_request.operation_request_id
+                ),
+                "external_system_id": str(system.system_id),
+                "external_system_key": system.system_key,
+                "operation_key": operation_request.operation_key,
+                "risk_level": operation_request.risk_level,
+                "status": operation_request.status,
+            },
+        )
+        await self._repository.upsert_message(conn, message)
+        event = await self._build_thread_event(
+            conn,
+            operation_request.workspace_id,
+            operation_request.thread_id,
+            "external_operation_request.pending_approval",
+            actor=actor,
+            target=TargetRef(
+                type="external_operation_request",
+                id=operation_request.operation_request_id,
+            ),
+            payload=self._external_operation_event_payload(
+                operation_request,
+                system=system,
+                outcome="pending_approval",
+            ),
+            visibility="workspace",
+            timestamp=timestamp,
+            causation_id=message.message_id,
+        )
+        await self._repository.record_event(conn, event)
+        return message, event
 
     async def _require_workspace_permission(
         self,

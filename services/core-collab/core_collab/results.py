@@ -11,6 +11,11 @@ from .contracts import (
     Artifact,
     AssetLink,
     EventEnvelope,
+    ExternalAccount,
+    ExternalIdentityGrant,
+    ExternalIdentityResolution,
+    ExternalOperationRequest,
+    ExternalSystemDefinition,
     GitRepository,
     InteractionRequestDetail,
     Library,
@@ -166,6 +171,16 @@ class MemoryProviderCommandResult(CommandResult):
 
 
 @dataclass
+class ExternalAccessCommandResult(CommandResult):
+    system: ExternalSystemDefinition | None = None
+    account: ExternalAccount | None = None
+    grant: ExternalIdentityGrant | None = None
+    operation_request: ExternalOperationRequest | None = None
+    resolution: ExternalIdentityResolution | None = None
+    message: TimelineMessage | None = None
+
+
+@dataclass
 class McpServerCommandResult(CommandResult):
     server: McpServerDefinition | None = None
     binding: WorkspaceMcpServer | None = None
@@ -274,6 +289,7 @@ __all__ = [
     "AgentDefinitionCommandResult",
     "AgentIdentityCommandResult",
     "CommandResult",
+    "ExternalAccessCommandResult",
     "GitRepositoryCommandResult",
     "IamRoleCommandResult",
     "InteractionRequestCommandResult",

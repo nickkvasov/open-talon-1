@@ -36,6 +36,12 @@ from .contracts import (
     AssetLink,
     AgentRoleBinding,
     EventEnvelope,
+    ExternalAccount,
+    ExternalEventInboxEntry,
+    ExternalIdentityGrant,
+    ExternalOperationRequest,
+    ExternalSystemDefinition,
+    ExternalWebhookEndpoint,
     GitRepository,
     GeneratedToolManifest,
     GeneratedToolValidationReport,
@@ -2767,6 +2773,209 @@ class CollaborationRepository:
             provider.updated_by,
             provider.updated_at,
             self._json_dumps(provider.metadata),
+        )
+
+    async def upsert_external_system(
+        self, conn: asyncpg.Connection, system: ExternalSystemDefinition
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO external_systems (
+                system_id, scope, organization_id, system_key, display_name, description,
+                auth_kind, config, secret_config, operation_catalog, webhook_config, enabled,
+                created_by, created_at, updated_by, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11, $12,
+                $13, $14, $15, $16, $17
+            )
+            ON CONFLICT (system_id) DO UPDATE
+                SET scope = EXCLUDED.scope,
+                    organization_id = EXCLUDED.organization_id,
+                    system_key = EXCLUDED.system_key,
+                    display_name = EXCLUDED.display_name,
+                    description = EXCLUDED.description,
+                    auth_kind = EXCLUDED.auth_kind,
+                    config = EXCLUDED.config,
+                    secret_config = EXCLUDED.secret_config,
+                    operation_catalog = EXCLUDED.operation_catalog,
+                    webhook_config = EXCLUDED.webhook_config,
+                    enabled = EXCLUDED.enabled,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            system.system_id,
+            system.scope,
+            system.organization_id,
+            system.system_key,
+            system.display_name,
+            system.description,
+            system.auth_kind,
+            self._json_dumps(system.config),
+            self._json_dumps(system.secret_config),
+            self._json_dumps(system.operation_catalog),
+            self._json_dumps(system.webhook_config),
+            system.enabled,
+            system.created_by,
+            system.created_at,
+            system.updated_by,
+            system.updated_at,
+            self._json_dumps(system.metadata),
+        )
+
+    async def upsert_external_account(
+        self, conn: asyncpg.Connection, account: ExternalAccount
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO external_accounts (
+                account_id, system_id, owner_kind, user_id, system_agent_id,
+                external_subject, display_name, scopes, credential_ref, status, expires_at,
+                created_by, created_at, updated_by, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9, $10, $11,
+                $12, $13, $14, $15, $16
+            )
+            ON CONFLICT (account_id) DO UPDATE
+                SET system_id = EXCLUDED.system_id,
+                    owner_kind = EXCLUDED.owner_kind,
+                    user_id = EXCLUDED.user_id,
+                    system_agent_id = EXCLUDED.system_agent_id,
+                    external_subject = EXCLUDED.external_subject,
+                    display_name = EXCLUDED.display_name,
+                    scopes = EXCLUDED.scopes,
+                    credential_ref = EXCLUDED.credential_ref,
+                    status = EXCLUDED.status,
+                    expires_at = EXCLUDED.expires_at,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            account.account_id,
+            account.system_id,
+            account.owner_kind,
+            account.user_id,
+            account.system_agent_id,
+            account.external_subject,
+            account.display_name,
+            self._json_dumps(account.scopes),
+            self._json_dumps(account.credential_ref),
+            account.status,
+            account.expires_at,
+            account.created_by,
+            account.created_at,
+            account.updated_by,
+            account.updated_at,
+            self._json_dumps(account.metadata),
+        )
+
+    async def upsert_external_identity_grant(
+        self, conn: asyncpg.Connection, grant: ExternalIdentityGrant
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO external_identity_grants (
+                grant_id, workspace_id, participant_id, system_id, account_id,
+                user_id, system_agent_id, allowed_scopes, allowed_operations, risk_policy,
+                status, expires_at, created_by, approved_by, created_at, updated_by,
+                updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16,
+                $17, $18
+            )
+            ON CONFLICT (grant_id) DO UPDATE
+                SET workspace_id = EXCLUDED.workspace_id,
+                    participant_id = EXCLUDED.participant_id,
+                    system_id = EXCLUDED.system_id,
+                    account_id = EXCLUDED.account_id,
+                    user_id = EXCLUDED.user_id,
+                    system_agent_id = EXCLUDED.system_agent_id,
+                    allowed_scopes = EXCLUDED.allowed_scopes,
+                    allowed_operations = EXCLUDED.allowed_operations,
+                    risk_policy = EXCLUDED.risk_policy,
+                    status = EXCLUDED.status,
+                    expires_at = EXCLUDED.expires_at,
+                    approved_by = EXCLUDED.approved_by,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            grant.grant_id,
+            grant.workspace_id,
+            grant.participant_id,
+            grant.system_id,
+            grant.account_id,
+            grant.user_id,
+            grant.system_agent_id,
+            self._json_dumps(grant.allowed_scopes),
+            self._json_dumps(grant.allowed_operations),
+            self._json_dumps(grant.risk_policy),
+            grant.status,
+            grant.expires_at,
+            grant.created_by,
+            grant.approved_by,
+            grant.created_at,
+            grant.updated_by,
+            grant.updated_at,
+            self._json_dumps(grant.metadata),
+        )
+
+    async def upsert_external_operation_request(
+        self, conn: asyncpg.Connection, request: ExternalOperationRequest
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO external_operation_requests (
+                operation_request_id, workspace_id, thread_id, tool_call_id, system_id,
+                grant_id, participant_id, user_id, system_agent_id, operation_key, source,
+                risk_level, status, requested_by, approved_by, rejected_by, requested_at,
+                decided_at, completed_at, request_metadata, result_metadata, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9, $10, $11,
+                $12, $13, $14, $15, $16, $17,
+                $18, $19, $20, $21, $22
+            )
+            ON CONFLICT (operation_request_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    approved_by = EXCLUDED.approved_by,
+                    rejected_by = EXCLUDED.rejected_by,
+                    decided_at = EXCLUDED.decided_at,
+                    completed_at = EXCLUDED.completed_at,
+                    request_metadata = EXCLUDED.request_metadata,
+                    result_metadata = EXCLUDED.result_metadata,
+                    metadata = EXCLUDED.metadata
+            """,
+            request.operation_request_id,
+            request.workspace_id,
+            request.thread_id,
+            request.tool_call_id,
+            request.system_id,
+            request.grant_id,
+            request.participant_id,
+            request.user_id,
+            request.system_agent_id,
+            request.operation_key,
+            request.source,
+            request.risk_level,
+            request.status,
+            request.requested_by,
+            request.approved_by,
+            request.rejected_by,
+            request.requested_at,
+            request.decided_at,
+            request.completed_at,
+            self._json_dumps(request.request_metadata),
+            self._json_dumps(request.result_metadata),
+            self._json_dumps(request.metadata),
         )
 
     async def upsert_mcp_server(
@@ -8466,6 +8675,281 @@ class CollaborationRepository:
         )
         return [self._memory_provider_from_row(row) for row in rows]
 
+    async def list_external_systems(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[ExternalSystemDefinition]:
+        rows = await self._pool.fetch(
+            """
+            SELECT system_id, scope, organization_id, system_key, display_name, description,
+                   auth_kind, config, secret_config, operation_catalog, webhook_config, enabled,
+                   created_by, created_at, updated_by, updated_at, metadata
+            FROM external_systems
+            WHERE scope = $1
+              AND (
+                    ($2::uuid IS NULL AND organization_id IS NULL)
+                 OR organization_id = $2
+              )
+            ORDER BY created_at ASC
+            """,
+            scope,
+            organization_id,
+        )
+        return [self._external_system_from_row(row) for row in rows]
+
+    async def fetch_external_system(
+        self, system_id: UUID
+    ) -> ExternalSystemDefinition | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT system_id, scope, organization_id, system_key, display_name, description,
+                   auth_kind, config, secret_config, operation_catalog, webhook_config, enabled,
+                   created_by, created_at, updated_by, updated_at, metadata
+            FROM external_systems
+            WHERE system_id = $1
+            """,
+            system_id,
+        )
+        return self._external_system_from_row(row) if row else None
+
+    async def fetch_external_system_by_key(
+        self,
+        *,
+        system_key: str,
+        organization_id: UUID | None = None,
+    ) -> ExternalSystemDefinition | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT system_id, scope, organization_id, system_key, display_name, description,
+                   auth_kind, config, secret_config, operation_catalog, webhook_config, enabled,
+                   created_by, created_at, updated_by, updated_at, metadata
+            FROM external_systems
+            WHERE system_key = $1
+              AND (
+                    scope = 'global'
+                 OR (scope = 'organization' AND organization_id = $2)
+              )
+            ORDER BY CASE WHEN scope = 'organization' THEN 0 ELSE 1 END, created_at ASC
+            LIMIT 1
+            """,
+            system_key,
+            organization_id,
+        )
+        return self._external_system_from_row(row) if row else None
+
+    async def delete_external_system(
+        self, conn: asyncpg.Connection, *, system_id: UUID
+    ) -> bool:
+        status = await conn.execute(
+            "DELETE FROM external_systems WHERE system_id = $1",
+            system_id,
+        )
+        return status.endswith(" 1")
+
+    async def list_external_accounts(
+        self,
+        *,
+        system_id: UUID | None = None,
+        user_id: UUID | None = None,
+        system_agent_id: UUID | None = None,
+        include_inactive: bool = False,
+    ) -> list[ExternalAccount]:
+        rows = await self._pool.fetch(
+            """
+            SELECT account_id, system_id, owner_kind, user_id, system_agent_id,
+                   external_subject, display_name, scopes, credential_ref, status, expires_at,
+                   created_by, created_at, updated_by, updated_at, metadata
+            FROM external_accounts
+            WHERE ($1::uuid IS NULL OR system_id = $1)
+              AND ($2::uuid IS NULL OR user_id = $2)
+              AND ($3::uuid IS NULL OR system_agent_id = $3)
+              AND ($4::boolean OR status = 'active')
+            ORDER BY created_at ASC
+            """,
+            system_id,
+            user_id,
+            system_agent_id,
+            include_inactive,
+        )
+        return [self._external_account_from_row(row) for row in rows]
+
+    async def fetch_external_account(self, account_id: UUID) -> ExternalAccount | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT account_id, system_id, owner_kind, user_id, system_agent_id,
+                   external_subject, display_name, scopes, credential_ref, status, expires_at,
+                   created_by, created_at, updated_by, updated_at, metadata
+            FROM external_accounts
+            WHERE account_id = $1
+            """,
+            account_id,
+        )
+        return self._external_account_from_row(row) if row else None
+
+    async def list_external_identity_grants(
+        self,
+        *,
+        workspace_id: UUID,
+        participant_id: UUID | None = None,
+        system_id: UUID | None = None,
+        include_inactive: bool = False,
+    ) -> list[ExternalIdentityGrant]:
+        rows = await self._pool.fetch(
+            """
+            SELECT grant_id, workspace_id, participant_id, system_id, account_id,
+                   user_id, system_agent_id, allowed_scopes, allowed_operations, risk_policy,
+                   status, expires_at, created_by, approved_by, created_at, updated_by,
+                   updated_at, metadata
+            FROM external_identity_grants
+            WHERE workspace_id = $1
+              AND ($2::uuid IS NULL OR participant_id = $2)
+              AND ($3::uuid IS NULL OR system_id = $3)
+              AND ($4::boolean OR status = 'active')
+            ORDER BY created_at ASC
+            """,
+            workspace_id,
+            participant_id,
+            system_id,
+            include_inactive,
+        )
+        return [self._external_identity_grant_from_row(row) for row in rows]
+
+    async def fetch_external_identity_grant(
+        self, grant_id: UUID
+    ) -> ExternalIdentityGrant | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT grant_id, workspace_id, participant_id, system_id, account_id,
+                   user_id, system_agent_id, allowed_scopes, allowed_operations, risk_policy,
+                   status, expires_at, created_by, approved_by, created_at, updated_by,
+                   updated_at, metadata
+            FROM external_identity_grants
+            WHERE grant_id = $1
+            """,
+            grant_id,
+        )
+        return self._external_identity_grant_from_row(row) if row else None
+
+    async def fetch_active_external_identity_grant(
+        self,
+        *,
+        workspace_id: UUID,
+        participant_id: UUID,
+        system_id: UUID,
+        operation_key: str,
+        now,
+    ) -> ExternalIdentityGrant | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT grant.grant_id, grant.workspace_id, grant.participant_id, grant.system_id,
+                   grant.account_id, grant.user_id, grant.system_agent_id,
+                   grant.allowed_scopes, grant.allowed_operations, grant.risk_policy,
+                   grant.status, grant.expires_at, grant.created_by, grant.approved_by,
+                   grant.created_at, grant.updated_by, grant.updated_at, grant.metadata
+            FROM external_identity_grants AS grant
+            JOIN external_systems AS system ON system.system_id = grant.system_id
+            LEFT JOIN external_accounts AS account ON account.account_id = grant.account_id
+            WHERE grant.workspace_id = $1
+              AND grant.participant_id = $2
+              AND grant.system_id = $3
+              AND grant.status = 'active'
+              AND (grant.expires_at IS NULL OR grant.expires_at > $5)
+              AND system.enabled = TRUE
+              AND (
+                    grant.allowed_operations = '[]'::jsonb
+                 OR grant.allowed_operations ? $4
+              )
+              AND (
+                    grant.account_id IS NULL
+                 OR (
+                    account.status = 'active'
+                    AND (account.expires_at IS NULL OR account.expires_at > $5)
+                 )
+              )
+            ORDER BY grant.created_at ASC
+            LIMIT 1
+            """,
+            workspace_id,
+            participant_id,
+            system_id,
+            operation_key,
+            now,
+        )
+        return self._external_identity_grant_from_row(row) if row else None
+
+    async def fetch_external_operation_request(
+        self, operation_request_id: UUID
+    ) -> ExternalOperationRequest | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT operation_request_id, workspace_id, thread_id, tool_call_id, system_id,
+                   grant_id, participant_id, user_id, system_agent_id, operation_key, source,
+                   risk_level, status, requested_by, approved_by, rejected_by, requested_at,
+                   decided_at, completed_at, request_metadata, result_metadata, metadata
+            FROM external_operation_requests
+            WHERE operation_request_id = $1
+            """,
+            operation_request_id,
+        )
+        return self._external_operation_request_from_row(row) if row else None
+
+    async def list_external_operation_requests(
+        self,
+        *,
+        workspace_id: UUID,
+        status: str | None = None,
+    ) -> list[ExternalOperationRequest]:
+        rows = await self._pool.fetch(
+            """
+            SELECT operation_request_id, workspace_id, thread_id, tool_call_id, system_id,
+                   grant_id, participant_id, user_id, system_agent_id, operation_key, source,
+                   risk_level, status, requested_by, approved_by, rejected_by, requested_at,
+                   decided_at, completed_at, request_metadata, result_metadata, metadata
+            FROM external_operation_requests
+            WHERE workspace_id = $1
+              AND ($2::text IS NULL OR status = $2)
+            ORDER BY requested_at DESC
+            """,
+            workspace_id,
+            status,
+        )
+        return [self._external_operation_request_from_row(row) for row in rows]
+
+    async def fetch_approved_external_operation_request_for_tool_call(
+        self,
+        *,
+        workspace_id: UUID,
+        tool_call_id: UUID,
+        system_id: UUID,
+        participant_id: UUID,
+        operation_key: str,
+    ) -> ExternalOperationRequest | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT operation_request_id, workspace_id, thread_id, tool_call_id, system_id,
+                   grant_id, participant_id, user_id, system_agent_id, operation_key, source,
+                   risk_level, status, requested_by, approved_by, rejected_by, requested_at,
+                   decided_at, completed_at, request_metadata, result_metadata, metadata
+            FROM external_operation_requests
+            WHERE workspace_id = $1
+              AND tool_call_id = $2
+              AND system_id = $3
+              AND participant_id = $4
+              AND operation_key = $5
+              AND status = 'approved'
+            ORDER BY decided_at DESC NULLS LAST, requested_at DESC
+            LIMIT 1
+            """,
+            workspace_id,
+            tool_call_id,
+            system_id,
+            participant_id,
+            operation_key,
+        )
+        return self._external_operation_request_from_row(row) if row else None
+
     async def list_mcp_servers(
         self,
         *,
@@ -10558,6 +11042,121 @@ class CollaborationRepository:
             created_at=row["created_at"],
             updated_by=row["updated_by"],
             updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _external_system_from_row(row: asyncpg.Record) -> ExternalSystemDefinition:
+        return ExternalSystemDefinition(
+            system_id=row["system_id"],
+            scope=row["scope"],
+            organization_id=row["organization_id"],
+            system_key=row["system_key"],
+            display_name=row["display_name"],
+            description=row["description"],
+            auth_kind=row["auth_kind"],
+            config=CollaborationRepository._json_value(row["config"], default={}),
+            secret_config=CollaborationRepository._json_value(
+                row["secret_config"], default={}
+            ),
+            operation_catalog=CollaborationRepository._json_value(
+                row["operation_catalog"], default={}
+            ),
+            webhook_config=CollaborationRepository._json_value(
+                row["webhook_config"], default={}
+            ),
+            enabled=row["enabled"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_by=row["updated_by"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _external_account_from_row(row: asyncpg.Record) -> ExternalAccount:
+        return ExternalAccount(
+            account_id=row["account_id"],
+            system_id=row["system_id"],
+            owner_kind=row["owner_kind"],
+            user_id=row["user_id"],
+            system_agent_id=row["system_agent_id"],
+            external_subject=row["external_subject"],
+            display_name=row["display_name"],
+            scopes=list(CollaborationRepository._json_value(row["scopes"], default=[])),
+            credential_ref=CollaborationRepository._json_value(
+                row["credential_ref"], default={}
+            ),
+            status=row["status"],
+            expires_at=row["expires_at"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_by=row["updated_by"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _external_identity_grant_from_row(
+        row: asyncpg.Record,
+    ) -> ExternalIdentityGrant:
+        return ExternalIdentityGrant(
+            grant_id=row["grant_id"],
+            workspace_id=row["workspace_id"],
+            participant_id=row["participant_id"],
+            system_id=row["system_id"],
+            account_id=row["account_id"],
+            user_id=row["user_id"],
+            system_agent_id=row["system_agent_id"],
+            allowed_scopes=list(
+                CollaborationRepository._json_value(row["allowed_scopes"], default=[])
+            ),
+            allowed_operations=list(
+                CollaborationRepository._json_value(row["allowed_operations"], default=[])
+            ),
+            risk_policy=CollaborationRepository._json_value(
+                row["risk_policy"], default={}
+            ),
+            status=row["status"],
+            expires_at=row["expires_at"],
+            created_by=row["created_by"],
+            approved_by=row["approved_by"],
+            created_at=row["created_at"],
+            updated_by=row["updated_by"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _external_operation_request_from_row(
+        row: asyncpg.Record,
+    ) -> ExternalOperationRequest:
+        return ExternalOperationRequest(
+            operation_request_id=row["operation_request_id"],
+            workspace_id=row["workspace_id"],
+            thread_id=row["thread_id"],
+            tool_call_id=row["tool_call_id"],
+            system_id=row["system_id"],
+            grant_id=row["grant_id"],
+            participant_id=row["participant_id"],
+            user_id=row["user_id"],
+            system_agent_id=row["system_agent_id"],
+            operation_key=row["operation_key"],
+            source=row["source"],
+            risk_level=row["risk_level"],
+            status=row["status"],
+            requested_by=row["requested_by"],
+            approved_by=row["approved_by"],
+            rejected_by=row["rejected_by"],
+            requested_at=row["requested_at"],
+            decided_at=row["decided_at"],
+            completed_at=row["completed_at"],
+            request_metadata=CollaborationRepository._json_value(
+                row["request_metadata"], default={}
+            ),
+            result_metadata=CollaborationRepository._json_value(
+                row["result_metadata"], default={}
+            ),
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),
         )
 

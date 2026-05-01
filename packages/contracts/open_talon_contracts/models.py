@@ -37,7 +37,7 @@ TaskStatus = Literal["created", "claimed", "released", "completed", "failed"]
 RunStatus = Literal["started", "progressing", "completed", "failed"]
 RunStepStatus = Literal["created", "claimed", "waiting_tools", "completed", "failed"]
 RunStepKind = Literal["model"]
-ToolCallStatus = Literal["created", "claimed", "completed", "failed"]
+ToolCallStatus = Literal["created", "claimed", "pending_approval", "completed", "failed"]
 AgentEndpointKind = Literal["local", "system", "remote"]
 SeededAgentProfileKind = Literal[
     "example_planning_participant",
@@ -58,7 +58,15 @@ ExecutionWorkspaceRefMode = Literal["local_path"]
 NetworkPolicy = Literal["none", "full"]
 WorkspaceAccessMode = Literal["none", "read_only", "read_write"]
 ExecutionInvocationKind = Literal["tool_call"]
-ExecutionStatus = Literal["queued", "running", "completed", "failed", "cancelled", "timed_out"]
+ExecutionStatus = Literal[
+    "queued",
+    "running",
+    "pending_approval",
+    "completed",
+    "failed",
+    "cancelled",
+    "timed_out",
+]
 RegistryScope = Literal["global", "organization"]
 AssetScope = Literal["global", "organization", "project", "workspace"]
 LibraryScope = Literal["organization", "project", "workspace"]
@@ -198,6 +206,27 @@ IamScope = Literal["global", "organization"]
 IamSubjectKind = Literal["human", "agent"]
 AgentIdentityStatus = Literal["active", "disabled"]
 PrincipalType = Literal["human", "agent", "api_key"]
+ExternalSystemAuthKind = Literal[
+    "oauth2",
+    "oidc",
+    "api_key",
+    "bearer_token",
+    "client_credentials",
+    "custom",
+]
+ExternalAccountOwnerKind = Literal["user", "agent"]
+ExternalAccountStatus = Literal["active", "disabled", "revoked"]
+ExternalIdentityGrantStatus = Literal["active", "disabled", "revoked", "expired"]
+ExternalOperationRiskLevel = Literal["low", "medium", "high", "destructive"]
+ExternalOperationRequestStatus = Literal[
+    "pending_approval",
+    "approved",
+    "rejected",
+    "completed",
+    "failed",
+    "cancelled",
+]
+ExternalEventInboxStatus = Literal["received", "processed", "ignored", "failed"]
 ToolGenerationRequestStatus = Literal[
     "submitted",
     "clarification_needed",
@@ -318,6 +347,9 @@ class TargetRef(BaseModel):
         "interaction_answer",
         "tool_generation_request",
         "tool_generation_revision",
+        "external_system",
+        "external_identity_grant",
+        "external_operation_request",
         "methodic_execution",
         "methodic_execution_step",
         "methodic_execution_assignment",
@@ -936,6 +968,127 @@ class MemoryProviderDefinition(BaseModel):
     updated_by: UUID
     updated_at: datetime = Field(default_factory=utcnow)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExternalSystemDefinition(BaseModel):
+    system_id: UUID
+    scope: RegistryScope = "global"
+    organization_id: UUID | None = None
+    system_key: str
+    display_name: str
+    description: str = ""
+    auth_kind: ExternalSystemAuthKind
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_config: dict[str, Any] = Field(default_factory=dict)
+    operation_catalog: dict[str, Any] = Field(default_factory=dict)
+    webhook_config: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExternalAccount(BaseModel):
+    account_id: UUID
+    system_id: UUID
+    owner_kind: ExternalAccountOwnerKind
+    user_id: UUID | None = None
+    system_agent_id: UUID | None = None
+    external_subject: str | None = None
+    display_name: str | None = None
+    scopes: list[str] = Field(default_factory=list)
+    credential_ref: dict[str, Any] = Field(default_factory=dict)
+    status: ExternalAccountStatus = "active"
+    expires_at: datetime | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExternalIdentityGrant(BaseModel):
+    grant_id: UUID
+    workspace_id: UUID
+    participant_id: UUID
+    system_id: UUID
+    account_id: UUID | None = None
+    user_id: UUID | None = None
+    system_agent_id: UUID | None = None
+    allowed_scopes: list[str] = Field(default_factory=list)
+    allowed_operations: list[str] = Field(default_factory=list)
+    risk_policy: dict[str, Any] = Field(default_factory=dict)
+    status: ExternalIdentityGrantStatus = "active"
+    expires_at: datetime | None = None
+    created_by: UUID
+    approved_by: UUID | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExternalOperationRequest(BaseModel):
+    operation_request_id: UUID
+    workspace_id: UUID
+    thread_id: UUID | None = None
+    tool_call_id: UUID | None = None
+    system_id: UUID
+    grant_id: UUID | None = None
+    participant_id: UUID
+    user_id: UUID | None = None
+    system_agent_id: UUID | None = None
+    operation_key: str
+    source: str = "direct"
+    risk_level: ExternalOperationRiskLevel = "low"
+    status: ExternalOperationRequestStatus = "pending_approval"
+    requested_by: UUID
+    approved_by: UUID | None = None
+    rejected_by: UUID | None = None
+    requested_at: datetime = Field(default_factory=utcnow)
+    decided_at: datetime | None = None
+    completed_at: datetime | None = None
+    request_metadata: dict[str, Any] = Field(default_factory=dict)
+    result_metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExternalWebhookEndpoint(BaseModel):
+    endpoint_id: UUID
+    system_id: UUID
+    workspace_id: UUID
+    display_name: str
+    signing_secret_ref: dict[str, Any] = Field(default_factory=dict)
+    status: ExternalAccountStatus = "active"
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExternalEventInboxEntry(BaseModel):
+    event_id: UUID
+    endpoint_id: UUID
+    system_id: UUID
+    workspace_id: UUID
+    external_event_id: str
+    event_type: str
+    status: ExternalEventInboxStatus = "received"
+    received_at: datetime = Field(default_factory=utcnow)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExternalIdentityResolution(BaseModel):
+    system: ExternalSystemDefinition
+    grant: ExternalIdentityGrant
+    account: ExternalAccount | None = None
+    operation_request: ExternalOperationRequest | None = None
+    approved: bool = True
+    operation_result: dict[str, Any] | None = None
 
 
 class McpServerDefinition(BaseModel):
@@ -2787,6 +2940,114 @@ class CreateMemoryProviderRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class CreateExternalSystemRequest(BaseModel):
+    actor: ParticipantInput
+    system_key: str
+    display_name: str
+    description: str = ""
+    auth_kind: ExternalSystemAuthKind
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_config: dict[str, Any] = Field(default_factory=dict)
+    operation_catalog: dict[str, Any] = Field(default_factory=dict)
+    webhook_config: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateExternalSystemRequest(BaseModel):
+    actor: ParticipantInput
+    system_key: str | None = None
+    display_name: str | None = None
+    description: str | None = None
+    auth_kind: ExternalSystemAuthKind | None = None
+    config: dict[str, Any] | None = None
+    secret_config: dict[str, Any] | None = None
+    operation_catalog: dict[str, Any] | None = None
+    webhook_config: dict[str, Any] | None = None
+    enabled: bool | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class DeleteExternalSystemRequest(BaseModel):
+    actor: ParticipantInput
+
+
+class CreateExternalAccountRequest(BaseModel):
+    actor: ParticipantInput
+    system_id: UUID
+    owner_kind: ExternalAccountOwnerKind
+    user_id: UUID | None = None
+    system_agent_id: UUID | None = None
+    external_subject: str | None = None
+    display_name: str | None = None
+    scopes: list[str] = Field(default_factory=list)
+    credential_ref: dict[str, Any] = Field(default_factory=dict)
+    expires_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateExternalAccountRequest(BaseModel):
+    actor: ParticipantInput
+    external_subject: str | None = None
+    display_name: str | None = None
+    scopes: list[str] | None = None
+    credential_ref: dict[str, Any] | None = None
+    status: ExternalAccountStatus | None = None
+    expires_at: datetime | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class CreateExternalIdentityGrantRequest(BaseModel):
+    actor: ParticipantInput
+    participant_id: UUID
+    system_id: UUID
+    account_id: UUID | None = None
+    allowed_scopes: list[str] = Field(default_factory=list)
+    allowed_operations: list[str] = Field(default_factory=list)
+    risk_policy: dict[str, Any] = Field(default_factory=dict)
+    expires_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExternalIdentityGrantAssignment(BaseModel):
+    system_id: UUID
+    account_id: UUID | None = None
+    allowed_scopes: list[str] = Field(default_factory=list)
+    allowed_operations: list[str] = Field(default_factory=list)
+    risk_policy: dict[str, Any] = Field(default_factory=dict)
+    expires_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateExternalIdentityGrantRequest(BaseModel):
+    actor: ParticipantInput
+    account_id: UUID | None = None
+    allowed_scopes: list[str] | None = None
+    allowed_operations: list[str] | None = None
+    risk_policy: dict[str, Any] | None = None
+    status: ExternalIdentityGrantStatus | None = None
+    expires_at: datetime | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class DeleteExternalIdentityGrantRequest(BaseModel):
+    actor: ParticipantInput
+
+
+class ExecuteExternalOperationRequest(BaseModel):
+    actor: ParticipantInput
+    operation_key: str = ""
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    risk_level: ExternalOperationRiskLevel = "low"
+    thread_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReviewExternalOperationRequest(BaseModel):
+    actor: ParticipantInput
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class CreateMcpServerRequest(BaseModel):
     actor: ParticipantInput
     server_key: str
@@ -2982,6 +3243,7 @@ class DeleteWorkspaceToolRequest(BaseModel):
 class CreateAgentParticipantRequest(BaseModel):
     actor: ParticipantInput
     agent_id: UUID
+    external_access_grants: list[ExternalIdentityGrantAssignment] = Field(default_factory=list)
 
 
 class UpdateAgentParticipantRequest(BaseModel):
@@ -2989,6 +3251,7 @@ class UpdateAgentParticipantRequest(BaseModel):
     status: ParticipantStatus | None = None
     visibility_scope: Visibility | None = None
     metadata: dict[str, Any] | None = None
+    external_access_grants: list[ExternalIdentityGrantAssignment] | None = None
 
 
 class CreateIamRoleRequest(BaseModel):

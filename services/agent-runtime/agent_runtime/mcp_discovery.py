@@ -87,9 +87,12 @@ async def _headers_for_server(
         if isinstance(key, str) and isinstance(value, str):
             headers[key] = value
     auth_config = server.config.get("auth")
-    if isinstance(auth_config, dict) and auth_config.get("kind") == "open_talon_agent_identity":
+    if isinstance(auth_config, dict) and auth_config.get("kind") in {
+        "open_talon_agent_identity",
+        "external_identity",
+    }:
         raise ValueError(
-            "System Plugin sync cannot use open_talon_agent_identity auth because no agent identity is executing the sync"
+            "System Plugin sync cannot use execution-scoped MCP auth because no workspace participant is executing the sync"
         )
     for key, value in dict(server.secret_config.get("headers") or {}).items():
         if not isinstance(key, str):

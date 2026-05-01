@@ -60,6 +60,9 @@ from gateway_edge.models import (
     CreateIamRoleRequest,
     CreateLlmProviderRequest,
     CreateMemoryProviderRequest,
+    CreateExternalAccountRequest,
+    CreateExternalIdentityGrantRequest,
+    CreateExternalSystemRequest,
     CreateMcpServerRequest,
     CreateSystemPluginRequest,
     CancelMethodicExecutionRequest,
@@ -88,6 +91,8 @@ from gateway_edge.models import (
     DeleteLlmProviderRequest,
     DeleteLibraryRequest,
     DeleteMemoryProviderRequest,
+    DeleteExternalIdentityGrantRequest,
+    DeleteExternalSystemRequest,
     DeleteMcpServerRequest,
     DeleteSystemPluginRequest,
     DeleteParticipantRequest,
@@ -99,7 +104,13 @@ from gateway_edge.models import (
     DeleteWorkspaceSystemPluginRequest,
     DeleteWorkspaceRequest,
     EventEnvelope,
+    ExecuteExternalOperationRequest,
     EvaluateMethodicStepRequest,
+    ExternalAccount,
+    ExternalIdentityGrant,
+    ExternalIdentityResolution,
+    ExternalOperationRequest,
+    ExternalSystemDefinition,
     GitRepository,
     IndexLibraryRequest,
     InteractionRequestDetail,
@@ -182,6 +193,9 @@ from gateway_edge.models import (
     UpdateAgentParticipantRequest,
     UpdateLlmProviderRequest,
     UpdateMemoryProviderRequest,
+    UpdateExternalAccountRequest,
+    UpdateExternalIdentityGrantRequest,
+    UpdateExternalSystemRequest,
     UpdateMcpServerRequest,
     UpdateSystemPluginRequest,
     UpdateMemoryEntryRequest,
@@ -196,6 +210,7 @@ from gateway_edge.models import (
     ReviewMethodologyBlueprintVersionRequest,
     ReviewToolGenerationRevisionRequest,
     ReviewMethodicResourceRequest,
+    ReviewExternalOperationRequest,
     SubmitMethodologyBlueprintDraftRequest,
     SubmitResearchDossierHealthCheckRequest,
     SyncResearchDossierNotebookRequest,
@@ -957,6 +972,42 @@ class CollaborationService:
         assert result.provider is not None
         return result.provider
 
+    async def create_external_system(
+        self,
+        payload: CreateExternalSystemRequest,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> ExternalSystemDefinition:
+        result = await self._require_kernel().create_external_system(
+            payload,
+            scope=scope,
+            organization_id=organization_id,
+        )
+        assert result.system is not None
+        return result.system
+
+    async def create_external_account(
+        self,
+        payload: CreateExternalAccountRequest,
+    ) -> ExternalAccount:
+        result = await self._require_kernel().create_external_account(payload)
+        assert result.account is not None
+        return result.account
+
+    async def create_external_identity_grant(
+        self,
+        workspace_id: UUID,
+        payload: CreateExternalIdentityGrantRequest,
+    ) -> ExternalIdentityGrant:
+        result = await self._require_kernel().create_external_identity_grant(
+            workspace_id,
+            payload,
+        )
+        await self._publish_events(result.events)
+        assert result.grant is not None
+        return result.grant
+
     async def create_mcp_server(
         self,
         payload: CreateMcpServerRequest,
@@ -1025,6 +1076,128 @@ class CollaborationService:
         return await self._require_kernel().list_memory_providers(
             scope=scope,
             organization_id=organization_id,
+        )
+
+    async def list_external_systems(
+        self,
+        *,
+        scope: str = "global",
+        organization_id: UUID | None = None,
+    ) -> list[ExternalSystemDefinition]:
+        return await self._require_kernel().list_external_systems(
+            scope=scope,
+            organization_id=organization_id,
+        )
+
+    async def list_workspace_external_systems(
+        self,
+        workspace_id: UUID,
+    ) -> list[ExternalSystemDefinition]:
+        return await self._require_kernel().list_workspace_external_systems(workspace_id)
+
+    async def get_external_system(
+        self,
+        system_id: UUID,
+    ) -> ExternalSystemDefinition | None:
+        return await self._require_kernel().get_external_system(system_id)
+
+    async def list_external_accounts(
+        self,
+        *,
+        system_id: UUID | None = None,
+        user_id: UUID | None = None,
+        system_agent_id: UUID | None = None,
+        include_inactive: bool = False,
+    ) -> list[ExternalAccount]:
+        return await self._require_kernel().list_external_accounts(
+            system_id=system_id,
+            user_id=user_id,
+            system_agent_id=system_agent_id,
+            include_inactive=include_inactive,
+        )
+
+    async def get_external_account(
+        self,
+        account_id: UUID,
+    ) -> ExternalAccount | None:
+        return await self._require_kernel().get_external_account(account_id)
+
+    async def list_external_identity_grants(
+        self,
+        *,
+        workspace_id: UUID,
+        participant_id: UUID | None = None,
+        system_id: UUID | None = None,
+        include_inactive: bool = False,
+    ) -> list[ExternalIdentityGrant]:
+        return await self._require_kernel().list_external_identity_grants(
+            workspace_id=workspace_id,
+            participant_id=participant_id,
+            system_id=system_id,
+            include_inactive=include_inactive,
+        )
+
+    async def get_external_identity_grant(
+        self,
+        grant_id: UUID,
+    ) -> ExternalIdentityGrant | None:
+        return await self._require_kernel().get_external_identity_grant(grant_id)
+
+    async def resolve_external_identity_for_operation(
+        self,
+        *,
+        workspace_id: UUID,
+        participant_id: UUID,
+        system_id: UUID,
+        operation_key: str,
+        risk_level: str = "low",
+        thread_id: UUID | None = None,
+        request_metadata: dict[str, object] | None = None,
+    ) -> ExternalIdentityResolution:
+        return await self._require_kernel().resolve_external_identity_for_operation(
+            workspace_id=workspace_id,
+            participant_id=participant_id,
+            system_id=system_id,
+            operation_key=operation_key,
+            risk_level=risk_level,
+            source="direct",
+            thread_id=thread_id,
+            requested_by=participant_id,
+            request_metadata=request_metadata,
+        )
+
+    async def execute_external_operation(
+        self,
+        workspace_id: UUID,
+        system_id: UUID,
+        payload: ExecuteExternalOperationRequest,
+    ) -> ExternalIdentityResolution:
+        result = await self._require_kernel().execute_external_operation(
+            workspace_id,
+            system_id,
+            payload,
+        )
+        await self._publish_events(result.events)
+        assert result.resolution is not None
+        return result.resolution
+
+    async def list_external_operation_requests(
+        self,
+        *,
+        workspace_id: UUID,
+        status: str | None = None,
+    ) -> list[ExternalOperationRequest]:
+        return await self._require_kernel().list_external_operation_requests(
+            workspace_id=workspace_id,
+            status=status,
+        )
+
+    async def get_external_operation_request(
+        self,
+        operation_request_id: UUID,
+    ) -> ExternalOperationRequest | None:
+        return await self._require_kernel().get_external_operation_request(
+            operation_request_id
         )
 
     async def list_mcp_servers(
@@ -1232,6 +1405,57 @@ class CollaborationService:
         result = await self._require_kernel().update_memory_provider(provider_id, payload)
         assert result.provider is not None
         return result.provider
+
+    async def update_external_system(
+        self, system_id: UUID, payload: UpdateExternalSystemRequest
+    ) -> ExternalSystemDefinition:
+        result = await self._require_kernel().update_external_system(system_id, payload)
+        assert result.system is not None
+        return result.system
+
+    async def update_external_account(
+        self, account_id: UUID, payload: UpdateExternalAccountRequest
+    ) -> ExternalAccount:
+        result = await self._require_kernel().update_external_account(account_id, payload)
+        assert result.account is not None
+        return result.account
+
+    async def update_external_identity_grant(
+        self, grant_id: UUID, payload: UpdateExternalIdentityGrantRequest
+    ) -> ExternalIdentityGrant:
+        result = await self._require_kernel().update_external_identity_grant(
+            grant_id,
+            payload,
+        )
+        await self._publish_events(result.events)
+        assert result.grant is not None
+        return result.grant
+
+    async def approve_external_operation_request(
+        self,
+        operation_request_id: UUID,
+        payload: ReviewExternalOperationRequest,
+    ) -> ExternalOperationRequest:
+        result = await self._require_kernel().approve_external_operation_request(
+            operation_request_id,
+            payload,
+        )
+        await self._publish_events(result.events)
+        assert result.operation_request is not None
+        return result.operation_request
+
+    async def reject_external_operation_request(
+        self,
+        operation_request_id: UUID,
+        payload: ReviewExternalOperationRequest,
+    ) -> ExternalOperationRequest:
+        result = await self._require_kernel().reject_external_operation_request(
+            operation_request_id,
+            payload,
+        )
+        await self._publish_events(result.events)
+        assert result.operation_request is not None
+        return result.operation_request
 
     async def update_mcp_server(
         self, server_id: UUID, payload: UpdateMcpServerRequest
@@ -2909,6 +3133,26 @@ class CollaborationService:
         payload: DeleteMemoryProviderRequest,
     ) -> dict[str, bool | str]:
         return await self._require_kernel().delete_memory_provider(provider_id, payload)
+
+    async def delete_external_system(
+        self,
+        system_id: UUID,
+        payload: DeleteExternalSystemRequest,
+    ) -> dict[str, bool | str]:
+        return await self._require_kernel().delete_external_system(system_id, payload)
+
+    async def delete_external_identity_grant(
+        self,
+        grant_id: UUID,
+        payload: DeleteExternalIdentityGrantRequest,
+    ) -> ExternalIdentityGrant:
+        result = await self._require_kernel().delete_external_identity_grant(
+            grant_id,
+            payload,
+        )
+        await self._publish_events(result.events)
+        assert result.grant is not None
+        return result.grant
 
     async def upsert_role_definition(
         self,

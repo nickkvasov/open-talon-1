@@ -215,6 +215,31 @@ def test_xwiki_dossier_notebook_seed_migration_declares_mcp_allowlists() -> None
     assert "methodology.dossiers.health.submit" in sql
 
 
+def test_external_identity_grants_migration_declares_control_plane_tables() -> None:
+    sql = (
+        MIGRATIONS_DIR / "20260501223406_add_external_identity_grants.sql"
+    ).read_text(encoding="utf-8")
+
+    for table_name in (
+        "external_systems",
+        "external_accounts",
+        "external_identity_grants",
+        "external_operation_requests",
+        "external_webhook_endpoints",
+        "external_event_inbox",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table_name}" in sql
+    assert "workspace_id UUID NOT NULL REFERENCES workspaces(workspace_id)" in sql
+    assert "participant_id UUID NOT NULL REFERENCES participants(participant_id)" in sql
+    assert "system_id UUID NOT NULL REFERENCES external_systems(system_id)" in sql
+    assert "account_id UUID NULL REFERENCES external_accounts(account_id)" in sql
+    assert "tool_call_id UUID NULL REFERENCES tool_calls(tool_call_id)" in sql
+    assert "request_metadata JSONB NOT NULL DEFAULT '{}'::jsonb" in sql
+    assert "idx_external_identity_grants_workspace_participant" in sql
+    assert "idx_external_operation_requests_workspace_status" in sql
+    assert "idx_external_event_inbox_dedupe" in sql
+
+
 def test_seeded_agent_profile_migration_declares_all_managed_profiles() -> None:
     sql = (
         MIGRATIONS_DIR / "20260501180000_seed_seeded_agent_profiles.sql"

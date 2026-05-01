@@ -481,6 +481,12 @@ class ToolWorker:
                     "tool-worker",
                     tool_result,
                 )
+            elif result.status == "pending_approval":
+                completion = await self._kernel.mark_tool_call_pending_external_approval(
+                    tool_call_id,
+                    "tool-worker",
+                    tool_result,
+                )
             else:
                 completion = await self._kernel.fail_tool_call(
                     tool_call_id,

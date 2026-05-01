@@ -119,6 +119,7 @@ Important implications:
 - organization-level project listings require organization `project.read`; project details, access management, and project workspace structure also require local project access
 - project access roles map to project-local permissions: creators and owners can read/write/manage access/create workspaces, editors can read/write/create workspaces, and viewers can read/list workspace structure
 - workspace detail and workspace-scoped operations still require IAM permissions together with participant attachment; collaboration-role definitions do not grant authorization
+- external system access is granted only through control-plane identity permissions: `external.systems.*`, `external.grants.*`, and `external.operations.approve`; workspace collaboration roles and capabilities do not create or approve external identity grants
 - OIDC workspace-scoped reads are membership-scoped; non-members should see `404` for workspace, thread, memory, and workspace-scoped asset reads
 - organization-scoped reads are also membership-scoped; non-members should see `404` there as well
 - out-of-scope reads return `404`; in-scope requests without the required permission return `403`
@@ -257,6 +258,7 @@ The current defaults are aimed at a single medium-sized internal company deploym
 - global reads and writes for system agents, system tools, global Git repositories, global file/retrieval flows, global asset publish/link/activate flows, provider management, library/Retriever plugin use, and global IAM management require the matching global IAM permission or platform-admin bootstrap access
 - organization CRUD, organization membership changes, and organization-scoped IAM management require the relevant organization permissions, which are granted by membership baseline roles or explicit IAM role bindings
 - workspace role-definition changes, workspace agent attachment/update/removal, workspace tool attach/update/delete, workspace Git repository creation, workspace asset publishing, workspace library management/attachments, and workspace retrieval operations require the matching workspace-scoped IAM permission together with participant attachment
+- external identity grants target an attached workspace participant and are required before MCP `auth.kind="external_identity"` or direct external-operation APIs can use an external account; high-risk operations create approval requests unless the grant risk policy pre-approves them, and approved direct HTTP operations run only from the external system `operation_catalog`
 - Tinker approval requires both `tool_generation.review` and `tool_catalog.write` in the requested publication scope
 - human workspace access depends on organization membership first, then workspace participation
 - workspace catalogs resolve as the union of platform-global resources and same-organization resources

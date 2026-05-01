@@ -13,7 +13,16 @@ from gateway_edge.audit_middleware import AuditMiddleware
 from gateway_edge.auth.middleware import AuthMiddleware
 from gateway_edge.config import settings
 from gateway_edge.db.postgres import setup_postgres, teardown_postgres
-from gateway_edge.routers import admin, auth, chat, collaboration, health, iam, mcp
+from gateway_edge.routers import (
+    admin,
+    auth,
+    chat,
+    collaboration,
+    external_access,
+    health,
+    iam,
+    mcp,
+)
 from gateway_edge.services.audit import audit_service
 from gateway_edge.services.collaboration import collaboration_service
 from gateway_edge.services.events import event_service
@@ -95,6 +104,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(chat.router)
     app.include_router(collaboration.router)
+    app.include_router(external_access.router)
     app.include_router(iam.router)
     app.include_router(admin.router)
     if settings.mcp_enabled:

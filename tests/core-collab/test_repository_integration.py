@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
@@ -34,6 +34,9 @@ from open_talon_contracts.models import (
     AuditEventDraft,
     CreateMethodologyBlueprintRequest,
     CreateResearchDossierSourceRequest,
+    ExternalAccount,
+    ExternalIdentityGrant,
+    ExternalSystemDefinition,
     GitRepository,
     Library,
     LlmProviderDefinition,
@@ -45,6 +48,7 @@ from open_talon_contracts.models import (
     Organization,
     OrganizationMembership,
     ParticipantInput,
+    ParticipantProfile,
     Project,
     ProjectAccessBinding,
     RequestMcpServerSyncRequest,
@@ -218,6 +222,229 @@ async def test_fresh_database_migration_chain_builds_xwiki_dossier_schema():
         finally:
             if admin_conn is not None and not admin_conn.is_closed():
                 await admin_conn.close()
+
+
+@pytest.mark.asyncio
+async def test_repository_external_identity_grant_active_filter_round_trips():
+    try:
+        pool = await asyncpg.create_pool(dsn=_postgres_dsn(), min_size=1, max_size=2)
+    except Exception as exc:  # pragma: no cover - integration environment dependent
+        pytest.skip(f"Postgres not available for repository integration test: {exc}")
+
+    repository = CollaborationRepository(pool)
+    try:
+        await apply_pending_migrations(pool)
+        now = datetime.now(timezone.utc)
+        owner_id = uuid4()
+        member_id = uuid4()
+        organization_id = uuid4()
+        project_id = uuid4()
+        workspace_id = uuid4()
+        participant_id = uuid4()
+        system_id = uuid4()
+        account_id = uuid4()
+        active_grant_id = uuid4()
+        expired_grant_id = uuid4()
+        revoked_grant_id = uuid4()
+        organization = Organization(
+            organization_id=organization_id,
+            slug=f"external-access-repo-{organization_id.hex[:8]}",
+            name="External Access Repository Integration",
+            created_by=owner_id,
+            created_at=now,
+            updated_at=now,
+            metadata={},
+        )
+        project = Project(
+            project_id=project_id,
+            organization_id=organization_id,
+            slug="external-access-project",
+            name="External Access Project",
+            created_by=owner_id,
+            creator_user_id=owner_id,
+            owner_user_id=owner_id,
+            created_at=now,
+            updated_at=now,
+            metadata={},
+        )
+        workspace = Workspace(
+            workspace_id=workspace_id,
+            organization_id=organization_id,
+            project_id=project_id,
+            name="External Access Workspace",
+            description="Workspace for external grant repository coverage.",
+            owner_user_id=owner_id,
+            created_at=now,
+            updated_at=now,
+            metadata={},
+        )
+        participant = ParticipantProfile(
+            participant_id=participant_id,
+            workspace_id=workspace_id,
+            participant_type="user",
+            user_id=member_id,
+            display_name="External Access Member",
+            created_at=now,
+            updated_at=now,
+        )
+        system = ExternalSystemDefinition(
+            system_id=system_id,
+            scope="organization",
+            organization_id=organization_id,
+            system_key=f"repo-crm-{system_id.hex[:8]}",
+            display_name="Repository CRM",
+            description="Repository-backed external system.",
+            auth_kind="bearer_token",
+            enabled=True,
+            created_by=owner_id,
+            created_at=now,
+            updated_by=owner_id,
+            updated_at=now,
+            metadata={},
+        )
+        account = ExternalAccount(
+            account_id=account_id,
+            system_id=system_id,
+            owner_kind="user",
+            user_id=member_id,
+            display_name="Repository CRM Account",
+            credential_ref={"bearer_token": {"secret_ref": "repo-crm-token"}},
+            status="active",
+            created_by=owner_id,
+            created_at=now,
+            updated_by=owner_id,
+            updated_at=now,
+            metadata={},
+        )
+        active_grant = ExternalIdentityGrant(
+            grant_id=active_grant_id,
+            workspace_id=workspace_id,
+            participant_id=participant_id,
+            system_id=system_id,
+            account_id=account_id,
+            user_id=member_id,
+            allowed_operations=["crm.read"],
+            risk_policy={"preapproved_operations": ["crm.read"]},
+            status="active",
+            created_by=owner_id,
+            approved_by=owner_id,
+            created_at=now,
+            updated_by=owner_id,
+            updated_at=now,
+            metadata={"case": "active"},
+        )
+        expired_grant = active_grant.model_copy(
+            update={
+                "grant_id": expired_grant_id,
+                "allowed_operations": ["crm.expired"],
+                "expires_at": now - timedelta(minutes=1),
+                "metadata": {"case": "expired"},
+            }
+        )
+        revoked_grant = active_grant.model_copy(
+            update={
+                "grant_id": revoked_grant_id,
+                "allowed_operations": ["crm.revoked"],
+                "status": "revoked",
+                "metadata": {"case": "revoked"},
+            }
+        )
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                for user_id, display_name in (
+                    (owner_id, "Repository Owner"),
+                    (member_id, "External Access Member"),
+                ):
+                    await repository.upsert_user(
+                        conn,
+                        UserRecord(
+                            user_id=user_id,
+                            display_name=display_name,
+                            created_at=now,
+                            updated_at=now,
+                            metadata={},
+                        ),
+                    )
+                await repository.upsert_organization(conn, organization)
+                await repository.upsert_organization_membership(
+                    conn,
+                    OrganizationMembership(
+                        organization_id=organization_id,
+                        user_id=owner_id,
+                        role="owner",
+                        joined_at=now,
+                        updated_at=now,
+                        metadata={},
+                    ),
+                )
+                await repository.upsert_project(conn, project)
+                await repository.upsert_workspace(conn, workspace)
+                await repository.upsert_participant(conn, participant)
+                await repository.upsert_external_system(conn, system)
+                await repository.upsert_external_account(conn, account)
+                await repository.upsert_external_identity_grant(conn, active_grant)
+                await repository.upsert_external_identity_grant(conn, expired_grant)
+                await repository.upsert_external_identity_grant(conn, revoked_grant)
+
+        active = await repository.fetch_active_external_identity_grant(
+            workspace_id=workspace_id,
+            participant_id=participant_id,
+            system_id=system_id,
+            operation_key="crm.read",
+            now=now,
+        )
+        wrong_operation = await repository.fetch_active_external_identity_grant(
+            workspace_id=workspace_id,
+            participant_id=participant_id,
+            system_id=system_id,
+            operation_key="crm.write",
+            now=now,
+        )
+        expired = await repository.fetch_active_external_identity_grant(
+            workspace_id=workspace_id,
+            participant_id=participant_id,
+            system_id=system_id,
+            operation_key="crm.expired",
+            now=now,
+        )
+        revoked = await repository.fetch_active_external_identity_grant(
+            workspace_id=workspace_id,
+            participant_id=participant_id,
+            system_id=system_id,
+            operation_key="crm.revoked",
+            now=now,
+        )
+        listed = await repository.list_external_identity_grants(
+            workspace_id=workspace_id,
+            participant_id=participant_id,
+            include_inactive=True,
+        )
+        async with pool.acquire() as conn:
+            await repository.upsert_external_account(
+                conn,
+                account.model_copy(update={"status": "disabled", "updated_at": now}),
+            )
+        disabled_account = await repository.fetch_active_external_identity_grant(
+            workspace_id=workspace_id,
+            participant_id=participant_id,
+            system_id=system_id,
+            operation_key="crm.read",
+            now=now,
+        )
+
+        assert active is not None
+        assert active.grant_id == active_grant_id
+        assert wrong_operation is None
+        assert expired is None
+        assert revoked is None
+        assert {grant.grant_id for grant in listed} == {
+            active_grant_id,
+            expired_grant_id,
+            revoked_grant_id,
+        }
+        assert disabled_account is None
+    finally:
+        await pool.close()
 
 
 @pytest.mark.asyncio
