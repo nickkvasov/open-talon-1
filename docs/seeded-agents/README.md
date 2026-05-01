@@ -1,9 +1,9 @@
 # Seeded Agent Cards
 
 This directory documents the current seeded Open Talon agents as product and
-testable runtime contracts. Each document covers the agent card, product idea,
-harness or runtime contract, live-test design, and exact behavior the tests
-prove.
+testable runtime contracts. Each document covers the agent card, seeded
+`definition.profile`, product idea, harness or runtime contract, live-test
+design, and exact behavior the tests prove.
 
 The source of truth for seeded definitions is
 [`services/core-collab/core_collab/system_defaults.py`](../../services/core-collab/core_collab/system_defaults.py).
@@ -14,6 +14,11 @@ Runtime workers must remain generic. Seeded-agent behavior must come from agent
 definitions, harnesses, interaction contracts, task payloads, IAM/project/workspace
 bindings, and tool/MCP allowlists rather than runtime branching on `agent_key`,
 display name, role text, capability text, or metadata tags.
+
+The seeded `definition.profile` block is a descriptive, auditable profile for
+cards, admin surfaces, and agent discovery. It records profile kind, mandate,
+activation, authority, boundaries, inputs, outputs, handoffs, and knowledge
+layer where relevant. It is not an authorization layer.
 
 ## System Concept
 
@@ -37,6 +42,13 @@ methodics execution.
 | Conductor | `conductor` | global, attached per workspace only when opted in | [conductor.md](./conductor.md) |
 
 ## Live Test Entry Points
+
+Coordinated live matrix:
+
+```bash
+./scripts/run-live-tests.sh agents
+./scripts/run-live-tests.sh knowledge
+```
 
 Operational-agent live suite:
 

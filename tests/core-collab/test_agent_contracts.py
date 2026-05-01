@@ -3645,14 +3645,26 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
     tinker = next(agent for agent in repository._agents.values() if agent.agent_key == "tinker")
     assert tinker.role == "generated tool authoring and validation agent"
     assert "validates generated tools before approval" in tinker.capabilities
+    assert tinker.definition["profile"]["kind"] == "workspace_tool_generation_specialist"
+    assert "human approval for publication" in tinker.definition["profile"]["authority"]
     steward = next(agent for agent in repository._agents.values() if agent.agent_key == "steward")
     assert steward.role == "platform operations steward"
     assert "reviews platform runtime and audit health" in steward.capabilities
+    assert steward.definition["profile"]["kind"] == "platform_operations_specialist"
+    assert "platform_steward IAM role" in steward.definition["profile"]["authority"]
+    curator = next(agent for agent in repository._agents.values() if agent.agent_key == "curator")
+    assert curator.definition["profile"]["kind"] == "organization_operations_specialist"
+    assert "stay inside the owning organization" in curator.definition["profile"]["boundaries"]
     researcher = next(
         agent for agent in repository._agents.values() if agent.agent_key == "researcher"
     )
     assert researcher.display_name == "Researcher"
     assert researcher.role == "evidence discovery and research dossier agent"
+    assert researcher.definition["profile"]["kind"] == "methodology_research_dossier_specialist"
+    assert (
+        researcher.definition["profile"]["knowledge_layer"]
+        == "dossier knowledge storage over retained data and indexed information"
+    )
     assert researcher.definition["task_routing"]["normal_message_fanout"] is False
     assert researcher.definition["task_routing"]["accepted_task_kinds"] == [
         "methodology_research_dossier_build",
@@ -3667,6 +3679,14 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
     assert methodologist.role == "methodology extraction and workspace design agent"
     assert methodologist.endpoint.engine_id == "local-ollama"
     assert methodologist.endpoint.provider == "ollama"
+    assert (
+        methodologist.definition["profile"]["kind"]
+        == "methodology_blueprint_synthesis_specialist"
+    )
+    assert (
+        "do not perform open-ended research triage"
+        in methodologist.definition["profile"]["boundaries"]
+    )
     assert (
         "Workspace Template"
         in methodologist.interaction_contract.response_contract.required_sections
@@ -3684,6 +3704,14 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
     assert conductor.role == "workspace methodics execution conductor"
     assert conductor.endpoint.engine_id == "local-ollama"
     assert conductor.endpoint.provider == "ollama"
+    assert (
+        conductor.definition["profile"]["kind"]
+        == "workspace_methodics_execution_specialist"
+    )
+    assert (
+        "no active loop without explicit execution start"
+        in conductor.definition["profile"]["boundaries"]
+    )
     assert conductor.definition["task_routing"]["normal_message_fanout"] is False
     assert conductor.definition["task_routing"]["accepted_task_kinds"] == [
         "methodics_execution_start",

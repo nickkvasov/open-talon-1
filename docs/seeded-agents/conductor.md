@@ -9,12 +9,23 @@
 | Agent key | `conductor` |
 | Scope | global definition, opt-in workspace participant |
 | Role | `workspace methodics execution conductor` |
+| Profile kind | `workspace_methodics_execution_specialist` |
 | Endpoint | `local-ollama` through provider `ollama` |
 | Task routing | `normal_message_fanout=false` |
 | Accepted task kinds | `methodics_execution_start`, `methodics_step_coordinate`, `methodics_step_verify`, `methodics_resource_review` |
 | IAM role | `workspace_conductor` for agent subjects |
 | Execution source | active `WorkspaceHarness.methodics` snapshot |
 | Human gates | execution start/cancel and resource request approve/reject |
+
+## Agent Profile
+
+Conductor's seeded profile says its mandate is to coordinate active workspace
+methodics from an explicit execution snapshot. It is activated only by manual
+workspace attachment plus explicit human start of a methodics execution. Its
+authority comes from the `workspace_conductor` IAM role, workspace participant
+attachment, methodic execution state, and private Conductor MCP allowlist. It
+has no normal message fanout and no active loop without explicit execution
+start; start, cancel, approve, and reject remain human-gated.
 
 ## Idea
 

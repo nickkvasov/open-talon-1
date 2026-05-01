@@ -344,6 +344,7 @@ If a change touches operational agents, managed administration contexts, agent-p
 
 - inspect `system_agents`, `agent_identities`, IAM bindings, MCP server/binding code, repository workspace visibility, runtime task claiming, and gateway bootstrap together
 - keep agent purpose in `display_name`, `role`, and `capabilities`; avoid new classification fields unless they are strictly required
+- keep seeded `definition.profile` blocks aligned with each agent card; profiles describe mandate, activation, authority, boundaries, handoffs, and knowledge layer but do not authorize anything
 - keep managed contexts idempotent and deterministic: `System Base / Administration / System Operations` plus every organization's `Administration / Organization Operations`
 - any code path that creates an organization and its managed `Organization Operations` workspace must attach the global Anchor participant immediately. If a prior path could have created workspaces without Anchor, add an explicit migration/backfill instead of relying on manual repair.
 - verify global `Steward`, organization-scoped `Curator`, and workspace-attached `Anchor` paths when changing shared operator or publication-review behavior

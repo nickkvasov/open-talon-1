@@ -9,9 +9,21 @@
 | Agent key | `researcher` |
 | Scope | global |
 | Role | `evidence discovery and research dossier agent` |
+| Profile kind | `methodology_research_dossier_specialist` |
 | Endpoint | `local-ollama` through provider `ollama` |
 | Primary inputs | topic, target tasks, selected libraries, pre-indexed Retriever corpora, local files, database-visible context, web follow-up results |
 | Primary outputs | durable research dossier, source records, concept notebook, claims, typed links, context pack links, contradiction map, gaps, health/sync state, readiness decision |
+
+## Agent Profile
+
+Researcher's seeded profile says its mandate is to discover, collect, triage,
+preserve, and organize evidence into durable concept dossiers. It is activated
+by targeted organization-operations dossier build/refine tasks created by
+methodology blueprint workflows. Its authority comes from the
+`methodology_researcher` IAM role, organization Operations workspace
+attachment, and Library, Retriever, Web Search, and dossier MCP allowlists. Its
+knowledge layer is dossier knowledge storage over retained data and indexed
+information.
 
 ## Idea
 

@@ -9,9 +9,21 @@
 | Agent key | `methodologist` |
 | Scope | global |
 | Role | `methodology extraction and workspace design agent` |
+| Profile kind | `methodology_blueprint_synthesis_specialist` |
 | Endpoint | `local-ollama` through provider `ollama` |
 | Primary inputs | completed research dossiers, dossier notebook navigation, cited retrieval evidence, source material, target goal, visible workspace context |
 | Primary outputs | methodology basis, methodics, methods/tools/actors, workspace template draft |
+
+## Agent Profile
+
+Methodologist's seeded profile says its mandate is to turn completed research
+dossiers or cited source corpora into methodology, methodics, and workspace
+harness drafts. It is activated by targeted blueprint-draft tasks after dossier
+readiness, or by manual workspace attachment for explicit extraction/design
+work. Its authority comes from the `methodology_methodologist` IAM role,
+visible dossier notebook/source records, cited Retriever context, and private
+dossier-read plus blueprint-draft MCP allowlist. Its knowledge layer is
+methodology synthesis over dossier knowledge storage.
 
 ## Idea
 

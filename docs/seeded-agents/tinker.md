@@ -8,10 +8,21 @@
 | Agent id | `44444444-4444-4444-4444-444444444444` |
 | Agent key | `tinker` |
 | Scope | global |
-| Role | `tool generation agent` in the current repair definition |
+| Role | `generated tool authoring and validation agent` |
+| Profile kind | `workspace_tool_generation_specialist` |
 | Endpoint | `openai-responses` through provider `openai` |
 | Attachment | manual workspace attachment required before users can request tools |
 | Private tools | generated-tool bootstrap, file write, build, registry push, smoke test, asset publish, status update, registry pull verification |
+
+## Agent Profile
+
+Tinker's seeded profile says its mandate is to turn workspace requests for
+missing capabilities into reviewable generated-tool revisions. It is activated
+by manual workspace attachment plus a targeted tool-generation request. Its
+authority comes from visible workspace context, attached tools, private
+authoring helpers, and human approval for publication. It must reuse existing
+visible tools when possible, avoid publication claims before validation and
+approval, and never auto-attach approved tools to workspaces.
 
 ## Idea
 

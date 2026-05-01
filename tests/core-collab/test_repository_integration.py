@@ -160,6 +160,20 @@ async def test_fresh_database_migration_chain_builds_xwiki_dossier_schema():
                 )
             }
             assert seeded_agents == {"researcher", "methodologist"}
+            profile_kinds = {
+                row["agent_key"]: row["profile_kind"]
+                for row in await conn.fetch(
+                    """
+                    SELECT agent_key, definition->'profile'->>'kind' AS profile_kind
+                    FROM system_agents
+                    WHERE agent_key IN ('researcher', 'methodologist')
+                    """
+                )
+            }
+            assert profile_kinds == {
+                "researcher": "methodology_research_dossier_specialist",
+                "methodologist": "methodology_blueprint_synthesis_specialist",
+            }
             private_tools = {
                 row["tool_name"]
                 for row in await conn.fetch(
@@ -894,6 +908,7 @@ async def test_repository_migrations_seed_operational_agents_and_contexts_idempo
         assert steward is not None
         assert steward.agent_key == "steward"
         assert steward.role == "platform operations steward"
+        assert steward.definition["profile"]["kind"] == "platform_operations_specialist"
         steward_mcp_tools = await repository.list_agent_internal_mcp_tools(steward.agent_id)
         assert "control_plane__runtime.overview.get" in {
             tool.exposed_name for tool in steward_mcp_tools
@@ -912,6 +927,7 @@ async def test_repository_migrations_seed_operational_agents_and_contexts_idempo
         )
         curator = next(agent for agent in curators if agent.agent_key == "curator")
         assert curator.role == "organization operations curator"
+        assert curator.definition["profile"]["kind"] == "organization_operations_specialist"
         curator_tools = await repository.list_agent_internal_mcp_tools(curator.agent_id)
         exposed = {tool.exposed_name for tool in curator_tools}
         assert "control_plane__organizations.get" in exposed
@@ -928,6 +944,7 @@ async def test_repository_migrations_seed_operational_agents_and_contexts_idempo
         assert anchor.endpoint.provider == "ollama"
         assert anchor.definition["runtime"]["engine_id"] == "local-ollama"
         assert anchor.definition["runtime"]["provider"] == "ollama"
+        assert anchor.definition["profile"]["kind"] == "workspace_topic_governance_reviewer"
         assert anchor.interaction_contract.response_contract.format == "json"
         for workspace in await repository.list_workspaces():
             participant = await repository.fetch_agent_participant(
@@ -954,6 +971,10 @@ async def test_repository_migrations_seed_operational_agents_and_contexts_idempo
             methodologist.interaction_contract.response_contract.required_sections
         )
         assert methodologist.definition["runtime"]["engine_id"] == "local-ollama"
+        assert (
+            methodologist.definition["profile"]["kind"]
+            == "methodology_blueprint_synthesis_specialist"
+        )
         assert methodologist.definition["output_targets"]["workspace_harness_fields"] == [
             "methodology",
             "methodics",
@@ -967,6 +988,10 @@ async def test_repository_migrations_seed_operational_agents_and_contexts_idempo
         assert conductor.agent_key == "conductor"
         assert conductor.display_name == "Conductor"
         assert conductor.role == "workspace methodics execution conductor"
+        assert (
+            conductor.definition["profile"]["kind"]
+            == "workspace_methodics_execution_specialist"
+        )
         assert conductor.definition["task_routing"]["normal_message_fanout"] is False
         assert conductor.definition["task_routing"]["accepted_task_kinds"] == [
             "methodics_execution_start",

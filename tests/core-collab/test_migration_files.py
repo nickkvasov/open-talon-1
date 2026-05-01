@@ -215,6 +215,27 @@ def test_xwiki_dossier_notebook_seed_migration_declares_mcp_allowlists() -> None
     assert "methodology.dossiers.health.submit" in sql
 
 
+def test_seeded_agent_profile_migration_declares_all_managed_profiles() -> None:
+    sql = (
+        MIGRATIONS_DIR / "20260501180000_seed_seeded_agent_profiles.sql"
+    ).read_text(encoding="utf-8")
+
+    for profile_kind in (
+        "example_planning_participant",
+        "workspace_tool_generation_specialist",
+        "platform_operations_specialist",
+        "organization_operations_specialist",
+        "workspace_topic_governance_reviewer",
+        "methodology_research_dossier_specialist",
+        "methodology_blueprint_synthesis_specialist",
+        "workspace_methodics_execution_specialist",
+    ):
+        assert profile_kind in sql
+    assert "profile_version" in sql
+    assert "dossier knowledge storage over retained data and indexed information" in sql
+    assert "methodology synthesis over dossier knowledge storage" in sql
+
+
 def test_conductor_control_plane_migration_declares_human_gates() -> None:
     sql = (
         MIGRATIONS_DIR / "20260427200100_add_conductor_control_plane_binding.sql"

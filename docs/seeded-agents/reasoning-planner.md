@@ -9,10 +9,20 @@
 | Agent key | none |
 | Scope | global |
 | Role | `planning agent` |
+| Profile kind | `example_planning_participant` |
 | Endpoint | `openai-responses` through provider `openai` |
 | Locality | cloud |
 | Capabilities | `planning`, `triage`, `reasoning` |
 | Metadata | `managed=true`, `seeded=true`, `example=true` |
+
+## Agent Profile
+
+Reasoning Planner's seeded profile says its mandate is to provide small-scope
+planning, triage, and reasoning examples for installations and tests. It is
+activated by manual workspace attachment or explicit targeted planning tasks.
+Its authority is only visible workspace/thread context and any ordinary
+workspace tools granted by attachment. It has no private operational MCP
+bindings, platform authority, or special runtime behavior.
 
 ## Idea
 

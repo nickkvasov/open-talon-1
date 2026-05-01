@@ -25,6 +25,13 @@ contracts, task payloads, workspace context, tools, MCP bindings, memory, and
 provider configuration. It must not branch on `agent_key`, display name, role
 text, capability text, or metadata tags.
 
+Each seeded agent also carries a `definition.profile` block. The profile is the
+machine-readable counterpart to the card: it records mandate, activation,
+authority, boundaries, inputs, outputs, handoffs, and knowledge layer where
+relevant. Profiles support admin surfaces, documentation, and agent discovery,
+but authorization still comes only from IAM, attachments, task routing, and
+tool/MCP allowlists.
+
 ## Authority Model
 
 Agent role text is descriptive. It helps humans, routers, and UIs understand
@@ -55,16 +62,16 @@ This keeps seeded agents useful without making their names magical.
 
 ## Seeded Agent Role Map
 
-| Agent | System role | Main boundary |
-| --- | --- | --- |
-| Reasoning Planner | Example planning participant for cloud reasoning and interaction-contract seeding | No private tools or operational authority by default |
-| Tinker | Creates missing agent-usable tools from workspace requests | Must be attached to a workspace; generated tools require approval and manual workspace attachment |
-| Steward | Platform operations specialist for global control-plane work | Global IAM plus System Operations workspace; destructive tools remain denied unless explicitly granted later |
-| Curator | Organization operations specialist for one tenant | Organization-scoped IAM and Organization Operations workspace; cannot cross organization boundaries |
-| Anchor | Workspace topic-alignment reviewer | Auto-attached per workspace, but receives only topic-moderation tasks and no normal message fanout |
-| Researcher | Evidence discovery and durable research dossier specialist | Builds dossier source records, contradiction maps, gaps, and context-pack links; does not synthesize methodology |
-| Methodologist | Evidence-backed methodology extraction and workspace-template design specialist | Produces cited methodology/methodics/template drafts; does not execute methodics |
-| Conductor | Active methodics execution coordinator | Must be explicitly attached and explicitly started; human-gated start/cancel/resource decisions |
+| Agent | Profile kind | System role | Main boundary |
+| --- | --- | --- | --- |
+| Reasoning Planner | `example_planning_participant` | Example planning participant for cloud reasoning and interaction-contract seeding | No private tools or operational authority by default |
+| Tinker | `workspace_tool_generation_specialist` | Creates missing agent-usable tools from workspace requests | Must be attached to a workspace; generated tools require approval and manual workspace attachment |
+| Steward | `platform_operations_specialist` | Platform operations specialist for global control-plane work | Global IAM plus System Operations workspace; destructive tools remain denied unless explicitly granted later |
+| Curator | `organization_operations_specialist` | Organization operations specialist for one tenant | Organization-scoped IAM and Organization Operations workspace; cannot cross organization boundaries |
+| Anchor | `workspace_topic_governance_reviewer` | Workspace topic-alignment reviewer | Auto-attached per workspace, but receives only topic-moderation tasks and no normal message fanout |
+| Researcher | `methodology_research_dossier_specialist` | Evidence discovery and durable research dossier specialist | Builds dossier source records, contradiction maps, gaps, and context-pack links; does not synthesize methodology |
+| Methodologist | `methodology_blueprint_synthesis_specialist` | Evidence-backed methodology extraction and workspace-template design specialist | Produces cited methodology/methodics/template drafts; does not execute methodics |
+| Conductor | `workspace_methodics_execution_specialist` | Active methodics execution coordinator | Must be explicitly attached and explicitly started; human-gated start/cancel/resource decisions |
 
 ## Lifecycle
 
@@ -170,6 +177,8 @@ owners in control of durable changes.
 
 When changing a seeded agent:
 
+- update its `definition.profile` when the mandate, activation, authority,
+  boundaries, or handoffs change
 - update the Python seed/repair definition and any migration/backfill needed for existing installs
 - update the agent card in this directory
 - update relevant API, quickstart, and live-test docs

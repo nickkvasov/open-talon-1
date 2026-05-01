@@ -8,11 +8,21 @@
 | Agent id | `44444444-4444-4444-4444-444444444445` |
 | Agent key | `steward` |
 | Scope | global |
-| Role | `platform steward` |
+| Role | `platform operations steward` |
+| Profile kind | `platform_operations_specialist` |
 | Endpoint | `openai-responses` through provider `openai` |
 | Managed context | `System Base / Administration / System Operations` |
 | IAM role | `platform_steward` for agent subjects |
 | Private MCP | `open_talon_control_plane` with platform control-plane allowlist |
+
+## Agent Profile
+
+Steward's seeded profile says its mandate is to inspect, validate, repair, and
+coordinate platform-wide Open Talon operational resources. Its authority comes
+from the `platform_steward` IAM role, System Operations workspace attachment,
+and private control-plane MCP allowlist. Its boundaries are explicit: role text
+is descriptive, destructive or secret-rotating operations remain denied unless
+granted later, and tenant IAM/audit boundaries must stay visible.
 
 ## Idea
 

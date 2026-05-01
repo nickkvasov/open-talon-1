@@ -9,10 +9,21 @@
 | Agent key | `anchor` |
 | Scope | global definition, workspace participant per workspace |
 | Role | `workspace topic alignment reviewer` |
+| Profile kind | `workspace_topic_governance_reviewer` |
 | Endpoint | `local-ollama` through provider `ollama` |
 | Task routing | `normal_message_fanout=false` |
 | Accepted task kind | `workspace_topic_moderation` |
 | Response format | strict JSON moderation decision |
+
+## Agent Profile
+
+Anchor's seeded profile says its mandate is to review candidate workspace
+communication for fit with the workspace topic and topic-freedom policy. It is
+auto-attached to workspaces but activated only through targeted
+`workspace_topic_moderation` tasks. Its authority comes from the workspace
+moderation policy, workspace topic/context, and publication-review payload. It
+has no normal message fanout and must not act as a general safety, style, or
+task-assistance reviewer.
 
 ## Idea
 

@@ -9,10 +9,21 @@
 | Scope | organization |
 | Agent id | deterministic per organization |
 | Role | `organization operations curator` |
+| Profile kind | `organization_operations_specialist` |
 | Endpoint | `openai-responses` through provider `openai` |
 | Managed context | each organization's `Administration / Organization Operations` workspace |
 | IAM role | `organization_curator` for agent subjects in the same organization |
 | Private MCP | `open_talon_control_plane` with organization-scoped allowlist |
+
+## Agent Profile
+
+Curator's seeded profile says its mandate is to manage organization-local
+projects, workspaces, catalog resources, runtime health, and operational
+context. It is seeded per non-system organization and activated through that
+organization's Operations workspace. Its authority comes from the
+`organization_curator` IAM role, workspace attachment, and organization-scoped
+private control-plane MCP allowlist. It must stay inside the owning
+organization and must not perform platform-wide discovery.
 
 ## Idea
 
