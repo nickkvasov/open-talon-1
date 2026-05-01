@@ -70,6 +70,53 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  xwiki-postgres:
+    image: postgres:16
+    container_name: xwiki-postgres
+    profiles:
+      - xwiki
+    environment:
+      POSTGRES_USER: ${XWIKI_POSTGRES_USER:-xwiki}
+      POSTGRES_PASSWORD: ${XWIKI_POSTGRES_PASSWORD:-xwiki}
+      POSTGRES_DB: ${XWIKI_POSTGRES_DB:-xwiki}
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - ./data/xwiki-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -h 127.0.0.1 -p 5432 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  xwiki:
+    image: ${XWIKI_IMAGE:-xwiki:lts-postgres-tomcat}
+    container_name: xwiki
+    profiles:
+      - xwiki
+    depends_on:
+      xwiki-postgres:
+        condition: service_healthy
+    environment:
+      DB_USER: ${XWIKI_POSTGRES_USER:-xwiki}
+      DB_PASSWORD: ${XWIKI_POSTGRES_PASSWORD:-xwiki}
+      DB_DATABASE: ${XWIKI_POSTGRES_DB:-xwiki}
+      DB_HOST: xwiki-postgres
+      OPEN_TALON_XWIKI_SUPERADMIN_PASSWORD: ${OPEN_TALON_XWIKI_SUPERADMIN_PASSWORD:-}
+      JAVA_OPTS: ${XWIKI_JAVA_OPTS:--Xmx1024m} -Dxwiki.superadminpassword=${OPEN_TALON_XWIKI_SUPERADMIN_PASSWORD:-}
+    command: ["xwiki"]
+    ports:
+      - "${XWIKI_PORT:-8083}:8080"
+    volumes:
+      - ./data/xwiki:/usr/local/xwiki
+    restart: unless-stopped
+
   langfuse-db-init:
     image: pgvector/pgvector:pg16
     container_name: langfuse-db-init

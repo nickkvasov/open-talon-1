@@ -300,6 +300,14 @@ Current MCP system API operations:
 - `methodology.dossiers.sources.update`
 - `methodology.dossiers.context_pack.attach`
 - `methodology.dossiers.mark_ready`
+- `methodology.dossiers.notebook.get`
+- `methodology.dossiers.notes.upsert`
+- `methodology.dossiers.concepts.upsert`
+- `methodology.dossiers.claims.upsert`
+- `methodology.dossiers.links.upsert`
+- `methodology.dossiers.navigate`
+- `methodology.dossiers.sync`
+- `methodology.dossiers.health.submit`
 - `methodology.blueprints.submit_draft`
 - `methodics.executions.create`
 - `methodics.executions.list`
@@ -804,6 +812,21 @@ retained-source library preserves fetched source bytes and scraps; the dossier
 records source status, quality notes, rationale, contradictions, gaps,
 metadata, events, and downstream readiness.
 
+The storage split is intentional:
+
+- MinIO/object storage is data storage for immutable bytes, files, media, and fetched snapshots.
+- Library plus Retriever indexes are information storage for retained, indexed, and vectorized pieces.
+- Dossiers are knowledge storage for concept organization, claims, contradictions, gaps, methods, synthesis, provenance, and navigation.
+
+Dossier notebooks project this canonical knowledge state into an external
+structured wiki. The first provider is XWiki through the
+`DossierNotebookProvider` abstraction. Open Talon remains authoritative for
+lifecycle, IAM, audit, source provenance, provider bindings, external refs,
+health, sync runs, and the canonical concept/claim/link graph. XWiki stores the
+navigable concept repository under one space per dossier, such as
+`Dossiers.<dossier_slug>`, with `Home`, `Sources`, `Concepts`, `Entities`,
+`Methods`, `Questions`, `Contradictions`, `Gaps`, and `Synthesis` pages.
+
 When Researcher marks the dossier `ready_for_methodologist`, the service creates
 a targeted Methodologist task. Methodologist can submit a cited markdown draft
 and `WorkspaceHarness`-compatible draft, but a human must approve a version
@@ -821,6 +844,10 @@ Conductor.
 | `POST` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/versions/{version_id}/reject` | reject a draft version |
 | `POST` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/apply` | apply an approved blueprint version to a workspace harness |
 | `GET` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}` | get a research dossier |
+| `GET` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/notebook` | get notebook binding, notes, concepts, claims, links, external refs, and latest health |
+| `GET` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/graph` | get the canonical dossier note/concept/claim/source graph |
+| `POST` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/navigate` | query or focus-navigate the dossier concept notebook |
+| `POST` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sync` | record or run provider projection sync for the dossier notebook |
 | `GET` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sources` | list dossier source records |
 | `POST` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sources` | create a dossier source record |
 | `PATCH` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sources/{source_id}` | update a dossier source record |

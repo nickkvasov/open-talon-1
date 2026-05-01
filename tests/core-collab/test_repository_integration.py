@@ -31,6 +31,8 @@ from open_talon_contracts.models import (
     AgentToolUsePolicy,
     AssetLink,
     AuditEventDraft,
+    CreateMethodologyBlueprintRequest,
+    CreateResearchDossierSourceRequest,
     GitRepository,
     Library,
     LlmProviderDefinition,
@@ -38,6 +40,7 @@ from open_talon_contracts.models import (
     McpResourceDefinition,
     McpServerDefinition,
     McpToolDefinition,
+    NavigateResearchDossierRequest,
     Organization,
     OrganizationMembership,
     ParticipantInput,
@@ -45,6 +48,12 @@ from open_talon_contracts.models import (
     ProjectAccessBinding,
     RequestMcpServerSyncRequest,
     ResolvedAssetBinding,
+    SubmitResearchDossierHealthCheckRequest,
+    SyncResearchDossierNotebookRequest,
+    UpsertResearchDossierClaimRequest,
+    UpsertResearchDossierConceptRequest,
+    UpsertResearchDossierLinkRequest,
+    UpsertResearchDossierNoteRequest,
     Workspace,
     WorkspaceHarness,
     WorkspaceMethodology,
@@ -56,6 +65,10 @@ from support.model_constants import TEST_EXPLICIT_OLLAMA_MODEL
 from core_collab.kernel import CollaborationKernel
 from core_collab.migrations import apply_pending_migrations
 from core_collab.repository import CollaborationRepository, UserRecord
+from core_collab.system_defaults import (
+    DEFAULT_ORGANIZATION_ID,
+    ManagedSystemDefaultsRepairer,
+)
 
 
 pytestmark = pytest.mark.integration
@@ -69,6 +82,175 @@ def _postgres_dsn() -> str:
         f"@{os.getenv('POSTGRES_HOST', '127.0.0.1')}:{os.getenv('POSTGRES_PORT', '5432')}"
         f"/{os.getenv('POSTGRES_DB', 'app_db')}"
     )
+
+
+@pytest.mark.asyncio
+async def test_repository_methodology_dossier_notebook_round_trips():
+    try:
+        pool = await asyncpg.create_pool(dsn=_postgres_dsn(), min_size=1, max_size=2)
+    except Exception as exc:  # pragma: no cover - integration environment dependent
+        pytest.skip(f"Postgres not available for repository integration test: {exc}")
+
+    repository = CollaborationRepository(pool)
+    try:
+        await apply_pending_migrations(pool)
+        await ManagedSystemDefaultsRepairer(repository).repair()
+        kernel = CollaborationKernel(repository)
+        organization = await repository.fetch_organization(DEFAULT_ORGANIZATION_ID)
+        assert organization is not None
+        actor = ParticipantInput(
+            participant_id=uuid4(),
+            participant_type="user",
+            display_name="Repository Methodology Owner",
+        )
+        blueprint_result = await kernel.create_methodology_blueprint(
+            organization.organization_id,
+            CreateMethodologyBlueprintRequest(
+                actor=actor,
+                title=f"Repository dossier {uuid4().hex[:8]}",
+                topic="Evidence-backed repository integration dossier",
+                target_goal="Exercise canonical dossier notebook persistence",
+                tasks=["collect", "organize", "sync"],
+            ),
+        )
+        assert blueprint_result.detail is not None
+        dossier = blueprint_result.detail.dossier
+        notebook_detail = await kernel.get_research_dossier_notebook_detail(
+            dossier.dossier_id,
+            actor=actor,
+        )
+        assert notebook_detail.notebook.provider_kind == "xwiki"
+        assert notebook_detail.provider_bindings[0].provider_key == "xwiki"
+        assert {note.slug for note in notebook_detail.notes}.issuperset(
+            {"home", "sources", "concepts", "synthesis"}
+        )
+
+        researcher = await repository.fetch_system_agent_by_key(
+            scope="global",
+            organization_id=None,
+            agent_key="researcher",
+        )
+        assert researcher is not None
+        assert dossier.operations_workspace_id is not None
+        researcher_participant = await repository.fetch_agent_participant(
+            dossier.operations_workspace_id,
+            researcher.agent_id,
+        )
+        assert researcher_participant is not None
+        agent_actor = ParticipantInput(
+            participant_id=researcher_participant.participant_id,
+            participant_type="agent",
+            display_name=researcher.display_name,
+        )
+
+        source_result = await kernel.create_research_dossier_source(
+            dossier.dossier_id,
+            CreateResearchDossierSourceRequest(
+                actor=agent_actor,
+                source_kind="webpage",
+                status="included",
+                title="Repository integration evidence",
+                source_uri="https://example.test/repository-dossier-evidence",
+                citation_id="S1",
+                quality_notes="Stable fixture source for integration coverage.",
+            ),
+        )
+        source = source_result.source
+        assert source is not None
+        assert source.discovered_by_system_agent_id == researcher.agent_id
+
+        concept_result = await kernel.upsert_research_dossier_concept(
+            dossier.dossier_id,
+            UpsertResearchDossierConceptRequest(
+                actor=agent_actor,
+                slug="repository-evidence-loop",
+                name="Repository Evidence Loop",
+                definition="A concept persisted through the dossier notebook tables.",
+                status="active",
+                source_ids=[source.source_id],
+            ),
+        )
+        concept = concept_result.concept
+        assert concept is not None
+        note_result = await kernel.upsert_research_dossier_note(
+            dossier.dossier_id,
+            UpsertResearchDossierNoteRequest(
+                actor=agent_actor,
+                note_kind="concept",
+                status="active",
+                slug="repository-evidence-loop-note",
+                title="Repository Evidence Loop",
+                body="Concept note tied to source S1.",
+                concept_id=concept.concept_id,
+                citation_ids=["S1"],
+            ),
+        )
+        note = note_result.note
+        assert note is not None
+        claim_result = await kernel.upsert_research_dossier_claim(
+            dossier.dossier_id,
+            UpsertResearchDossierClaimRequest(
+                actor=agent_actor,
+                claim_key=f"claim:{uuid4().hex[:8]}",
+                statement="Dossier notebooks preserve conceptual research structure.",
+                status="supported",
+                source_ids=[source.source_id],
+                citation_ids=["S1"],
+            ),
+        )
+        claim = claim_result.claim
+        assert claim is not None
+        link_result = await kernel.upsert_research_dossier_link(
+            dossier.dossier_id,
+            UpsertResearchDossierLinkRequest(
+                actor=agent_actor,
+                source_type="concept",
+                source_ref_id=concept.concept_id,
+                target_type="claim",
+                target_ref_id=claim.claim_id,
+                link_kind="supports",
+                rationale="The concept supports the persisted claim.",
+            ),
+        )
+        assert link_result.link is not None
+        navigation = await kernel.navigate_research_dossier(
+            dossier.dossier_id,
+            NavigateResearchDossierRequest(
+                actor=agent_actor,
+                query="repository evidence",
+            ),
+        )
+        assert [item.concept_id for item in navigation.concepts] == [concept.concept_id]
+        health = await kernel.submit_research_dossier_health_check(
+            dossier.dossier_id,
+            SubmitResearchDossierHealthCheckRequest(
+                actor=agent_actor,
+                status="passed",
+                summary="Repository notebook round-trip passed.",
+            ),
+        )
+        sync = await kernel.sync_research_dossier_notebook(
+            dossier.dossier_id,
+            SyncResearchDossierNotebookRequest(
+                actor=agent_actor,
+                provider_key="xwiki",
+            ),
+            stats={"pages_synced": len(notebook_detail.notes) + 2},
+        )
+        fetched = await repository.fetch_research_dossier_notebook_detail(
+            dossier.dossier_id
+        )
+        assert fetched is not None
+        assert fetched.latest_health_check is not None
+        assert fetched.latest_health_check.check_id == health.check_id
+        assert fetched.notebook.status == "ready"
+        assert fetched.provider_bindings[0].last_sync_at == sync.completed_at
+        assert any(item.note_id == note.note_id for item in fetched.notes)
+        assert any(item.concept_id == concept.concept_id for item in fetched.concepts)
+        assert any(item.claim_id == claim.claim_id for item in fetched.claims)
+        assert any(item.link_id == link_result.link.link_id for item in fetched.links)
+    finally:
+        await pool.close()
 
 
 @pytest.mark.asyncio

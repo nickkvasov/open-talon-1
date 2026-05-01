@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import sys
@@ -131,6 +132,7 @@ from .contracts import (
     MethodologyBlueprint,
     MethodologyBlueprintDetail,
     MethodologyBlueprintVersion,
+    NavigateResearchDossierRequest,
     PublicationReview,
     McpPromptDefinition,
     McpResourceDefinition,
@@ -169,8 +171,20 @@ from .contracts import (
     RetrievalSource,
     RetrievalSourceVersion,
     ResearchDossier,
+    ResearchDossierClaim,
+    ResearchDossierConcept,
     ResearchDossierEvent,
+    ResearchDossierGraph,
+    ResearchDossierHealthCheck,
+    ResearchDossierLink,
+    ResearchDossierNavigationResult,
+    ResearchDossierNote,
+    ResearchDossierNotebook,
+    ResearchDossierNotebookDetail,
+    ResearchDossierProviderBinding,
+    ResearchDossierProviderExternalRef,
     ResearchDossierSource,
+    ResearchDossierSyncRun,
     RunRetrievalSearchRequest,
     PresenceState,
     ResolvedAssetBinding,
@@ -214,6 +228,10 @@ from .contracts import (
     UpdateOrganizationRequest,
     UpdateProjectRequest,
     UpdateResearchDossierSourceRequest,
+    UpsertResearchDossierClaimRequest,
+    UpsertResearchDossierConceptRequest,
+    UpsertResearchDossierLinkRequest,
+    UpsertResearchDossierNoteRequest,
     UpsertProjectAccessRequest,
     UpsertRoleDefinitionRequest,
     RemoveOrganizationMemberRequest,
@@ -226,6 +244,8 @@ from .contracts import (
     UpdateMemoryEntryRequest,
     UpdateWorkspaceRequest,
     SubmitMethodologyBlueprintDraftRequest,
+    SubmitResearchDossierHealthCheckRequest,
+    SyncResearchDossierNotebookRequest,
     UploadFileAssetRequest,
     UpdateWorkspaceToolRequest,
     UpdateWorkspaceMcpServerRequest,
@@ -3797,6 +3817,17 @@ class CollaborationKernel:
                 "selected_library_ids": [str(item) for item in payload.library_ids],
             },
         )
+        (
+            notebook,
+            provider_binding,
+            notebook_notes,
+            external_refs,
+        ) = self._build_research_dossier_notebook_defaults(
+            dossier=dossier,
+            title=payload.title,
+            actor_id=payload.actor.participant_id,
+            now=now,
+        )
         task = self._build_researcher_dossier_task(
             dossier=dossier,
             blueprint=blueprint,
@@ -3816,6 +3847,9 @@ class CollaborationKernel:
                 "blueprint_id": str(blueprint_id),
                 "version_id": str(version_id),
                 "retained_library_id": str(retained_library.library_id),
+                "notebook_id": str(notebook.notebook_id),
+                "notebook_provider": provider_binding.provider_key,
+                "notebook_external_space_ref": provider_binding.external_space_ref,
                 "researcher_task_id": str(task.task_id),
             },
             created_at=now,
@@ -3829,6 +3863,18 @@ class CollaborationKernel:
                 await self._repository.upsert_methodology_blueprint(conn, blueprint)
                 await self._repository.upsert_methodology_blueprint_version(conn, version)
                 await self._repository.upsert_research_dossier(conn, dossier)
+                await self._repository.upsert_research_dossier_notebook(conn, notebook)
+                await self._repository.upsert_research_dossier_provider_binding(
+                    conn,
+                    provider_binding,
+                )
+                for note in notebook_notes:
+                    await self._repository.upsert_research_dossier_note(conn, note)
+                for external_ref in external_refs:
+                    await self._repository.upsert_research_dossier_provider_external_ref(
+                        conn,
+                        external_ref,
+                    )
                 await self._repository.upsert_task(conn, task)
                 await self._repository.append_research_dossier_event(conn, event)
         return MethodologyBlueprintCommandResult(
@@ -3947,6 +3993,558 @@ class CollaborationKernel:
             status=status,
         )
 
+    async def get_research_dossier_notebook_detail(
+        self,
+        dossier_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+    ) -> ResearchDossierNotebookDetail:
+        dossier = await self.get_research_dossier(dossier_id, actor=actor)
+        detail = await self._repository.fetch_research_dossier_notebook_detail(
+            dossier.dossier_id
+        )
+        if detail is None:
+            raise KeyError(f"Research dossier notebook for {dossier_id} not found")
+        return detail
+
+    async def get_research_dossier_graph(
+        self,
+        dossier_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+    ) -> ResearchDossierGraph:
+        detail = await self.get_research_dossier_notebook_detail(
+            dossier_id,
+            actor=actor,
+        )
+        nodes: list[dict[str, Any]] = []
+        nodes.extend(
+            {
+                "type": "note",
+                "id": str(note.note_id),
+                "label": note.title,
+                "kind": note.note_kind,
+                "status": note.status,
+                "slug": note.slug,
+            }
+            for note in detail.notes
+        )
+        nodes.extend(
+            {
+                "type": "concept",
+                "id": str(concept.concept_id),
+                "label": concept.name,
+                "status": concept.status,
+                "slug": concept.slug,
+            }
+            for concept in detail.concepts
+        )
+        nodes.extend(
+            {
+                "type": "claim",
+                "id": str(claim.claim_id),
+                "label": claim.statement,
+                "status": claim.status,
+                "claim_key": claim.claim_key,
+            }
+            for claim in detail.claims
+        )
+        sources = await self._repository.list_research_dossier_sources(dossier_id)
+        nodes.extend(
+            {
+                "type": "source",
+                "id": str(source.source_id),
+                "label": source.title,
+                "status": source.status,
+                "citation_id": source.citation_id,
+            }
+            for source in sources
+        )
+        return ResearchDossierGraph(
+            dossier_id=dossier_id,
+            notebook_id=detail.notebook.notebook_id,
+            nodes=nodes,
+            links=detail.links,
+            metadata={
+                "node_count": len(nodes),
+                "link_count": len(detail.links),
+                "knowledge_storage": True,
+            },
+        )
+
+    async def navigate_research_dossier(
+        self,
+        dossier_id: UUID,
+        payload: NavigateResearchDossierRequest,
+    ) -> ResearchDossierNavigationResult:
+        detail = await self.get_research_dossier_notebook_detail(
+            dossier_id,
+            actor=payload.actor,
+        )
+        query = (payload.query or "").strip().lower()
+        notes = list(detail.notes)
+        concepts = list(detail.concepts)
+        claims = list(detail.claims)
+        if payload.focus_note_id is not None:
+            notes = [note for note in notes if note.note_id == payload.focus_note_id]
+        if payload.focus_concept_id is not None:
+            concepts = [
+                concept
+                for concept in concepts
+                if concept.concept_id == payload.focus_concept_id
+            ]
+        if query:
+            notes = [
+                note
+                for note in detail.notes
+                if query in note.title.lower()
+                or query in note.slug.lower()
+                or query in (note.body or "").lower()
+                or query in (note.summary or "").lower()
+            ]
+            concepts = [
+                concept
+                for concept in detail.concepts
+                if query in concept.name.lower()
+                or query in concept.slug.lower()
+                or any(query in alias.lower() for alias in concept.aliases)
+                or query in (concept.definition or "").lower()
+            ]
+            claims = [
+                claim
+                for claim in detail.claims
+                if query in claim.statement.lower()
+                or query in (claim.claim_key or "").lower()
+            ]
+        note_ids = {note.note_id for note in notes[: payload.max_results]}
+        concept_ids = {concept.concept_id for concept in concepts[: payload.max_results]}
+        claim_ids = {claim.claim_id for claim in claims[: payload.max_results]}
+        links = [
+            link
+            for link in detail.links
+            if link.source_ref_id in note_ids | concept_ids | claim_ids
+            or link.target_ref_id in note_ids | concept_ids | claim_ids
+        ][: payload.max_results]
+        gaps = [note for note in detail.notes if note.note_kind == "gap"][
+            : payload.max_results
+        ]
+        contradictions = [
+            note for note in detail.notes if note.note_kind == "contradiction"
+        ][: payload.max_results]
+        recommended_next = [
+            {
+                "type": "note",
+                "id": str(note.note_id),
+                "title": note.title,
+                "reason": "entry_note_match" if query else "dossier_entrypoint",
+            }
+            for note in (notes or detail.notes)[: payload.max_results]
+        ]
+        return ResearchDossierNavigationResult(
+            dossier_id=dossier_id,
+            notebook_id=detail.notebook.notebook_id,
+            query=payload.query,
+            entry_notes=notes[: payload.max_results],
+            concepts=concepts[: payload.max_results],
+            claims=claims[: payload.max_results],
+            links=links,
+            gaps=gaps,
+            contradictions=contradictions,
+            recommended_next=recommended_next,
+            metadata={"include_sources": payload.include_sources},
+        )
+
+    async def upsert_research_dossier_note(
+        self,
+        dossier_id: UUID,
+        payload: UpsertResearchDossierNoteRequest,
+    ) -> MethodologyBlueprintCommandResult:
+        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        await self._require_dossier_write_actor(dossier, payload.actor)
+        notebook = await self._require_research_dossier_notebook(dossier_id)
+        now = self._now()
+        existing = (
+            await self._repository.fetch_research_dossier_note(payload.note_id)
+            if payload.note_id is not None
+            else None
+        )
+        if existing is not None and existing.notebook_id != notebook.notebook_id:
+            raise KeyError(f"Research dossier note {payload.note_id} not found")
+        await self._validate_dossier_note_refs(dossier, notebook, payload)
+        note = ResearchDossierNote(
+            note_id=existing.note_id if existing is not None else payload.note_id or uuid4(),
+            notebook_id=notebook.notebook_id,
+            dossier_id=dossier.dossier_id,
+            organization_id=dossier.organization_id,
+            note_kind=payload.note_kind,
+            status=payload.status,
+            slug=self._normalize_library_slug(payload.slug),
+            title=payload.title,
+            body=payload.body,
+            summary=payload.summary,
+            source_id=payload.source_id,
+            concept_id=payload.concept_id,
+            citation_ids=list(payload.citation_ids),
+            related_note_ids=list(payload.related_note_ids),
+            external_page_ref=payload.external_page_ref,
+            external_url=payload.external_url,
+            created_by=existing.created_by if existing is not None else payload.actor.participant_id,
+            created_at=existing.created_at if existing is not None else now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata={
+                **(existing.metadata if existing is not None else {}),
+                **payload.metadata,
+            },
+        )
+        event = self._build_dossier_notebook_event(
+            dossier=dossier,
+            actor=payload.actor,
+            system_agent_id=await self._dossier_actor_system_agent_id(
+                dossier,
+                payload.actor,
+            ),
+            event_type="research_dossier_notebook.note_upserted",
+            payload={"note_id": str(note.note_id), "slug": note.slug, "kind": note.note_kind},
+            now=now,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_research_dossier_note(conn, note)
+                await self._repository.append_research_dossier_event(conn, event)
+        return MethodologyBlueprintCommandResult(dossier=dossier, note=note)
+
+    async def upsert_research_dossier_concept(
+        self,
+        dossier_id: UUID,
+        payload: UpsertResearchDossierConceptRequest,
+    ) -> MethodologyBlueprintCommandResult:
+        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        await self._require_dossier_write_actor(dossier, payload.actor)
+        notebook = await self._require_research_dossier_notebook(dossier_id)
+        now = self._now()
+        existing = (
+            await self._repository.fetch_research_dossier_concept(payload.concept_id)
+            if payload.concept_id is not None
+            else None
+        )
+        if existing is not None and existing.notebook_id != notebook.notebook_id:
+            raise KeyError(f"Research dossier concept {payload.concept_id} not found")
+        for source_id in payload.source_ids:
+            source = await self._repository.fetch_research_dossier_source(source_id)
+            if source is None or source.dossier_id != dossier_id:
+                raise KeyError(f"Research dossier source {source_id} not found")
+        concept = ResearchDossierConcept(
+            concept_id=(
+                existing.concept_id
+                if existing is not None
+                else payload.concept_id or uuid4()
+            ),
+            notebook_id=notebook.notebook_id,
+            dossier_id=dossier.dossier_id,
+            organization_id=dossier.organization_id,
+            slug=self._normalize_library_slug(payload.slug),
+            name=payload.name,
+            aliases=list(payload.aliases),
+            definition=payload.definition,
+            status=payload.status,
+            confidence=payload.confidence,
+            source_ids=list(payload.source_ids),
+            claim_ids=list(payload.claim_ids),
+            created_by=existing.created_by if existing is not None else payload.actor.participant_id,
+            created_at=existing.created_at if existing is not None else now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata={
+                **(existing.metadata if existing is not None else {}),
+                **payload.metadata,
+            },
+        )
+        event = self._build_dossier_notebook_event(
+            dossier=dossier,
+            actor=payload.actor,
+            system_agent_id=await self._dossier_actor_system_agent_id(
+                dossier,
+                payload.actor,
+            ),
+            event_type="research_dossier_notebook.concept_upserted",
+            payload={"concept_id": str(concept.concept_id), "slug": concept.slug},
+            now=now,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_research_dossier_concept(conn, concept)
+                await self._repository.append_research_dossier_event(conn, event)
+        return MethodologyBlueprintCommandResult(dossier=dossier, concept=concept)
+
+    async def upsert_research_dossier_claim(
+        self,
+        dossier_id: UUID,
+        payload: UpsertResearchDossierClaimRequest,
+    ) -> MethodologyBlueprintCommandResult:
+        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        await self._require_dossier_write_actor(dossier, payload.actor)
+        notebook = await self._require_research_dossier_notebook(dossier_id)
+        now = self._now()
+        existing = (
+            await self._repository.fetch_research_dossier_claim(payload.claim_id)
+            if payload.claim_id is not None
+            else None
+        )
+        if existing is not None and existing.notebook_id != notebook.notebook_id:
+            raise KeyError(f"Research dossier claim {payload.claim_id} not found")
+        for source_id in payload.source_ids:
+            source = await self._repository.fetch_research_dossier_source(source_id)
+            if source is None or source.dossier_id != dossier_id:
+                raise KeyError(f"Research dossier source {source_id} not found")
+        for context_pack_id in payload.context_pack_ids:
+            context_pack = await self._repository.fetch_retrieval_context_pack(
+                context_pack_id
+            )
+            if context_pack is None or context_pack.organization_id != dossier.organization_id:
+                raise KeyError(f"Retrieval context pack {context_pack_id} not found")
+        claim = ResearchDossierClaim(
+            claim_id=existing.claim_id if existing is not None else payload.claim_id or uuid4(),
+            notebook_id=notebook.notebook_id,
+            dossier_id=dossier.dossier_id,
+            organization_id=dossier.organization_id,
+            claim_key=payload.claim_key,
+            statement=payload.statement,
+            status=payload.status,
+            confidence=payload.confidence,
+            provenance=payload.provenance,
+            source_ids=list(payload.source_ids),
+            citation_ids=list(payload.citation_ids),
+            context_pack_ids=list(payload.context_pack_ids),
+            contradicted_by_claim_ids=list(payload.contradicted_by_claim_ids),
+            created_by=existing.created_by if existing is not None else payload.actor.participant_id,
+            created_at=existing.created_at if existing is not None else now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata={
+                **(existing.metadata if existing is not None else {}),
+                **payload.metadata,
+            },
+        )
+        event = self._build_dossier_notebook_event(
+            dossier=dossier,
+            actor=payload.actor,
+            system_agent_id=await self._dossier_actor_system_agent_id(
+                dossier,
+                payload.actor,
+            ),
+            event_type="research_dossier_notebook.claim_upserted",
+            payload={"claim_id": str(claim.claim_id), "claim_key": claim.claim_key},
+            now=now,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_research_dossier_claim(conn, claim)
+                await self._repository.append_research_dossier_event(conn, event)
+        return MethodologyBlueprintCommandResult(dossier=dossier, claim=claim)
+
+    async def upsert_research_dossier_link(
+        self,
+        dossier_id: UUID,
+        payload: UpsertResearchDossierLinkRequest,
+    ) -> MethodologyBlueprintCommandResult:
+        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        await self._require_dossier_write_actor(dossier, payload.actor)
+        notebook = await self._require_research_dossier_notebook(dossier_id)
+        await self._validate_dossier_graph_ref(
+            notebook,
+            payload.source_type,
+            payload.source_ref_id,
+        )
+        await self._validate_dossier_graph_ref(
+            notebook,
+            payload.target_type,
+            payload.target_ref_id,
+        )
+        now = self._now()
+        existing = (
+            await self._repository.fetch_research_dossier_link(payload.link_id)
+            if payload.link_id is not None
+            else None
+        )
+        if existing is not None and existing.notebook_id != notebook.notebook_id:
+            raise KeyError(f"Research dossier link {payload.link_id} not found")
+        link = ResearchDossierLink(
+            link_id=existing.link_id if existing is not None else payload.link_id or uuid4(),
+            notebook_id=notebook.notebook_id,
+            dossier_id=dossier.dossier_id,
+            organization_id=dossier.organization_id,
+            source_type=payload.source_type,
+            source_ref_id=payload.source_ref_id,
+            target_type=payload.target_type,
+            target_ref_id=payload.target_ref_id,
+            link_kind=payload.link_kind,
+            rationale=payload.rationale,
+            confidence=payload.confidence,
+            created_by=existing.created_by if existing is not None else payload.actor.participant_id,
+            created_at=existing.created_at if existing is not None else now,
+            updated_by=payload.actor.participant_id,
+            updated_at=now,
+            metadata={
+                **(existing.metadata if existing is not None else {}),
+                **payload.metadata,
+            },
+        )
+        event = self._build_dossier_notebook_event(
+            dossier=dossier,
+            actor=payload.actor,
+            system_agent_id=await self._dossier_actor_system_agent_id(
+                dossier,
+                payload.actor,
+            ),
+            event_type="research_dossier_notebook.link_upserted",
+            payload={"link_id": str(link.link_id), "link_kind": link.link_kind},
+            now=now,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_research_dossier_link(conn, link)
+                await self._repository.append_research_dossier_event(conn, event)
+        return MethodologyBlueprintCommandResult(dossier=dossier, link=link)
+
+    async def sync_research_dossier_notebook(
+        self,
+        dossier_id: UUID,
+        payload: SyncResearchDossierNotebookRequest,
+        *,
+        status: str = "completed",
+        error: str | None = None,
+        stats: dict[str, Any] | None = None,
+    ) -> ResearchDossierSyncRun:
+        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        await self._require_dossier_write_actor(dossier, payload.actor)
+        notebook = await self._require_research_dossier_notebook(dossier_id)
+        bindings = await self._repository.list_research_dossier_provider_bindings(
+            notebook.notebook_id,
+            provider_key=payload.provider_key,
+        )
+        binding = bindings[0] if bindings else None
+        if payload.provider_key is not None and binding is None:
+            raise KeyError(f"Dossier notebook provider {payload.provider_key!r} not found")
+        now = self._now()
+        actor_system_agent_id = await self._dossier_actor_system_agent_id(
+            dossier,
+            payload.actor,
+        )
+        sync_run = ResearchDossierSyncRun(
+            sync_run_id=uuid4(),
+            binding_id=binding.binding_id if binding is not None else None,
+            notebook_id=notebook.notebook_id,
+            dossier_id=dossier.dossier_id,
+            organization_id=dossier.organization_id,
+            status=status,
+            direction="push",
+            started_at=now,
+            completed_at=now if status in {"completed", "failed"} else None,
+            error=error,
+            stats=stats or {},
+            actor_participant_id=payload.actor.participant_id,
+            system_agent_id=actor_system_agent_id,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        updated_notebook = notebook.model_copy(
+            update={
+                "status": "ready" if status == "completed" else "failed",
+                "last_sync_at": now if status == "completed" else notebook.last_sync_at,
+                "updated_by": payload.actor.participant_id,
+                "updated_at": now,
+            }
+        )
+        updated_binding = (
+            binding.model_copy(
+                update={
+                    "status": "ready" if status == "completed" else "failed",
+                    "last_sync_at": now if status == "completed" else binding.last_sync_at,
+                    "updated_by": payload.actor.participant_id,
+                    "updated_at": now,
+                }
+            )
+            if binding is not None
+            else None
+        )
+        event = self._build_dossier_notebook_event(
+            dossier=dossier,
+            actor=payload.actor,
+            system_agent_id=actor_system_agent_id,
+            event_type="research_dossier_notebook.synced",
+            payload={
+                "sync_run_id": str(sync_run.sync_run_id),
+                "provider_key": binding.provider_key if binding is not None else None,
+                "status": sync_run.status,
+            },
+            now=now,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_research_dossier_sync_run(conn, sync_run)
+                await self._repository.upsert_research_dossier_notebook(
+                    conn,
+                    updated_notebook,
+                )
+                if updated_binding is not None:
+                    await self._repository.upsert_research_dossier_provider_binding(
+                        conn,
+                        updated_binding,
+                    )
+                await self._repository.append_research_dossier_event(conn, event)
+        return sync_run
+
+    async def submit_research_dossier_health_check(
+        self,
+        dossier_id: UUID,
+        payload: SubmitResearchDossierHealthCheckRequest,
+    ) -> ResearchDossierHealthCheck:
+        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        await self._require_dossier_write_actor(dossier, payload.actor)
+        notebook = await self._require_research_dossier_notebook(dossier_id)
+        now = self._now()
+        actor_system_agent_id = await self._dossier_actor_system_agent_id(
+            dossier,
+            payload.actor,
+        )
+        check = ResearchDossierHealthCheck(
+            check_id=uuid4(),
+            notebook_id=notebook.notebook_id,
+            dossier_id=dossier.dossier_id,
+            organization_id=dossier.organization_id,
+            status=payload.status,
+            summary=payload.summary,
+            findings=list(payload.findings),
+            unresolved_count=payload.unresolved_count,
+            stale_count=payload.stale_count,
+            broken_link_count=payload.broken_link_count,
+            checked_by_participant_id=payload.actor.participant_id,
+            checked_by_system_agent_id=actor_system_agent_id,
+            created_at=now,
+            metadata=payload.metadata,
+        )
+        event = self._build_dossier_notebook_event(
+            dossier=dossier,
+            actor=payload.actor,
+            system_agent_id=actor_system_agent_id,
+            event_type="research_dossier_notebook.health_checked",
+            payload={
+                "check_id": str(check.check_id),
+                "status": check.status,
+                "unresolved_count": check.unresolved_count,
+                "stale_count": check.stale_count,
+                "broken_link_count": check.broken_link_count,
+            },
+            now=now,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.append_research_dossier_health_check(conn, check)
+                await self._repository.append_research_dossier_event(conn, event)
+        return check
+
     async def create_research_dossier_source(
         self,
         dossier_id: UUID,
@@ -3955,6 +4553,10 @@ class CollaborationKernel:
         dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
         await self._require_dossier_write_actor(dossier, payload.actor)
         now = self._now()
+        actor_system_agent_id = await self._dossier_actor_system_agent_id(
+            dossier,
+            payload.actor,
+        )
         source = ResearchDossierSource(
             source_id=uuid4(),
             dossier_id=dossier.dossier_id,
@@ -3975,11 +4577,7 @@ class CollaborationKernel:
             fetch_metadata=payload.fetch_metadata,
             error=payload.error,
             discovered_by_participant_id=payload.actor.participant_id,
-            discovered_by_system_agent_id=(
-                payload.actor.participant_id
-                if payload.actor.participant_type == "agent"
-                else None
-            ),
+            discovered_by_system_agent_id=actor_system_agent_id,
             created_at=now,
             updated_at=now,
             metadata=payload.metadata,
@@ -3991,7 +4589,7 @@ class CollaborationKernel:
             organization_id=dossier.organization_id,
             event_type="research_dossier_source.created",
             actor_participant_id=payload.actor.participant_id,
-            system_agent_id=source.discovered_by_system_agent_id,
+            system_agent_id=actor_system_agent_id,
             source_id=source.source_id,
             payload=source.model_dump(mode="json"),
             created_at=now,
@@ -4014,6 +4612,10 @@ class CollaborationKernel:
         if source is None or source.dossier_id != dossier_id:
             raise KeyError(f"Research dossier source {source_id} not found")
         now = self._now()
+        actor_system_agent_id = await self._dossier_actor_system_agent_id(
+            dossier,
+            payload.actor,
+        )
         update = {
             key: value
             for key, value in payload.model_dump(exclude={"actor"}, exclude_none=True).items()
@@ -4037,11 +4639,7 @@ class CollaborationKernel:
             organization_id=dossier.organization_id,
             event_type="research_dossier_source.updated",
             actor_participant_id=payload.actor.participant_id,
-            system_agent_id=(
-                payload.actor.participant_id
-                if payload.actor.participant_type == "agent"
-                else None
-            ),
+            system_agent_id=actor_system_agent_id,
             source_id=updated.source_id,
             payload=updated.model_dump(mode="json"),
             created_at=now,
@@ -4065,6 +4663,10 @@ class CollaborationKernel:
         if context_pack is None or context_pack.organization_id != dossier.organization_id:
             raise KeyError(f"Retrieval context pack {payload.context_pack_id} not found")
         now = self._now()
+        actor_system_agent_id = await self._dossier_actor_system_agent_id(
+            dossier,
+            payload.actor,
+        )
         updated_dossier = dossier.model_copy(
             update={
                 "context_pack_ids": list(
@@ -4093,11 +4695,7 @@ class CollaborationKernel:
             organization_id=dossier.organization_id,
             event_type="research_dossier.context_pack_attached",
             actor_participant_id=payload.actor.participant_id,
-            system_agent_id=(
-                payload.actor.participant_id
-                if payload.actor.participant_type == "agent"
-                else None
-            ),
+            system_agent_id=actor_system_agent_id,
             source_id=payload.source_id,
             payload={"context_pack_id": str(payload.context_pack_id)},
             created_at=now,
@@ -4124,6 +4722,10 @@ class CollaborationKernel:
         if version is None:
             raise KeyError(f"Methodology blueprint version {dossier.version_id} not found")
         now = self._now()
+        actor_system_agent_id = await self._dossier_actor_system_agent_id(
+            dossier,
+            payload.actor,
+        )
         updated_dossier = dossier.model_copy(
             update={
                 "status": "ready_for_methodologist",
@@ -4158,11 +4760,7 @@ class CollaborationKernel:
             organization_id=dossier.organization_id,
             event_type="research_dossier.ready_for_methodologist",
             actor_participant_id=payload.actor.participant_id,
-            system_agent_id=(
-                payload.actor.participant_id
-                if payload.actor.participant_type == "agent"
-                else None
-            ),
+            system_agent_id=actor_system_agent_id,
             payload={
                 "methodologist_task_id": str(methodologist_task.task_id),
                 "context_pack_ids": [str(item) for item in updated_dossier.context_pack_ids],
@@ -4200,25 +4798,26 @@ class CollaborationKernel:
                     "methodology.write",
                 )
         now = self._now()
+        dossier = (
+            await self._repository.fetch_research_dossier(version.research_dossier_id)
+            if version.research_dossier_id is not None
+            else None
+        )
+        actor_system_agent_id = (
+            await self._dossier_actor_system_agent_id(dossier, payload.actor)
+            if dossier is not None
+            else None
+        )
         updated_version = version.model_copy(
             update={
                 "status": "pending_review",
                 "cited_output": payload.cited_output,
                 "harness_draft": payload.harness_draft,
-                "submitted_by_system_agent_id": (
-                    payload.actor.participant_id
-                    if payload.actor.participant_type == "agent"
-                    else None
-                ),
+                "submitted_by_system_agent_id": actor_system_agent_id,
                 "submitted_at": now,
                 "updated_at": now,
                 "metadata": {**version.metadata, **payload.metadata},
             }
-        )
-        dossier = (
-            await self._repository.fetch_research_dossier(version.research_dossier_id)
-            if version.research_dossier_id is not None
-            else None
         )
         if dossier is not None:
             dossier = dossier.model_copy(update={"status": "completed", "updated_at": now})
@@ -12156,6 +12755,104 @@ class CollaborationKernel:
             "methodology.write",
         )
 
+    async def _require_research_dossier_notebook(
+        self,
+        dossier_id: UUID,
+    ) -> ResearchDossierNotebook:
+        notebook = await self._repository.fetch_research_dossier_notebook_for_dossier(
+            dossier_id
+        )
+        if notebook is None:
+            raise KeyError(f"Research dossier notebook for {dossier_id} not found")
+        return notebook
+
+    async def _dossier_actor_system_agent_id(
+        self,
+        dossier: ResearchDossier,
+        actor: ParticipantInput,
+    ) -> UUID | None:
+        if actor.participant_type != "agent" or dossier.operations_workspace_id is None:
+            return None
+        participant = await self._repository.fetch_participant(
+            dossier.operations_workspace_id,
+            actor.participant_id,
+        )
+        if participant is None or participant.participant_type != "agent":
+            return None
+        return participant.system_agent_id
+
+    def _build_dossier_notebook_event(
+        self,
+        *,
+        dossier: ResearchDossier,
+        actor: ParticipantInput,
+        system_agent_id: UUID | None,
+        event_type: str,
+        payload: dict[str, Any],
+        now: datetime,
+    ) -> ResearchDossierEvent:
+        return ResearchDossierEvent(
+            event_id=uuid4(),
+            dossier_id=dossier.dossier_id,
+            organization_id=dossier.organization_id,
+            event_type=event_type,
+            actor_participant_id=actor.participant_id,
+            system_agent_id=system_agent_id,
+            payload=payload,
+            created_at=now,
+        )
+
+    async def _validate_dossier_note_refs(
+        self,
+        dossier: ResearchDossier,
+        notebook: ResearchDossierNotebook,
+        payload: UpsertResearchDossierNoteRequest,
+    ) -> None:
+        if payload.source_id is not None:
+            source = await self._repository.fetch_research_dossier_source(
+                payload.source_id
+            )
+            if source is None or source.dossier_id != dossier.dossier_id:
+                raise KeyError(f"Research dossier source {payload.source_id} not found")
+        if payload.concept_id is not None:
+            concept = await self._repository.fetch_research_dossier_concept(
+                payload.concept_id
+            )
+            if concept is None or concept.notebook_id != notebook.notebook_id:
+                raise KeyError(f"Research dossier concept {payload.concept_id} not found")
+        for note_id in payload.related_note_ids:
+            note = await self._repository.fetch_research_dossier_note(note_id)
+            if note is None or note.notebook_id != notebook.notebook_id:
+                raise KeyError(f"Research dossier note {note_id} not found")
+
+    async def _validate_dossier_graph_ref(
+        self,
+        notebook: ResearchDossierNotebook,
+        node_type: str,
+        ref_id: UUID,
+    ) -> None:
+        if node_type == "note":
+            note = await self._repository.fetch_research_dossier_note(ref_id)
+            if note is None or note.notebook_id != notebook.notebook_id:
+                raise KeyError(f"Research dossier note {ref_id} not found")
+            return
+        if node_type == "concept":
+            concept = await self._repository.fetch_research_dossier_concept(ref_id)
+            if concept is None or concept.notebook_id != notebook.notebook_id:
+                raise KeyError(f"Research dossier concept {ref_id} not found")
+            return
+        if node_type == "claim":
+            claim = await self._repository.fetch_research_dossier_claim(ref_id)
+            if claim is None or claim.notebook_id != notebook.notebook_id:
+                raise KeyError(f"Research dossier claim {ref_id} not found")
+            return
+        if node_type == "source":
+            source = await self._repository.fetch_research_dossier_source(ref_id)
+            if source is None or source.dossier_id != notebook.dossier_id:
+                raise KeyError(f"Research dossier source {ref_id} not found")
+            return
+        raise ValueError(f"Unsupported dossier graph node type {node_type!r}")
+
     async def _validate_research_dossier_source_refs(
         self,
         dossier: ResearchDossier,
@@ -12515,6 +13212,213 @@ class CollaborationKernel:
         if not normalized:
             raise ValueError("Library slug must contain at least one letter or number")
         return normalized
+
+    def _build_research_dossier_notebook_defaults(
+        self,
+        *,
+        dossier: ResearchDossier,
+        title: str,
+        actor_id: UUID,
+        now: datetime,
+    ) -> tuple[
+        ResearchDossierNotebook,
+        ResearchDossierProviderBinding,
+        list[ResearchDossierNote],
+        list[ResearchDossierProviderExternalRef],
+    ]:
+        notebook_id = uuid4()
+        binding_id = uuid4()
+        dossier_slug = self._normalize_library_slug(
+            f"dossier-{dossier.dossier_id.hex[:12]}-{title}"
+        )
+        space_ref = f"Dossiers.{dossier_slug}"
+        base_url = (
+            os.getenv("OPEN_TALON_XWIKI_BASE_URL")
+            or os.getenv("XWIKI_BASE_URL")
+            or "http://127.0.0.1:8083"
+        ).rstrip("/")
+        wiki_name = (
+            os.getenv("OPEN_TALON_XWIKI_WIKI_NAME")
+            or os.getenv("XWIKI_WIKI_NAME")
+            or "xwiki"
+        )
+        home_url = f"{base_url}/bin/view/Dossiers/{dossier_slug}/"
+        managed_pages = [
+            ("home", "home", "Home", "WebHome"),
+            ("source", "sources", "Sources", "Sources.WebHome"),
+            ("concept", "concepts", "Concepts", "Concepts.WebHome"),
+            ("entity", "entities", "Entities", "Entities.WebHome"),
+            ("method", "methods", "Methods", "Methods.WebHome"),
+            ("question", "questions", "Questions", "Questions.WebHome"),
+            (
+                "contradiction",
+                "contradictions",
+                "Contradictions",
+                "Contradictions.WebHome",
+            ),
+            ("gap", "gaps", "Gaps", "Gaps.WebHome"),
+            ("synthesis", "synthesis", "Synthesis", "Synthesis.WebHome"),
+        ]
+        notes: list[ResearchDossierNote] = []
+        external_refs: list[ResearchDossierProviderExternalRef] = []
+        for note_kind, slug, page_title, page_ref_suffix in managed_pages:
+            note_id = uuid4()
+            page_ref = f"{space_ref}.{page_ref_suffix}"
+            notes.append(
+                ResearchDossierNote(
+                    note_id=note_id,
+                    notebook_id=notebook_id,
+                    dossier_id=dossier.dossier_id,
+                    organization_id=dossier.organization_id,
+                    note_kind=note_kind,
+                    status="active",
+                    slug=slug,
+                    title=page_title,
+                    body=self._default_dossier_note_body(
+                        dossier=dossier,
+                        title=page_title,
+                        space_ref=space_ref,
+                    ),
+                    created_by=actor_id,
+                    created_at=now,
+                    updated_by=actor_id,
+                    updated_at=now,
+                    external_page_ref=page_ref,
+                    external_url=self._xwiki_page_url(
+                        base_url=base_url,
+                        space_slug=dossier_slug,
+                        page_ref_suffix=page_ref_suffix,
+                    ),
+                    metadata={
+                        "managed": True,
+                        "xwiki_page_ref": page_ref,
+                        "xwiki_space_ref": space_ref,
+                    },
+                )
+            )
+            external_refs.append(
+                ResearchDossierProviderExternalRef(
+                    ref_id=uuid4(),
+                    binding_id=binding_id,
+                    notebook_id=notebook_id,
+                    dossier_id=dossier.dossier_id,
+                    organization_id=dossier.organization_id,
+                    open_talon_resource_type="research_dossier_note",
+                    open_talon_resource_id=note_id,
+                    external_kind="page",
+                    external_id=page_ref,
+                    external_url=self._xwiki_page_url(
+                        base_url=base_url,
+                        space_slug=dossier_slug,
+                        page_ref_suffix=page_ref_suffix,
+                    ),
+                    created_at=now,
+                    updated_at=now,
+                    metadata={"managed": True},
+                )
+            )
+        home_note_id = notes[0].note_id
+        notebook = ResearchDossierNotebook(
+            notebook_id=notebook_id,
+            dossier_id=dossier.dossier_id,
+            organization_id=dossier.organization_id,
+            provider_kind="xwiki",
+            provider_key="xwiki",
+            status="created",
+            home_note_id=home_note_id,
+            external_space_ref=space_ref,
+            external_url=home_url,
+            created_by=actor_id,
+            created_at=now,
+            updated_by=actor_id,
+            updated_at=now,
+            metadata={
+                "managed": True,
+                "knowledge_storage": True,
+                "provider_projection": "xwiki",
+                "dossier_slug": dossier_slug,
+            },
+        )
+        provider_binding = ResearchDossierProviderBinding(
+            binding_id=binding_id,
+            notebook_id=notebook_id,
+            dossier_id=dossier.dossier_id,
+            organization_id=dossier.organization_id,
+            provider_kind="xwiki",
+            provider_key="xwiki",
+            status="created",
+            external_space_ref=space_ref,
+            external_base_url=base_url,
+            auth_kind="basic",
+            config={
+                "wiki_name": wiki_name,
+                "space_ref": space_ref,
+                "dossier_slug": dossier_slug,
+                "managed_pages": [
+                    {"slug": slug, "title": page_title, "page_ref": f"{space_ref}.{suffix}"}
+                    for _, slug, page_title, suffix in managed_pages
+                ],
+            },
+            secret_config={
+                "username": {"env": {"name": "OPEN_TALON_XWIKI_USERNAME"}},
+                "password": {"env": {"name": "OPEN_TALON_XWIKI_PASSWORD"}},
+            },
+            created_by=actor_id,
+            created_at=now,
+            updated_by=actor_id,
+            updated_at=now,
+            metadata={"managed": True, "system_plugin": "xwiki"},
+        )
+        external_refs.append(
+            ResearchDossierProviderExternalRef(
+                ref_id=uuid4(),
+                binding_id=binding_id,
+                notebook_id=notebook_id,
+                dossier_id=dossier.dossier_id,
+                organization_id=dossier.organization_id,
+                open_talon_resource_type="research_dossier_notebook",
+                open_talon_resource_id=notebook_id,
+                external_kind="space",
+                external_id=space_ref,
+                external_url=home_url,
+                created_at=now,
+                updated_at=now,
+                metadata={"managed": True},
+            )
+        )
+        return notebook, provider_binding, notes, external_refs
+
+    @staticmethod
+    def _default_dossier_note_body(
+        *,
+        dossier: ResearchDossier,
+        title: str,
+        space_ref: str,
+    ) -> str:
+        return (
+            f"= {title} =\n\n"
+            f"Open Talon dossier: `{dossier.dossier_id}`\n\n"
+            f"XWiki space: `{space_ref}`\n\n"
+            "== Purpose ==\n\n"
+            "Researcher maintains this page through dossier notebook MCP operations.\n\n"
+            "== Notes ==\n\n"
+            "_No curated entries yet._\n"
+        )
+
+    @staticmethod
+    def _xwiki_page_url(
+        *,
+        base_url: str,
+        space_slug: str,
+        page_ref_suffix: str,
+    ) -> str:
+        parts = ["Dossiers", space_slug]
+        suffix_parts = page_ref_suffix.split(".")
+        if suffix_parts[-1] == "WebHome":
+            parts.extend(suffix_parts[:-1])
+        else:
+            parts.extend(suffix_parts)
+        return f"{base_url}/bin/view/" + "/".join(part for part in parts if part) + "/"
 
     async def _resolve_library_owner(
         self,

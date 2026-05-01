@@ -11,7 +11,7 @@
 | Role | `evidence discovery and research dossier agent` |
 | Endpoint | `local-ollama` through provider `ollama` |
 | Primary inputs | topic, target tasks, selected libraries, pre-indexed Retriever corpora, local files, database-visible context, web follow-up results |
-| Primary outputs | durable research dossier, source records, context pack links, contradiction map, gaps, readiness decision |
+| Primary outputs | durable research dossier, source records, concept notebook, claims, typed links, context pack links, contradiction map, gaps, health/sync state, readiness decision |
 
 ## Idea
 
@@ -27,6 +27,20 @@ library for fetched pages, papers, files, and media snapshots. The library keeps
 source bytes and scraps; the dossier explains why each source matters, whether
 it was included or excluded, and how it relates to the research question.
 
+The storage taxonomy is:
+
+- MinIO/object storage is data storage for immutable source bytes and snapshots.
+- Libraries plus Retriever indexes are information storage for retained, indexed, and vectorized pieces.
+- Dossiers are knowledge storage for concept organization, claims, contradictions, gaps, methods, synthesis, provenance, and navigation.
+
+Each methodology dossier also has a notebook. The default notebook provider is
+XWiki, mapped as one XWiki space per dossier (`Dossiers.<dossier_slug>`).
+Open Talon stores the canonical lifecycle, source provenance, IAM, audit,
+concept/claim/link metadata, provider binding, external refs, health, and sync
+state in Postgres. XWiki stores the navigable concept repository that humans and
+agents can read: `Home`, `Sources`, `Concepts`, `Entities`, `Methods`,
+`Questions`, `Contradictions`, `Gaps`, and `Synthesis` pages.
+
 Researcher does not draft the methodology blueprint. It decides what evidence
 is credible and sufficient, records unresolved gaps, and marks the dossier ready
 for downstream synthesis.
@@ -39,10 +53,11 @@ Researcher seeds an explicit `AgentHarness`:
 - use web search only for follow-up discovery, recency checks, missing coverage, or contradiction resolution
 - preserve fetched source snapshots in the retained dossier library whenever possible
 - create or update structured dossier source records for every included, excluded, duplicate, failed, and unresolved item
+- create or update notebook notes, concepts, claims, and typed links so the dossier stays navigable
 - record source quality notes, rationale, citation identifiers, fetch metadata, errors, and retained source references
 - map contradictions and disagreements instead of hiding them
 - attach Retriever context packs when they define a reusable evidence boundary
-- mark a dossier ready only after summary, contradictions, gaps, and context packs are explicit
+- run notebook health/sync checks and mark a dossier ready only after summary, contradictions, gaps, context packs, and unresolved notebook issues are explicit
 
 The response contract is operational rather than conversational: Researcher
 persists dossier state through methodology dossier MCP operations and uses
@@ -52,13 +67,16 @@ thread messages only for progress, summaries, or blocker notes.
 
 Creating a methodology blueprint creates the initial blueprint version, a
 research dossier, an organization-managed retained-source library, and a
-targeted Researcher task in the organization's `Administration / Organization
-Operations` workspace.
+notebook provider binding for the XWiki dossier space, then creates a targeted
+Researcher task in the organization's `Administration / Organization Operations`
+workspace.
 
 Researcher can use least-privilege access to Library, Retriever, and Web Search
 plus private methodology dossier MCP operations. It records source status and
 quality, saves fetched evidence into the retained dossier library when possible,
-attaches context packs, and marks the dossier `ready_for_methodologist`.
+attaches context packs, writes notebook notes/concepts/claims/links, submits
+notebook health, syncs the provider projection, and marks the dossier
+`ready_for_methodologist`.
 
 When the dossier is ready, the service creates a targeted Methodologist task
 with the dossier summary, source records, contradictions, gaps, context pack
@@ -74,9 +92,9 @@ Seed and migration coverage verifies:
 - Researcher accepts `methodology_research_dossier_build` and `methodology_research_dossier_refine`
 - the harness includes local-library-first research, web follow-up, source quality, contradiction mapping, retained refs, and source status labels
 - the `methodology_researcher` IAM role grants least-privilege library, retrieval, web search, and methodology permissions
-- the private MCP allowlist includes dossier read/write, source update, context-pack attach, and readiness operations
+- the private MCP allowlist includes dossier read/write, source update, context-pack attach, notebook get, note/concept/claim/link upsert, navigation, sync, health, and readiness operations
 
 Repository, gateway, and live-style tests should cover the durable dossier
 tables, cross-organization source rejection, human review gating, Methodologist
-handoff, cited blueprint draft submission, and the rule that Conductor is never
-started automatically.
+handoff, XWiki adapter projection, cited blueprint draft submission, and the
+rule that Conductor is never started automatically.

@@ -3,11 +3,28 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 from gateway_edge.config import settings
 from gateway_edge.mcp_api import OPERATION_REGISTRY, notification_hub
-from gateway_edge.models import AuthContext, Library, LibraryItem, RetrievalIngestionJob
+from gateway_edge.models import (
+    AuthContext,
+    Library,
+    LibraryItem,
+    ResearchDossier,
+    ResearchDossierClaim,
+    ResearchDossierConcept,
+    ResearchDossierHealthCheck,
+    ResearchDossierLink,
+    ResearchDossierNavigationResult,
+    ResearchDossierNote,
+    ResearchDossierNotebook,
+    ResearchDossierNotebookDetail,
+    ResearchDossierProviderBinding,
+    ResearchDossierSyncRun,
+    RetrievalIngestionJob,
+)
 
 
 def _oidc_context(*, roles: list[str], user_id=None) -> AuthContext:
@@ -95,6 +112,14 @@ def test_mcp_methodology_dossier_operations_declare_org_scope_and_permissions() 
         "methodology.dossiers.sources.update": "methodology.write",
         "methodology.dossiers.context_pack.attach": "methodology.write",
         "methodology.dossiers.mark_ready": "methodology.write",
+        "methodology.dossiers.notebook.get": "methodology.read",
+        "methodology.dossiers.notes.upsert": "methodology.write",
+        "methodology.dossiers.concepts.upsert": "methodology.write",
+        "methodology.dossiers.claims.upsert": "methodology.write",
+        "methodology.dossiers.links.upsert": "methodology.write",
+        "methodology.dossiers.navigate": "methodology.read",
+        "methodology.dossiers.sync": "methodology.write",
+        "methodology.dossiers.health.submit": "methodology.write",
         "methodology.blueprints.submit_draft": "methodology.write",
     }
 
@@ -104,6 +129,292 @@ def test_mcp_methodology_dossier_operations_declare_org_scope_and_permissions() 
         assert operation.required_permission_type == "identity"
         assert operation.required_permission == permission
         assert operation.requires_workspace_actor is False
+
+
+async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
+    client,
+    mock_collaboration_service,
+    monkeypatch,
+) -> None:
+    organization_id = mock_collaboration_service.default_organization.organization_id
+    admin = _oidc_context(roles=["admin"]).model_copy(update={"platform_admin": True})
+    _patch_oidc_tokens(monkeypatch, {"admin-token": admin})
+    now = datetime.now(timezone.utc)
+    dossier = ResearchDossier(
+        dossier_id=uuid4(),
+        blueprint_id=uuid4(),
+        version_id=uuid4(),
+        organization_id=organization_id,
+        status="researching",
+        topic="MCP dossier notebook",
+        tasks=["organize concepts"],
+        created_by=admin.user_id,
+        created_at=now,
+        updated_at=now,
+    )
+    notebook = ResearchDossierNotebook(
+        notebook_id=uuid4(),
+        dossier_id=dossier.dossier_id,
+        organization_id=organization_id,
+        provider_kind="xwiki",
+        provider_key="xwiki",
+        status="created",
+        external_space_ref="Dossiers.mcp-dossier",
+        created_by=admin.user_id,
+        updated_by=admin.user_id,
+        created_at=now,
+        updated_at=now,
+    )
+    binding = ResearchDossierProviderBinding(
+        binding_id=uuid4(),
+        notebook_id=notebook.notebook_id,
+        dossier_id=dossier.dossier_id,
+        organization_id=organization_id,
+        provider_kind="xwiki",
+        provider_key="xwiki",
+        external_space_ref="Dossiers.mcp-dossier",
+        external_base_url="http://xwiki.test",
+        created_by=admin.user_id,
+        updated_by=admin.user_id,
+        created_at=now,
+        updated_at=now,
+    )
+    note = ResearchDossierNote(
+        note_id=uuid4(),
+        notebook_id=notebook.notebook_id,
+        dossier_id=dossier.dossier_id,
+        organization_id=organization_id,
+        note_kind="concept",
+        status="active",
+        slug="mcp-note",
+        title="MCP Note",
+        created_by=admin.user_id,
+        updated_by=admin.user_id,
+        created_at=now,
+        updated_at=now,
+    )
+    concept = ResearchDossierConcept(
+        concept_id=uuid4(),
+        notebook_id=notebook.notebook_id,
+        dossier_id=dossier.dossier_id,
+        organization_id=organization_id,
+        slug="mcp-concept",
+        name="MCP Concept",
+        status="active",
+        created_by=admin.user_id,
+        updated_by=admin.user_id,
+        created_at=now,
+        updated_at=now,
+    )
+    claim = ResearchDossierClaim(
+        claim_id=uuid4(),
+        notebook_id=notebook.notebook_id,
+        dossier_id=dossier.dossier_id,
+        organization_id=organization_id,
+        statement="MCP dossier claims are persisted through Open Talon.",
+        status="supported",
+        created_by=admin.user_id,
+        updated_by=admin.user_id,
+        created_at=now,
+        updated_at=now,
+    )
+    link = ResearchDossierLink(
+        link_id=uuid4(),
+        notebook_id=notebook.notebook_id,
+        dossier_id=dossier.dossier_id,
+        organization_id=organization_id,
+        source_type="concept",
+        source_ref_id=concept.concept_id,
+        target_type="claim",
+        target_ref_id=claim.claim_id,
+        link_kind="supports",
+        created_by=admin.user_id,
+        updated_by=admin.user_id,
+        created_at=now,
+        updated_at=now,
+    )
+    detail = ResearchDossierNotebookDetail(
+        notebook=notebook,
+        provider_bindings=[binding],
+        notes=[note],
+        concepts=[concept],
+        claims=[claim],
+        links=[link],
+    )
+    sync_run = ResearchDossierSyncRun(
+        sync_run_id=uuid4(),
+        binding_id=binding.binding_id,
+        notebook_id=notebook.notebook_id,
+        dossier_id=dossier.dossier_id,
+        organization_id=organization_id,
+        status="completed",
+        stats={"pages_synced": 4},
+        created_at=now,
+        updated_at=now,
+    )
+    health = ResearchDossierHealthCheck(
+        check_id=uuid4(),
+        notebook_id=notebook.notebook_id,
+        dossier_id=dossier.dossier_id,
+        organization_id=organization_id,
+        status="passed",
+        summary="Notebook is navigable.",
+        created_at=now,
+    )
+    mock_collaboration_service.get_research_dossier = AsyncMock(return_value=dossier)
+    mock_collaboration_service.get_research_dossier_notebook_detail = AsyncMock(
+        return_value=detail
+    )
+    mock_collaboration_service.upsert_research_dossier_note = AsyncMock(
+        return_value=note
+    )
+    mock_collaboration_service.upsert_research_dossier_concept = AsyncMock(
+        return_value=concept
+    )
+    mock_collaboration_service.upsert_research_dossier_claim = AsyncMock(
+        return_value=claim
+    )
+    mock_collaboration_service.upsert_research_dossier_link = AsyncMock(
+        return_value=link
+    )
+    mock_collaboration_service.navigate_research_dossier = AsyncMock(
+        return_value=ResearchDossierNavigationResult(
+            dossier_id=dossier.dossier_id,
+            notebook_id=notebook.notebook_id,
+            query="mcp",
+            entry_notes=[note],
+            concepts=[concept],
+            claims=[claim],
+            links=[link],
+        )
+    )
+    mock_collaboration_service.sync_research_dossier_notebook = AsyncMock(
+        return_value=sync_run
+    )
+    mock_collaboration_service.submit_research_dossier_health_check = AsyncMock(
+        return_value=health
+    )
+
+    session_id = await _mcp_initialize(client, token="admin-token")
+    await _mcp_tool_call(
+        client,
+        token="admin-token",
+        session_id=session_id,
+        name="session.set_scope",
+        arguments={"scope": "organization", "organization_id": str(organization_id)},
+    )
+
+    calls = [
+        await _mcp_tool_call(
+            client,
+            token="admin-token",
+            session_id=session_id,
+            name="methodology.dossiers.notebook.get",
+            arguments={"dossier_id": str(dossier.dossier_id)},
+            request_id=10,
+        ),
+        await _mcp_tool_call(
+            client,
+            token="admin-token",
+            session_id=session_id,
+            name="methodology.dossiers.notes.upsert",
+            arguments={
+                "dossier_id": str(dossier.dossier_id),
+                "note_kind": "concept",
+                "status": "active",
+                "slug": "mcp-note",
+                "title": "MCP Note",
+            },
+            request_id=11,
+        ),
+        await _mcp_tool_call(
+            client,
+            token="admin-token",
+            session_id=session_id,
+            name="methodology.dossiers.concepts.upsert",
+            arguments={
+                "dossier_id": str(dossier.dossier_id),
+                "slug": "mcp-concept",
+                "name": "MCP Concept",
+                "status": "active",
+            },
+            request_id=12,
+        ),
+        await _mcp_tool_call(
+            client,
+            token="admin-token",
+            session_id=session_id,
+            name="methodology.dossiers.claims.upsert",
+            arguments={
+                "dossier_id": str(dossier.dossier_id),
+                "statement": claim.statement,
+                "status": "supported",
+            },
+            request_id=13,
+        ),
+        await _mcp_tool_call(
+            client,
+            token="admin-token",
+            session_id=session_id,
+            name="methodology.dossiers.links.upsert",
+            arguments={
+                "dossier_id": str(dossier.dossier_id),
+                "source_type": "concept",
+                "source_ref_id": str(concept.concept_id),
+                "target_type": "claim",
+                "target_ref_id": str(claim.claim_id),
+                "link_kind": "supports",
+            },
+            request_id=14,
+        ),
+        await _mcp_tool_call(
+            client,
+            token="admin-token",
+            session_id=session_id,
+            name="methodology.dossiers.navigate",
+            arguments={"dossier_id": str(dossier.dossier_id), "query": "mcp"},
+            request_id=15,
+        ),
+        await _mcp_tool_call(
+            client,
+            token="admin-token",
+            session_id=session_id,
+            name="methodology.dossiers.sync",
+            arguments={
+                "dossier_id": str(dossier.dossier_id),
+                "provider_key": "xwiki",
+                "force": True,
+            },
+            request_id=16,
+        ),
+        await _mcp_tool_call(
+            client,
+            token="admin-token",
+            session_id=session_id,
+            name="methodology.dossiers.health.submit",
+            arguments={
+                "dossier_id": str(dossier.dossier_id),
+                "status": "passed",
+                "summary": "Notebook is navigable.",
+            },
+            request_id=17,
+        ),
+    ]
+
+    for response in calls:
+        assert response.status_code == 200
+        assert response.json()["result"]["isError"] is False
+    assert calls[0].json()["result"]["structuredContent"]["notebook"]["notebook_id"] == str(
+        notebook.notebook_id
+    )
+    assert calls[5].json()["result"]["structuredContent"]["entry_notes"][0]["note_id"] == str(
+        note.note_id
+    )
+    assert calls[6].json()["result"]["structuredContent"]["stats"]["pages_synced"] == 4
+    assert calls[7].json()["result"]["structuredContent"]["status"] == "passed"
+    note_payload = mock_collaboration_service.upsert_research_dossier_note.await_args.args[1]
+    assert note_payload.actor.user_id == admin.user_id
+    assert note_payload.slug == "mcp-note"
 
 
 async def test_mcp_library_and_retriever_tools_execute_with_scoped_actor(

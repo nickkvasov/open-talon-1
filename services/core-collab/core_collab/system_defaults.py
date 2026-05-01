@@ -239,6 +239,14 @@ _RESEARCHER_CONTROL_PLANE_ALLOWLIST = [
     "methodology.dossiers.sources.update",
     "methodology.dossiers.context_pack.attach",
     "methodology.dossiers.mark_ready",
+    "methodology.dossiers.notebook.get",
+    "methodology.dossiers.notes.upsert",
+    "methodology.dossiers.concepts.upsert",
+    "methodology.dossiers.claims.upsert",
+    "methodology.dossiers.links.upsert",
+    "methodology.dossiers.navigate",
+    "methodology.dossiers.sync",
+    "methodology.dossiers.health.submit",
 ]
 _METHODOLOGIST_CONTROL_PLANE_ALLOWLIST = [
     "session.get_identity",
@@ -251,6 +259,8 @@ _METHODOLOGIST_CONTROL_PLANE_ALLOWLIST = [
     "threads.timeline.get",
     "retrieval.context_pack.get",
     "methodology.dossiers.get",
+    "methodology.dossiers.notebook.get",
+    "methodology.dossiers.navigate",
     "methodology.blueprints.submit_draft",
 ]
 _METHODICS_HUMAN_CONTROL_PLANE_TOOLS = [
@@ -1539,6 +1549,7 @@ class ManagedSystemDefaultsRepairer:
                 "triages sources by quality relevance duplication inclusion and unresolved status",
                 "maps contradictions disagreements and follow-up questions before synthesis",
                 "preserves fetched pages papers files and media in retained dossier libraries",
+                "structures concept notes claims gaps and synthesis pages in the dossier notebook",
                 "submits structured research dossier source records and readiness updates",
             ],
             endpoint=AgentEndpoint(
@@ -1564,10 +1575,11 @@ class ManagedSystemDefaultsRepairer:
                     "triage, contradiction mapping, and retained source organization."
                 ),
                 operating_principles=[
-                    "Treat the dossier as a reusable evidence object for agents, users, and participants.",
+                    "Treat the dossier as knowledge storage: a reusable concept repository for agents, users, and participants.",
                     "Search local libraries and indexed corpora before broad web discovery.",
                     "Use explicit web follow-up for gaps, recency, and contradictions.",
                     "Preserve fetched source snapshots in the retained dossier library whenever possible.",
+                    "Keep the concept notebook navigable with source summaries, concepts, claims, typed links, gaps, contradictions, methods, and synthesis pages.",
                     "Keep included, excluded, duplicate, failed, and unresolved records visible.",
                     "Separate evidence, quality judgment, disagreement mapping, and open gaps.",
                 ],
@@ -1592,7 +1604,7 @@ class ManagedSystemDefaultsRepairer:
                         "Use Library tools to inspect selected and retained dossier libraries.",
                         "Use Retriever tools for indexed searches and context packs.",
                         "Use Web Search only for explicit follow-up discovery, gaps, or recency.",
-                        "Use methodology dossier MCP tools to persist every source and readiness update.",
+                        "Use methodology dossier MCP tools to persist every source, notebook note, concept, claim, link, health check, sync, and readiness update.",
                     ],
                     fallback_when_no_tool_fits=(
                         "Record the limitation as an unresolved dossier gap and continue with visible evidence."
@@ -1610,6 +1622,7 @@ class ManagedSystemDefaultsRepairer:
                         "Quality notes and rationale are present for included and excluded sources.",
                         "Contradictions and disagreements are mapped with affected source ids.",
                         "Open gaps and follow-up opportunities are explicit before mark_ready.",
+                        "The concept notebook is navigable or unresolved notebook health issues are explicit.",
                     ],
                     require_evidence_for_claims=True,
                     require_tool_results_for_completion=True,
@@ -1639,7 +1652,7 @@ class ManagedSystemDefaultsRepairer:
                     "Operate as Researcher, the evidence discovery and research dossier agent.",
                     "Build and refine durable dossiers through targeted dossier tasks only.",
                     "Search local libraries and Retriever context first, then use web follow-up for gaps and recency.",
-                    "Persist source records, context packs, contradictions, gaps, and readiness through dossier MCP operations.",
+                    "Persist source records, context packs, concept notes, claims, links, contradictions, gaps, health checks, sync, and readiness through dossier MCP operations.",
                     "Do not synthesize the final methodology blueprint.",
                 ],
                 response_contract=AgentResponseContract(
@@ -1653,6 +1666,7 @@ class ManagedSystemDefaultsRepairer:
                         "Contradictions",
                         "Gaps",
                         "Retained References",
+                        "Concept Notebook",
                         "Readiness",
                     ],
                     guidance=[
@@ -1730,7 +1744,7 @@ class ManagedSystemDefaultsRepairer:
             ),
             role="methodology extraction and workspace design agent",
             capabilities=[
-                "consumes completed research dossiers with source records contradictions gaps and context packs",
+                "consumes completed research dossiers with source records concept notebooks contradictions gaps and context packs",
                 "analyzes narrow-domain books and source corpora through cited retrieval evidence",
                 "extracts methodology basis including ontology axiology epistemology and principles",
                 "derives methodics as high-level repeatable steps for achieving a stated goal",
@@ -1748,7 +1762,7 @@ class ManagedSystemDefaultsRepairer:
                 "material for a narrow domain and extract the methodology basis, methodics, "
                 "concrete methods, required actors, candidate tools, and a project/workspace "
                 "template for implementing the approach. Use dossier source records, "
-                "contradictions, gaps, and retrieval/context-pack evidence as the authority "
+                "concept notebook navigation, contradictions, gaps, and retrieval/context-pack evidence as the authority "
                 "for source-derived claims. "
                 "Clearly separate what the source states from what you infer or ideate for Open Talon "
                 "implementation. Do not invent citations, and ask for more source material or a clearer "
@@ -1762,7 +1776,7 @@ class ManagedSystemDefaultsRepairer:
                 ),
                 operating_principles=[
                     "Start from the user's target goal and the completed dossier or cited source corpus; do not treat general knowledge as source evidence.",
-                    "Use dossier source records, contradictions, gaps, and context packs as the evidence boundary when a dossier is supplied.",
+                    "Use dossier source records, concept notebook pages, contradictions, gaps, and context packs as the evidence boundary when a dossier is supplied.",
                     "Separate methodology basis, methodics, methods, tools, actors, artifacts, and workspace template decisions.",
                     "Keep source-grounded extraction distinct from implementation ideation.",
                     "Preserve citations for claims that come from the source material.",
@@ -1787,7 +1801,7 @@ class ManagedSystemDefaultsRepairer:
                     cite_tool_results_in_reasoning=True,
                     verify_side_effects_after_mutation=True,
                     selection_principles=[
-                        "Read the completed research dossier before synthesizing when a dossier id is supplied.",
+                        "Read and navigate the completed research dossier notebook before synthesizing when a dossier id is supplied.",
                         "Use retrieval search or context packs for source evidence before synthesis.",
                         "Inspect existing workspace harness, files, and retrieval corpora before proposing changes.",
                         "Use authoring or catalog tools only when the user asks to materialize the template.",

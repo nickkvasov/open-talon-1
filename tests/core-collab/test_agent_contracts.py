@@ -93,6 +93,7 @@ from open_talon_contracts.models import (  # noqa: E402
     MemoryEntry,
     MemoryProviderDefinition,
     MemoryProviderRecord,
+    NavigateResearchDossierRequest,
     MethodicExecution,
     MethodicExecutionAssignment,
     MethodicExecutionCheck,
@@ -111,13 +112,25 @@ from open_talon_contracts.models import (  # noqa: E402
     ProjectAccessBinding,
     ProjectSubjectRef,
     ResearchDossier,
+    ResearchDossierClaim,
+    ResearchDossierConcept,
     ResearchDossierEvent,
+    ResearchDossierHealthCheck,
+    ResearchDossierLink,
+    ResearchDossierNote,
+    ResearchDossierNotebook,
+    ResearchDossierNotebookDetail,
+    ResearchDossierProviderBinding,
+    ResearchDossierProviderExternalRef,
     ResearchDossierSource,
+    ResearchDossierSyncRun,
     RetrievalContextPack,
     Run,
     RunStep,
     SearchMemoryRequest,
     SubmitMethodologyBlueprintDraftRequest,
+    SubmitResearchDossierHealthCheckRequest,
+    SyncResearchDossierNotebookRequest,
     TargetRef,
     ToolCall,
     ToolCallResult,
@@ -135,7 +148,12 @@ from open_talon_contracts.models import (  # noqa: E402
     UpdateInteractionRequestRequest,
     UpdateLlmProviderRequest,
     UpdateProjectRequest,
+    UpdateResearchDossierSourceRequest,
     UpsertProjectAccessRequest,
+    UpsertResearchDossierClaimRequest,
+    UpsertResearchDossierConceptRequest,
+    UpsertResearchDossierLinkRequest,
+    UpsertResearchDossierNoteRequest,
     EvaluateMethodicStepRequest,
     ReviewToolGenerationRevisionRequest,
     RemoveProjectAccessRequest,
@@ -307,6 +325,15 @@ class FakeRepository:
         self._research_dossiers = {}
         self._research_dossier_sources = {}
         self._research_dossier_events = {}
+        self._research_dossier_notebooks = {}
+        self._research_dossier_notes = {}
+        self._research_dossier_concepts = {}
+        self._research_dossier_claims = {}
+        self._research_dossier_links = {}
+        self._research_dossier_provider_bindings = {}
+        self._research_dossier_provider_external_refs = {}
+        self._research_dossier_sync_runs = {}
+        self._research_dossier_health_checks = {}
         default_organization = Organization(
             organization_id=UUID("11111111-1111-1111-1111-111111111111"),
             slug="default",
@@ -691,6 +718,69 @@ class FakeRepository:
     async def upsert_research_dossier(self, conn, dossier: ResearchDossier) -> None:
         self._research_dossiers[dossier.dossier_id] = dossier
 
+    async def upsert_research_dossier_notebook(
+        self,
+        conn,
+        notebook: ResearchDossierNotebook,
+    ) -> None:
+        self._research_dossier_notebooks[notebook.notebook_id] = notebook
+
+    async def upsert_research_dossier_note(
+        self,
+        conn,
+        note: ResearchDossierNote,
+    ) -> None:
+        self._research_dossier_notes[note.note_id] = note
+
+    async def upsert_research_dossier_concept(
+        self,
+        conn,
+        concept: ResearchDossierConcept,
+    ) -> None:
+        self._research_dossier_concepts[concept.concept_id] = concept
+
+    async def upsert_research_dossier_claim(
+        self,
+        conn,
+        claim: ResearchDossierClaim,
+    ) -> None:
+        self._research_dossier_claims[claim.claim_id] = claim
+
+    async def upsert_research_dossier_link(
+        self,
+        conn,
+        link: ResearchDossierLink,
+    ) -> None:
+        self._research_dossier_links[link.link_id] = link
+
+    async def upsert_research_dossier_provider_binding(
+        self,
+        conn,
+        binding: ResearchDossierProviderBinding,
+    ) -> None:
+        self._research_dossier_provider_bindings[binding.binding_id] = binding
+
+    async def upsert_research_dossier_provider_external_ref(
+        self,
+        conn,
+        external_ref: ResearchDossierProviderExternalRef,
+    ) -> None:
+        self._research_dossier_provider_external_refs[external_ref.ref_id] = external_ref
+
+    async def upsert_research_dossier_sync_run(
+        self,
+        conn,
+        sync_run: ResearchDossierSyncRun,
+    ) -> None:
+        self._research_dossier_sync_runs[sync_run.sync_run_id] = sync_run
+
+    async def append_research_dossier_health_check(
+        self,
+        conn,
+        check: ResearchDossierHealthCheck,
+    ) -> None:
+        self._research_dossier_health_checks[check.check_id] = check
+
     async def upsert_research_dossier_source(
         self,
         conn,
@@ -755,6 +845,121 @@ class FakeRepository:
 
     async def list_research_dossier_events(self, dossier_id):
         return list(self._research_dossier_events.get(dossier_id, []))
+
+    async def fetch_research_dossier_notebook(self, notebook_id):
+        return self._research_dossier_notebooks.get(notebook_id)
+
+    async def fetch_research_dossier_notebook_for_dossier(self, dossier_id):
+        for notebook in self._research_dossier_notebooks.values():
+            if notebook.dossier_id == dossier_id:
+                return notebook
+        return None
+
+    async def fetch_research_dossier_note(self, note_id):
+        return self._research_dossier_notes.get(note_id)
+
+    async def list_research_dossier_notes(self, notebook_id, *, note_kind=None, status=None):
+        notes = [
+            note
+            for note in self._research_dossier_notes.values()
+            if note.notebook_id == notebook_id
+            and (note_kind is None or note.note_kind == note_kind)
+            and (status is None or note.status == status)
+        ]
+        return sorted(notes, key=lambda item: (item.note_kind, item.slug))
+
+    async def fetch_research_dossier_concept(self, concept_id):
+        return self._research_dossier_concepts.get(concept_id)
+
+    async def list_research_dossier_concepts(self, notebook_id, *, status=None):
+        concepts = [
+            concept
+            for concept in self._research_dossier_concepts.values()
+            if concept.notebook_id == notebook_id
+            and (status is None or concept.status == status)
+        ]
+        return sorted(concepts, key=lambda item: item.slug)
+
+    async def fetch_research_dossier_claim(self, claim_id):
+        return self._research_dossier_claims.get(claim_id)
+
+    async def list_research_dossier_claims(self, notebook_id, *, status=None):
+        claims = [
+            claim
+            for claim in self._research_dossier_claims.values()
+            if claim.notebook_id == notebook_id
+            and (status is None or claim.status == status)
+        ]
+        return sorted(claims, key=lambda item: item.created_at)
+
+    async def fetch_research_dossier_link(self, link_id):
+        return self._research_dossier_links.get(link_id)
+
+    async def list_research_dossier_links(self, notebook_id, *, link_kind=None):
+        links = [
+            link
+            for link in self._research_dossier_links.values()
+            if link.notebook_id == notebook_id
+            and (link_kind is None or link.link_kind == link_kind)
+        ]
+        return sorted(links, key=lambda item: item.created_at)
+
+    async def list_research_dossier_provider_bindings(
+        self,
+        notebook_id,
+        *,
+        provider_key=None,
+    ):
+        bindings = [
+            binding
+            for binding in self._research_dossier_provider_bindings.values()
+            if binding.notebook_id == notebook_id
+            and (provider_key is None or binding.provider_key == provider_key)
+        ]
+        return sorted(bindings, key=lambda item: item.created_at)
+
+    async def list_research_dossier_provider_external_refs(
+        self,
+        notebook_id,
+        *,
+        binding_id=None,
+    ):
+        refs = [
+            ref
+            for ref in self._research_dossier_provider_external_refs.values()
+            if ref.notebook_id == notebook_id
+            and (binding_id is None or ref.binding_id == binding_id)
+        ]
+        return sorted(refs, key=lambda item: item.created_at)
+
+    async def fetch_latest_research_dossier_health_check(self, notebook_id):
+        checks = [
+            check
+            for check in self._research_dossier_health_checks.values()
+            if check.notebook_id == notebook_id
+        ]
+        return max(checks, key=lambda item: item.created_at) if checks else None
+
+    async def fetch_research_dossier_notebook_detail(self, dossier_id):
+        notebook = await self.fetch_research_dossier_notebook_for_dossier(dossier_id)
+        if notebook is None:
+            return None
+        return ResearchDossierNotebookDetail(
+            notebook=notebook,
+            provider_bindings=await self.list_research_dossier_provider_bindings(
+                notebook.notebook_id
+            ),
+            notes=await self.list_research_dossier_notes(notebook.notebook_id),
+            concepts=await self.list_research_dossier_concepts(notebook.notebook_id),
+            claims=await self.list_research_dossier_claims(notebook.notebook_id),
+            links=await self.list_research_dossier_links(notebook.notebook_id),
+            external_refs=await self.list_research_dossier_provider_external_refs(
+                notebook.notebook_id
+            ),
+            latest_health_check=await self.fetch_latest_research_dossier_health_check(
+                notebook.notebook_id
+            ),
+        )
 
     async def fetch_thread(self, thread_id):
         return self._threads.get(thread_id)
@@ -3470,6 +3675,9 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
         "workspaces.create",
         "iam.agent_identities.list",
         "methodology.dossiers.sources.create",
+        "methodology.dossiers.notebook.get",
+        "methodology.dossiers.notes.upsert",
+        "methodology.dossiers.navigate",
         "methodology.blueprints.submit_draft",
         "methodics.resource_requests.approve",
     }.issubset({tool.tool_name for tool in repository._mcp_server_tools[control_plane.server_id]})
@@ -3510,6 +3718,8 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
         (researcher.agent_id, control_plane.server_id)
     ]
     assert "methodology.dossiers.mark_ready" in researcher_binding.tool_allowlist
+    assert "methodology.dossiers.notes.upsert" in researcher_binding.tool_allowlist
+    assert "methodology.dossiers.health.submit" in researcher_binding.tool_allowlist
     assert "methodology.blueprints.submit_draft" not in researcher_binding.tool_allowlist
     researcher_library_binding = repository._agent_internal_mcp_servers[
         (researcher.agent_id, library_plugin.server_id)
@@ -3530,6 +3740,7 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
         (methodologist.agent_id, control_plane.server_id)
     ]
     assert "methodology.dossiers.get" in methodologist_binding.tool_allowlist
+    assert "methodology.dossiers.navigate" in methodologist_binding.tool_allowlist
     assert "methodology.blueprints.submit_draft" in methodologist_binding.tool_allowlist
     methodologist_role = next(role for role in repository._iam_roles.values() if role.name == "methodology_methodologist")
     assert "methodology.write" in methodologist_role.permissions
@@ -3838,6 +4049,28 @@ async def test_methodology_blueprint_creation_creates_dossier_library_and_resear
     assert retained_library.scope == "organization"
     assert retained_library.organization_id == organization.organization_id
     assert retained_library.metadata["research_dossier"] is True
+    notebook_detail = await kernel.get_research_dossier_notebook_detail(
+        dossier.dossier_id,
+        actor=actor,
+    )
+    assert notebook_detail.notebook.provider_kind == "xwiki"
+    assert notebook_detail.notebook.external_space_ref.startswith("Dossiers.dossier-")
+    assert notebook_detail.provider_bindings[0].provider_key == "xwiki"
+    assert notebook_detail.provider_bindings[0].external_space_ref == (
+        notebook_detail.notebook.external_space_ref
+    )
+    assert {note.slug for note in notebook_detail.notes} == {
+        "home",
+        "sources",
+        "concepts",
+        "entities",
+        "methods",
+        "questions",
+        "contradictions",
+        "gaps",
+        "synthesis",
+    }
+    assert len(notebook_detail.external_refs) == 10
     assert repository._threads[dossier.thread_id].metadata["research_dossier_id"] == str(
         dossier.dossier_id
     )
@@ -3872,6 +4105,198 @@ async def test_methodology_blueprint_creation_creates_dossier_library_and_resear
         "task_instructions"
     ]
     assert repository._methodic_executions == {}
+
+
+@pytest.mark.asyncio
+async def test_research_dossier_notebook_concepts_claims_links_health_and_sync():
+    repository, kernel, organization, _operations_workspace, actor = (
+        await _seed_methodology_world()
+    )
+    detail = await _create_methodology_blueprint_fixture(
+        repository,
+        kernel,
+        organization,
+        actor,
+    )
+    dossier = detail.dossier
+    source_result = await kernel.create_research_dossier_source(
+        dossier.dossier_id,
+        CreateResearchDossierSourceRequest(
+            actor=actor,
+            source_kind="webpage",
+            status="included",
+            title="Evidence onboarding source",
+            source_uri="https://example.test/onboarding",
+            citation_id="S1",
+            quality_notes="Primary source for test evidence.",
+        ),
+    )
+    source = source_result.source
+    assert source is not None
+
+    concept_result = await kernel.upsert_research_dossier_concept(
+        dossier.dossier_id,
+        UpsertResearchDossierConceptRequest(
+            actor=actor,
+            slug="evidence-backed-onboarding",
+            name="Evidence-backed onboarding",
+            definition="Onboarding decisions grounded in retained source evidence.",
+            status="active",
+            confidence=0.9,
+            source_ids=[source.source_id],
+        ),
+    )
+    concept = concept_result.concept
+    assert concept is not None
+
+    note_result = await kernel.upsert_research_dossier_note(
+        dossier.dossier_id,
+        UpsertResearchDossierNoteRequest(
+            actor=actor,
+            note_kind="concept",
+            status="active",
+            slug="evidence-backed-onboarding-note",
+            title="Evidence-backed onboarding",
+            body="Concept note with [[S1]] citation.",
+            concept_id=concept.concept_id,
+            citation_ids=["S1"],
+        ),
+    )
+    note = note_result.note
+    assert note is not None
+
+    claim_result = await kernel.upsert_research_dossier_claim(
+        dossier.dossier_id,
+        UpsertResearchDossierClaimRequest(
+            actor=actor,
+            claim_key="claim:evidence-onboarding",
+            statement="Reusable onboarding should be grounded in retained evidence.",
+            status="supported",
+            confidence=0.8,
+            source_ids=[source.source_id],
+            citation_ids=["S1"],
+        ),
+    )
+    claim = claim_result.claim
+    assert claim is not None
+
+    link_result = await kernel.upsert_research_dossier_link(
+        dossier.dossier_id,
+        UpsertResearchDossierLinkRequest(
+            actor=actor,
+            source_type="concept",
+            source_ref_id=concept.concept_id,
+            target_type="claim",
+            target_ref_id=claim.claim_id,
+            link_kind="supports",
+            rationale="The concept contains the supported claim.",
+            confidence=0.7,
+        ),
+    )
+    link = link_result.link
+    assert link is not None
+
+    navigation = await kernel.navigate_research_dossier(
+        dossier.dossier_id,
+        NavigateResearchDossierRequest(
+            actor=actor,
+            query="onboarding",
+            max_results=5,
+        ),
+    )
+    assert [item.concept_id for item in navigation.concepts] == [concept.concept_id]
+    assert any(item.note_id == note.note_id for item in navigation.entry_notes)
+    assert navigation.links[0].link_id == link.link_id
+
+    health = await kernel.submit_research_dossier_health_check(
+        dossier.dossier_id,
+        SubmitResearchDossierHealthCheckRequest(
+            actor=actor,
+            status="passed",
+            summary="Concept notebook is navigable.",
+        ),
+    )
+    assert health.status == "passed"
+    sync = await kernel.sync_research_dossier_notebook(
+        dossier.dossier_id,
+        SyncResearchDossierNotebookRequest(
+            actor=actor,
+            provider_key="xwiki",
+            metadata={"test": True},
+        ),
+        stats={"pages_synced": 11},
+    )
+    assert sync.status == "completed"
+    refreshed = await kernel.get_research_dossier_notebook_detail(
+        dossier.dossier_id,
+        actor=actor,
+    )
+    assert refreshed.latest_health_check is not None
+    assert refreshed.latest_health_check.check_id == health.check_id
+    assert refreshed.notebook.status == "ready"
+    assert refreshed.provider_bindings[0].last_sync_at == sync.completed_at
+    assert {
+        event.event_type for event in await repository.list_research_dossier_events(
+            dossier.dossier_id
+        )
+    }.issuperset(
+        {
+            "research_dossier_notebook.concept_upserted",
+            "research_dossier_notebook.claim_upserted",
+            "research_dossier_notebook.link_upserted",
+            "research_dossier_notebook.health_checked",
+            "research_dossier_notebook.synced",
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_research_dossier_agent_events_record_system_agent_id_not_participant_id():
+    repository, kernel, organization, operations_workspace, actor = (
+        await _seed_methodology_world()
+    )
+    detail = await _create_methodology_blueprint_fixture(
+        repository,
+        kernel,
+        organization,
+        actor,
+    )
+    dossier = detail.dossier
+    researcher = await repository.fetch_system_agent_by_key(
+        scope="global",
+        organization_id=None,
+        agent_key="researcher",
+    )
+    researcher_participant = await repository.fetch_agent_participant(
+        operations_workspace.workspace_id,
+        researcher.agent_id,
+    )
+    agent_actor = ParticipantInput(
+        participant_id=researcher_participant.participant_id,
+        participant_type="agent",
+        display_name=researcher.display_name,
+    )
+
+    source_result = await kernel.create_research_dossier_source(
+        dossier.dossier_id,
+        CreateResearchDossierSourceRequest(
+            actor=agent_actor,
+            source_kind="webpage",
+            status="included",
+            title="Researcher source",
+            source_uri="https://example.test/researcher-source",
+        ),
+    )
+    source = source_result.source
+    assert source is not None
+    assert source.discovered_by_system_agent_id == researcher.agent_id
+    assert source.discovered_by_system_agent_id != researcher_participant.participant_id
+    source_events = [
+        event
+        for event in await repository.list_research_dossier_events(dossier.dossier_id)
+        if event.event_type == "research_dossier_source.created"
+    ]
+    assert source_events[0].system_agent_id == researcher.agent_id
 
 
 @pytest.mark.asyncio
@@ -4016,6 +4441,542 @@ async def test_research_dossier_sources_reject_cross_org_refs_and_ready_handoff(
         source.source_id
     )
     assert methodologist_tasks[0].metadata["dossier_sources"][0]["status"] == "included"
+    assert repository._methodic_executions == {}
+
+
+@pytest.mark.asyncio
+async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
+    repository, kernel, organization, operations_workspace, actor = (
+        await _seed_methodology_world()
+    )
+    detail = await _create_methodology_blueprint_fixture(
+        repository,
+        kernel,
+        organization,
+        actor,
+    )
+    dossier = detail.dossier
+    researcher = await repository.fetch_system_agent_by_key(
+        scope="global",
+        organization_id=None,
+        agent_key="researcher",
+    )
+    methodologist = await repository.fetch_system_agent_by_key(
+        scope="global",
+        organization_id=None,
+        agent_key="methodologist",
+    )
+    assert researcher is not None
+    assert methodologist is not None
+    researcher_participant = await repository.fetch_agent_participant(
+        operations_workspace.workspace_id,
+        researcher.agent_id,
+    )
+    methodologist_participant = await repository.fetch_agent_participant(
+        operations_workspace.workspace_id,
+        methodologist.agent_id,
+    )
+    assert researcher_participant is not None
+    assert methodologist_participant is not None
+    researcher_actor = ParticipantInput(
+        participant_id=researcher_participant.participant_id,
+        participant_type="agent",
+        display_name=researcher.display_name,
+    )
+    methodologist_actor = ParticipantInput(
+        participant_id=methodologist_participant.participant_id,
+        participant_type="agent",
+        display_name=methodologist.display_name,
+    )
+    retained_library = repository._libraries[dossier.retained_library_id]
+    retained_item = _methodology_library_item(
+        repository,
+        library=retained_library,
+        actor=actor,
+        title="Retained onboarding field guide",
+    )
+    context_pack = _methodology_context_pack(
+        repository,
+        organization_id=organization.organization_id,
+        actor=actor,
+        content=(
+            "S1 supports evidence-backed onboarding. S2 warns that approval-heavy "
+            "onboarding reduces team autonomy."
+        ),
+    )
+
+    local_source = (
+        await kernel.create_research_dossier_source(
+            dossier.dossier_id,
+            CreateResearchDossierSourceRequest(
+                actor=researcher_actor,
+                source_kind="library_item",
+                status="included",
+                title="Retained onboarding field guide",
+                library_id=retained_library.library_id,
+                library_item_id=retained_item.item_id,
+                asset_id=retained_item.asset_id,
+                asset_version_id=retained_item.active_asset_version_id,
+                context_pack_ids=[context_pack.context_pack_id],
+                citation_id="S1",
+                quality_notes="Retained internal field guide with direct task evidence.",
+                rationale="Primary local evidence for onboarding methodics.",
+                fetch_metadata={"storage_layer": "library", "raw_asset_preserved": True},
+            ),
+        )
+    ).source
+    unresolved_web_source = (
+        await kernel.create_research_dossier_source(
+            dossier.dossier_id,
+            CreateResearchDossierSourceRequest(
+                actor=researcher_actor,
+                source_kind="webpage",
+                status="unresolved",
+                title="Recent onboarding benchmark",
+                source_uri="https://example.test/recent-onboarding-benchmark",
+                citation_id="S2",
+                quality_notes="Recent web source found during follow-up discovery.",
+                contradictions=[
+                    {
+                        "claim": "Approval depth",
+                        "note": "Benchmarks recommend lighter approval gates.",
+                    }
+                ],
+                rationale="Used to map disagreement around approval-heavy workflows.",
+                fetch_metadata={"storage_layer": "web_snapshot", "fetched": True},
+            ),
+        )
+    ).source
+    included_web_source = (
+        await kernel.update_research_dossier_source(
+            dossier.dossier_id,
+            unresolved_web_source.source_id,
+            UpdateResearchDossierSourceRequest(
+                actor=researcher_actor,
+                status="included",
+                quality_notes="Triaged as relevant and recent enough for synthesis.",
+                metadata={"triage": "resolved_after_followup"},
+            ),
+        )
+    ).source
+    duplicate_source = (
+        await kernel.create_research_dossier_source(
+            dossier.dossier_id,
+            CreateResearchDossierSourceRequest(
+                actor=researcher_actor,
+                source_kind="webpage",
+                status="duplicate",
+                title="Mirror of onboarding field guide",
+                source_uri="https://example.test/field-guide-mirror",
+                rationale="Duplicate of S1, retained as metadata only.",
+            ),
+        )
+    ).source
+    excluded_source = (
+        await kernel.create_research_dossier_source(
+            dossier.dossier_id,
+            CreateResearchDossierSourceRequest(
+                actor=researcher_actor,
+                source_kind="paper",
+                status="excluded",
+                title="Consumer onboarding paper",
+                source_uri="https://example.test/consumer-onboarding",
+                rationale="Different domain from organization team onboarding.",
+            ),
+        )
+    ).source
+    failed_source = (
+        await kernel.create_research_dossier_source(
+            dossier.dossier_id,
+            CreateResearchDossierSourceRequest(
+                actor=researcher_actor,
+                source_kind="webpage",
+                status="failed",
+                title="Removed onboarding memo",
+                source_uri="https://example.test/removed-onboarding-memo",
+                error="404 during fetch",
+                rationale="Search result retained as failed evidence trail.",
+            ),
+        )
+    ).source
+    unresolved_source = (
+        await kernel.create_research_dossier_source(
+            dossier.dossier_id,
+            CreateResearchDossierSourceRequest(
+                actor=researcher_actor,
+                source_kind="dataset",
+                status="unresolved",
+                title="Regional onboarding dataset",
+                rationale="Promising but unavailable before Methodologist handoff.",
+            ),
+        )
+    ).source
+    assert local_source is not None
+    assert included_web_source is not None
+    assert duplicate_source is not None
+    assert excluded_source is not None
+    assert failed_source is not None
+    assert unresolved_source is not None
+    await kernel.attach_research_dossier_context_pack(
+        dossier.dossier_id,
+        AttachResearchDossierContextPackRequest(
+            actor=researcher_actor,
+            context_pack_id=context_pack.context_pack_id,
+            source_id=local_source.source_id,
+        ),
+    )
+
+    supported_claim = (
+        await kernel.upsert_research_dossier_claim(
+            dossier.dossier_id,
+            UpsertResearchDossierClaimRequest(
+                actor=researcher_actor,
+                claim_key="claim:onboarding-evidence-gates",
+                statement="Team onboarding needs explicit evidence gates before execution.",
+                status="supported",
+                confidence=0.86,
+                source_ids=[local_source.source_id],
+                citation_ids=["S1"],
+                context_pack_ids=[context_pack.context_pack_id],
+            ),
+        )
+    ).claim
+    autonomy_claim = (
+        await kernel.upsert_research_dossier_claim(
+            dossier.dossier_id,
+            UpsertResearchDossierClaimRequest(
+                actor=researcher_actor,
+                claim_key="claim:approval-depth",
+                statement="Approval-heavy onboarding can reduce team autonomy.",
+                status="ambiguous",
+                confidence=0.62,
+                source_ids=[included_web_source.source_id],
+                citation_ids=["S2"],
+                contradicted_by_claim_ids=[supported_claim.claim_id],
+            ),
+        )
+    ).claim
+    concept = (
+        await kernel.upsert_research_dossier_concept(
+            dossier.dossier_id,
+            UpsertResearchDossierConceptRequest(
+                actor=researcher_actor,
+                slug="evidence-gated-onboarding",
+                name="Evidence-gated onboarding",
+                aliases=["Karpathy-style onboarding dossier", "concept graph onboarding"],
+                definition=(
+                    "A navigable concept graph that connects onboarding methods, "
+                    "source citations, approval gaps, and contradictions."
+                ),
+                status="active",
+                confidence=0.88,
+                source_ids=[local_source.source_id, included_web_source.source_id],
+                claim_ids=[supported_claim.claim_id, autonomy_claim.claim_id],
+            ),
+        )
+    ).concept
+    concept_note = (
+        await kernel.upsert_research_dossier_note(
+            dossier.dossier_id,
+            UpsertResearchDossierNoteRequest(
+                actor=researcher_actor,
+                note_kind="concept",
+                status="active",
+                slug="evidence-gated-onboarding",
+                title="Evidence-gated onboarding",
+                summary="Central concept connecting retained sources and synthesis claims.",
+                body="Use S1 for source-grounded gates and S2 for approval-depth caveats.",
+                concept_id=concept.concept_id,
+                citation_ids=["S1", "S2"],
+            ),
+        )
+    ).note
+    contradiction_note = (
+        await kernel.upsert_research_dossier_note(
+            dossier.dossier_id,
+            UpsertResearchDossierNoteRequest(
+                actor=researcher_actor,
+                note_kind="contradiction",
+                status="active",
+                slug="approval-depth-contradiction",
+                title="Approval depth contradiction",
+                summary="S1 favors explicit gates; S2 warns against heavy approvals.",
+                body="Methodologist must preserve the distinction between gates and approvals.",
+                related_note_ids=[concept_note.note_id],
+                citation_ids=["S1", "S2"],
+            ),
+        )
+    ).note
+    gap_note = (
+        await kernel.upsert_research_dossier_note(
+            dossier.dossier_id,
+            UpsertResearchDossierNoteRequest(
+                actor=researcher_actor,
+                note_kind="gap",
+                status="active",
+                slug="regional-dataset-gap",
+                title="Regional dataset gap",
+                summary="Dataset remains unresolved and must be called out before synthesis.",
+                body="Synthesis can proceed only if the regional dataset gap is explicit.",
+                source_id=unresolved_source.source_id,
+            ),
+        )
+    ).note
+    source_note = (
+        await kernel.upsert_research_dossier_note(
+            dossier.dossier_id,
+            UpsertResearchDossierNoteRequest(
+                actor=researcher_actor,
+                note_kind="source",
+                status="active",
+                slug="retained-field-guide-source",
+                title="Retained field guide source summary",
+                summary="S1 source summary.",
+                body="Raw evidence is preserved in the retained dossier library.",
+                source_id=local_source.source_id,
+                citation_ids=["S1"],
+            ),
+        )
+    ).note
+    assert contradiction_note is not None
+    assert gap_note is not None
+    assert source_note is not None
+    await kernel.upsert_research_dossier_link(
+        dossier.dossier_id,
+        UpsertResearchDossierLinkRequest(
+            actor=researcher_actor,
+            source_type="concept",
+            source_ref_id=concept.concept_id,
+            target_type="claim",
+            target_ref_id=supported_claim.claim_id,
+            link_kind="supports",
+            rationale="The concept operationalizes the supported claim.",
+        ),
+    )
+    await kernel.upsert_research_dossier_link(
+        dossier.dossier_id,
+        UpsertResearchDossierLinkRequest(
+            actor=researcher_actor,
+            source_type="claim",
+            source_ref_id=autonomy_claim.claim_id,
+            target_type="claim",
+            target_ref_id=supported_claim.claim_id,
+            link_kind="contradicts",
+            rationale="S2 complicates the approval-gate interpretation in S1.",
+        ),
+    )
+    await kernel.upsert_research_dossier_link(
+        dossier.dossier_id,
+        UpsertResearchDossierLinkRequest(
+            actor=researcher_actor,
+            source_type="source",
+            source_ref_id=local_source.source_id,
+            target_type="note",
+            target_ref_id=source_note.note_id,
+            link_kind="derived_from",
+            rationale="The source summary is derived from the retained library item.",
+        ),
+    )
+    warning = await kernel.submit_research_dossier_health_check(
+        dossier.dossier_id,
+        SubmitResearchDossierHealthCheckRequest(
+            actor=researcher_actor,
+            status="warning",
+            summary="Notebook is useful but still has one explicit unresolved dataset.",
+            unresolved_count=1,
+            findings=[{"kind": "gap", "note_id": str(gap_note.note_id)}],
+        ),
+    )
+    assert warning.checked_by_system_agent_id == researcher.agent_id
+    passed = await kernel.submit_research_dossier_health_check(
+        dossier.dossier_id,
+        SubmitResearchDossierHealthCheckRequest(
+            actor=researcher_actor,
+            status="passed",
+            summary="Notebook is navigable and unresolved items are explicit.",
+            unresolved_count=1,
+            findings=[{"kind": "accepted_gap", "note_id": str(gap_note.note_id)}],
+        ),
+    )
+    sync = await kernel.sync_research_dossier_notebook(
+        dossier.dossier_id,
+        SyncResearchDossierNotebookRequest(
+            actor=researcher_actor,
+            provider_key="xwiki",
+            metadata={"provider": "xwiki", "mode": "compound-test"},
+        ),
+        stats={"pages_synced": 13, "provider_projection": "mocked"},
+    )
+    assert sync.system_agent_id == researcher.agent_id
+
+    graph = await kernel.get_research_dossier_graph(
+        dossier.dossier_id,
+        actor=researcher_actor,
+    )
+    node_statuses = {
+        node["label"]: node["status"]
+        for node in graph.nodes
+        if node["type"] == "source"
+    }
+    assert node_statuses == {
+        "Retained onboarding field guide": "included",
+        "Recent onboarding benchmark": "included",
+        "Mirror of onboarding field guide": "duplicate",
+        "Consumer onboarding paper": "excluded",
+        "Removed onboarding memo": "failed",
+        "Regional onboarding dataset": "unresolved",
+    }
+    assert graph.metadata["knowledge_storage"] is True
+    assert graph.metadata["node_count"] >= 16
+    assert graph.metadata["link_count"] == 3
+    navigation = await kernel.navigate_research_dossier(
+        dossier.dossier_id,
+        NavigateResearchDossierRequest(
+            actor=methodologist_actor,
+            query="approval",
+            max_results=10,
+        ),
+    )
+    assert any(item.concept_id == concept.concept_id for item in navigation.concepts)
+    assert any(item.claim_id == autonomy_claim.claim_id for item in navigation.claims)
+    assert any(item.note_id == contradiction_note.note_id for item in navigation.contradictions)
+    assert any(item.note_id == gap_note.note_id for item in navigation.gaps)
+    focused = await kernel.navigate_research_dossier(
+        dossier.dossier_id,
+        NavigateResearchDossierRequest(
+            actor=methodologist_actor,
+            focus_concept_id=concept.concept_id,
+        ),
+    )
+    assert focused.concepts == [concept]
+    refreshed_notebook = await kernel.get_research_dossier_notebook_detail(
+        dossier.dossier_id,
+        actor=methodologist_actor,
+    )
+    assert refreshed_notebook.latest_health_check is not None
+    assert refreshed_notebook.latest_health_check.check_id == passed.check_id
+    assert refreshed_notebook.notebook.status == "ready"
+
+    ready = await kernel.mark_research_dossier_ready(
+        dossier.dossier_id,
+        MarkResearchDossierReadyRequest(
+            actor=researcher_actor,
+            summary="Research dossier is ready with explicit evidence, contradictions, and gaps.",
+            contradictions=[
+                {
+                    "claims": [
+                        "claim:onboarding-evidence-gates",
+                        "claim:approval-depth",
+                    ],
+                    "notes": [str(contradiction_note.note_id)],
+                    "source_refs": ["S1", "S2"],
+                }
+            ],
+            gaps=[
+                "Regional onboarding dataset remains unresolved; do not overgeneralize."
+            ],
+            metadata={"latest_health_check_id": str(passed.check_id)},
+        ),
+    )
+    assert ready.status == "ready_for_methodologist"
+    methodologist_tasks = await kernel.list_pending_tasks_for_system_agent(
+        methodologist.agent_id
+    )
+    draft_task = next(
+        task
+        for task in methodologist_tasks
+        if task.metadata["task_kind"] == "methodology_blueprint_draft"
+        and task.correlation_id == dossier.dossier_id
+    )
+    assert draft_task.metadata["dossier_summary"] == ready.summary
+    assert draft_task.metadata["dossier_gaps"] == ready.gaps
+    assert draft_task.metadata["dossier_sources"][0]["citation_id"] == "S1"
+    assert {
+        item["status"] for item in draft_task.metadata["dossier_sources"]
+    } == {"included", "duplicate", "excluded", "failed", "unresolved"}
+
+    harness_draft = WorkspaceHarness(
+        summary="Evidence-gated onboarding workspace harness.",
+        methodology=WorkspaceMethodology(
+            ontology="Concepts, claims, source summaries, contradictions, and gaps.",
+            principles=[
+                "Treat MinIO/library evidence as source material.",
+                "Treat the dossier concept graph as knowledge storage.",
+            ],
+        ),
+        methodics=[
+            WorkspaceMethodic(
+                name="Evidence-gated onboarding",
+                goal="Move a team into execution with cited evidence gates.",
+                steps=[
+                    WorkspaceMethodicStep(
+                        instruction="Read the dossier synthesis, contradictions, and gaps.",
+                        expected_artifacts=["cited onboarding brief"],
+                        verification=["brief cites S1 and explains the S2 approval caveat"],
+                    )
+                ],
+                success_criteria=["Human reviewer accepts the cited onboarding brief."],
+            )
+        ],
+        execution_rules=[
+            HarnessExecutionRule(
+                name="No hidden execution",
+                instruction="Do not start Conductor execution without explicit human start.",
+            )
+        ],
+        metadata={
+            "research_dossier_id": str(dossier.dossier_id),
+            "notebook_id": str(refreshed_notebook.notebook.notebook_id),
+        },
+    )
+    submitted = await kernel.submit_methodology_blueprint_draft(
+        detail.versions[0].version_id,
+        SubmitMethodologyBlueprintDraftRequest(
+            actor=methodologist_actor,
+            cited_output=(
+                "# Evidence-gated onboarding\n\n"
+                "Use explicit gates from S1 while preserving the approval-depth caveat from S2."
+            ),
+            harness_draft=harness_draft,
+            metadata={"consumed_via": "navigate+graph"},
+        ),
+    )
+    submitted_version = submitted.versions[0]
+    assert submitted_version.status == "pending_review"
+    assert submitted_version.submitted_by_system_agent_id == methodologist.agent_id
+    assert submitted_version.metadata["consumed_via"] == "navigate+graph"
+    assert submitted.dossier.status == "completed"
+    with pytest.raises(ValueError, match="Only approved"):
+        target_workspace = Workspace(
+            workspace_id=uuid4(),
+            organization_id=organization.organization_id,
+            project_id=uuid4(),
+            name="Compound target workspace",
+            created_by=actor.participant_id,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        repository._workspaces[target_workspace.workspace_id] = target_workspace
+        repository._participants[(target_workspace.workspace_id, actor.participant_id)] = (
+            ParticipantProfile(
+                participant_id=actor.participant_id,
+                workspace_id=target_workspace.workspace_id,
+                participant_type="user",
+                user_id=actor.user_id,
+                display_name=actor.display_name,
+                roles=["admin"],
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        await kernel.apply_methodology_blueprint(
+            detail.blueprint.blueprint_id,
+            ApplyMethodologyBlueprintRequest(
+                actor=actor,
+                workspace_id=target_workspace.workspace_id,
+                version_id=submitted_version.version_id,
+            ),
+        )
     assert repository._methodic_executions == {}
 
 

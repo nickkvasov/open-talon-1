@@ -346,6 +346,8 @@ System Plugin capabilities are rendered and executed as external MCP-backed capa
 
 The managed `web_search`, `library`, and `retriever` System Plugins are seeded globally. Start web search backing services with `./open-talon start --web-search`, then sync capabilities from the admin console or `POST /v1/system-plugins/{plugin_id}/sync`. The launcher starts SearXNG as the optional Docker Compose `searxng` container under the `web-search` profile, waits for it to become reachable, and then starts the local `web-search-mcp` bridge process. It uses SearXNG for search and Crawl4AI for clean Markdown extraction. Parsed pages are returned by default; asset-candidate output is guarded by explicit plugin attachment metadata and `workspace.assets.publish`. Library and Retriever use the gateway-mounted MCP adapter as managed plugin backends: `library.*` tools manage scoped libraries and items, while `retriever.*` tools explicitly index and search selected library content.
 
+Concept dossiers follow a separate storage taxonomy. MinIO/object storage is data storage for immutable bytes and snapshots. Libraries plus Retriever indexes are information storage for retained, indexed, and vectorized pieces. Research dossiers are knowledge storage for concepts, claims, contradictions, gaps, methods, synthesis, provenance, and navigation. Start optional XWiki-backed dossier notebooks with `./open-talon start --xwiki`; the launcher enables notebook sync, local `superadmin` / `system` XWiki credentials unless overridden, and blueprint-create projection for the local gateway. Open Talon remains canonical for dossier lifecycle, IAM, audit, provenance, graph metadata, and sync state while XWiki stores the navigable concept repository projection.
+
 This means a tool is defined once at the platform or organization layer, then added to any compatible workspace that wants to advertise it to attached agents.
 
 Generated tools follow the same model through `Tinker`:
@@ -616,6 +618,8 @@ Local services:
 - `retriever-worker`: local worker that extracts and indexes retrieval sources stored as immutable file assets
 - `web-search-mcp`: optional local System Plugin MCP service started with `./open-talon start --web-search`
 - `searxng`: optional Docker Compose container used by the managed `web_search` System Plugin
+- `xwiki`: optional Docker Compose container for XWiki-backed concept dossier notebooks when started with `./open-talon start --xwiki`
+- `xwiki-postgres`: optional dedicated Postgres service for the XWiki container
 - `postgres`: application database with `pgvector` enabled
 - `pgadmin`: pgAdmin 4 web UI for inspecting and querying the local Postgres instance
 - `kafka`: event bus for chat, collaboration, and agent-runtime traffic
@@ -657,6 +661,7 @@ Common local endpoints:
 - `minio console`: [http://localhost:9091](http://localhost:9091)
 - `forgejo`: [http://localhost:3001](http://localhost:3001)
 - `memgraph HTTP` when started with `./open-talon start --memgraph`: [http://127.0.0.1:7444](http://127.0.0.1:7444)
+- `xwiki` when started with `./open-talon start --xwiki`: [http://127.0.0.1:8083](http://127.0.0.1:8083)
 
 Ports and protocols:
 
@@ -667,6 +672,7 @@ Ports and protocols:
 - `langfuse-worker`: `localhost:3030`
 - `forgejo ssh`: `localhost:2222`
 - `memgraph bolt` when started with `./open-talon start --memgraph`: `localhost:7688`
+- `xwiki`: `localhost:8083`
 - `hyperdx OTLP gRPC` when started with `--profile hyperdx`: `localhost:4317`
 - `hyperdx OTLP HTTP` when started with `--profile hyperdx`: `localhost:4318`
 

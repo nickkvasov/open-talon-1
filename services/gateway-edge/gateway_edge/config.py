@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Literal
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from open_talon_contracts.local_env import load_repo_local_env
@@ -85,6 +86,37 @@ class Settings(BaseSettings):
     mcp_session_ttl_seconds: int = 3_600
     # Falls back to cors_origins when left empty.
     mcp_allowed_origins: str = ""
+
+    # ── Dossier notebook providers ──────────────────────────────────────────
+    xwiki_sync_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "XWIKI_SYNC_ENABLED",
+            "OPEN_TALON_XWIKI_SYNC_ENABLED",
+        ),
+    )
+    xwiki_auto_sync_on_blueprint_create: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "XWIKI_AUTO_SYNC_ON_BLUEPRINT_CREATE",
+            "OPEN_TALON_XWIKI_AUTO_SYNC_ON_BLUEPRINT_CREATE",
+        ),
+    )
+    xwiki_base_url: str = Field(
+        default="http://127.0.0.1:8083",
+        validation_alias=AliasChoices("XWIKI_BASE_URL", "OPEN_TALON_XWIKI_BASE_URL"),
+    )
+    xwiki_wiki_name: str = Field(
+        default="xwiki",
+        validation_alias=AliasChoices("XWIKI_WIKI_NAME", "OPEN_TALON_XWIKI_WIKI_NAME"),
+    )
+    xwiki_request_timeout_seconds: float = Field(
+        default=15.0,
+        validation_alias=AliasChoices(
+            "XWIKI_REQUEST_TIMEOUT_SECONDS",
+            "OPEN_TALON_XWIKI_REQUEST_TIMEOUT_SECONDS",
+        ),
+    )
 
     # ── Operational agent bootstrap ──────────────────────────────────────────
     operational_agents_bootstrap_enabled: bool = True

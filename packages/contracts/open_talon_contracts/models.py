@@ -128,6 +128,57 @@ ResearchDossierSourceStatus = Literal[
     "rejected",
     "unresolved",
 ]
+DossierNotebookProviderKind = Literal["native", "xwiki"]
+DossierNotebookStatus = Literal["created", "syncing", "ready", "degraded", "failed"]
+DossierNoteKind = Literal[
+    "home",
+    "source",
+    "concept",
+    "entity",
+    "method",
+    "question",
+    "contradiction",
+    "gap",
+    "synthesis",
+    "other",
+]
+DossierNoteStatus = Literal["draft", "active", "stale", "archived", "failed"]
+DossierConceptStatus = Literal["candidate", "active", "merged", "deprecated", "unresolved"]
+DossierClaimStatus = Literal[
+    "draft",
+    "supported",
+    "contradicted",
+    "ambiguous",
+    "rejected",
+    "unresolved",
+]
+DossierLinkKind = Literal[
+    "supports",
+    "contradicts",
+    "requires",
+    "generalizes",
+    "specializes",
+    "example_of",
+    "same_as",
+    "derived_from",
+    "mentions",
+    "answers",
+    "questions",
+    "related",
+]
+DossierGraphNodeType = Literal["note", "concept", "claim", "source"]
+DossierExternalRefKind = Literal[
+    "notebook",
+    "space",
+    "page",
+    "object",
+    "attachment",
+    "search_index",
+    "other",
+]
+DossierSyncStatus = Literal["queued", "running", "completed", "failed"]
+DossierSyncDirection = Literal["push", "pull", "bidirectional", "health"]
+DossierHealthStatus = Literal["passed", "warning", "failed"]
 AuditScopeType = Literal["global", "organization", "workspace", "thread"]
 AuditActorType = Literal["user", "agent", "system", "api_key", "unknown"]
 AuditOutcome = Literal["success", "failure", "denied", "error"]
@@ -1760,6 +1811,216 @@ class ResearchDossierEvent(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ResearchDossierNotebook(BaseModel):
+    notebook_id: UUID
+    dossier_id: UUID
+    organization_id: UUID
+    provider_kind: DossierNotebookProviderKind = "xwiki"
+    provider_key: str = "xwiki"
+    status: DossierNotebookStatus = "created"
+    home_note_id: UUID | None = None
+    external_space_ref: str | None = None
+    external_url: str | None = None
+    last_sync_at: datetime | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchDossierNote(BaseModel):
+    note_id: UUID
+    notebook_id: UUID
+    dossier_id: UUID
+    organization_id: UUID
+    note_kind: DossierNoteKind = "other"
+    status: DossierNoteStatus = "draft"
+    slug: str
+    title: str
+    body: str | None = None
+    summary: str | None = None
+    source_id: UUID | None = None
+    concept_id: UUID | None = None
+    citation_ids: list[str] = Field(default_factory=list)
+    related_note_ids: list[UUID] = Field(default_factory=list)
+    external_page_ref: str | None = None
+    external_url: str | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchDossierConcept(BaseModel):
+    concept_id: UUID
+    notebook_id: UUID
+    dossier_id: UUID
+    organization_id: UUID
+    slug: str
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    definition: str | None = None
+    status: DossierConceptStatus = "candidate"
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    source_ids: list[UUID] = Field(default_factory=list)
+    claim_ids: list[UUID] = Field(default_factory=list)
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchDossierClaim(BaseModel):
+    claim_id: UUID
+    notebook_id: UUID
+    dossier_id: UUID
+    organization_id: UUID
+    claim_key: str | None = None
+    statement: str
+    status: DossierClaimStatus = "draft"
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    provenance: str = "source"
+    source_ids: list[UUID] = Field(default_factory=list)
+    citation_ids: list[str] = Field(default_factory=list)
+    context_pack_ids: list[UUID] = Field(default_factory=list)
+    contradicted_by_claim_ids: list[UUID] = Field(default_factory=list)
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchDossierLink(BaseModel):
+    link_id: UUID
+    notebook_id: UUID
+    dossier_id: UUID
+    organization_id: UUID
+    source_type: DossierGraphNodeType
+    source_ref_id: UUID
+    target_type: DossierGraphNodeType
+    target_ref_id: UUID
+    link_kind: DossierLinkKind = "related"
+    rationale: str | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchDossierProviderBinding(BaseModel):
+    binding_id: UUID
+    notebook_id: UUID
+    dossier_id: UUID
+    organization_id: UUID
+    provider_kind: DossierNotebookProviderKind = "xwiki"
+    provider_key: str = "xwiki"
+    status: DossierNotebookStatus = "created"
+    external_space_ref: str | None = None
+    external_base_url: str | None = None
+    auth_kind: str = "basic"
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_config: dict[str, Any] = Field(default_factory=dict)
+    last_sync_at: datetime | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_by: UUID
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchDossierProviderExternalRef(BaseModel):
+    ref_id: UUID
+    binding_id: UUID
+    notebook_id: UUID
+    dossier_id: UUID
+    organization_id: UUID
+    open_talon_resource_type: str
+    open_talon_resource_id: UUID
+    external_kind: DossierExternalRefKind = "other"
+    external_id: str
+    external_url: str | None = None
+    external_parent_id: str | None = None
+    sync_hash: str | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchDossierSyncRun(BaseModel):
+    sync_run_id: UUID
+    binding_id: UUID | None = None
+    notebook_id: UUID
+    dossier_id: UUID
+    organization_id: UUID
+    status: DossierSyncStatus = "queued"
+    direction: DossierSyncDirection = "push"
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error: str | None = None
+    stats: dict[str, Any] = Field(default_factory=dict)
+    actor_participant_id: UUID | None = None
+    system_agent_id: UUID | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchDossierHealthCheck(BaseModel):
+    check_id: UUID
+    notebook_id: UUID
+    dossier_id: UUID
+    organization_id: UUID
+    status: DossierHealthStatus = "warning"
+    summary: str | None = None
+    findings: list[dict[str, Any]] = Field(default_factory=list)
+    unresolved_count: int = 0
+    stale_count: int = 0
+    broken_link_count: int = 0
+    checked_by_participant_id: UUID | None = None
+    checked_by_system_agent_id: UUID | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchDossierNotebookDetail(BaseModel):
+    notebook: ResearchDossierNotebook
+    provider_bindings: list[ResearchDossierProviderBinding] = Field(default_factory=list)
+    notes: list[ResearchDossierNote] = Field(default_factory=list)
+    concepts: list[ResearchDossierConcept] = Field(default_factory=list)
+    claims: list[ResearchDossierClaim] = Field(default_factory=list)
+    links: list[ResearchDossierLink] = Field(default_factory=list)
+    external_refs: list[ResearchDossierProviderExternalRef] = Field(default_factory=list)
+    latest_health_check: ResearchDossierHealthCheck | None = None
+
+
+class ResearchDossierGraph(BaseModel):
+    dossier_id: UUID
+    notebook_id: UUID
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    links: list[ResearchDossierLink] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchDossierNavigationResult(BaseModel):
+    dossier_id: UUID
+    notebook_id: UUID
+    query: str | None = None
+    entry_notes: list[ResearchDossierNote] = Field(default_factory=list)
+    concepts: list[ResearchDossierConcept] = Field(default_factory=list)
+    claims: list[ResearchDossierClaim] = Field(default_factory=list)
+    links: list[ResearchDossierLink] = Field(default_factory=list)
+    gaps: list[ResearchDossierNote] = Field(default_factory=list)
+    contradictions: list[ResearchDossierNote] = Field(default_factory=list)
+    recommended_next: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class MethodologyBlueprintDetail(BaseModel):
     blueprint: MethodologyBlueprint
     versions: list[MethodologyBlueprintVersion] = Field(default_factory=list)
@@ -3079,6 +3340,94 @@ class MarkResearchDossierReadyRequest(BaseModel):
     summary: str | None = None
     contradictions: list[dict[str, Any]] = Field(default_factory=list)
     gaps: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpsertResearchDossierNoteRequest(BaseModel):
+    actor: ParticipantInput
+    note_id: UUID | None = None
+    note_kind: DossierNoteKind = "other"
+    status: DossierNoteStatus = "draft"
+    slug: str
+    title: str
+    body: str | None = None
+    summary: str | None = None
+    source_id: UUID | None = None
+    concept_id: UUID | None = None
+    citation_ids: list[str] = Field(default_factory=list)
+    related_note_ids: list[UUID] = Field(default_factory=list)
+    external_page_ref: str | None = None
+    external_url: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpsertResearchDossierConceptRequest(BaseModel):
+    actor: ParticipantInput
+    concept_id: UUID | None = None
+    slug: str
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    definition: str | None = None
+    status: DossierConceptStatus = "candidate"
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    source_ids: list[UUID] = Field(default_factory=list)
+    claim_ids: list[UUID] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpsertResearchDossierClaimRequest(BaseModel):
+    actor: ParticipantInput
+    claim_id: UUID | None = None
+    claim_key: str | None = None
+    statement: str
+    status: DossierClaimStatus = "draft"
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    provenance: str = "source"
+    source_ids: list[UUID] = Field(default_factory=list)
+    citation_ids: list[str] = Field(default_factory=list)
+    context_pack_ids: list[UUID] = Field(default_factory=list)
+    contradicted_by_claim_ids: list[UUID] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpsertResearchDossierLinkRequest(BaseModel):
+    actor: ParticipantInput
+    link_id: UUID | None = None
+    source_type: DossierGraphNodeType
+    source_ref_id: UUID
+    target_type: DossierGraphNodeType
+    target_ref_id: UUID
+    link_kind: DossierLinkKind = "related"
+    rationale: str | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class NavigateResearchDossierRequest(BaseModel):
+    actor: ParticipantInput
+    query: str | None = None
+    focus_note_id: UUID | None = None
+    focus_concept_id: UUID | None = None
+    include_sources: bool = True
+    max_results: int = Field(default=12, ge=1, le=100)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SyncResearchDossierNotebookRequest(BaseModel):
+    actor: ParticipantInput
+    provider_key: str | None = None
+    force: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SubmitResearchDossierHealthCheckRequest(BaseModel):
+    actor: ParticipantInput
+    status: DossierHealthStatus = "warning"
+    summary: str | None = None
+    findings: list[dict[str, Any]] = Field(default_factory=list)
+    unresolved_count: int = 0
+    stale_count: int = 0
+    broken_link_count: int = 0
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

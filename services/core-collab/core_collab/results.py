@@ -37,7 +37,15 @@ from .contracts import (
     RetrievalSource,
     RetrievalSourceVersion,
     ResearchDossier,
+    ResearchDossierClaim,
+    ResearchDossierConcept,
+    ResearchDossierHealthCheck,
+    ResearchDossierLink,
+    ResearchDossierNote,
+    ResearchDossierNotebook,
+    ResearchDossierNotebookDetail,
     ResearchDossierSource,
+    ResearchDossierSyncRun,
     ResolvedAssetBinding,
     RoleDefinition,
     Run,
@@ -208,6 +216,14 @@ class MethodologyBlueprintCommandResult(CommandResult):
     detail: MethodologyBlueprintDetail | None = None
     dossier: ResearchDossier | None = None
     source: ResearchDossierSource | None = None
+    notebook: ResearchDossierNotebook | None = None
+    notebook_detail: ResearchDossierNotebookDetail | None = None
+    note: ResearchDossierNote | None = None
+    concept: ResearchDossierConcept | None = None
+    claim: ResearchDossierClaim | None = None
+    link: ResearchDossierLink | None = None
+    sync_run: ResearchDossierSyncRun | None = None
+    health_check: ResearchDossierHealthCheck | None = None
 
 
 @dataclass

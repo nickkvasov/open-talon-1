@@ -121,6 +121,7 @@ from gateway_edge.models import (
     MethodologyBlueprint,
     MethodologyBlueprintDetail,
     MethodologyBlueprintVersion,
+    NavigateResearchDossierRequest,
     MethodicExecution,
     MethodicExecutionDetail,
     MethodicResourceRequest,
@@ -143,8 +144,17 @@ from gateway_edge.models import (
     RetrievalSource,
     RetrievalSourceVersion,
     ResearchDossier,
+    ResearchDossierClaim,
+    ResearchDossierConcept,
     ResearchDossierEvent,
+    ResearchDossierGraph,
+    ResearchDossierHealthCheck,
+    ResearchDossierLink,
+    ResearchDossierNavigationResult,
+    ResearchDossierNote,
+    ResearchDossierNotebookDetail,
     ResearchDossierSource,
+    ResearchDossierSyncRun,
     RunRetrievalSearchRequest,
     PublishAgentBundleFromGitRequest,
     ResolvedAssetBinding,
@@ -179,10 +189,16 @@ from gateway_edge.models import (
     UpdateProjectRequest,
     UpdateResearchDossierSourceRequest,
     UpsertProjectAccessRequest,
+    UpsertResearchDossierClaimRequest,
+    UpsertResearchDossierConceptRequest,
+    UpsertResearchDossierLinkRequest,
+    UpsertResearchDossierNoteRequest,
     ReviewMethodologyBlueprintVersionRequest,
     ReviewToolGenerationRevisionRequest,
     ReviewMethodicResourceRequest,
     SubmitMethodologyBlueprintDraftRequest,
+    SubmitResearchDossierHealthCheckRequest,
+    SyncResearchDossierNotebookRequest,
     RemoveProjectAccessRequest,
     UpdateWorkspaceToolRequest,
     UpdateWorkspaceMcpServerRequest,
@@ -216,6 +232,7 @@ from gateway_edge.services.agent_bundles import (
 )
 from gateway_edge.services.git_publish import GitPublishService
 from gateway_edge.services.git_worktrees import LocalManagedWorktreeStore
+from gateway_edge.services.dossier_notebook_provider import XWikiDossierNotebookProvider
 from gateway_edge.services.object_storage import MinioObjectStorage
 from gateway_edge.services.events import event_service
 from gateway_edge.services.session import (
@@ -2275,6 +2292,22 @@ class CollaborationService:
             payload,
         )
         assert result.detail is not None
+        if settings.xwiki_auto_sync_on_blueprint_create:
+            try:
+                await self.sync_research_dossier_notebook(
+                    result.detail.dossier.dossier_id,
+                    SyncResearchDossierNotebookRequest(
+                        actor=payload.actor,
+                        provider_key="xwiki",
+                        force=True,
+                        metadata={"trigger": "methodology_blueprint_create"},
+                    ),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to create XWiki dossier projection for %s",
+                    result.detail.dossier.dossier_id,
+                )
         return result.detail
 
     async def list_methodology_blueprints(
@@ -2334,6 +2367,157 @@ class CollaborationService:
             dossier_id,
             actor=actor,
             status=status,
+        )
+
+    async def get_research_dossier_notebook_detail(
+        self,
+        dossier_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+    ) -> ResearchDossierNotebookDetail:
+        return await self._require_kernel().get_research_dossier_notebook_detail(
+            dossier_id,
+            actor=actor,
+        )
+
+    async def get_research_dossier_graph(
+        self,
+        dossier_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+    ) -> ResearchDossierGraph:
+        return await self._require_kernel().get_research_dossier_graph(
+            dossier_id,
+            actor=actor,
+        )
+
+    async def navigate_research_dossier(
+        self,
+        dossier_id: UUID,
+        payload: NavigateResearchDossierRequest,
+    ) -> ResearchDossierNavigationResult:
+        return await self._require_kernel().navigate_research_dossier(
+            dossier_id,
+            payload,
+        )
+
+    async def upsert_research_dossier_note(
+        self,
+        dossier_id: UUID,
+        payload: UpsertResearchDossierNoteRequest,
+    ) -> ResearchDossierNote:
+        result = await self._require_kernel().upsert_research_dossier_note(
+            dossier_id,
+            payload,
+        )
+        assert result.note is not None
+        return result.note
+
+    async def upsert_research_dossier_concept(
+        self,
+        dossier_id: UUID,
+        payload: UpsertResearchDossierConceptRequest,
+    ) -> ResearchDossierConcept:
+        result = await self._require_kernel().upsert_research_dossier_concept(
+            dossier_id,
+            payload,
+        )
+        assert result.concept is not None
+        return result.concept
+
+    async def upsert_research_dossier_claim(
+        self,
+        dossier_id: UUID,
+        payload: UpsertResearchDossierClaimRequest,
+    ) -> ResearchDossierClaim:
+        result = await self._require_kernel().upsert_research_dossier_claim(
+            dossier_id,
+            payload,
+        )
+        assert result.claim is not None
+        return result.claim
+
+    async def upsert_research_dossier_link(
+        self,
+        dossier_id: UUID,
+        payload: UpsertResearchDossierLinkRequest,
+    ) -> ResearchDossierLink:
+        result = await self._require_kernel().upsert_research_dossier_link(
+            dossier_id,
+            payload,
+        )
+        assert result.link is not None
+        return result.link
+
+    async def sync_research_dossier_notebook(
+        self,
+        dossier_id: UUID,
+        payload: SyncResearchDossierNotebookRequest,
+    ) -> ResearchDossierSyncRun:
+        kernel = self._require_kernel()
+        detail = await kernel.get_research_dossier_notebook_detail(
+            dossier_id,
+            actor=payload.actor,
+        )
+        bindings = [
+            binding
+            for binding in detail.provider_bindings
+            if payload.provider_key is None or binding.provider_key == payload.provider_key
+        ]
+        binding = bindings[0] if bindings else None
+        if payload.provider_key is not None and binding is None:
+            raise KeyError(f"Dossier notebook provider {payload.provider_key!r} not found")
+        if binding is None:
+            return await kernel.sync_research_dossier_notebook(
+                dossier_id,
+                payload,
+                stats={
+                    "provider_projection": "skipped",
+                    "reason": "no_provider_binding",
+                },
+            )
+        if binding.provider_kind != "xwiki":
+            return await kernel.sync_research_dossier_notebook(
+                dossier_id,
+                payload,
+                stats={
+                    "provider_projection": "skipped",
+                    "reason": "unsupported_provider_kind",
+                    "provider_kind": binding.provider_kind,
+                    "provider_key": binding.provider_key,
+                },
+            )
+        if not settings.xwiki_sync_enabled and not payload.force:
+            return await kernel.sync_research_dossier_notebook(
+                dossier_id,
+                payload,
+                stats={
+                    "provider_projection": "skipped",
+                    "reason": "xwiki_sync_disabled",
+                    "provider_kind": binding.provider_kind,
+                    "provider_key": binding.provider_key,
+                },
+            )
+        provider = XWikiDossierNotebookProvider(
+            timeout_seconds=settings.xwiki_request_timeout_seconds,
+        )
+        sync_result = await provider.sync(detail=detail, binding=binding)
+        return await kernel.sync_research_dossier_notebook(
+            dossier_id,
+            payload,
+            status=sync_result.status,
+            error=sync_result.error,
+            stats=sync_result.stats,
+        )
+
+    async def submit_research_dossier_health_check(
+        self,
+        dossier_id: UUID,
+        payload: SubmitResearchDossierHealthCheckRequest,
+    ) -> ResearchDossierHealthCheck:
+        return await self._require_kernel().submit_research_dossier_health_check(
+            dossier_id,
+            payload,
         )
 
     async def create_research_dossier_source(

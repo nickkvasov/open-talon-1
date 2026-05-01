@@ -182,6 +182,39 @@ def test_researcher_seed_migration_declares_agent_role_and_dossier_mcp() -> None
     assert "methodology.blueprints.submit_draft" in sql
 
 
+def test_xwiki_dossier_notebook_migration_declares_knowledge_tables() -> None:
+    sql = (
+        MIGRATIONS_DIR / "20260501123814_add_xwiki_backed_research_dossier_notebooks.sql"
+    ).read_text(encoding="utf-8")
+
+    for table_name in (
+        "research_dossier_notebooks",
+        "research_dossier_notes",
+        "research_dossier_concepts",
+        "research_dossier_claims",
+        "research_dossier_links",
+        "research_dossier_provider_bindings",
+        "research_dossier_provider_external_refs",
+        "research_dossier_sync_runs",
+        "research_dossier_health_checks",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table_name}" in sql
+    assert "provider_kind IN ('native', 'xwiki')" in sql
+    assert "source_type IN ('note', 'concept', 'claim', 'source')" in sql
+
+
+def test_xwiki_dossier_notebook_seed_migration_declares_mcp_allowlists() -> None:
+    sql = (
+        MIGRATIONS_DIR / "20260501125656_seed_xwiki_dossier_notebook_mcp.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "methodology.dossiers.notebook.get" in sql
+    assert "methodology.dossiers.notes.upsert" in sql
+    assert "methodology.dossiers.concepts.upsert" in sql
+    assert "methodology.dossiers.navigate" in sql
+    assert "methodology.dossiers.health.submit" in sql
+
+
 def test_conductor_control_plane_migration_declares_human_gates() -> None:
     sql = (
         MIGRATIONS_DIR / "20260427200100_add_conductor_control_plane_binding.sql"

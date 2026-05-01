@@ -10,17 +10,20 @@
 | Scope | global |
 | Role | `methodology extraction and workspace design agent` |
 | Endpoint | `local-ollama` through provider `ollama` |
-| Primary inputs | completed research dossiers, cited retrieval evidence, source material, target goal, visible workspace context |
+| Primary inputs | completed research dossiers, dossier notebook navigation, cited retrieval evidence, source material, target goal, visible workspace context |
 | Primary outputs | methodology basis, methodics, methods/tools/actors, workspace template draft |
 
 ## Idea
 
 Methodologist turns completed research dossiers or narrow-domain source
-material into an Open Talon workspace operating template. It extracts
-methodology basis and methodics from cited evidence, distinguishes
-source-backed methods from inferred implementation ideas, and drafts workspace
-structures that can later be materialized into projects, workspaces,
-participants, tools, retrieval corpora, artifacts, and execution rules.
+material into an Open Talon workspace operating template. When a dossier is
+supplied, Methodologist navigates its concept notebook first: source summaries,
+concept pages, claims, typed links, contradictions, gaps, methods, and synthesis
+pages. It extracts methodology basis and methodics from cited evidence,
+distinguishes source-backed methods from inferred implementation ideas, and
+drafts workspace structures that can later be materialized into projects,
+workspaces, participants, tools, retrieval corpora, artifacts, and execution
+rules.
 
 Methodologist does not perform open-ended research triage and does not execute
 the methodics. Researcher owns dossier discovery and contradiction mapping;
@@ -31,8 +34,9 @@ start call.
 
 Methodologist seeds an explicit `AgentHarness`:
 
-- start from the user's target goal and cited source corpus
+- start from the user's target goal and the completed dossier notebook or cited source corpus
 - do not treat general knowledge as source evidence
+- use dossier source records, concept pages, claims, links, contradictions, gaps, and context packs as the evidence boundary when a dossier is supplied
 - separate methodology basis, methodics, methods, tools, actors, artifacts, and workspace template decisions
 - preserve citations for source-grounded claims
 - mark inferred or ideated tools explicitly

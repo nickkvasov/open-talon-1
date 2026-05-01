@@ -103,6 +103,7 @@ from gateway_edge.models import (
     MethodicExecution,
     MethodicExecutionDetail,
     MethodicResourceRequest,
+    NavigateResearchDossierRequest,
     McpPromptDefinition,
     McpResourceDefinition,
     McpServerDefinition,
@@ -138,7 +139,16 @@ from gateway_edge.models import (
     RetrievalSearchResponse,
     RetrievalSource,
     ResearchDossier,
+    ResearchDossierClaim,
+    ResearchDossierConcept,
+    ResearchDossierGraph,
+    ResearchDossierHealthCheck,
+    ResearchDossierLink,
+    ResearchDossierNavigationResult,
+    ResearchDossierNote,
+    ResearchDossierNotebookDetail,
     ResearchDossierSource,
+    ResearchDossierSyncRun,
     ResolvedAssetBinding,
     RoleDefinition,
     RunRetrievalSearchRequest,
@@ -169,10 +179,16 @@ from gateway_edge.models import (
     UpdateProjectRequest,
     UpdateResearchDossierSourceRequest,
     UpsertProjectAccessRequest,
+    UpsertResearchDossierClaimRequest,
+    UpsertResearchDossierConceptRequest,
+    UpsertResearchDossierLinkRequest,
+    UpsertResearchDossierNoteRequest,
     ReviewMethodologyBlueprintVersionRequest,
     ReviewToolGenerationRevisionRequest,
     ReviewMethodicResourceRequest,
     SubmitMethodologyBlueprintDraftRequest,
+    SubmitResearchDossierHealthCheckRequest,
+    SyncResearchDossierNotebookRequest,
     EvaluateMethodicStepRequest,
     RemoveProjectAccessRequest,
     UpdateWorkspaceToolRequest,
@@ -1628,6 +1644,150 @@ async def list_research_dossier_sources(
             dossier_id,
             actor=_request_actor_if_oidc(request),
             status=status,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/methodology/dossiers/{dossier_id}/notebook",
+    response_model=ResearchDossierNotebookDetail,
+    summary="Get a research dossier concept notebook",
+)
+async def get_research_dossier_notebook(
+    request: Request,
+    organization_id: UUID,
+    dossier_id: UUID,
+) -> ResearchDossierNotebookDetail:
+    await _require_identity_permission(
+        request,
+        permission="methodology.read",
+        organization_id=organization_id,
+    )
+    try:
+        dossier = await collab_svc.collaboration_service.get_research_dossier(
+            dossier_id,
+            actor=_request_actor_if_oidc(request),
+        )
+        _require_resource_in_organization(
+            resource_name="Research dossier",
+            resource_id=dossier_id,
+            organization_id=organization_id,
+            resource_organization_id=dossier.organization_id,
+        )
+        return await collab_svc.collaboration_service.get_research_dossier_notebook_detail(
+            dossier_id,
+            actor=_request_actor_if_oidc(request),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/methodology/dossiers/{dossier_id}/graph",
+    response_model=ResearchDossierGraph,
+    summary="Get a research dossier concept graph",
+)
+async def get_research_dossier_graph(
+    request: Request,
+    organization_id: UUID,
+    dossier_id: UUID,
+) -> ResearchDossierGraph:
+    await _require_identity_permission(
+        request,
+        permission="methodology.read",
+        organization_id=organization_id,
+    )
+    try:
+        dossier = await collab_svc.collaboration_service.get_research_dossier(
+            dossier_id,
+            actor=_request_actor_if_oidc(request),
+        )
+        _require_resource_in_organization(
+            resource_name="Research dossier",
+            resource_id=dossier_id,
+            organization_id=organization_id,
+            resource_organization_id=dossier.organization_id,
+        )
+        return await collab_svc.collaboration_service.get_research_dossier_graph(
+            dossier_id,
+            actor=_request_actor_if_oidc(request),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/methodology/dossiers/{dossier_id}/navigate",
+    response_model=ResearchDossierNavigationResult,
+    summary="Navigate a research dossier concept notebook",
+)
+async def navigate_research_dossier(
+    request: Request,
+    organization_id: UUID,
+    dossier_id: UUID,
+    payload: NavigateResearchDossierRequest,
+) -> ResearchDossierNavigationResult:
+    await _require_identity_permission(
+        request,
+        permission="methodology.read",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        dossier = await collab_svc.collaboration_service.get_research_dossier(
+            dossier_id,
+            actor=payload.actor,
+        )
+        _require_resource_in_organization(
+            resource_name="Research dossier",
+            resource_id=dossier_id,
+            organization_id=organization_id,
+            resource_organization_id=dossier.organization_id,
+        )
+        return await collab_svc.collaboration_service.navigate_research_dossier(
+            dossier_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sync",
+    response_model=ResearchDossierSyncRun,
+    summary="Sync a research dossier notebook provider projection",
+)
+async def sync_research_dossier_notebook(
+    request: Request,
+    organization_id: UUID,
+    dossier_id: UUID,
+    payload: SyncResearchDossierNotebookRequest,
+) -> ResearchDossierSyncRun:
+    await _require_identity_permission(
+        request,
+        permission="methodology.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        dossier = await collab_svc.collaboration_service.get_research_dossier(
+            dossier_id,
+            actor=payload.actor,
+        )
+        _require_resource_in_organization(
+            resource_name="Research dossier",
+            resource_id=dossier_id,
+            organization_id=organization_id,
+            resource_organization_id=dossier.organization_id,
+        )
+        return await collab_svc.collaboration_service.sync_research_dossier_notebook(
+            dossier_id,
+            payload,
         )
     except Exception as exc:
         raise _http_error(exc) from exc

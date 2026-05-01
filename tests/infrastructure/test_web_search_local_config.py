@@ -35,11 +35,11 @@ def test_web_search_local_config_uses_optional_searxng_container():
     assert "- json" in settings
     assert "limiter: false" in settings
 
-    assert "./open-talon start [--memgraph] [--web-search]" in launcher
+    assert "./open-talon start [--memgraph] [--web-search] [--xwiki]" in launcher
     assert "--web-search)" in launcher
     assert "enable_web_search=1" in launcher
     assert "services+=(searxng)" in launcher
     assert "searxng_ready()" in launcher
     assert "OPEN_TALON_SEARXNG_STARTUP_WAIT_SECONDS" in launcher
     assert '"web_search_mcp.main" \\' in launcher
-    assert "docker compose --profile mem0-graph --profile web-search down" in launcher
+    assert "docker compose --profile mem0-graph --profile web-search --profile xwiki down" in launcher

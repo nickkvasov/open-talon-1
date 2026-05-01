@@ -86,8 +86,20 @@ from .contracts import (
     RetrievalSource,
     RetrievalSourceVersion,
     ResearchDossier,
+    ResearchDossierClaim,
+    ResearchDossierConcept,
     ResearchDossierEvent,
+    ResearchDossierGraph,
+    ResearchDossierHealthCheck,
+    ResearchDossierLink,
+    ResearchDossierNavigationResult,
+    ResearchDossierNote,
+    ResearchDossierNotebook,
+    ResearchDossierNotebookDetail,
+    ResearchDossierProviderBinding,
+    ResearchDossierProviderExternalRef,
     ResearchDossierSource,
+    ResearchDossierSyncRun,
     ResolvedAssetBinding,
     Run,
     RunStep,
@@ -5749,6 +5761,401 @@ class CollaborationRepository:
             self._json_dumps(event.metadata),
         )
 
+    async def upsert_research_dossier_notebook(
+        self,
+        conn: asyncpg.Connection,
+        notebook: ResearchDossierNotebook,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO research_dossier_notebooks (
+                notebook_id, dossier_id, organization_id, provider_kind, provider_key,
+                status, home_note_id, external_space_ref, external_url, last_sync_at,
+                created_by, created_at, updated_by, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            ON CONFLICT (notebook_id) DO UPDATE
+                SET provider_kind = EXCLUDED.provider_kind,
+                    provider_key = EXCLUDED.provider_key,
+                    status = EXCLUDED.status,
+                    home_note_id = EXCLUDED.home_note_id,
+                    external_space_ref = EXCLUDED.external_space_ref,
+                    external_url = EXCLUDED.external_url,
+                    last_sync_at = EXCLUDED.last_sync_at,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            notebook.notebook_id,
+            notebook.dossier_id,
+            notebook.organization_id,
+            notebook.provider_kind,
+            notebook.provider_key,
+            notebook.status,
+            notebook.home_note_id,
+            notebook.external_space_ref,
+            notebook.external_url,
+            notebook.last_sync_at,
+            notebook.created_by,
+            notebook.created_at,
+            notebook.updated_by,
+            notebook.updated_at,
+            self._json_dumps(notebook.metadata),
+        )
+
+    async def upsert_research_dossier_note(
+        self,
+        conn: asyncpg.Connection,
+        note: ResearchDossierNote,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO research_dossier_notes (
+                note_id, notebook_id, dossier_id, organization_id, note_kind, status,
+                slug, title, body, summary, source_id, concept_id, citation_ids,
+                related_note_ids, external_page_ref, external_url, created_by,
+                created_at, updated_by, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+            )
+            ON CONFLICT (note_id) DO UPDATE
+                SET note_kind = EXCLUDED.note_kind,
+                    status = EXCLUDED.status,
+                    slug = EXCLUDED.slug,
+                    title = EXCLUDED.title,
+                    body = EXCLUDED.body,
+                    summary = EXCLUDED.summary,
+                    source_id = EXCLUDED.source_id,
+                    concept_id = EXCLUDED.concept_id,
+                    citation_ids = EXCLUDED.citation_ids,
+                    related_note_ids = EXCLUDED.related_note_ids,
+                    external_page_ref = EXCLUDED.external_page_ref,
+                    external_url = EXCLUDED.external_url,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            note.note_id,
+            note.notebook_id,
+            note.dossier_id,
+            note.organization_id,
+            note.note_kind,
+            note.status,
+            note.slug,
+            note.title,
+            note.body,
+            note.summary,
+            note.source_id,
+            note.concept_id,
+            self._json_dumps(note.citation_ids),
+            self._json_dumps([str(item) for item in note.related_note_ids]),
+            note.external_page_ref,
+            note.external_url,
+            note.created_by,
+            note.created_at,
+            note.updated_by,
+            note.updated_at,
+            self._json_dumps(note.metadata),
+        )
+
+    async def upsert_research_dossier_concept(
+        self,
+        conn: asyncpg.Connection,
+        concept: ResearchDossierConcept,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO research_dossier_concepts (
+                concept_id, notebook_id, dossier_id, organization_id, slug, name,
+                aliases, definition, status, confidence, source_ids, claim_ids,
+                created_by, created_at, updated_by, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            ON CONFLICT (concept_id) DO UPDATE
+                SET slug = EXCLUDED.slug,
+                    name = EXCLUDED.name,
+                    aliases = EXCLUDED.aliases,
+                    definition = EXCLUDED.definition,
+                    status = EXCLUDED.status,
+                    confidence = EXCLUDED.confidence,
+                    source_ids = EXCLUDED.source_ids,
+                    claim_ids = EXCLUDED.claim_ids,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            concept.concept_id,
+            concept.notebook_id,
+            concept.dossier_id,
+            concept.organization_id,
+            concept.slug,
+            concept.name,
+            self._json_dumps(concept.aliases),
+            concept.definition,
+            concept.status,
+            concept.confidence,
+            self._json_dumps([str(item) for item in concept.source_ids]),
+            self._json_dumps([str(item) for item in concept.claim_ids]),
+            concept.created_by,
+            concept.created_at,
+            concept.updated_by,
+            concept.updated_at,
+            self._json_dumps(concept.metadata),
+        )
+
+    async def upsert_research_dossier_claim(
+        self,
+        conn: asyncpg.Connection,
+        claim: ResearchDossierClaim,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO research_dossier_claims (
+                claim_id, notebook_id, dossier_id, organization_id, claim_key,
+                statement, status, confidence, provenance, source_ids, citation_ids,
+                context_pack_ids, contradicted_by_claim_ids, created_by, created_at,
+                updated_by, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            ON CONFLICT (claim_id) DO UPDATE
+                SET claim_key = EXCLUDED.claim_key,
+                    statement = EXCLUDED.statement,
+                    status = EXCLUDED.status,
+                    confidence = EXCLUDED.confidence,
+                    provenance = EXCLUDED.provenance,
+                    source_ids = EXCLUDED.source_ids,
+                    citation_ids = EXCLUDED.citation_ids,
+                    context_pack_ids = EXCLUDED.context_pack_ids,
+                    contradicted_by_claim_ids = EXCLUDED.contradicted_by_claim_ids,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            claim.claim_id,
+            claim.notebook_id,
+            claim.dossier_id,
+            claim.organization_id,
+            claim.claim_key,
+            claim.statement,
+            claim.status,
+            claim.confidence,
+            claim.provenance,
+            self._json_dumps([str(item) for item in claim.source_ids]),
+            self._json_dumps(claim.citation_ids),
+            self._json_dumps([str(item) for item in claim.context_pack_ids]),
+            self._json_dumps([str(item) for item in claim.contradicted_by_claim_ids]),
+            claim.created_by,
+            claim.created_at,
+            claim.updated_by,
+            claim.updated_at,
+            self._json_dumps(claim.metadata),
+        )
+
+    async def upsert_research_dossier_link(
+        self,
+        conn: asyncpg.Connection,
+        link: ResearchDossierLink,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO research_dossier_links (
+                link_id, notebook_id, dossier_id, organization_id, source_type,
+                source_ref_id, target_type, target_ref_id, link_kind, rationale,
+                confidence, created_by, created_at, updated_by, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            ON CONFLICT (link_id) DO UPDATE
+                SET source_type = EXCLUDED.source_type,
+                    source_ref_id = EXCLUDED.source_ref_id,
+                    target_type = EXCLUDED.target_type,
+                    target_ref_id = EXCLUDED.target_ref_id,
+                    link_kind = EXCLUDED.link_kind,
+                    rationale = EXCLUDED.rationale,
+                    confidence = EXCLUDED.confidence,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            link.link_id,
+            link.notebook_id,
+            link.dossier_id,
+            link.organization_id,
+            link.source_type,
+            link.source_ref_id,
+            link.target_type,
+            link.target_ref_id,
+            link.link_kind,
+            link.rationale,
+            link.confidence,
+            link.created_by,
+            link.created_at,
+            link.updated_by,
+            link.updated_at,
+            self._json_dumps(link.metadata),
+        )
+
+    async def upsert_research_dossier_provider_binding(
+        self,
+        conn: asyncpg.Connection,
+        binding: ResearchDossierProviderBinding,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO research_dossier_provider_bindings (
+                binding_id, notebook_id, dossier_id, organization_id, provider_kind,
+                provider_key, status, external_space_ref, external_base_url, auth_kind,
+                config, secret_config, last_sync_at, created_by, created_at,
+                updated_by, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            ON CONFLICT (binding_id) DO UPDATE
+                SET provider_kind = EXCLUDED.provider_kind,
+                    provider_key = EXCLUDED.provider_key,
+                    status = EXCLUDED.status,
+                    external_space_ref = EXCLUDED.external_space_ref,
+                    external_base_url = EXCLUDED.external_base_url,
+                    auth_kind = EXCLUDED.auth_kind,
+                    config = EXCLUDED.config,
+                    secret_config = EXCLUDED.secret_config,
+                    last_sync_at = EXCLUDED.last_sync_at,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            binding.binding_id,
+            binding.notebook_id,
+            binding.dossier_id,
+            binding.organization_id,
+            binding.provider_kind,
+            binding.provider_key,
+            binding.status,
+            binding.external_space_ref,
+            binding.external_base_url,
+            binding.auth_kind,
+            self._json_dumps(binding.config),
+            self._json_dumps(binding.secret_config),
+            binding.last_sync_at,
+            binding.created_by,
+            binding.created_at,
+            binding.updated_by,
+            binding.updated_at,
+            self._json_dumps(binding.metadata),
+        )
+
+    async def upsert_research_dossier_provider_external_ref(
+        self,
+        conn: asyncpg.Connection,
+        ref: ResearchDossierProviderExternalRef,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO research_dossier_provider_external_refs (
+                ref_id, binding_id, notebook_id, dossier_id, organization_id,
+                open_talon_resource_type, open_talon_resource_id, external_kind,
+                external_id, external_url, external_parent_id, sync_hash,
+                created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            ON CONFLICT (binding_id, open_talon_resource_type, open_talon_resource_id, external_kind) DO UPDATE
+                SET external_id = EXCLUDED.external_id,
+                    external_url = EXCLUDED.external_url,
+                    external_parent_id = EXCLUDED.external_parent_id,
+                    sync_hash = EXCLUDED.sync_hash,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            ref.ref_id,
+            ref.binding_id,
+            ref.notebook_id,
+            ref.dossier_id,
+            ref.organization_id,
+            ref.open_talon_resource_type,
+            ref.open_talon_resource_id,
+            ref.external_kind,
+            ref.external_id,
+            ref.external_url,
+            ref.external_parent_id,
+            ref.sync_hash,
+            ref.created_at,
+            ref.updated_at,
+            self._json_dumps(ref.metadata),
+        )
+
+    async def upsert_research_dossier_sync_run(
+        self,
+        conn: asyncpg.Connection,
+        sync_run: ResearchDossierSyncRun,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO research_dossier_sync_runs (
+                sync_run_id, binding_id, notebook_id, dossier_id, organization_id,
+                status, direction, started_at, completed_at, error, stats,
+                actor_participant_id, system_agent_id, created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            ON CONFLICT (sync_run_id) DO UPDATE
+                SET binding_id = EXCLUDED.binding_id,
+                    status = EXCLUDED.status,
+                    direction = EXCLUDED.direction,
+                    started_at = EXCLUDED.started_at,
+                    completed_at = EXCLUDED.completed_at,
+                    error = EXCLUDED.error,
+                    stats = EXCLUDED.stats,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            sync_run.sync_run_id,
+            sync_run.binding_id,
+            sync_run.notebook_id,
+            sync_run.dossier_id,
+            sync_run.organization_id,
+            sync_run.status,
+            sync_run.direction,
+            sync_run.started_at,
+            sync_run.completed_at,
+            sync_run.error,
+            self._json_dumps(sync_run.stats),
+            sync_run.actor_participant_id,
+            sync_run.system_agent_id,
+            sync_run.created_at,
+            sync_run.updated_at,
+            self._json_dumps(sync_run.metadata),
+        )
+
+    async def append_research_dossier_health_check(
+        self,
+        conn: asyncpg.Connection,
+        check: ResearchDossierHealthCheck,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO research_dossier_health_checks (
+                check_id, notebook_id, dossier_id, organization_id, status, summary,
+                findings, unresolved_count, stale_count, broken_link_count,
+                checked_by_participant_id, checked_by_system_agent_id, created_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (check_id) DO NOTHING
+            """,
+            check.check_id,
+            check.notebook_id,
+            check.dossier_id,
+            check.organization_id,
+            check.status,
+            check.summary,
+            self._json_dumps(check.findings),
+            check.unresolved_count,
+            check.stale_count,
+            check.broken_link_count,
+            check.checked_by_participant_id,
+            check.checked_by_system_agent_id,
+            check.created_at,
+            self._json_dumps(check.metadata),
+        )
+
     async def fetch_methodology_blueprint(
         self,
         blueprint_id: UUID,
@@ -5916,6 +6323,275 @@ class CollaborationRepository:
             dossier_id,
         )
         return [self._research_dossier_event_from_row(row) for row in rows]
+
+    async def fetch_research_dossier_notebook(
+        self,
+        notebook_id: UUID,
+    ) -> ResearchDossierNotebook | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT notebook_id, dossier_id, organization_id, provider_kind, provider_key,
+                   status, home_note_id, external_space_ref, external_url, last_sync_at,
+                   created_by, created_at, updated_by, updated_at, metadata
+            FROM research_dossier_notebooks
+            WHERE notebook_id = $1
+            """,
+            notebook_id,
+        )
+        return self._research_dossier_notebook_from_row(row) if row else None
+
+    async def fetch_research_dossier_notebook_for_dossier(
+        self,
+        dossier_id: UUID,
+    ) -> ResearchDossierNotebook | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT notebook_id, dossier_id, organization_id, provider_kind, provider_key,
+                   status, home_note_id, external_space_ref, external_url, last_sync_at,
+                   created_by, created_at, updated_by, updated_at, metadata
+            FROM research_dossier_notebooks
+            WHERE dossier_id = $1
+            """,
+            dossier_id,
+        )
+        return self._research_dossier_notebook_from_row(row) if row else None
+
+    async def fetch_research_dossier_note(
+        self,
+        note_id: UUID,
+    ) -> ResearchDossierNote | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT note_id, notebook_id, dossier_id, organization_id, note_kind,
+                   status, slug, title, body, summary, source_id, concept_id,
+                   citation_ids, related_note_ids, external_page_ref, external_url,
+                   created_by, created_at, updated_by, updated_at, metadata
+            FROM research_dossier_notes
+            WHERE note_id = $1
+            """,
+            note_id,
+        )
+        return self._research_dossier_note_from_row(row) if row else None
+
+    async def list_research_dossier_notes(
+        self,
+        notebook_id: UUID,
+        *,
+        note_kind: str | None = None,
+        status: str | None = None,
+    ) -> list[ResearchDossierNote]:
+        rows = await self._pool.fetch(
+            """
+            SELECT note_id, notebook_id, dossier_id, organization_id, note_kind,
+                   status, slug, title, body, summary, source_id, concept_id,
+                   citation_ids, related_note_ids, external_page_ref, external_url,
+                   created_by, created_at, updated_by, updated_at, metadata
+            FROM research_dossier_notes
+            WHERE notebook_id = $1
+              AND ($2::text IS NULL OR note_kind = $2)
+              AND ($3::text IS NULL OR status = $3)
+            ORDER BY note_kind ASC, slug ASC
+            """,
+            notebook_id,
+            note_kind,
+            status,
+        )
+        return [self._research_dossier_note_from_row(row) for row in rows]
+
+    async def fetch_research_dossier_concept(
+        self,
+        concept_id: UUID,
+    ) -> ResearchDossierConcept | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT concept_id, notebook_id, dossier_id, organization_id, slug, name,
+                   aliases, definition, status, confidence, source_ids, claim_ids,
+                   created_by, created_at, updated_by, updated_at, metadata
+            FROM research_dossier_concepts
+            WHERE concept_id = $1
+            """,
+            concept_id,
+        )
+        return self._research_dossier_concept_from_row(row) if row else None
+
+    async def list_research_dossier_concepts(
+        self,
+        notebook_id: UUID,
+        *,
+        status: str | None = None,
+    ) -> list[ResearchDossierConcept]:
+        rows = await self._pool.fetch(
+            """
+            SELECT concept_id, notebook_id, dossier_id, organization_id, slug, name,
+                   aliases, definition, status, confidence, source_ids, claim_ids,
+                   created_by, created_at, updated_by, updated_at, metadata
+            FROM research_dossier_concepts
+            WHERE notebook_id = $1
+              AND ($2::text IS NULL OR status = $2)
+            ORDER BY slug ASC
+            """,
+            notebook_id,
+            status,
+        )
+        return [self._research_dossier_concept_from_row(row) for row in rows]
+
+    async def fetch_research_dossier_claim(
+        self,
+        claim_id: UUID,
+    ) -> ResearchDossierClaim | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT claim_id, notebook_id, dossier_id, organization_id, claim_key,
+                   statement, status, confidence, provenance, source_ids, citation_ids,
+                   context_pack_ids, contradicted_by_claim_ids, created_by, created_at,
+                   updated_by, updated_at, metadata
+            FROM research_dossier_claims
+            WHERE claim_id = $1
+            """,
+            claim_id,
+        )
+        return self._research_dossier_claim_from_row(row) if row else None
+
+    async def list_research_dossier_claims(
+        self,
+        notebook_id: UUID,
+        *,
+        status: str | None = None,
+    ) -> list[ResearchDossierClaim]:
+        rows = await self._pool.fetch(
+            """
+            SELECT claim_id, notebook_id, dossier_id, organization_id, claim_key,
+                   statement, status, confidence, provenance, source_ids, citation_ids,
+                   context_pack_ids, contradicted_by_claim_ids, created_by, created_at,
+                   updated_by, updated_at, metadata
+            FROM research_dossier_claims
+            WHERE notebook_id = $1
+              AND ($2::text IS NULL OR status = $2)
+            ORDER BY created_at ASC
+            """,
+            notebook_id,
+            status,
+        )
+        return [self._research_dossier_claim_from_row(row) for row in rows]
+
+    async def fetch_research_dossier_link(
+        self,
+        link_id: UUID,
+    ) -> ResearchDossierLink | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT link_id, notebook_id, dossier_id, organization_id, source_type,
+                   source_ref_id, target_type, target_ref_id, link_kind, rationale,
+                   confidence, created_by, created_at, updated_by, updated_at, metadata
+            FROM research_dossier_links
+            WHERE link_id = $1
+            """,
+            link_id,
+        )
+        return self._research_dossier_link_from_row(row) if row else None
+
+    async def list_research_dossier_links(
+        self,
+        notebook_id: UUID,
+    ) -> list[ResearchDossierLink]:
+        rows = await self._pool.fetch(
+            """
+            SELECT link_id, notebook_id, dossier_id, organization_id, source_type,
+                   source_ref_id, target_type, target_ref_id, link_kind, rationale,
+                   confidence, created_by, created_at, updated_by, updated_at, metadata
+            FROM research_dossier_links
+            WHERE notebook_id = $1
+            ORDER BY created_at ASC
+            """,
+            notebook_id,
+        )
+        return [self._research_dossier_link_from_row(row) for row in rows]
+
+    async def list_research_dossier_provider_bindings(
+        self,
+        notebook_id: UUID,
+        *,
+        provider_key: str | None = None,
+    ) -> list[ResearchDossierProviderBinding]:
+        rows = await self._pool.fetch(
+            """
+            SELECT binding_id, notebook_id, dossier_id, organization_id, provider_kind,
+                   provider_key, status, external_space_ref, external_base_url, auth_kind,
+                   config, secret_config, last_sync_at, created_by, created_at,
+                   updated_by, updated_at, metadata
+            FROM research_dossier_provider_bindings
+            WHERE notebook_id = $1
+              AND ($2::text IS NULL OR provider_key = $2)
+            ORDER BY provider_key ASC
+            """,
+            notebook_id,
+            provider_key,
+        )
+        return [self._research_dossier_provider_binding_from_row(row) for row in rows]
+
+    async def list_research_dossier_provider_external_refs(
+        self,
+        notebook_id: UUID,
+        *,
+        binding_id: UUID | None = None,
+    ) -> list[ResearchDossierProviderExternalRef]:
+        rows = await self._pool.fetch(
+            """
+            SELECT ref_id, binding_id, notebook_id, dossier_id, organization_id,
+                   open_talon_resource_type, open_talon_resource_id, external_kind,
+                   external_id, external_url, external_parent_id, sync_hash,
+                   created_at, updated_at, metadata
+            FROM research_dossier_provider_external_refs
+            WHERE notebook_id = $1
+              AND ($2::uuid IS NULL OR binding_id = $2)
+            ORDER BY external_kind ASC, external_id ASC
+            """,
+            notebook_id,
+            binding_id,
+        )
+        return [self._research_dossier_provider_external_ref_from_row(row) for row in rows]
+
+    async def fetch_latest_research_dossier_health_check(
+        self,
+        notebook_id: UUID,
+    ) -> ResearchDossierHealthCheck | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT check_id, notebook_id, dossier_id, organization_id, status, summary,
+                   findings, unresolved_count, stale_count, broken_link_count,
+                   checked_by_participant_id, checked_by_system_agent_id, created_at,
+                   metadata
+            FROM research_dossier_health_checks
+            WHERE notebook_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            notebook_id,
+        )
+        return self._research_dossier_health_check_from_row(row) if row else None
+
+    async def fetch_research_dossier_notebook_detail(
+        self,
+        dossier_id: UUID,
+    ) -> ResearchDossierNotebookDetail | None:
+        notebook = await self.fetch_research_dossier_notebook_for_dossier(dossier_id)
+        if notebook is None:
+            return None
+        bindings = await self.list_research_dossier_provider_bindings(notebook.notebook_id)
+        return ResearchDossierNotebookDetail(
+            notebook=notebook,
+            provider_bindings=bindings,
+            notes=await self.list_research_dossier_notes(notebook.notebook_id),
+            concepts=await self.list_research_dossier_concepts(notebook.notebook_id),
+            claims=await self.list_research_dossier_claims(notebook.notebook_id),
+            links=await self.list_research_dossier_links(notebook.notebook_id),
+            external_refs=await self.list_research_dossier_provider_external_refs(
+                notebook.notebook_id
+            ),
+            latest_health_check=await self.fetch_latest_research_dossier_health_check(
+                notebook.notebook_id
+            ),
+        )
 
     async def upsert_methodic_execution(
         self,
@@ -9273,6 +9949,228 @@ class CollaborationRepository:
             system_agent_id=row["system_agent_id"],
             source_id=row["source_id"],
             payload=CollaborationRepository._json_value(row["payload"], default={}),
+            created_at=row["created_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _research_dossier_notebook_from_row(
+        row: asyncpg.Record,
+    ) -> ResearchDossierNotebook:
+        return ResearchDossierNotebook(
+            notebook_id=row["notebook_id"],
+            dossier_id=row["dossier_id"],
+            organization_id=row["organization_id"],
+            provider_kind=row["provider_kind"],
+            provider_key=row["provider_key"],
+            status=row["status"],
+            home_note_id=row["home_note_id"],
+            external_space_ref=row["external_space_ref"],
+            external_url=row["external_url"],
+            last_sync_at=row["last_sync_at"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_by=row["updated_by"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _research_dossier_note_from_row(row: asyncpg.Record) -> ResearchDossierNote:
+        return ResearchDossierNote(
+            note_id=row["note_id"],
+            notebook_id=row["notebook_id"],
+            dossier_id=row["dossier_id"],
+            organization_id=row["organization_id"],
+            note_kind=row["note_kind"],
+            status=row["status"],
+            slug=row["slug"],
+            title=row["title"],
+            body=row["body"],
+            summary=row["summary"],
+            source_id=row["source_id"],
+            concept_id=row["concept_id"],
+            citation_ids=CollaborationRepository._json_value(
+                row["citation_ids"],
+                default=[],
+            ),
+            related_note_ids=CollaborationRepository._uuid_list_from_json(
+                row["related_note_ids"]
+            ),
+            external_page_ref=row["external_page_ref"],
+            external_url=row["external_url"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_by=row["updated_by"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _research_dossier_concept_from_row(
+        row: asyncpg.Record,
+    ) -> ResearchDossierConcept:
+        return ResearchDossierConcept(
+            concept_id=row["concept_id"],
+            notebook_id=row["notebook_id"],
+            dossier_id=row["dossier_id"],
+            organization_id=row["organization_id"],
+            slug=row["slug"],
+            name=row["name"],
+            aliases=CollaborationRepository._json_value(row["aliases"], default=[]),
+            definition=row["definition"],
+            status=row["status"],
+            confidence=row["confidence"],
+            source_ids=CollaborationRepository._uuid_list_from_json(row["source_ids"]),
+            claim_ids=CollaborationRepository._uuid_list_from_json(row["claim_ids"]),
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_by=row["updated_by"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _research_dossier_claim_from_row(row: asyncpg.Record) -> ResearchDossierClaim:
+        return ResearchDossierClaim(
+            claim_id=row["claim_id"],
+            notebook_id=row["notebook_id"],
+            dossier_id=row["dossier_id"],
+            organization_id=row["organization_id"],
+            claim_key=row["claim_key"],
+            statement=row["statement"],
+            status=row["status"],
+            confidence=row["confidence"],
+            provenance=row["provenance"],
+            source_ids=CollaborationRepository._uuid_list_from_json(row["source_ids"]),
+            citation_ids=CollaborationRepository._json_value(
+                row["citation_ids"],
+                default=[],
+            ),
+            context_pack_ids=CollaborationRepository._uuid_list_from_json(
+                row["context_pack_ids"]
+            ),
+            contradicted_by_claim_ids=CollaborationRepository._uuid_list_from_json(
+                row["contradicted_by_claim_ids"]
+            ),
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_by=row["updated_by"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _research_dossier_link_from_row(row: asyncpg.Record) -> ResearchDossierLink:
+        return ResearchDossierLink(
+            link_id=row["link_id"],
+            notebook_id=row["notebook_id"],
+            dossier_id=row["dossier_id"],
+            organization_id=row["organization_id"],
+            source_type=row["source_type"],
+            source_ref_id=row["source_ref_id"],
+            target_type=row["target_type"],
+            target_ref_id=row["target_ref_id"],
+            link_kind=row["link_kind"],
+            rationale=row["rationale"],
+            confidence=row["confidence"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_by=row["updated_by"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _research_dossier_provider_binding_from_row(
+        row: asyncpg.Record,
+    ) -> ResearchDossierProviderBinding:
+        return ResearchDossierProviderBinding(
+            binding_id=row["binding_id"],
+            notebook_id=row["notebook_id"],
+            dossier_id=row["dossier_id"],
+            organization_id=row["organization_id"],
+            provider_kind=row["provider_kind"],
+            provider_key=row["provider_key"],
+            status=row["status"],
+            external_space_ref=row["external_space_ref"],
+            external_base_url=row["external_base_url"],
+            auth_kind=row["auth_kind"],
+            config=CollaborationRepository._json_value(row["config"], default={}),
+            secret_config=CollaborationRepository._json_value(
+                row["secret_config"],
+                default={},
+            ),
+            last_sync_at=row["last_sync_at"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_by=row["updated_by"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _research_dossier_provider_external_ref_from_row(
+        row: asyncpg.Record,
+    ) -> ResearchDossierProviderExternalRef:
+        return ResearchDossierProviderExternalRef(
+            ref_id=row["ref_id"],
+            binding_id=row["binding_id"],
+            notebook_id=row["notebook_id"],
+            dossier_id=row["dossier_id"],
+            organization_id=row["organization_id"],
+            open_talon_resource_type=row["open_talon_resource_type"],
+            open_talon_resource_id=row["open_talon_resource_id"],
+            external_kind=row["external_kind"],
+            external_id=row["external_id"],
+            external_url=row["external_url"],
+            external_parent_id=row["external_parent_id"],
+            sync_hash=row["sync_hash"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _research_dossier_sync_run_from_row(
+        row: asyncpg.Record,
+    ) -> ResearchDossierSyncRun:
+        return ResearchDossierSyncRun(
+            sync_run_id=row["sync_run_id"],
+            binding_id=row["binding_id"],
+            notebook_id=row["notebook_id"],
+            dossier_id=row["dossier_id"],
+            organization_id=row["organization_id"],
+            status=row["status"],
+            direction=row["direction"],
+            started_at=row["started_at"],
+            completed_at=row["completed_at"],
+            error=row["error"],
+            stats=CollaborationRepository._json_value(row["stats"], default={}),
+            actor_participant_id=row["actor_participant_id"],
+            system_agent_id=row["system_agent_id"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _research_dossier_health_check_from_row(
+        row: asyncpg.Record,
+    ) -> ResearchDossierHealthCheck:
+        return ResearchDossierHealthCheck(
+            check_id=row["check_id"],
+            notebook_id=row["notebook_id"],
+            dossier_id=row["dossier_id"],
+            organization_id=row["organization_id"],
+            status=row["status"],
+            summary=row["summary"],
+            findings=CollaborationRepository._json_value(row["findings"], default=[]),
+            unresolved_count=row["unresolved_count"],
+            stale_count=row["stale_count"],
+            broken_link_count=row["broken_link_count"],
+            checked_by_participant_id=row["checked_by_participant_id"],
+            checked_by_system_agent_id=row["checked_by_system_agent_id"],
             created_at=row["created_at"],
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),
         )

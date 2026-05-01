@@ -227,14 +227,34 @@ raise SystemExit(1)
 PY
 }
 
+xwiki_ready() {
+  local base_url="${OPEN_TALON_XWIKI_BASE_URL:-http://127.0.0.1:${XWIKI_PORT:-8083}}"
+  XWIKI_PROBE_BASE_URL="${base_url%/}" "${PYTHON_BIN}" - <<'PY'
+import os
+import urllib.request
+
+base_url = os.environ["XWIKI_PROBE_BASE_URL"].rstrip("/")
+for path in ("/", "/bin/view/Main/"):
+    try:
+        with urllib.request.urlopen(f"{base_url}{path}", timeout=3) as response:
+            if response.status in (200, 302, 401):
+                raise SystemExit(0)
+    except Exception:
+        pass
+raise SystemExit(1)
+PY
+}
+
 start_cmd() {
   ensure_python
   load_local_env
   local gateway_startup_wait_seconds="${OPEN_TALON_GATEWAY_STARTUP_WAIT_SECONDS:-60}"
   local oidc_startup_wait_seconds="${OPEN_TALON_OIDC_STARTUP_WAIT_SECONDS:-60}"
   local searxng_startup_wait_seconds="${OPEN_TALON_SEARXNG_STARTUP_WAIT_SECONDS:-60}"
+  local xwiki_startup_wait_seconds="${OPEN_TALON_XWIKI_STARTUP_WAIT_SECONDS:-120}"
   local enable_memgraph=0
   local enable_web_search=0
+  local enable_xwiki=0
   while (($# > 0)); do
     case "$1" in
       --memgraph)
@@ -242,6 +262,15 @@ start_cmd() {
         ;;
       --web-search)
         enable_web_search=1
+        ;;
+      --xwiki)
+        enable_xwiki=1
+        export OPEN_TALON_XWIKI_BASE_URL="${OPEN_TALON_XWIKI_BASE_URL:-http://127.0.0.1:${XWIKI_PORT:-8083}}"
+        export OPEN_TALON_XWIKI_SYNC_ENABLED="${OPEN_TALON_XWIKI_SYNC_ENABLED:-true}"
+        export OPEN_TALON_XWIKI_AUTO_SYNC_ON_BLUEPRINT_CREATE="${OPEN_TALON_XWIKI_AUTO_SYNC_ON_BLUEPRINT_CREATE:-true}"
+        export OPEN_TALON_XWIKI_USERNAME="${OPEN_TALON_XWIKI_USERNAME:-superadmin}"
+        export OPEN_TALON_XWIKI_PASSWORD="${OPEN_TALON_XWIKI_PASSWORD:-system}"
+        export OPEN_TALON_XWIKI_SUPERADMIN_PASSWORD="${OPEN_TALON_XWIKI_SUPERADMIN_PASSWORD:-${OPEN_TALON_XWIKI_PASSWORD}}"
         ;;
       *)
         echo "Unknown start option: $1" >&2
@@ -282,6 +311,9 @@ start_cmd() {
     if ((enable_web_search)); then
       services+=(searxng)
     fi
+    if ((enable_xwiki)); then
+      services+=(xwiki-postgres xwiki)
+    fi
     docker compose up -d "${services[@]}"
   )
 
@@ -298,10 +330,28 @@ start_cmd() {
     fi
   fi
 
+  if ((enable_xwiki)); then
+    for _ in $(seq 1 "${xwiki_startup_wait_seconds}"); do
+      if xwiki_ready; then
+        break
+      fi
+      sleep 1
+    done
+    if ! xwiki_ready; then
+      echo "XWiki failed to become ready: ${OPEN_TALON_XWIKI_BASE_URL}" >&2
+      exit 1
+    fi
+  fi
+
   if [[ -f "${GATEWAY_PID_FILE}" ]]; then
     EXISTING_PID="$(cat "${GATEWAY_PID_FILE}")"
     if kill -0 "${EXISTING_PID}" >/dev/null 2>&1; then
-      if gateway_supports_current_api "${pythonpath}"; then
+      if ((enable_xwiki)); then
+        echo "Restarting gateway-edge PID ${EXISTING_PID} to apply XWiki settings..."
+        kill "${EXISTING_PID}" >/dev/null 2>&1 || true
+        wait "${EXISTING_PID}" 2>/dev/null || true
+        rm -f "${GATEWAY_PID_FILE}"
+      elif gateway_supports_current_api "${pythonpath}"; then
         echo "Gateway already running with PID ${EXISTING_PID}."
       else
         echo "Restarting stale gateway-edge PID ${EXISTING_PID}..."
@@ -444,7 +494,7 @@ stop_cmd() {
   echo "Stopping infrastructure services..."
   (
     cd "${ROOT_DIR}/infrastructure"
-    docker compose --profile mem0-graph --profile web-search down
+    docker compose --profile mem0-graph --profile web-search --profile xwiki down
   )
 }
 
@@ -478,7 +528,7 @@ Usage:
   ./open-talon init [--memgraph] [--wait-seconds seconds]
   ./open-talon repair [--no-start] [--memgraph] [--skip-identities]
   ./open-talon reset --yes [--init] [--include-models] [--memgraph]
-  ./open-talon start [--memgraph] [--web-search]
+  ./open-talon start [--memgraph] [--web-search] [--xwiki]
   ./open-talon stop
   ./open-talon tui [extra tui args]
   ./open-talon tui auth login [auth args]

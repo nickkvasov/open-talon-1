@@ -147,6 +147,29 @@ If you want the managed web-search System Plugin locally, start with:
 
 That adds self-hosted SearXNG as the optional Docker Compose `searxng` container and starts the local `web-search-mcp` process after SearXNG is reachable. The seeded `web_search` System Plugin still must be synced and attached to a workspace explicitly before agents can use `search`, `fetch`, or `search_and_fetch`.
 
+If you want XWiki-backed concept dossiers locally, start with:
+
+```bash
+./open-talon start --xwiki
+```
+
+That starts the optional `xwiki` and `xwiki-postgres` containers, enables
+XWiki notebook sync, and restarts the local gateway if needed so new blueprint
+creation attempts to project the initial dossier space. Open Talon still keeps the
+canonical dossier lifecycle, provenance, IAM, audit, graph metadata, and sync
+state in Postgres; XWiki is the navigable concept notebook projection. For local
+development the launcher enables XWiki `superadmin` with
+`OPEN_TALON_XWIKI_USERNAME=superadmin` and
+`OPEN_TALON_XWIKI_PASSWORD=system` unless you override them. Deployments should
+replace those defaults with a managed XWiki account or OpenBao-backed provider
+secrets before running live sync.
+
+Run the real XWiki live test after the stack is up:
+
+```bash
+OPEN_TALON_RUN_XWIKI_LIVE=1 ./.venv/bin/python -m pytest -m integration tests/infrastructure/test_xwiki_dossier_live_system.py -q -s
+```
+
 ## 3. Check The Main Endpoints
 
 - Gateway: [http://127.0.0.1:8000](http://127.0.0.1:8000)
@@ -174,6 +197,7 @@ That adds self-hosted SearXNG as the optional Docker Compose `searxng` container
 - Ollama: [http://127.0.0.1:11434](http://127.0.0.1:11434)
 - SearXNG: [http://127.0.0.1:8082](http://127.0.0.1:8082) when started with `./open-talon start --web-search`
 - Web Search MCP: [http://127.0.0.1:8181/health](http://127.0.0.1:8181/health) when started with `./open-talon start --web-search`
+- XWiki: [http://127.0.0.1:8083](http://127.0.0.1:8083) when started with `./open-talon start --xwiki`
 - HyperDX UI when started with `--profile hyperdx`: [http://127.0.0.1:8080](http://127.0.0.1:8080)
 - HyperDX OTLP gRPC when started with `--profile hyperdx`: `localhost:4317`
 - HyperDX OTLP HTTP when started with `--profile hyperdx`: `localhost:4318`
@@ -243,6 +267,7 @@ Current admin-web highlights:
 - Forgejo: `forgejo` / `forgejo123`
 - ClickHouse: `langfuse` / `langfuse`
 - Memgraph: `memgraph` / `memgraph` when started with `./open-talon start --memgraph`
+- XWiki when started with `./open-talon start --xwiki`: local `superadmin` / `system` credentials are enabled unless overridden; use a managed XWiki account or OpenBao-backed provider binding outside local development.
 
 All local defaults come from [`infrastructure/.env.example`](../infrastructure/.env.example).
 
@@ -617,8 +642,8 @@ The local schema seeds managed operational and specialist agents without adding 
 - `Steward` (`agent_key=steward`) has role `platform operations steward` and is attached to `System Base / Administration / System Operations`.
 - `Curator` (`agent_key=curator`) has role `organization operations curator`; every non-system organization receives one in its `Administration / Organization Operations` workspace.
 - `Anchor` (`agent_key=anchor`) has role `workspace topic alignment reviewer`; every workspace receives an Anchor participant whose task-routing metadata disables normal message fanout and accepts only publication-review work. Anchor uses the managed `local-ollama` LLM provider by default.
-- `Researcher` (`agent_key=researcher`) has role `evidence discovery and research dossier agent`; methodology blueprint creation targets it in the organization operations workspace to build a durable dossier from local libraries, Retriever context, database-visible context, and web follow-up sources. A dossier has source records, retained-library refs, context packs, contradictions, gaps, events, and a readiness decision.
-- `Methodologist` (`agent_key=methodologist`) has role `methodology extraction and workspace design agent`; it extracts methodology basis, methodics, methods/tools, actors, and workspace-template drafts from completed research dossiers or cited retrieval/source evidence through its normal agent definition and harness.
+- `Researcher` (`agent_key=researcher`) has role `evidence discovery and research dossier agent`; methodology blueprint creation targets it in the organization operations workspace to build a durable dossier from local libraries, Retriever context, database-visible context, and web follow-up sources. A dossier has source records, retained-library refs, context packs, concepts, claims, typed links, contradictions, gaps, events, notebook health, sync state, and a readiness decision.
+- `Methodologist` (`agent_key=methodologist`) has role `methodology extraction and workspace design agent`; it navigates completed dossier notebooks and extracts methodology basis, methodics, methods/tools, actors, and workspace-template drafts from the dossier's cited knowledge structure or other cited retrieval/source evidence through its normal agent definition and harness.
 - `Conductor` (`agent_key=conductor`) has role `workspace methodics execution conductor`; it is not auto-attached. A workspace only gets active methodics orchestration after an authorized human participant attaches Conductor and explicitly starts a methodics execution. Conductor can read execution state and create pending resource requests through its private MCP binding after attachment, while start/cancel and resource request approval/rejection stay human-gated.
 
 The operational purpose is advertised through `display_name`, `role`, and `capabilities`. Authorization still comes from IAM role bindings, project access bindings, participant attachment, and MCP/tool allowlists.
