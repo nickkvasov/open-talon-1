@@ -32,6 +32,7 @@ methodics execution.
 | Steward | `steward` | global | [steward.md](./steward.md) |
 | Curator | `curator` | organization | [curator.md](./curator.md) |
 | Anchor | `anchor` | global, attached per workspace | [anchor.md](./anchor.md) |
+| Researcher | `researcher` | global, targeted organization operations tasks | [researcher.md](./researcher.md) |
 | Methodologist | `methodologist` | global | [methodologist.md](./methodologist.md) |
 | Conductor | `conductor` | global, attached per workspace only when opted in | [conductor.md](./conductor.md) |
 

@@ -25,6 +25,7 @@ The protocol covers these managed agents and contexts:
 - [`Steward`](./seeded-agents/steward.md) with `agent_key=steward`
 - [`Curator`](./seeded-agents/curator.md) with `agent_key=curator`
 - [`Anchor`](./seeded-agents/anchor.md) with `agent_key=anchor`, using the managed `local-ollama` provider by default
+- [`Researcher`](./seeded-agents/researcher.md) with `agent_key=researcher`
 - [`Methodologist`](./seeded-agents/methodologist.md) with `agent_key=methodologist`
 - [`Conductor`](./seeded-agents/conductor.md) with `agent_key=conductor`
 - `System Base / Administration / System Operations`
@@ -340,7 +341,38 @@ Pass criteria:
 - approval does not attach the tool to any workspace
 - organization-scoped and global publication paths remain distinct
 
-### 11. Verify Methodologist Evidence Extraction
+### 11. Verify Researcher Dossier Build
+
+Run this check when changing Researcher, methodology blueprint creation,
+dossier tables, Library/Retriever/Web Search access, private dossier MCP
+operations, or Methodologist handoff.
+
+Minimum automated coverage:
+
+- methodology blueprint creation creates a blueprint, initial version, dossier, retained-source library, operations thread, and targeted Researcher task
+- Researcher can create and update source records with included, excluded, duplicate, failed, and unresolved statuses
+- source records reject cross-organization libraries, library items, assets, and context packs
+- Researcher can attach Retriever context packs and map contradictions and gaps
+- marking the dossier ready creates a targeted Methodologist task with dossier summary, sources, context packs, contradictions, and gaps
+
+Pass criteria:
+
+- Researcher behavior comes from its agent definition, harness, task payload, IAM binding, and private MCP allowlist
+- the dossier is durable enough for Methodologist, another agent, or a human reviewer to consume
+- retained source bytes live in the managed dossier library when they have been fetched
+- no blueprint version becomes approved or active without human review
+- no Conductor execution is started by dossier or blueprint creation
+
+Current deterministic non-live coverage for this check lives in
+`tests/core-collab/test_agent_contracts.py`,
+`tests/gateway-edge/test_methodology_routes.py`,
+`tests/gateway-edge/test_mcp.py`, and
+`tests/core-collab/test_migration_files.py`. Add a focused
+`tests/infrastructure/operational_agents_live/test_researcher_live_system.py`
+module before claiming full local-stack private-MCP execution coverage for
+Researcher.
+
+### 12. Verify Methodologist Evidence Extraction
 
 Run this check when changing Methodologist, Retriever context-pack handling,
 agent response contracts, workspace template drafting, or methodology/methodics
@@ -360,7 +392,7 @@ Pass criteria:
 - the live output can be translated into `WorkspaceHarness.methodology`, `methodics`, and `execution_rules`
 - the test remains deterministic and does not depend on local model quality unless model behavior is explicitly under test
 
-### 12. Verify Conductor Methodics Execution Gate
+### 13. Verify Conductor Methodics Execution Gate
 
 Run this check when changing Methodologist, Conductor, methodics execution, MCP
 scope filtering, workspace participant attachment, or managed specialist-agent

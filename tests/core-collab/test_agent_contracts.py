@@ -49,14 +49,18 @@ from open_talon_contracts.models import (  # noqa: E402
     AgentRunResult,
     AgentToolCallDraft,
     AgentToolUsePolicy,
+    ApplyMethodologyBlueprintRequest,
     AssumeParticipantRoleRequest,
     ArtifactRef,
+    AttachResearchDossierContextPackRequest,
     CreateAgentParticipantRequest,
     CreateGitRepositoryRequest,
     CreateThreadRequest,
     CreateLlmProviderRequest,
+    CreateMethodologyBlueprintRequest,
     CreateOrganizationRequest,
     CreateProjectRequest,
+    CreateResearchDossierSourceRequest,
     CreateWorkspaceRequest,
     CreateSystemToolRequest,
     EventEnvelope,
@@ -82,7 +86,10 @@ from open_talon_contracts.models import (  # noqa: E402
     InteractionRequestDetail,
     InteractionRequestDraft,
     InteractionRequestTarget,
+    Library,
+    LibraryItem,
     LlmProviderDefinition,
+    MarkResearchDossierReadyRequest,
     MemoryEntry,
     MemoryProviderDefinition,
     MemoryProviderRecord,
@@ -92,6 +99,9 @@ from open_talon_contracts.models import (  # noqa: E402
     MethodicExecutionDetail,
     MethodicExecutionStep,
     MethodicResourceRequest,
+    MethodologyBlueprint,
+    MethodologyBlueprintDetail,
+    MethodologyBlueprintVersion,
     McpServerDefinition,
     McpToolDefinition,
     Organization,
@@ -100,9 +110,14 @@ from open_talon_contracts.models import (  # noqa: E402
     Project,
     ProjectAccessBinding,
     ProjectSubjectRef,
+    ResearchDossier,
+    ResearchDossierEvent,
+    ResearchDossierSource,
+    RetrievalContextPack,
     Run,
     RunStep,
     SearchMemoryRequest,
+    SubmitMethodologyBlueprintDraftRequest,
     TargetRef,
     ToolCall,
     ToolCallResult,
@@ -125,8 +140,11 @@ from open_talon_contracts.models import (  # noqa: E402
     ReviewToolGenerationRevisionRequest,
     RemoveProjectAccessRequest,
     UpdateWorkspaceRequest,
+    ReviewMethodologyBlueprintVersionRequest,
     UpsertRoleDefinitionRequest,
     Workspace,
+    WorkspaceAsset,
+    WorkspaceAssetVersion,
     WorkspaceCommunicationLogEntry,
     WorkspaceCommunicationLogPage,
     WorkspaceHarness,
@@ -279,6 +297,16 @@ class FakeRepository:
         self._methodic_assignments = {}
         self._methodic_checks = {}
         self._methodic_resource_requests = {}
+        self._libraries = {}
+        self._library_items = {}
+        self._workspace_assets = {}
+        self._workspace_asset_versions = {}
+        self._retrieval_context_packs = {}
+        self._methodology_blueprints = {}
+        self._methodology_blueprint_versions = {}
+        self._research_dossiers = {}
+        self._research_dossier_sources = {}
+        self._research_dossier_events = {}
         default_organization = Organization(
             organization_id=UUID("11111111-1111-1111-1111-111111111111"),
             slug="default",
@@ -609,6 +637,124 @@ class FakeRepository:
             ):
                 visible.append(workspace)
         return visible
+
+    async def fetch_library(self, library_id):
+        return self._libraries.get(library_id)
+
+    async def upsert_library(self, conn, library: Library) -> None:
+        self._libraries[library.library_id] = library
+
+    async def fetch_library_item(self, item_id):
+        return self._library_items.get(item_id)
+
+    async def fetch_workspace_asset(self, asset_id):
+        return self._workspace_assets.get(asset_id)
+
+    async def fetch_workspace_asset_version(self, asset_version_id):
+        return self._workspace_asset_versions.get(asset_version_id)
+
+    async def list_workspace_asset_versions(self, asset_id):
+        return [
+            version
+            for version in self._workspace_asset_versions.values()
+            if version.asset_id == asset_id
+        ]
+
+    async def fetch_retrieval_context_pack(self, context_pack_id):
+        return self._retrieval_context_packs.get(context_pack_id)
+
+    async def upsert_retrieval_context_pack(self, conn, context_pack):
+        self._retrieval_context_packs[context_pack.context_pack_id] = context_pack
+
+    async def next_methodology_blueprint_version_number(self, conn, blueprint_id):
+        versions = [
+            version.version_number
+            for version in self._methodology_blueprint_versions.values()
+            if version.blueprint_id == blueprint_id
+        ]
+        return max(versions, default=0) + 1
+
+    async def upsert_methodology_blueprint(
+        self,
+        conn,
+        blueprint: MethodologyBlueprint,
+    ) -> None:
+        self._methodology_blueprints[blueprint.blueprint_id] = blueprint
+
+    async def upsert_methodology_blueprint_version(
+        self,
+        conn,
+        version: MethodologyBlueprintVersion,
+    ) -> None:
+        self._methodology_blueprint_versions[version.version_id] = version
+
+    async def upsert_research_dossier(self, conn, dossier: ResearchDossier) -> None:
+        self._research_dossiers[dossier.dossier_id] = dossier
+
+    async def upsert_research_dossier_source(
+        self,
+        conn,
+        source: ResearchDossierSource,
+    ) -> None:
+        self._research_dossier_sources[source.source_id] = source
+
+    async def append_research_dossier_event(
+        self,
+        conn,
+        event: ResearchDossierEvent,
+    ) -> None:
+        self._research_dossier_events.setdefault(event.dossier_id, []).append(event)
+
+    async def fetch_methodology_blueprint(self, blueprint_id):
+        return self._methodology_blueprints.get(blueprint_id)
+
+    async def list_methodology_blueprints(self, organization_id, *, status=None):
+        blueprints = [
+            blueprint
+            for blueprint in self._methodology_blueprints.values()
+            if blueprint.organization_id == organization_id
+            and (status is None or blueprint.status == status)
+        ]
+        return sorted(blueprints, key=lambda item: item.created_at, reverse=True)
+
+    async def fetch_methodology_blueprint_version(self, version_id):
+        return self._methodology_blueprint_versions.get(version_id)
+
+    async def list_methodology_blueprint_versions(self, blueprint_id):
+        versions = [
+            version
+            for version in self._methodology_blueprint_versions.values()
+            if version.blueprint_id == blueprint_id
+        ]
+        return sorted(
+            versions,
+            key=lambda item: (item.version_number, item.created_at),
+            reverse=True,
+        )
+
+    async def fetch_research_dossier(self, dossier_id):
+        return self._research_dossiers.get(dossier_id)
+
+    async def fetch_research_dossier_for_version(self, version_id):
+        for dossier in self._research_dossiers.values():
+            if dossier.version_id == version_id:
+                return dossier
+        return None
+
+    async def fetch_research_dossier_source(self, source_id):
+        return self._research_dossier_sources.get(source_id)
+
+    async def list_research_dossier_sources(self, dossier_id, *, status=None):
+        sources = [
+            source
+            for source in self._research_dossier_sources.values()
+            if source.dossier_id == dossier_id
+            and (status is None or source.status == status)
+        ]
+        return sorted(sources, key=lambda item: item.created_at)
+
+    async def list_research_dossier_events(self, dossier_id):
+        return list(self._research_dossier_events.get(dossier_id, []))
 
     async def fetch_thread(self, thread_id):
         return self._threads.get(thread_id)
@@ -3246,6 +3392,7 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
         "steward",
         "curator",
         "anchor",
+        "researcher",
         "methodologist",
         "conductor",
     }.issubset(agent_keys)
@@ -3256,6 +3403,18 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
     steward = next(agent for agent in repository._agents.values() if agent.agent_key == "steward")
     assert steward.role == "platform operations steward"
     assert "reviews platform runtime and audit health" in steward.capabilities
+    researcher = next(
+        agent for agent in repository._agents.values() if agent.agent_key == "researcher"
+    )
+    assert researcher.display_name == "Researcher"
+    assert researcher.role == "evidence discovery and research dossier agent"
+    assert researcher.definition["task_routing"]["normal_message_fanout"] is False
+    assert researcher.definition["task_routing"]["accepted_task_kinds"] == [
+        "methodology_research_dossier_build",
+        "methodology_research_dossier_refine",
+    ]
+    assert "Research Scope" in researcher.interaction_contract.response_contract.required_sections
+    assert "Contradictions" in researcher.interaction_contract.response_contract.required_sections
     methodologist = next(
         agent for agent in repository._agents.values() if agent.agent_key == "methodologist"
     )
@@ -3310,6 +3469,8 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
         "organizations.create",
         "workspaces.create",
         "iam.agent_identities.list",
+        "methodology.dossiers.sources.create",
+        "methodology.blueprints.submit_draft",
         "methodics.resource_requests.approve",
     }.issubset({tool.tool_name for tool in repository._mcp_server_tools[control_plane.server_id]})
     web_search = next(
@@ -3345,6 +3506,33 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
     assert "organizations.create" in steward_binding.tool_allowlist
     steward_role = next(role for role in repository._iam_roles.values() if role.name == "platform_steward")
     assert "organization.write" in steward_role.permissions
+    researcher_binding = repository._agent_internal_mcp_servers[
+        (researcher.agent_id, control_plane.server_id)
+    ]
+    assert "methodology.dossiers.mark_ready" in researcher_binding.tool_allowlist
+    assert "methodology.blueprints.submit_draft" not in researcher_binding.tool_allowlist
+    researcher_library_binding = repository._agent_internal_mcp_servers[
+        (researcher.agent_id, library_plugin.server_id)
+    ]
+    researcher_retriever_binding = repository._agent_internal_mcp_servers[
+        (researcher.agent_id, retriever_plugin.server_id)
+    ]
+    researcher_web_binding = repository._agent_internal_mcp_servers[
+        (researcher.agent_id, web_search.server_id)
+    ]
+    assert "library.items.create_text" in researcher_library_binding.tool_allowlist
+    assert "retriever.context_pack.create" in researcher_retriever_binding.tool_allowlist
+    assert researcher_web_binding.server_key == "web_search"
+    researcher_role = next(role for role in repository._iam_roles.values() if role.name == "methodology_researcher")
+    assert "library.write" in researcher_role.permissions
+    assert "methodology.write" in researcher_role.permissions
+    methodologist_binding = repository._agent_internal_mcp_servers[
+        (methodologist.agent_id, control_plane.server_id)
+    ]
+    assert "methodology.dossiers.get" in methodologist_binding.tool_allowlist
+    assert "methodology.blueprints.submit_draft" in methodologist_binding.tool_allowlist
+    methodologist_role = next(role for role in repository._iam_roles.values() if role.name == "methodology_methodologist")
+    assert "methodology.write" in methodologist_role.permissions
     system_operations = next(
         workspace
         for workspace in repository._workspaces.values()
@@ -3451,6 +3639,532 @@ async def test_managed_system_defaults_repairer_reuses_existing_org_curator_by_k
     assert curator_roles[0].created_at == legacy_created_at
     assert curator_roles[0].metadata["legacy"] is True
     assert curator_roles[0].metadata["managed"] is True
+
+
+def _methodology_actor() -> ParticipantInput:
+    actor_id = uuid4()
+    return ParticipantInput(
+        participant_id=actor_id,
+        participant_type="user",
+        user_id=actor_id,
+        display_name="Methodology Owner",
+        iam_permissions=sorted(WORKSPACE_PERMISSION_NAMES),
+    )
+
+
+async def _seed_methodology_world() -> tuple[
+    FakeRepository,
+    CollaborationKernel,
+    Organization,
+    Workspace,
+    ParticipantInput,
+]:
+    repository = FakeRepository()
+    await ManagedSystemDefaultsRepairer(repository).repair()
+    organization = next(
+        organization
+        for organization in repository._organizations.values()
+        if organization.slug == "default"
+    )
+    operations_workspace = next(
+        workspace
+        for workspace in repository._workspaces.values()
+        if workspace.organization_id == organization.organization_id
+        and workspace.metadata.get("managed") is True
+        and workspace.metadata.get("operations_workspace") is True
+        and workspace.metadata.get("operations_level") == "organization"
+    )
+    return (
+        repository,
+        CollaborationKernel(repository),
+        organization,
+        operations_workspace,
+        _methodology_actor(),
+    )
+
+
+def _methodology_library(
+    repository: FakeRepository,
+    *,
+    organization_id: UUID,
+    actor: ParticipantInput,
+    scope: str = "organization",
+) -> Library:
+    now = datetime.now(timezone.utc)
+    library = Library(
+        library_id=uuid4(),
+        scope=scope,
+        organization_id=organization_id,
+        project_id=uuid4() if scope == "project" else None,
+        slug=f"methodology-{uuid4().hex[:8]}",
+        name="Methodology Sources",
+        created_by=actor.participant_id,
+        updated_by=actor.participant_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    repository._libraries[library.library_id] = library
+    return library
+
+
+def _methodology_library_item(
+    repository: FakeRepository,
+    *,
+    library: Library,
+    actor: ParticipantInput,
+    title: str = "Evidence Note",
+) -> LibraryItem:
+    now = datetime.now(timezone.utc)
+    asset_id = uuid4()
+    version_id = uuid4()
+    repository._workspace_assets[asset_id] = WorkspaceAsset(
+        asset_id=asset_id,
+        scope=library.scope,
+        organization_id=library.organization_id,
+        project_id=library.project_id,
+        workspace_id=library.workspace_id,
+        asset_type="text",
+        logical_name=title.lower().replace(" ", "-"),
+        title=title,
+        created_by=actor.participant_id,
+        created_at=now,
+        updated_at=now,
+    )
+    repository._workspace_asset_versions[version_id] = WorkspaceAssetVersion(
+        asset_version_id=version_id,
+        asset_id=asset_id,
+        version=1,
+        source_kind="library_text",
+        bucket="open-talon-assets",
+        object_key=f"methodology/{asset_id}.md",
+        content_type="text/markdown",
+        size_bytes=128,
+        sha256="b" * 64,
+        created_by=actor.participant_id,
+        created_at=now,
+    )
+    item = LibraryItem(
+        item_id=uuid4(),
+        library_id=library.library_id,
+        asset_id=asset_id,
+        active_asset_version_id=version_id,
+        item_kind="text",
+        title=title,
+        content_type="text/markdown",
+        created_by=actor.participant_id,
+        updated_by=actor.participant_id,
+        created_at=now,
+        updated_at=now,
+        metadata={},
+    )
+    repository._library_items[item.item_id] = item
+    return item
+
+
+def _methodology_context_pack(
+    repository: FakeRepository,
+    *,
+    organization_id: UUID,
+    actor: ParticipantInput,
+    content: str = "Source [1] supports the methodology basis.",
+) -> RetrievalContextPack:
+    now = datetime.now(timezone.utc)
+    context_pack = RetrievalContextPack(
+        context_pack_id=uuid4(),
+        scope="organization",
+        organization_id=organization_id,
+        query="methodology source evidence",
+        content=content,
+        token_count=12,
+        created_by=actor.participant_id,
+        created_at=now,
+        metadata={"citation_ids": ["S1"]},
+    )
+    repository._retrieval_context_packs[context_pack.context_pack_id] = context_pack
+    return context_pack
+
+
+async def _create_methodology_blueprint_fixture(
+    repository: FakeRepository,
+    kernel: CollaborationKernel,
+    organization: Organization,
+    actor: ParticipantInput,
+) -> MethodologyBlueprintDetail:
+    selected_library = _methodology_library(
+        repository,
+        organization_id=organization.organization_id,
+        actor=actor,
+    )
+    result = await kernel.create_methodology_blueprint(
+        organization.organization_id,
+        CreateMethodologyBlueprintRequest(
+            actor=actor,
+            title="Evidence-backed onboarding",
+            topic="Use evidence to onboard organization teams",
+            target_goal="Create a reusable onboarding methodology",
+            tasks=["Discover sources", "Map contradictions", "Draft workspace harness"],
+            library_ids=[selected_library.library_id],
+        ),
+    )
+    assert result.detail is not None
+    return result.detail
+
+
+@pytest.mark.asyncio
+async def test_methodology_blueprint_creation_creates_dossier_library_and_researcher_task():
+    repository, kernel, organization, operations_workspace, actor = (
+        await _seed_methodology_world()
+    )
+
+    detail = await _create_methodology_blueprint_fixture(
+        repository,
+        kernel,
+        organization,
+        actor,
+    )
+
+    assert detail.blueprint.status == "draft"
+    assert len(detail.versions) == 1
+    version = detail.versions[0]
+    assert version.status == "researching"
+    assert version.research_dossier_id == detail.dossier.dossier_id
+    dossier = detail.dossier
+    assert dossier is not None
+    assert dossier.status == "researching"
+    assert dossier.operations_workspace_id == operations_workspace.workspace_id
+    assert dossier.retained_library_id in repository._libraries
+    retained_library = repository._libraries[dossier.retained_library_id]
+    assert retained_library.scope == "organization"
+    assert retained_library.organization_id == organization.organization_id
+    assert retained_library.metadata["research_dossier"] is True
+    assert repository._threads[dossier.thread_id].metadata["research_dossier_id"] == str(
+        dossier.dossier_id
+    )
+
+    researcher = await repository.fetch_system_agent_by_key(
+        scope="global",
+        organization_id=None,
+        agent_key="researcher",
+    )
+    methodologist = await repository.fetch_system_agent_by_key(
+        scope="global",
+        organization_id=None,
+        agent_key="methodologist",
+    )
+    assert await repository.fetch_agent_participant(
+        operations_workspace.workspace_id,
+        researcher.agent_id,
+    )
+    assert await repository.fetch_agent_participant(
+        operations_workspace.workspace_id,
+        methodologist.agent_id,
+    )
+    researcher_tasks = await kernel.list_pending_tasks_for_system_agent(
+        researcher.agent_id
+    )
+    assert len(researcher_tasks) == 1
+    task = researcher_tasks[0]
+    assert task.correlation_id == dossier.dossier_id
+    assert task.metadata["task_kind"] == "methodology_research_dossier_build"
+    assert task.metadata["retained_library_id"] == str(dossier.retained_library_id)
+    assert "Use web follow-up for gaps, recency, and contradiction checks." in task.metadata[
+        "task_instructions"
+    ]
+    assert repository._methodic_executions == {}
+
+
+@pytest.mark.asyncio
+async def test_research_dossier_sources_reject_cross_org_refs_and_ready_handoff():
+    repository, kernel, organization, _operations_workspace, actor = (
+        await _seed_methodology_world()
+    )
+    detail = await _create_methodology_blueprint_fixture(
+        repository,
+        kernel,
+        organization,
+        actor,
+    )
+    dossier = detail.dossier
+    same_org_library = _methodology_library(
+        repository,
+        organization_id=organization.organization_id,
+        actor=actor,
+    )
+    same_org_item = _methodology_library_item(
+        repository,
+        library=same_org_library,
+        actor=actor,
+    )
+    context_pack = _methodology_context_pack(
+        repository,
+        organization_id=organization.organization_id,
+        actor=actor,
+    )
+
+    source_result = await kernel.create_research_dossier_source(
+        dossier.dossier_id,
+        CreateResearchDossierSourceRequest(
+            actor=actor,
+            source_kind="library_item",
+            status="included",
+            title="Evidence Note",
+            library_id=same_org_library.library_id,
+            library_item_id=same_org_item.item_id,
+            asset_id=same_org_item.asset_id,
+            asset_version_id=same_org_item.active_asset_version_id,
+            context_pack_ids=[context_pack.context_pack_id],
+            citation_id="S1",
+            quality_notes="Directly relevant retained source.",
+            rationale="Primary source for onboarding constraints.",
+        ),
+    )
+
+    source = source_result.source
+    assert source is not None
+    assert source.status == "included"
+    assert source.library_item_id == same_org_item.item_id
+    assert source.context_pack_ids == [context_pack.context_pack_id]
+    assert {
+        event.event_type
+        for event in await repository.list_research_dossier_events(dossier.dossier_id)
+    } == {"research_dossier.created", "research_dossier_source.created"}
+
+    cross_org_library = _methodology_library(
+        repository,
+        organization_id=uuid4(),
+        actor=actor,
+    )
+    with pytest.raises(KeyError, match="not found in organization"):
+        await kernel.create_research_dossier_source(
+            dossier.dossier_id,
+            CreateResearchDossierSourceRequest(
+                actor=actor,
+                source_kind="library_item",
+                status="included",
+                title="Wrong Org Source",
+                library_id=cross_org_library.library_id,
+            ),
+        )
+
+    cross_org_pack = _methodology_context_pack(
+        repository,
+        organization_id=uuid4(),
+        actor=actor,
+    )
+    with pytest.raises(ValueError, match="context pack belongs to a different organization"):
+        await kernel.create_research_dossier_source(
+            dossier.dossier_id,
+            CreateResearchDossierSourceRequest(
+                actor=actor,
+                source_kind="other",
+                status="included",
+                title="Wrong Org Context",
+                context_pack_ids=[cross_org_pack.context_pack_id],
+            ),
+        )
+
+    updated_dossier = await kernel.attach_research_dossier_context_pack(
+        dossier.dossier_id,
+        AttachResearchDossierContextPackRequest(
+            actor=actor,
+            context_pack_id=context_pack.context_pack_id,
+            source_id=source.source_id,
+        ),
+    )
+    assert updated_dossier.context_pack_ids == [context_pack.context_pack_id]
+    assert repository._research_dossier_sources[source.source_id].context_pack_ids == [
+        context_pack.context_pack_id
+    ]
+
+    ready = await kernel.mark_research_dossier_ready(
+        dossier.dossier_id,
+        MarkResearchDossierReadyRequest(
+            actor=actor,
+            summary="Evidence is sufficient for Methodologist.",
+            contradictions=[
+                {
+                    "claim": "Team autonomy",
+                    "sources": ["S1"],
+                    "note": "Source disagrees on approval depth.",
+                }
+            ],
+            gaps=["No recent compliance source found."],
+        ),
+    )
+
+    assert ready.status == "ready_for_methodologist"
+    assert ready.summary == "Evidence is sufficient for Methodologist."
+    assert repository._methodology_blueprint_versions[detail.versions[0].version_id].status == (
+        "ready_for_methodologist"
+    )
+    methodologist = await repository.fetch_system_agent_by_key(
+        scope="global",
+        organization_id=None,
+        agent_key="methodologist",
+    )
+    methodologist_tasks = await kernel.list_pending_tasks_for_system_agent(
+        methodologist.agent_id
+    )
+    assert len(methodologist_tasks) == 1
+    assert methodologist_tasks[0].metadata["task_kind"] == "methodology_blueprint_draft"
+    assert methodologist_tasks[0].metadata["dossier_summary"] == ready.summary
+    assert methodologist_tasks[0].metadata["context_pack_ids"] == [
+        str(context_pack.context_pack_id)
+    ]
+    assert methodologist_tasks[0].metadata["dossier_sources"][0]["source_id"] == str(
+        source.source_id
+    )
+    assert methodologist_tasks[0].metadata["dossier_sources"][0]["status"] == "included"
+    assert repository._methodic_executions == {}
+
+
+@pytest.mark.asyncio
+async def test_methodology_blueprint_draft_review_and_apply_are_human_gated():
+    repository, kernel, organization, _operations_workspace, actor = (
+        await _seed_methodology_world()
+    )
+    detail = await _create_methodology_blueprint_fixture(
+        repository,
+        kernel,
+        organization,
+        actor,
+    )
+    dossier = await kernel.mark_research_dossier_ready(
+        detail.dossier.dossier_id,
+        MarkResearchDossierReadyRequest(
+            actor=actor,
+            summary="Ready for synthesis.",
+        ),
+    )
+    version = repository._methodology_blueprint_versions[dossier.version_id]
+
+    with pytest.raises(ValueError, match="without a harness draft"):
+        await kernel.review_methodology_blueprint_version(
+            detail.blueprint.blueprint_id,
+            version.version_id,
+            ReviewMethodologyBlueprintVersionRequest(actor=actor),
+            approved=True,
+        )
+
+    methodologist = await repository.fetch_system_agent_by_key(
+        scope="global",
+        organization_id=None,
+        agent_key="methodologist",
+    )
+    harness_draft = WorkspaceHarness(
+        summary="Reusable onboarding methodology.",
+        methodology=WorkspaceMethodology(
+            ontology="People, work artifacts, and evidence gates.",
+            principles=["Cite every source-backed methodic."],
+        ),
+        methodics=[
+            WorkspaceMethodic(
+                name="Onboard team",
+                goal="Move a team into evidence-backed execution.",
+                steps=[
+                    WorkspaceMethodicStep(
+                        instruction="Collect current operating constraints.",
+                        expected_artifacts=["constraint brief"],
+                        verification=["brief cites dossier source"],
+                    )
+                ],
+                success_criteria=["Team has an accepted execution brief."],
+            )
+        ],
+        execution_rules=[
+            HarnessExecutionRule(
+                name="Citation discipline",
+                instruction="Cite dossier sources for source-backed claims.",
+            )
+        ],
+        moderation_policy=WorkspaceModerationPolicy(enabled=False, level="open"),
+        metadata={"draft": True},
+    )
+    submitted = await kernel.submit_methodology_blueprint_draft(
+        version.version_id,
+        SubmitMethodologyBlueprintDraftRequest(
+            actor=ParticipantInput(
+                participant_id=methodologist.agent_id,
+                participant_type="agent",
+                display_name="Methodologist",
+            ),
+            cited_output="# Blueprint\n\nClaim [S1]",
+            harness_draft=harness_draft,
+        ),
+    )
+    assert submitted.versions[0].status == "pending_review"
+    assert submitted.dossier.status == "completed"
+
+    target_workspace = Workspace(
+        workspace_id=uuid4(),
+        organization_id=organization.organization_id,
+        project_id=uuid4(),
+        name="Execution Workspace",
+        harness=WorkspaceHarness(
+            moderation_policy=WorkspaceModerationPolicy(
+                enabled=True,
+                level="strict",
+                topic="Existing workspace topic",
+            )
+        ),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    repository._workspaces[target_workspace.workspace_id] = target_workspace
+    repository._participants[(target_workspace.workspace_id, actor.participant_id)] = (
+        ParticipantProfile(
+            participant_id=actor.participant_id,
+            workspace_id=target_workspace.workspace_id,
+            participant_type="user",
+            user_id=actor.user_id,
+            display_name=actor.display_name,
+            roles=["admin"],
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+
+    with pytest.raises(ValueError, match="Only approved"):
+        await kernel.apply_methodology_blueprint(
+            detail.blueprint.blueprint_id,
+            ApplyMethodologyBlueprintRequest(
+                actor=actor,
+                workspace_id=target_workspace.workspace_id,
+                version_id=version.version_id,
+            ),
+        )
+
+    approved = await kernel.review_methodology_blueprint_version(
+        detail.blueprint.blueprint_id,
+        version.version_id,
+        ReviewMethodologyBlueprintVersionRequest(
+            actor=actor,
+            reason="Evidence and draft accepted.",
+        ),
+        approved=True,
+    )
+    assert approved.blueprint.status == "active"
+    assert approved.blueprint.active_version_id == version.version_id
+
+    applied = await kernel.apply_methodology_blueprint(
+        detail.blueprint.blueprint_id,
+        ApplyMethodologyBlueprintRequest(
+            actor=actor,
+            workspace_id=target_workspace.workspace_id,
+            version_id=version.version_id,
+            metadata={"applied_by_test": True},
+        ),
+    )
+    assert applied.workspace is not None
+    assert applied.workspace.harness.summary == "Reusable onboarding methodology."
+    assert applied.workspace.harness.moderation_policy.level == "strict"
+    assert applied.workspace.harness.moderation_policy.topic == "Existing workspace topic"
+    assert applied.workspace.harness.metadata["methodology_blueprint_id"] == str(
+        detail.blueprint.blueprint_id
+    )
+    assert applied.workspace.harness.metadata["applied_by_test"] is True
+    assert repository._methodic_executions == {}
 
 
 def _workspace_actor_with_methodics_permissions() -> ParticipantInput:

@@ -44,14 +44,20 @@ STEWARD_AGENT_ID = UUID("44444444-4444-4444-4444-444444444445")
 ANCHOR_AGENT_ID = UUID("44444444-4444-4444-4444-444444444446")
 METHODOLOGIST_AGENT_ID = UUID("44444444-4444-4444-4444-444444444447")
 CONDUCTOR_AGENT_ID = UUID("44444444-4444-4444-4444-444444444448")
+RESEARCHER_AGENT_ID = UUID("44444444-4444-4444-4444-444444444449")
 CONTROL_PLANE_MCP_SERVER_ID = UUID("66666666-6666-6666-6666-666666666666")
 WEB_SEARCH_PLUGIN_MCP_SERVER_ID = UUID("66666666-6666-6666-6666-666666666667")
 LIBRARY_PLUGIN_MCP_SERVER_ID = UUID("66666666-6666-6666-6666-666666666668")
 RETRIEVER_PLUGIN_MCP_SERVER_ID = UUID("66666666-6666-6666-6666-666666666669")
 PLATFORM_STEWARD_ROLE_ID = UUID("77777777-7777-7777-7777-777777777771")
 GLOBAL_CONDUCTOR_ROLE_ID = UUID("77777777-7777-7777-7777-777777777772")
+GLOBAL_RESEARCHER_ROLE_ID = UUID("77777777-7777-7777-7777-777777777773")
+GLOBAL_METHODOLOGIST_ROLE_ID = UUID("77777777-7777-7777-7777-777777777774")
 SYSTEM_ACTOR_ID = UUID("00000000-0000-0000-0000-000000000000")
 ANCHOR_TASK_KIND = "workspace_topic_moderation"
+METHODOLOGY_RESEARCH_DOSSIER_BUILD_TASK_KIND = "methodology_research_dossier_build"
+METHODOLOGY_RESEARCH_DOSSIER_REFINE_TASK_KIND = "methodology_research_dossier_refine"
+METHODOLOGY_BLUEPRINT_DRAFT_TASK_KIND = "methodology_blueprint_draft"
 METHODICS_EXECUTION_START_TASK_KIND = "methodics_execution_start"
 METHODICS_STEP_COORDINATE_TASK_KIND = "methodics_step_coordinate"
 METHODICS_STEP_VERIFY_TASK_KIND = "methodics_step_verify"
@@ -125,6 +131,28 @@ _CONDUCTOR_AGENT_PERMISSIONS = [
     "methodics.read",
     "methodics.execute",
 ]
+_RESEARCHER_AGENT_PERMISSIONS = [
+    "organization.read",
+    "project.read",
+    "workspace.list",
+    "workspace.read",
+    "library.read",
+    "library.write",
+    "library.index",
+    "retrieval.read",
+    "retrieval.search",
+    "methodology.read",
+    "methodology.write",
+]
+_METHODOLOGIST_AGENT_PERMISSIONS = [
+    "organization.read",
+    "workspace.read",
+    "library.read",
+    "retrieval.read",
+    "retrieval.search",
+    "methodology.read",
+    "methodology.write",
+]
 
 _CURATOR_CONTROL_PLANE_ALLOWLIST = [
     "session.get_identity",
@@ -195,6 +223,36 @@ _CONDUCTOR_CONTROL_PLANE_ALLOWLIST = [
     "methodics.assignments.create",
     "methodics.steps.evaluate",
 ]
+_RESEARCHER_CONTROL_PLANE_ALLOWLIST = [
+    "session.get_identity",
+    "session.get_permissions",
+    "session.list_scopes",
+    "session.set_scope",
+    "organizations.get",
+    "workspaces.list",
+    "workspaces.get",
+    "threads.get",
+    "threads.timeline.get",
+    "threads.messages.create",
+    "methodology.dossiers.get",
+    "methodology.dossiers.sources.create",
+    "methodology.dossiers.sources.update",
+    "methodology.dossiers.context_pack.attach",
+    "methodology.dossiers.mark_ready",
+]
+_METHODOLOGIST_CONTROL_PLANE_ALLOWLIST = [
+    "session.get_identity",
+    "session.get_permissions",
+    "session.list_scopes",
+    "session.set_scope",
+    "organizations.get",
+    "workspaces.get",
+    "threads.get",
+    "threads.timeline.get",
+    "retrieval.context_pack.get",
+    "methodology.dossiers.get",
+    "methodology.blueprints.submit_draft",
+]
 _METHODICS_HUMAN_CONTROL_PLANE_TOOLS = [
     "methodics.executions.create",
     "methodics.executions.cancel",
@@ -211,6 +269,8 @@ _CONTROL_PLANE_TOOL_NAMES = list(
         [
             *_STEWARD_CONTROL_PLANE_ALLOWLIST,
             *_CONDUCTOR_CONTROL_PLANE_ALLOWLIST,
+            *_RESEARCHER_CONTROL_PLANE_ALLOWLIST,
+            *_METHODOLOGIST_CONTROL_PLANE_ALLOWLIST,
             *_METHODICS_HUMAN_CONTROL_PLANE_TOOLS,
         ]
     )
@@ -527,12 +587,26 @@ class ManagedSystemDefaultsRepairer:
         steward = next(
             agent for agent in global_agents if agent.agent_key == "steward"
         )
+        researcher = next(
+            agent for agent in global_agents if agent.agent_key == "researcher"
+        )
+        methodologist = next(
+            agent for agent in global_agents if agent.agent_key == "methodologist"
+        )
         conductor = next(
             agent for agent in global_agents if agent.agent_key == "conductor"
         )
         await self._repository.upsert_iam_role_definition(
             conn,
             self._platform_steward_iam_role(now=now),
+        )
+        await self._repository.upsert_iam_role_definition(
+            conn,
+            self._global_researcher_iam_role(now=now),
+        )
+        await self._repository.upsert_iam_role_definition(
+            conn,
+            self._global_methodologist_iam_role(now=now),
         )
         await self._repository.upsert_iam_role_definition(
             conn,
@@ -548,14 +622,41 @@ class ManagedSystemDefaultsRepairer:
         )
         await self._repository.upsert_agent_internal_mcp_server(
             conn,
+            binding=self._researcher_control_plane_mcp_binding(
+                agent_id=researcher.agent_id,
+                server_id=control_plane.server_id,
+                now=now,
+            ),
+        )
+        for binding in self._researcher_plugin_mcp_bindings(
+            agent_id=researcher.agent_id,
+            library_server_id=library_plugin.server_id,
+            retriever_server_id=retriever_plugin.server_id,
+            web_search_server_id=web_search.server_id,
+            now=now,
+        ):
+            await self._repository.upsert_agent_internal_mcp_server(
+                conn,
+                binding=binding,
+            )
+        await self._repository.upsert_agent_internal_mcp_server(
+            conn,
+            binding=self._methodologist_internal_mcp_binding(
+                agent_id=methodologist.agent_id,
+                server_id=control_plane.server_id,
+                now=now,
+            ),
+        )
+        await self._repository.upsert_agent_internal_mcp_server(
+            conn,
             binding=self._conductor_internal_mcp_binding(
                 agent_id=conductor.agent_id,
                 server_id=control_plane.server_id,
                 now=now,
             ),
         )
-        summary["iam_roles"] += 2
-        summary["internal_mcp_bindings"] += 2
+        summary["iam_roles"] += 4
+        summary["internal_mcp_bindings"] += 7
         return control_plane, {
             agent.agent_key: agent
             for agent in global_agents
@@ -1003,6 +1104,7 @@ class ManagedSystemDefaultsRepairer:
             ("global", None, "tinker", self._tinker_agent_definition),
             ("global", None, "steward", self._steward_agent_definition),
             ("global", None, "anchor", self._anchor_agent_definition),
+            ("global", None, "researcher", self._researcher_agent_definition),
             ("global", None, "methodologist", self._methodologist_agent_definition),
             ("global", None, "conductor", self._conductor_agent_definition),
         ]:
@@ -1414,6 +1516,206 @@ class ManagedSystemDefaultsRepairer:
         )
 
     @staticmethod
+    def _researcher_agent_definition(*, now: datetime) -> AgentDefinition:
+        accepted_task_kinds = [
+            METHODOLOGY_RESEARCH_DOSSIER_BUILD_TASK_KIND,
+            METHODOLOGY_RESEARCH_DOSSIER_REFINE_TASK_KIND,
+        ]
+        return AgentDefinition(
+            agent_id=RESEARCHER_AGENT_ID,
+            agent_key="researcher",
+            scope="global",
+            organization_id=None,
+            display_name="Researcher",
+            description=(
+                "Builds durable research dossiers by discovering, collecting, "
+                "triaging, and organizing evidence from local libraries, indexed "
+                "retrieval corpora, databases, files, media, and web follow-up."
+            ),
+            role="evidence discovery and research dossier agent",
+            capabilities=[
+                "discovers sources across selected organization libraries and retrieval corpora",
+                "uses web follow-up for recency gaps contradiction checks and missing coverage",
+                "triages sources by quality relevance duplication inclusion and unresolved status",
+                "maps contradictions disagreements and follow-up questions before synthesis",
+                "preserves fetched pages papers files and media in retained dossier libraries",
+                "submits structured research dossier source records and readiness updates",
+            ],
+            endpoint=AgentEndpoint(
+                kind="system",
+                engine_id="local-ollama",
+                provider="ollama",
+            ),
+            system_prompt=(
+                "You are Researcher. Build durable research dossiers for specific "
+                "topics and tasks. Start with selected local and organization libraries, "
+                "pre-indexed Retriever corpora, files, media, and database-visible context. "
+                "Use web search and fetch only for gaps, recency, contradiction checks, "
+                "or missing source coverage. Preserve fetched sources in the retained "
+                "dossier library when possible. Record each source with retained refs, "
+                "quality notes, rationale, status, fetch metadata, contradictions, and "
+                "errors. Mark a dossier ready only when the evidence boundary, gaps, and "
+                "disagreements are explicit enough for downstream agents or humans."
+            ),
+            harness=AgentHarness(
+                version=1,
+                summary=(
+                    "Research dossier harness for auditable multi-step discovery, "
+                    "triage, contradiction mapping, and retained source organization."
+                ),
+                operating_principles=[
+                    "Treat the dossier as a reusable evidence object for agents, users, and participants.",
+                    "Search local libraries and indexed corpora before broad web discovery.",
+                    "Use explicit web follow-up for gaps, recency, and contradictions.",
+                    "Preserve fetched source snapshots in the retained dossier library whenever possible.",
+                    "Keep included, excluded, duplicate, failed, and unresolved records visible.",
+                    "Separate evidence, quality judgment, disagreement mapping, and open gaps.",
+                ],
+                planning=AgentPlanningPolicy(
+                    plan_before_act=True,
+                    incremental_execution=True,
+                    one_goal_at_a_time=True,
+                    explicit_uncertainty=True,
+                    guidance=[
+                        "Start with a research plan covering local libraries, retrieval, web follow-up, and triage criteria.",
+                        "Iterate when contradictions or gaps imply a follow-up search.",
+                        "Do a final dossier readiness pass before marking ready for downstream synthesis.",
+                    ],
+                ),
+                tool_use_policy=AgentToolUsePolicy(
+                    prefer_existing_workspace_tools=True,
+                    read_before_write=True,
+                    inspect_schema_before_use=True,
+                    cite_tool_results_in_reasoning=True,
+                    verify_side_effects_after_mutation=True,
+                    selection_principles=[
+                        "Use Library tools to inspect selected and retained dossier libraries.",
+                        "Use Retriever tools for indexed searches and context packs.",
+                        "Use Web Search only for explicit follow-up discovery, gaps, or recency.",
+                        "Use methodology dossier MCP tools to persist every source and readiness update.",
+                    ],
+                    fallback_when_no_tool_fits=(
+                        "Record the limitation as an unresolved dossier gap and continue with visible evidence."
+                    ),
+                ),
+                memory_policy=AgentMemoryPolicy(
+                    use_run_memory=True,
+                    use_thread_memory=True,
+                    use_workspace_memory=True,
+                ),
+                validation_policy=AgentValidationPolicy(
+                    required_checks=[
+                        "Every fetched source has a retained reference or a clear fetch failure.",
+                        "Every source has a terminal triage status before readiness.",
+                        "Quality notes and rationale are present for included and excluded sources.",
+                        "Contradictions and disagreements are mapped with affected source ids.",
+                        "Open gaps and follow-up opportunities are explicit before mark_ready.",
+                    ],
+                    require_evidence_for_claims=True,
+                    require_tool_results_for_completion=True,
+                    require_tests_before_done=False,
+                ),
+                stop_policy=AgentStopPolicy(
+                    completion_conditions=[
+                        "The research dossier has structured sources, summary, contradictions, gaps, context packs, and a readiness decision."
+                    ],
+                    stop_conditions=[
+                        "Do not synthesize the methodology blueprint; hand the completed dossier to Methodologist."
+                    ],
+                ),
+                metadata={
+                    "seeded": True,
+                    "managed": True,
+                    "agent_key": "researcher",
+                    "research_dossier_agent": True,
+                    "task_routing": {
+                        "normal_message_fanout": False,
+                        "accepted_task_kinds": accepted_task_kinds,
+                    },
+                },
+            ),
+            interaction_contract=AgentInteractionContract(
+                instructions=[
+                    "Operate as Researcher, the evidence discovery and research dossier agent.",
+                    "Build and refine durable dossiers through targeted dossier tasks only.",
+                    "Search local libraries and Retriever context first, then use web follow-up for gaps and recency.",
+                    "Persist source records, context packs, contradictions, gaps, and readiness through dossier MCP operations.",
+                    "Do not synthesize the final methodology blueprint.",
+                ],
+                response_contract=AgentResponseContract(
+                    format="markdown",
+                    title="Research Dossier Update",
+                    required_sections=[
+                        "Research Scope",
+                        "Discovery Plan",
+                        "Sources",
+                        "Quality Notes",
+                        "Contradictions",
+                        "Gaps",
+                        "Retained References",
+                        "Readiness",
+                    ],
+                    guidance=[
+                        "Group sources by status: included, excluded, duplicate, failed, and unresolved.",
+                        "Cite retained library item ids, context pack ids, asset refs, or source URIs.",
+                        "State why follow-up searches were or were not needed.",
+                    ],
+                ),
+                completion_criteria=[
+                    "The dossier is durable enough for Methodologist, another agent, or a human reviewer to consume.",
+                    "Source statuses and retained refs are explicit.",
+                    "Contradictions and remaining gaps are explicit.",
+                ],
+                metadata={"contract_version": 1, "seeded": True, "agent_key": "researcher"},
+            ),
+            definition={
+                "runtime": {
+                    "engine_id": "local-ollama",
+                    "provider": "ollama",
+                    "preferred_capabilities": ["local", "ollama", "reasoning"],
+                    "preferred_locality": "host",
+                },
+                "seeded": True,
+                "managed": True,
+                "agent_key": "researcher",
+                "research_dossier_agent": True,
+                "task_routing": {
+                    "normal_message_fanout": False,
+                    "accepted_task_kinds": accepted_task_kinds,
+                },
+                "dossier_outputs": {
+                    "source_statuses": [
+                        "included",
+                        "excluded",
+                        "duplicate",
+                        "failed",
+                        "unresolved",
+                    ],
+                    "required_judgments": [
+                        "source_quality",
+                        "rationale",
+                        "contradictions",
+                        "gaps",
+                        "retained_refs",
+                    ],
+                },
+            },
+            created_by=SYSTEM_ACTOR_ID,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "managed": True,
+                "seeded": True,
+                "agent_key": "researcher",
+                "research_dossier_agent": True,
+                "task_routing": {
+                    "normal_message_fanout": False,
+                    "accepted_task_kinds": accepted_task_kinds,
+                },
+            },
+        )
+
+    @staticmethod
     def _methodologist_agent_definition(*, now: datetime) -> AgentDefinition:
         return AgentDefinition(
             agent_id=METHODOLOGIST_AGENT_ID,
@@ -1423,10 +1725,12 @@ class ManagedSystemDefaultsRepairer:
             display_name="Methodologist",
             description=(
                 "Extracts methodology basis, methodics, methods, actors, tools, and "
-                "workspace implementation templates from cited domain source material."
+                "workspace implementation templates from completed research dossiers "
+                "or cited domain source material."
             ),
             role="methodology extraction and workspace design agent",
             capabilities=[
+                "consumes completed research dossiers with source records contradictions gaps and context packs",
                 "analyzes narrow-domain books and source corpora through cited retrieval evidence",
                 "extracts methodology basis including ontology axiology epistemology and principles",
                 "derives methodics as high-level repeatable steps for achieving a stated goal",
@@ -1440,10 +1744,12 @@ class ManagedSystemDefaultsRepairer:
                 provider="ollama",
             ),
             system_prompt=(
-                "You are Methodologist. Analyze cited source material for a narrow domain and "
-                "extract the methodology basis, methodics, concrete methods, required actors, "
-                "candidate tools, and a project/workspace template for implementing the approach. "
-                "Use retrieval/context-pack evidence as the authority for source-derived claims. "
+                "You are Methodologist. Analyze completed research dossiers or cited source "
+                "material for a narrow domain and extract the methodology basis, methodics, "
+                "concrete methods, required actors, candidate tools, and a project/workspace "
+                "template for implementing the approach. Use dossier source records, "
+                "contradictions, gaps, and retrieval/context-pack evidence as the authority "
+                "for source-derived claims. "
                 "Clearly separate what the source states from what you infer or ideate for Open Talon "
                 "implementation. Do not invent citations, and ask for more source material or a clearer "
                 "target goal when evidence is insufficient."
@@ -1455,7 +1761,8 @@ class ManagedSystemDefaultsRepairer:
                     "workspace-ready operating templates."
                 ),
                 operating_principles=[
-                    "Start from the user's target goal and the cited source corpus; do not treat general knowledge as book evidence.",
+                    "Start from the user's target goal and the completed dossier or cited source corpus; do not treat general knowledge as source evidence.",
+                    "Use dossier source records, contradictions, gaps, and context packs as the evidence boundary when a dossier is supplied.",
                     "Separate methodology basis, methodics, methods, tools, actors, artifacts, and workspace template decisions.",
                     "Keep source-grounded extraction distinct from implementation ideation.",
                     "Preserve citations for claims that come from the source material.",
@@ -1468,7 +1775,7 @@ class ManagedSystemDefaultsRepairer:
                     one_goal_at_a_time=True,
                     explicit_uncertainty=True,
                     guidance=[
-                        "Identify the domain, target outcome, source boundaries, and expected template consumer before synthesizing.",
+                        "Identify the domain, target outcome, dossier or source boundaries, and expected template consumer before synthesizing.",
                         "Use an extraction pass before the design pass.",
                         "Do a final consistency pass that maps each recommended methodic to evidence, actors, tools, and expected artifacts.",
                     ],
@@ -1480,6 +1787,7 @@ class ManagedSystemDefaultsRepairer:
                     cite_tool_results_in_reasoning=True,
                     verify_side_effects_after_mutation=True,
                     selection_principles=[
+                        "Read the completed research dossier before synthesizing when a dossier id is supplied.",
                         "Use retrieval search or context packs for source evidence before synthesis.",
                         "Inspect existing workspace harness, files, and retrieval corpora before proposing changes.",
                         "Use authoring or catalog tools only when the user asks to materialize the template.",
@@ -1524,7 +1832,7 @@ class ManagedSystemDefaultsRepairer:
             interaction_contract=AgentInteractionContract(
                 instructions=[
                     "Operate as Methodologist, the methodology extraction and workspace design agent.",
-                    "Use cited retrieval or visible source evidence for source-derived claims.",
+                    "Use completed research dossiers, cited retrieval, or visible source evidence for source-derived claims.",
                     "Separate source-grounded extraction from implementation ideation.",
                     "When evidence is missing, state the gap and ask for ingestion, corpus selection, or a clearer target goal.",
                     "Return a structure that can be translated into an Open Talon workspace harness.",
@@ -1809,6 +2117,42 @@ class ManagedSystemDefaultsRepairer:
             metadata={"seeded": True, "managed": True, "agent_key": "conductor"},
         )
 
+    @staticmethod
+    def _global_researcher_iam_role(*, now: datetime) -> IamRoleDefinition:
+        return IamRoleDefinition(
+            role_id=GLOBAL_RESEARCHER_ROLE_ID,
+            scope="global",
+            subject_kind="agent",
+            organization_id=None,
+            name="methodology_researcher",
+            description=(
+                "Least-privilege research dossier permissions for the seeded "
+                "Researcher specialist."
+            ),
+            permissions=list(_RESEARCHER_AGENT_PERMISSIONS),
+            created_at=now,
+            updated_at=now,
+            metadata={"seeded": True, "managed": True, "agent_key": "researcher"},
+        )
+
+    @staticmethod
+    def _global_methodologist_iam_role(*, now: datetime) -> IamRoleDefinition:
+        return IamRoleDefinition(
+            role_id=GLOBAL_METHODOLOGIST_ROLE_ID,
+            scope="global",
+            subject_kind="agent",
+            organization_id=None,
+            name="methodology_methodologist",
+            description=(
+                "Least-privilege methodology blueprint drafting permissions for "
+                "the seeded Methodologist specialist."
+            ),
+            permissions=list(_METHODOLOGIST_AGENT_PERMISSIONS),
+            created_at=now,
+            updated_at=now,
+            metadata={"seeded": True, "managed": True, "agent_key": "methodologist"},
+        )
+
     async def _control_plane_mcp_server(self, *, now: datetime) -> McpServerDefinition:
         existing = await self._find_mcp_server_by_key(
             scope="global",
@@ -2074,6 +2418,116 @@ class ManagedSystemDefaultsRepairer:
             updated_at=now,
             metadata={"seeded": True, "managed": True, "agent_key": "conductor"},
         )
+
+    @staticmethod
+    def _researcher_control_plane_mcp_binding(
+        *,
+        agent_id: UUID,
+        server_id: UUID,
+        now: datetime,
+    ) -> AgentInternalMcpServer:
+        return AgentInternalMcpServer(
+            system_agent_id=agent_id,
+            server_id=server_id,
+            server_key="open_talon_control_plane",
+            display_name="Open Talon Control Plane",
+            description=(
+                "Managed MCP server exposing Researcher-safe dossier persistence APIs."
+            ),
+            transport_kind="streamable_http",
+            trust_level="trusted",
+            name_prefix="control_plane__",
+            tool_allowlist=list(_RESEARCHER_CONTROL_PLANE_ALLOWLIST),
+            tool_denylist=list(_CONTROL_PLANE_TOOL_DENYLIST),
+            attached_by=SYSTEM_ACTOR_ID,
+            attached_at=now,
+            updated_at=now,
+            metadata={"seeded": True, "managed": True, "agent_key": "researcher"},
+        )
+
+    @staticmethod
+    def _methodologist_internal_mcp_binding(
+        *,
+        agent_id: UUID,
+        server_id: UUID,
+        now: datetime,
+    ) -> AgentInternalMcpServer:
+        return AgentInternalMcpServer(
+            system_agent_id=agent_id,
+            server_id=server_id,
+            server_key="open_talon_control_plane",
+            display_name="Open Talon Control Plane",
+            description=(
+                "Managed MCP server exposing Methodologist-safe dossier read and "
+                "blueprint draft submission APIs."
+            ),
+            transport_kind="streamable_http",
+            trust_level="trusted",
+            name_prefix="control_plane__",
+            tool_allowlist=list(_METHODOLOGIST_CONTROL_PLANE_ALLOWLIST),
+            tool_denylist=list(_CONTROL_PLANE_TOOL_DENYLIST),
+            attached_by=SYSTEM_ACTOR_ID,
+            attached_at=now,
+            updated_at=now,
+            metadata={"seeded": True, "managed": True, "agent_key": "methodologist"},
+        )
+
+    @staticmethod
+    def _researcher_plugin_mcp_bindings(
+        *,
+        agent_id: UUID,
+        library_server_id: UUID,
+        retriever_server_id: UUID,
+        web_search_server_id: UUID,
+        now: datetime,
+    ) -> list[AgentInternalMcpServer]:
+        return [
+            AgentInternalMcpServer(
+                system_agent_id=agent_id,
+                server_id=library_server_id,
+                server_key="library",
+                display_name="Library",
+                description="Managed Library plugin for retained dossier sources.",
+                transport_kind="streamable_http",
+                trust_level="trusted",
+                name_prefix="library__",
+                tool_allowlist=list(_LIBRARY_PLUGIN_TOOL_NAMES),
+                attached_by=SYSTEM_ACTOR_ID,
+                attached_at=now,
+                updated_at=now,
+                metadata={"seeded": True, "managed": True, "agent_key": "researcher"},
+            ),
+            AgentInternalMcpServer(
+                system_agent_id=agent_id,
+                server_id=retriever_server_id,
+                server_key="retriever",
+                display_name="Retriever",
+                description="Managed Retriever plugin for indexed search and context packs.",
+                transport_kind="streamable_http",
+                trust_level="trusted",
+                name_prefix="retriever__",
+                tool_allowlist=list(_RETRIEVER_PLUGIN_TOOL_NAMES),
+                attached_by=SYSTEM_ACTOR_ID,
+                attached_at=now,
+                updated_at=now,
+                metadata={"seeded": True, "managed": True, "agent_key": "researcher"},
+            ),
+            AgentInternalMcpServer(
+                system_agent_id=agent_id,
+                server_id=web_search_server_id,
+                server_key="web_search",
+                display_name="Web Search",
+                description="Managed Web Search plugin for follow-up discovery and fetches.",
+                transport_kind="streamable_http",
+                trust_level="sandboxed",
+                name_prefix="web_search__",
+                tool_allowlist=[],
+                attached_by=SYSTEM_ACTOR_ID,
+                attached_at=now,
+                updated_at=now,
+                metadata={"seeded": True, "managed": True, "agent_key": "researcher"},
+            ),
+        ]
 
     async def _tinker_internal_tools(self, *, now: datetime) -> list[SystemToolDefinition]:
         list_tools = (

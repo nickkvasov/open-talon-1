@@ -19,6 +19,7 @@ from .contracts import (
     LlmProviderDefinition,
     MemoryEntry,
     MemoryProviderDefinition,
+    MethodologyBlueprintDetail,
     MethodicExecutionDetail,
     MethodicResourceRequest,
     McpServerDefinition,
@@ -35,6 +36,8 @@ from .contracts import (
     RetrievalSearchResponse,
     RetrievalSource,
     RetrievalSourceVersion,
+    ResearchDossier,
+    ResearchDossierSource,
     ResolvedAssetBinding,
     RoleDefinition,
     Run,
@@ -198,6 +201,13 @@ class RetrievalCommandResult(CommandResult):
 class MethodicExecutionCommandResult(CommandResult):
     detail: MethodicExecutionDetail | None = None
     resource_request: MethodicResourceRequest | None = None
+
+
+@dataclass
+class MethodologyBlueprintCommandResult(CommandResult):
+    detail: MethodologyBlueprintDetail | None = None
+    dossier: ResearchDossier | None = None
+    source: ResearchDossierSource | None = None
 
 
 @dataclass

@@ -30,6 +30,7 @@ from gateway_edge.models import (
     AuditEventPage,
     AuditExportRequest,
     CancelMethodicExecutionRequest,
+    AttachResearchDossierContextPackRequest,
     AttachLibraryToWorkspaceRequest,
     CreateMethodicAssignmentRequest,
     CreateAgentGitWorktreeSessionRequest,
@@ -44,6 +45,7 @@ from gateway_edge.models import (
     CreateMessageRequest,
     CreateOrganizationRequest,
     CreateProjectRequest,
+    CreateResearchDossierSourceRequest,
     CreateRetrievalContextPackRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
@@ -57,6 +59,8 @@ from gateway_edge.models import (
     LlmProviderDefinition,
     MemoryProviderDefinition,
     MemorySearchResponse,
+    MarkResearchDossierReadyRequest,
+    MethodologyBlueprintDetail,
     MethodicExecution,
     MethodicExecutionDetail,
     MethodicResourceRequest,
@@ -75,19 +79,24 @@ from gateway_edge.models import (
     RetrievalIngestionJob,
     RetrievalSearchResponse,
     RetrievalSource,
+    ResearchDossier,
+    ResearchDossierSource,
     RunRetrievalSearchRequest,
+    SubmitMethodologyBlueprintDraftRequest,
     ReviewMethodicResourceRequest,
     SystemToolDefinition,
     Thread,
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
+    UpdateResearchDossierSourceRequest,
     UpdateLibraryItemRequest,
     UpdateLibraryRequest,
     UpdateProjectRequest,
     UpsertProjectAccessRequest,
     Workspace,
     WorkspaceDetail,
+    WorkspaceHarness,
     ValidateAgentBundleFromGitRequest,
 )
 from gateway_edge.services import collaboration as collab_svc
@@ -317,6 +326,101 @@ class RetrievalContextPackCreateArgs(BaseModel):
 
 class RetrievalContextPackGetArgs(BaseModel):
     context_pack_id: UUID
+
+
+class MethodologyDossierGetArgs(BaseModel):
+    dossier_id: UUID
+
+
+class MethodologyDossierSourceCreateArgs(BaseModel):
+    dossier_id: UUID
+    source_kind: Literal[
+        "library_item",
+        "webpage",
+        "paper",
+        "file",
+        "media",
+        "image",
+        "video",
+        "audio",
+        "dataset",
+        "other",
+    ] = "other"
+    status: Literal[
+        "discovered",
+        "fetched",
+        "included",
+        "excluded",
+        "duplicate",
+        "failed",
+        "rejected",
+        "unresolved",
+    ] = "discovered"
+    title: str
+    source_uri: str | None = None
+    library_id: UUID | None = None
+    library_item_id: UUID | None = None
+    asset_id: UUID | None = None
+    asset_version_id: UUID | None = None
+    context_pack_ids: list[UUID] = Field(default_factory=list)
+    citation_id: str | None = None
+    quality_notes: str | None = None
+    contradictions: list[dict[str, Any]] = Field(default_factory=list)
+    rationale: str | None = None
+    fetch_metadata: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodologyDossierSourceUpdateArgs(BaseModel):
+    dossier_id: UUID
+    source_id: UUID
+    status: Literal[
+        "discovered",
+        "fetched",
+        "included",
+        "excluded",
+        "duplicate",
+        "failed",
+        "rejected",
+        "unresolved",
+    ] | None = None
+    title: str | None = None
+    source_uri: str | None = None
+    library_id: UUID | None = None
+    library_item_id: UUID | None = None
+    asset_id: UUID | None = None
+    asset_version_id: UUID | None = None
+    context_pack_ids: list[UUID] | None = None
+    citation_id: str | None = None
+    quality_notes: str | None = None
+    contradictions: list[dict[str, Any]] | None = None
+    rationale: str | None = None
+    fetch_metadata: dict[str, Any] | None = None
+    error: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class MethodologyDossierContextPackAttachArgs(BaseModel):
+    dossier_id: UUID
+    context_pack_id: UUID
+    source_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodologyDossierMarkReadyArgs(BaseModel):
+    dossier_id: UUID
+    summary: str | None = None
+    contradictions: list[dict[str, Any]] = Field(default_factory=list)
+    gaps: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodologyBlueprintSubmitDraftArgs(BaseModel):
+    version_id: UUID
+    cited_output: str
+    harness_draft: WorkspaceHarness
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class MethodicsExecutionsCreateArgs(BaseModel):
@@ -1535,6 +1639,66 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             requires_workspace_actor=True,
             handler_name="handle_retrieval_context_pack_get",
         ),
+        "methodology.dossiers.get": OperationDefinition(
+            name="methodology.dossiers.get",
+            description="Read a research dossier in the active organization scope.",
+            input_model=MethodologyDossierGetArgs,
+            output_schema=_type_schema(ResearchDossier),
+            allowed_scopes=frozenset({"organization"}),
+            required_permission_type="identity",
+            required_permission="methodology.read",
+            handler_name="handle_methodology_dossiers_get",
+        ),
+        "methodology.dossiers.sources.create": OperationDefinition(
+            name="methodology.dossiers.sources.create",
+            description="Create a structured source record for a research dossier.",
+            input_model=MethodologyDossierSourceCreateArgs,
+            output_schema=_type_schema(ResearchDossierSource),
+            allowed_scopes=frozenset({"organization"}),
+            required_permission_type="identity",
+            required_permission="methodology.write",
+            handler_name="handle_methodology_dossiers_sources_create",
+        ),
+        "methodology.dossiers.sources.update": OperationDefinition(
+            name="methodology.dossiers.sources.update",
+            description="Update triage, quality, retained references, or errors for a dossier source.",
+            input_model=MethodologyDossierSourceUpdateArgs,
+            output_schema=_type_schema(ResearchDossierSource),
+            allowed_scopes=frozenset({"organization"}),
+            required_permission_type="identity",
+            required_permission="methodology.write",
+            handler_name="handle_methodology_dossiers_sources_update",
+        ),
+        "methodology.dossiers.context_pack.attach": OperationDefinition(
+            name="methodology.dossiers.context_pack.attach",
+            description="Attach a retrieval context pack to a research dossier or source.",
+            input_model=MethodologyDossierContextPackAttachArgs,
+            output_schema=_type_schema(ResearchDossier),
+            allowed_scopes=frozenset({"organization"}),
+            required_permission_type="identity",
+            required_permission="methodology.write",
+            handler_name="handle_methodology_dossiers_context_pack_attach",
+        ),
+        "methodology.dossiers.mark_ready": OperationDefinition(
+            name="methodology.dossiers.mark_ready",
+            description="Mark a research dossier ready for Methodologist or other consumers.",
+            input_model=MethodologyDossierMarkReadyArgs,
+            output_schema=_type_schema(ResearchDossier),
+            allowed_scopes=frozenset({"organization"}),
+            required_permission_type="identity",
+            required_permission="methodology.write",
+            handler_name="handle_methodology_dossiers_mark_ready",
+        ),
+        "methodology.blueprints.submit_draft": OperationDefinition(
+            name="methodology.blueprints.submit_draft",
+            description="Submit a cited methodology blueprint draft and WorkspaceHarness draft for review.",
+            input_model=MethodologyBlueprintSubmitDraftArgs,
+            output_schema=_type_schema(MethodologyBlueprintDetail),
+            allowed_scopes=frozenset({"organization"}),
+            required_permission_type="identity",
+            required_permission="methodology.write",
+            handler_name="handle_methodology_blueprints_submit_draft",
+        ),
         "methodics.executions.create": OperationDefinition(
             name="methodics.executions.create",
             description="Start explicit Conductor execution of active workspace methodics.",
@@ -2541,6 +2705,169 @@ async def handle_retrieval_context_pack_get(
     ):
         raise KeyError(f"Retrieval context pack {args.context_pack_id} not found")
     return context_pack
+
+
+def _active_methodology_organization_id(ctx: McpApiContext) -> UUID:
+    if ctx.active_scope_kind != "organization" or ctx.active_scope_id is None:
+        raise ValueError("Methodology dossier MCP operations require organization scope")
+    return ctx.active_scope_id
+
+
+def _require_dossier_in_active_org(
+    *,
+    dossier: ResearchDossier,
+    organization_id: UUID,
+    dossier_id: UUID,
+) -> None:
+    if dossier.organization_id != organization_id:
+        raise KeyError(f"Research dossier {dossier_id} not found")
+
+
+async def handle_methodology_dossiers_get(
+    ctx: McpApiContext,
+    args: MethodologyDossierGetArgs,
+) -> ResearchDossier:
+    organization_id = _active_methodology_organization_id(ctx)
+    dossier = await collab_svc.collaboration_service.get_research_dossier(
+        args.dossier_id,
+        actor=ctx.identity_actor(),
+    )
+    _require_dossier_in_active_org(
+        dossier=dossier,
+        organization_id=organization_id,
+        dossier_id=args.dossier_id,
+    )
+    return dossier
+
+
+async def handle_methodology_dossiers_sources_create(
+    ctx: McpApiContext,
+    args: MethodologyDossierSourceCreateArgs,
+) -> ResearchDossierSource:
+    organization_id = _active_methodology_organization_id(ctx)
+    dossier = await collab_svc.collaboration_service.get_research_dossier(
+        args.dossier_id,
+        actor=ctx.identity_actor(),
+    )
+    _require_dossier_in_active_org(
+        dossier=dossier,
+        organization_id=organization_id,
+        dossier_id=args.dossier_id,
+    )
+    return await collab_svc.collaboration_service.create_research_dossier_source(
+        args.dossier_id,
+        CreateResearchDossierSourceRequest(
+            actor=ctx.identity_actor(),
+            **args.model_dump(exclude={"dossier_id"}),
+        ),
+    )
+
+
+async def handle_methodology_dossiers_sources_update(
+    ctx: McpApiContext,
+    args: MethodologyDossierSourceUpdateArgs,
+) -> ResearchDossierSource:
+    organization_id = _active_methodology_organization_id(ctx)
+    dossier = await collab_svc.collaboration_service.get_research_dossier(
+        args.dossier_id,
+        actor=ctx.identity_actor(),
+    )
+    _require_dossier_in_active_org(
+        dossier=dossier,
+        organization_id=organization_id,
+        dossier_id=args.dossier_id,
+    )
+    return await collab_svc.collaboration_service.update_research_dossier_source(
+        args.dossier_id,
+        args.source_id,
+        UpdateResearchDossierSourceRequest(
+            actor=ctx.identity_actor(),
+            **args.model_dump(exclude={"dossier_id", "source_id"}, exclude_none=True),
+        ),
+    )
+
+
+async def handle_methodology_dossiers_context_pack_attach(
+    ctx: McpApiContext,
+    args: MethodologyDossierContextPackAttachArgs,
+) -> ResearchDossier:
+    organization_id = _active_methodology_organization_id(ctx)
+    current = await collab_svc.collaboration_service.get_research_dossier(
+        args.dossier_id,
+        actor=ctx.identity_actor(),
+    )
+    _require_dossier_in_active_org(
+        dossier=current,
+        organization_id=organization_id,
+        dossier_id=args.dossier_id,
+    )
+    dossier = await collab_svc.collaboration_service.attach_research_dossier_context_pack(
+        args.dossier_id,
+        AttachResearchDossierContextPackRequest(
+            actor=ctx.identity_actor(),
+            **args.model_dump(exclude={"dossier_id"}),
+        ),
+    )
+    _require_dossier_in_active_org(
+        dossier=dossier,
+        organization_id=organization_id,
+        dossier_id=args.dossier_id,
+    )
+    return dossier
+
+
+async def handle_methodology_dossiers_mark_ready(
+    ctx: McpApiContext,
+    args: MethodologyDossierMarkReadyArgs,
+) -> ResearchDossier:
+    organization_id = _active_methodology_organization_id(ctx)
+    current = await collab_svc.collaboration_service.get_research_dossier(
+        args.dossier_id,
+        actor=ctx.identity_actor(),
+    )
+    _require_dossier_in_active_org(
+        dossier=current,
+        organization_id=organization_id,
+        dossier_id=args.dossier_id,
+    )
+    dossier = await collab_svc.collaboration_service.mark_research_dossier_ready(
+        args.dossier_id,
+        MarkResearchDossierReadyRequest(
+            actor=ctx.identity_actor(),
+            **args.model_dump(exclude={"dossier_id"}),
+        ),
+    )
+    _require_dossier_in_active_org(
+        dossier=dossier,
+        organization_id=organization_id,
+        dossier_id=args.dossier_id,
+    )
+    return dossier
+
+
+async def handle_methodology_blueprints_submit_draft(
+    ctx: McpApiContext,
+    args: MethodologyBlueprintSubmitDraftArgs,
+) -> MethodologyBlueprintDetail:
+    organization_id = _active_methodology_organization_id(ctx)
+    version = await collab_svc.collaboration_service.get_methodology_blueprint_version(
+        args.version_id,
+        actor=ctx.identity_actor(),
+    )
+    if version.organization_id != organization_id:
+        raise KeyError(f"Methodology blueprint version {args.version_id} not found")
+    detail = await collab_svc.collaboration_service.submit_methodology_blueprint_draft(
+        args.version_id,
+        SubmitMethodologyBlueprintDraftRequest(
+            actor=ctx.identity_actor(),
+            cited_output=args.cited_output,
+            harness_draft=args.harness_draft,
+            metadata=args.metadata,
+        ),
+    )
+    if detail.blueprint.organization_id != organization_id:
+        raise KeyError(f"Methodology blueprint version {args.version_id} not found")
+    return detail
 
 
 async def _methodics_actor(

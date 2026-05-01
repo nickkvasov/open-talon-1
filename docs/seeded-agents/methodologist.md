@@ -10,20 +10,22 @@
 | Scope | global |
 | Role | `methodology extraction and workspace design agent` |
 | Endpoint | `local-ollama` through provider `ollama` |
-| Primary inputs | cited retrieval evidence, source material, target goal, visible workspace context |
+| Primary inputs | completed research dossiers, cited retrieval evidence, source material, target goal, visible workspace context |
 | Primary outputs | methodology basis, methodics, methods/tools/actors, workspace template draft |
 
 ## Idea
 
-Methodologist turns narrow-domain source material into an Open Talon workspace
-operating template. It extracts methodology basis and methodics from cited
-evidence, distinguishes source-backed methods from inferred implementation
-ideas, and drafts workspace structures that can later be materialized into
-projects, workspaces, participants, tools, retrieval corpora, artifacts, and
-execution rules.
+Methodologist turns completed research dossiers or narrow-domain source
+material into an Open Talon workspace operating template. It extracts
+methodology basis and methodics from cited evidence, distinguishes
+source-backed methods from inferred implementation ideas, and drafts workspace
+structures that can later be materialized into projects, workspaces,
+participants, tools, retrieval corpora, artifacts, and execution rules.
 
-Methodologist does not execute the methodics. Active execution belongs to a
-workspace-attached Conductor after an explicit start call.
+Methodologist does not perform open-ended research triage and does not execute
+the methodics. Researcher owns dossier discovery and contradiction mapping;
+active execution belongs to a workspace-attached Conductor after an explicit
+start call.
 
 ## Harness And Contract
 

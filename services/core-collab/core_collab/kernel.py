@@ -56,6 +56,8 @@ from .contracts import (
     AttachWorkspaceToolRequest,
     AttachLibraryToWorkspaceRequest,
     AssumeParticipantRoleRequest,
+    ApplyMethodologyBlueprintRequest,
+    AttachResearchDossierContextPackRequest,
     Artifact,
     AssetLink,
     ActivateAssetVersionRequest,
@@ -91,7 +93,9 @@ from .contracts import (
     CreateMemoryEntryRequest,
     CreateThreadMemoryRequest,
     CreateMessageRequest,
+    CreateMethodologyBlueprintRequest,
     CreateToolGenerationRevisionRequest,
+    CreateResearchDossierSourceRequest,
     SearchMemoryRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
@@ -124,6 +128,9 @@ from .contracts import (
     MemoryProviderRecord,
     MemorySearchHit,
     MemorySearchResponse,
+    MethodologyBlueprint,
+    MethodologyBlueprintDetail,
+    MethodologyBlueprintVersion,
     PublicationReview,
     McpPromptDefinition,
     McpResourceDefinition,
@@ -161,6 +168,9 @@ from .contracts import (
     RetrievalSearchResponse,
     RetrievalSource,
     RetrievalSourceVersion,
+    ResearchDossier,
+    ResearchDossierEvent,
+    ResearchDossierSource,
     RunRetrievalSearchRequest,
     PresenceState,
     ResolvedAssetBinding,
@@ -180,7 +190,9 @@ from .contracts import (
     ToolGenerationRevision,
     WorkspaceCommunicationLogPage,
     Run,
+    MarkResearchDossierReadyRequest,
     ReviewToolGenerationRevisionRequest,
+    ReviewMethodologyBlueprintVersionRequest,
     ReviewMethodicResourceRequest,
     RotateAgentIdentitySecretRequest,
     StopReason,
@@ -201,6 +213,7 @@ from .contracts import (
     UpdateMcpServerRequest,
     UpdateOrganizationRequest,
     UpdateProjectRequest,
+    UpdateResearchDossierSourceRequest,
     UpsertProjectAccessRequest,
     UpsertRoleDefinitionRequest,
     RemoveOrganizationMemberRequest,
@@ -212,6 +225,7 @@ from .contracts import (
     UpdateAgentParticipantRequest,
     UpdateMemoryEntryRequest,
     UpdateWorkspaceRequest,
+    SubmitMethodologyBlueprintDraftRequest,
     UploadFileAssetRequest,
     UpdateWorkspaceToolRequest,
     UpdateWorkspaceMcpServerRequest,
@@ -248,6 +262,7 @@ from .results import (
     LlmProviderCommandResult,
     MemoryCommandResult,
     MemoryProviderCommandResult,
+    MethodologyBlueprintCommandResult,
     MethodicExecutionCommandResult,
     McpServerCommandResult,
     MessageCommandResult,
@@ -274,6 +289,8 @@ from .system_defaults import (
     ANCHOR_AGENT_ID,
     ANCHOR_TASK_KIND,
     CONTROL_PLANE_MCP_SERVER_ID,
+    METHODOLOGY_BLUEPRINT_DRAFT_TASK_KIND,
+    METHODOLOGY_RESEARCH_DOSSIER_BUILD_TASK_KIND,
     METHODICS_EXECUTION_START_TASK_KIND,
     SYSTEM_BASE_ORGANIZATION_ID,
     administration_project_for_organization as managed_administration_project_for_organization,
@@ -3646,6 +3663,695 @@ class CollaborationKernel:
         self, context_pack_id: UUID
     ) -> RetrievalContextPack | None:
         return await self._repository.fetch_retrieval_context_pack(context_pack_id)
+
+    async def create_methodology_blueprint(
+        self,
+        organization_id: UUID,
+        payload: CreateMethodologyBlueprintRequest,
+    ) -> MethodologyBlueprintCommandResult:
+        organization = await self._repository.fetch_organization(organization_id)
+        if organization is None:
+            raise KeyError(f"Organization {organization_id} not found")
+        user_id = self._actor_user_id(payload.actor)
+        if user_id is not None:
+            await self._require_organization_permission(
+                organization_id,
+                user_id,
+                "methodology.write",
+            )
+        for library_id in payload.library_ids:
+            library = await self._repository.fetch_library(library_id)
+            if library is None or library.organization_id != organization_id:
+                raise KeyError(f"Library {library_id} not found in organization {organization_id}")
+            if library.scope not in {"organization", "project"}:
+                raise ValueError("Blueprint research can only select organization or project libraries")
+
+        now = self._now()
+        blueprint_id = uuid4()
+        version_id = uuid4()
+        dossier_id = uuid4()
+        operations_workspace = await self._organization_operations_workspace(organization_id)
+        researcher_agent = await self._repository.fetch_system_agent_by_key(
+            scope="global",
+            organization_id=None,
+            agent_key="researcher",
+        )
+        if researcher_agent is None:
+            raise KeyError("Seeded Researcher agent not found")
+        methodologist_agent = await self._repository.fetch_system_agent_by_key(
+            scope="global",
+            organization_id=None,
+            agent_key="methodologist",
+        )
+        if methodologist_agent is None:
+            raise KeyError("Seeded Methodologist agent not found")
+        researcher_participant = await self._ensure_operations_agent_participant(
+            operations_workspace,
+            researcher_agent,
+            now=now,
+        )
+        methodologist_participant = await self._ensure_operations_agent_participant(
+            operations_workspace,
+            methodologist_agent,
+            now=now,
+        )
+        retained_library = Library(
+            library_id=uuid4(),
+            scope="organization",
+            organization_id=organization_id,
+            slug=self._normalize_library_slug(f"research-dossier-{dossier_id.hex[:12]}"),
+            name=f"Research Dossier: {payload.title}",
+            description="Managed retained-source library for a methodology research dossier.",
+            created_by=payload.actor.participant_id,
+            updated_by=payload.actor.participant_id,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "managed": True,
+                "research_dossier": True,
+                "blueprint_id": str(blueprint_id),
+                "version_id": str(version_id),
+                "dossier_id": str(dossier_id),
+            },
+        )
+        thread = Thread(
+            thread_id=uuid4(),
+            workspace_id=operations_workspace.workspace_id,
+            title=f"Research dossier: {payload.title}",
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "managed": True,
+                "methodology_blueprint_id": str(blueprint_id),
+                "methodology_blueprint_version_id": str(version_id),
+                "research_dossier_id": str(dossier_id),
+            },
+        )
+        blueprint = MethodologyBlueprint(
+            blueprint_id=blueprint_id,
+            organization_id=organization_id,
+            title=payload.title,
+            topic=payload.topic,
+            target_goal=payload.target_goal,
+            tasks=list(payload.tasks),
+            status="draft",
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        version = MethodologyBlueprintVersion(
+            version_id=version_id,
+            blueprint_id=blueprint_id,
+            organization_id=organization_id,
+            version_number=1,
+            status="researching",
+            research_dossier_id=dossier_id,
+            source_policy=payload.source_policy,
+            selected_library_ids=list(payload.library_ids),
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_at=now,
+            metadata={"created_from_blueprint_request": True},
+        )
+        dossier = ResearchDossier(
+            dossier_id=dossier_id,
+            blueprint_id=blueprint_id,
+            version_id=version_id,
+            organization_id=organization_id,
+            retained_library_id=retained_library.library_id,
+            operations_workspace_id=operations_workspace.workspace_id,
+            thread_id=thread.thread_id,
+            researcher_system_agent_id=researcher_agent.agent_id,
+            researcher_participant_id=researcher_participant.participant_id,
+            methodologist_system_agent_id=methodologist_agent.agent_id,
+            methodologist_participant_id=methodologist_participant.participant_id,
+            status="researching",
+            topic=payload.topic,
+            tasks=list(payload.tasks),
+            created_by=payload.actor.participant_id,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "source_policy": payload.source_policy,
+                "selected_library_ids": [str(item) for item in payload.library_ids],
+            },
+        )
+        task = self._build_researcher_dossier_task(
+            dossier=dossier,
+            blueprint=blueprint,
+            version=version,
+            operations_workspace=operations_workspace,
+            researcher_participant=researcher_participant,
+            requested_by=payload.actor.participant_id,
+            now=now,
+        )
+        event = ResearchDossierEvent(
+            event_id=uuid4(),
+            dossier_id=dossier_id,
+            organization_id=organization_id,
+            event_type="research_dossier.created",
+            actor_participant_id=payload.actor.participant_id,
+            payload={
+                "blueprint_id": str(blueprint_id),
+                "version_id": str(version_id),
+                "retained_library_id": str(retained_library.library_id),
+                "researcher_task_id": str(task.task_id),
+            },
+            created_at=now,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_participant(conn, researcher_participant)
+                await self._repository.upsert_participant(conn, methodologist_participant)
+                await self._repository.upsert_library(conn, retained_library)
+                await self._repository.upsert_thread(conn, thread)
+                await self._repository.upsert_methodology_blueprint(conn, blueprint)
+                await self._repository.upsert_methodology_blueprint_version(conn, version)
+                await self._repository.upsert_research_dossier(conn, dossier)
+                await self._repository.upsert_task(conn, task)
+                await self._repository.append_research_dossier_event(conn, event)
+        return MethodologyBlueprintCommandResult(
+            detail=MethodologyBlueprintDetail(
+                blueprint=blueprint,
+                versions=[version],
+                dossier=dossier,
+                sources=[],
+            ),
+            dossier=dossier,
+        )
+
+    async def list_methodology_blueprints(
+        self,
+        organization_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+        status: str | None = None,
+    ) -> list[MethodologyBlueprint]:
+        if actor is not None:
+            user_id = self._actor_user_id(actor)
+            if user_id is not None:
+                await self._require_organization_permission(
+                    organization_id,
+                    user_id,
+                    "methodology.read",
+                )
+        return await self._repository.list_methodology_blueprints(
+            organization_id,
+            status=status,
+        )
+
+    async def get_methodology_blueprint_detail(
+        self,
+        blueprint_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+    ) -> MethodologyBlueprintDetail:
+        blueprint = await self._repository.fetch_methodology_blueprint(blueprint_id)
+        if blueprint is None:
+            raise KeyError(f"Methodology blueprint {blueprint_id} not found")
+        if actor is not None:
+            user_id = self._actor_user_id(actor)
+            if user_id is not None:
+                await self._require_organization_permission(
+                    blueprint.organization_id,
+                    user_id,
+                    "methodology.read",
+                )
+        versions = await self._repository.list_methodology_blueprint_versions(blueprint_id)
+        dossier = None
+        sources: list[ResearchDossierSource] = []
+        if versions and versions[0].research_dossier_id is not None:
+            dossier = await self._repository.fetch_research_dossier(
+                versions[0].research_dossier_id
+            )
+            if dossier is not None:
+                sources = await self._repository.list_research_dossier_sources(
+                    dossier.dossier_id
+                )
+        return MethodologyBlueprintDetail(
+            blueprint=blueprint,
+            versions=versions,
+            dossier=dossier,
+            sources=sources,
+        )
+
+    async def get_research_dossier(
+        self,
+        dossier_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+    ) -> ResearchDossier:
+        dossier = await self._repository.fetch_research_dossier(dossier_id)
+        if dossier is None:
+            raise KeyError(f"Research dossier {dossier_id} not found")
+        if actor is not None:
+            user_id = self._actor_user_id(actor)
+            if user_id is not None:
+                await self._require_organization_permission(
+                    dossier.organization_id,
+                    user_id,
+                    "methodology.read",
+                )
+        return dossier
+
+    async def get_methodology_blueprint_version(
+        self,
+        version_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+    ) -> MethodologyBlueprintVersion:
+        version = await self._repository.fetch_methodology_blueprint_version(version_id)
+        if version is None:
+            raise KeyError(f"Methodology blueprint version {version_id} not found")
+        if actor is not None:
+            user_id = self._actor_user_id(actor)
+            if user_id is not None:
+                await self._require_organization_permission(
+                    version.organization_id,
+                    user_id,
+                    "methodology.read",
+                )
+        return version
+
+    async def list_research_dossier_sources(
+        self,
+        dossier_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+        status: str | None = None,
+    ) -> list[ResearchDossierSource]:
+        dossier = await self.get_research_dossier(dossier_id, actor=actor)
+        return await self._repository.list_research_dossier_sources(
+            dossier.dossier_id,
+            status=status,
+        )
+
+    async def create_research_dossier_source(
+        self,
+        dossier_id: UUID,
+        payload: CreateResearchDossierSourceRequest,
+    ) -> MethodologyBlueprintCommandResult:
+        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        await self._require_dossier_write_actor(dossier, payload.actor)
+        now = self._now()
+        source = ResearchDossierSource(
+            source_id=uuid4(),
+            dossier_id=dossier.dossier_id,
+            organization_id=dossier.organization_id,
+            source_kind=payload.source_kind,
+            status=payload.status,
+            title=payload.title,
+            source_uri=payload.source_uri,
+            library_id=payload.library_id,
+            library_item_id=payload.library_item_id,
+            asset_id=payload.asset_id,
+            asset_version_id=payload.asset_version_id,
+            context_pack_ids=list(payload.context_pack_ids),
+            citation_id=payload.citation_id,
+            quality_notes=payload.quality_notes,
+            contradictions=list(payload.contradictions),
+            rationale=payload.rationale,
+            fetch_metadata=payload.fetch_metadata,
+            error=payload.error,
+            discovered_by_participant_id=payload.actor.participant_id,
+            discovered_by_system_agent_id=(
+                payload.actor.participant_id
+                if payload.actor.participant_type == "agent"
+                else None
+            ),
+            created_at=now,
+            updated_at=now,
+            metadata=payload.metadata,
+        )
+        await self._validate_research_dossier_source_refs(dossier, source)
+        event = ResearchDossierEvent(
+            event_id=uuid4(),
+            dossier_id=dossier.dossier_id,
+            organization_id=dossier.organization_id,
+            event_type="research_dossier_source.created",
+            actor_participant_id=payload.actor.participant_id,
+            system_agent_id=source.discovered_by_system_agent_id,
+            source_id=source.source_id,
+            payload=source.model_dump(mode="json"),
+            created_at=now,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_research_dossier_source(conn, source)
+                await self._repository.append_research_dossier_event(conn, event)
+        return MethodologyBlueprintCommandResult(dossier=dossier, source=source)
+
+    async def update_research_dossier_source(
+        self,
+        dossier_id: UUID,
+        source_id: UUID,
+        payload: UpdateResearchDossierSourceRequest,
+    ) -> MethodologyBlueprintCommandResult:
+        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        await self._require_dossier_write_actor(dossier, payload.actor)
+        source = await self._repository.fetch_research_dossier_source(source_id)
+        if source is None or source.dossier_id != dossier_id:
+            raise KeyError(f"Research dossier source {source_id} not found")
+        now = self._now()
+        update = {
+            key: value
+            for key, value in payload.model_dump(exclude={"actor"}, exclude_none=True).items()
+            if key != "metadata"
+        }
+        updated = source.model_copy(
+            update={
+                **update,
+                "updated_at": now,
+                "metadata": (
+                    {**source.metadata, **payload.metadata}
+                    if payload.metadata is not None
+                    else source.metadata
+                ),
+            }
+        )
+        await self._validate_research_dossier_source_refs(dossier, updated)
+        event = ResearchDossierEvent(
+            event_id=uuid4(),
+            dossier_id=dossier.dossier_id,
+            organization_id=dossier.organization_id,
+            event_type="research_dossier_source.updated",
+            actor_participant_id=payload.actor.participant_id,
+            system_agent_id=(
+                payload.actor.participant_id
+                if payload.actor.participant_type == "agent"
+                else None
+            ),
+            source_id=updated.source_id,
+            payload=updated.model_dump(mode="json"),
+            created_at=now,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_research_dossier_source(conn, updated)
+                await self._repository.append_research_dossier_event(conn, event)
+        return MethodologyBlueprintCommandResult(dossier=dossier, source=updated)
+
+    async def attach_research_dossier_context_pack(
+        self,
+        dossier_id: UUID,
+        payload: AttachResearchDossierContextPackRequest,
+    ) -> ResearchDossier:
+        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        await self._require_dossier_write_actor(dossier, payload.actor)
+        context_pack = await self._repository.fetch_retrieval_context_pack(
+            payload.context_pack_id
+        )
+        if context_pack is None or context_pack.organization_id != dossier.organization_id:
+            raise KeyError(f"Retrieval context pack {payload.context_pack_id} not found")
+        now = self._now()
+        updated_dossier = dossier.model_copy(
+            update={
+                "context_pack_ids": list(
+                    dict.fromkeys([*dossier.context_pack_ids, payload.context_pack_id])
+                ),
+                "updated_at": now,
+                "metadata": {**dossier.metadata, **payload.metadata},
+            }
+        )
+        source = None
+        if payload.source_id is not None:
+            source = await self._repository.fetch_research_dossier_source(payload.source_id)
+            if source is None or source.dossier_id != dossier_id:
+                raise KeyError(f"Research dossier source {payload.source_id} not found")
+            source = source.model_copy(
+                update={
+                    "context_pack_ids": list(
+                        dict.fromkeys([*source.context_pack_ids, payload.context_pack_id])
+                    ),
+                    "updated_at": now,
+                }
+            )
+        event = ResearchDossierEvent(
+            event_id=uuid4(),
+            dossier_id=dossier.dossier_id,
+            organization_id=dossier.organization_id,
+            event_type="research_dossier.context_pack_attached",
+            actor_participant_id=payload.actor.participant_id,
+            system_agent_id=(
+                payload.actor.participant_id
+                if payload.actor.participant_type == "agent"
+                else None
+            ),
+            source_id=payload.source_id,
+            payload={"context_pack_id": str(payload.context_pack_id)},
+            created_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_research_dossier(conn, updated_dossier)
+                if source is not None:
+                    await self._repository.upsert_research_dossier_source(conn, source)
+                await self._repository.append_research_dossier_event(conn, event)
+        return updated_dossier
+
+    async def mark_research_dossier_ready(
+        self,
+        dossier_id: UUID,
+        payload: MarkResearchDossierReadyRequest,
+    ) -> ResearchDossier:
+        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        await self._require_dossier_write_actor(dossier, payload.actor)
+        version = await self._repository.fetch_methodology_blueprint_version(
+            dossier.version_id
+        )
+        if version is None:
+            raise KeyError(f"Methodology blueprint version {dossier.version_id} not found")
+        now = self._now()
+        updated_dossier = dossier.model_copy(
+            update={
+                "status": "ready_for_methodologist",
+                "summary": payload.summary,
+                "contradictions": list(payload.contradictions),
+                "gaps": list(payload.gaps),
+                "ready_at": now,
+                "updated_at": now,
+                "metadata": {**dossier.metadata, **payload.metadata},
+            }
+        )
+        updated_version = version.model_copy(
+            update={
+                "status": "ready_for_methodologist",
+                "updated_at": now,
+                "metadata": {**version.metadata, "dossier_ready_at": now.isoformat()},
+            }
+        )
+        sources = await self._repository.list_research_dossier_sources(
+            dossier.dossier_id
+        )
+        methodologist_task = self._build_methodologist_blueprint_task(
+            dossier=updated_dossier,
+            version=updated_version,
+            sources=sources,
+            requested_by=payload.actor.participant_id,
+            now=now,
+        )
+        event = ResearchDossierEvent(
+            event_id=uuid4(),
+            dossier_id=dossier.dossier_id,
+            organization_id=dossier.organization_id,
+            event_type="research_dossier.ready_for_methodologist",
+            actor_participant_id=payload.actor.participant_id,
+            system_agent_id=(
+                payload.actor.participant_id
+                if payload.actor.participant_type == "agent"
+                else None
+            ),
+            payload={
+                "methodologist_task_id": str(methodologist_task.task_id),
+                "context_pack_ids": [str(item) for item in updated_dossier.context_pack_ids],
+            },
+            created_at=now,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_research_dossier(conn, updated_dossier)
+                await self._repository.upsert_methodology_blueprint_version(
+                    conn,
+                    updated_version,
+                )
+                await self._repository.upsert_task(conn, methodologist_task)
+                await self._repository.append_research_dossier_event(conn, event)
+        return updated_dossier
+
+    async def submit_methodology_blueprint_draft(
+        self,
+        version_id: UUID,
+        payload: SubmitMethodologyBlueprintDraftRequest,
+    ) -> MethodologyBlueprintDetail:
+        version = await self._repository.fetch_methodology_blueprint_version(version_id)
+        if version is None:
+            raise KeyError(f"Methodology blueprint version {version_id} not found")
+        blueprint = await self._repository.fetch_methodology_blueprint(version.blueprint_id)
+        if blueprint is None:
+            raise KeyError(f"Methodology blueprint {version.blueprint_id} not found")
+        if payload.actor.participant_type == "user":
+            user_id = self._actor_user_id(payload.actor)
+            if user_id is not None:
+                await self._require_organization_permission(
+                    version.organization_id,
+                    user_id,
+                    "methodology.write",
+                )
+        now = self._now()
+        updated_version = version.model_copy(
+            update={
+                "status": "pending_review",
+                "cited_output": payload.cited_output,
+                "harness_draft": payload.harness_draft,
+                "submitted_by_system_agent_id": (
+                    payload.actor.participant_id
+                    if payload.actor.participant_type == "agent"
+                    else None
+                ),
+                "submitted_at": now,
+                "updated_at": now,
+                "metadata": {**version.metadata, **payload.metadata},
+            }
+        )
+        dossier = (
+            await self._repository.fetch_research_dossier(version.research_dossier_id)
+            if version.research_dossier_id is not None
+            else None
+        )
+        if dossier is not None:
+            dossier = dossier.model_copy(update={"status": "completed", "updated_at": now})
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_methodology_blueprint_version(
+                    conn,
+                    updated_version,
+                )
+                if dossier is not None:
+                    await self._repository.upsert_research_dossier(conn, dossier)
+        return await self.get_methodology_blueprint_detail(blueprint.blueprint_id)
+
+    async def review_methodology_blueprint_version(
+        self,
+        blueprint_id: UUID,
+        version_id: UUID,
+        payload: ReviewMethodologyBlueprintVersionRequest,
+        *,
+        approved: bool,
+    ) -> MethodologyBlueprintDetail:
+        blueprint = await self._repository.fetch_methodology_blueprint(blueprint_id)
+        if blueprint is None:
+            raise KeyError(f"Methodology blueprint {blueprint_id} not found")
+        version = await self._repository.fetch_methodology_blueprint_version(version_id)
+        if version is None or version.blueprint_id != blueprint_id:
+            raise KeyError(f"Methodology blueprint version {version_id} not found")
+        user_id = self._actor_user_id(payload.actor)
+        if user_id is not None:
+            await self._require_organization_permission(
+                blueprint.organization_id,
+                user_id,
+                "methodology.write",
+            )
+        if approved and version.harness_draft is None:
+            raise ValueError("Cannot approve a methodology blueprint version without a harness draft")
+        now = self._now()
+        if approved:
+            updated_version = version.model_copy(
+                update={
+                    "status": "approved",
+                    "approved_by": payload.actor.participant_id,
+                    "approved_at": now,
+                    "review_reason": payload.reason,
+                    "updated_at": now,
+                    "metadata": {**version.metadata, **payload.metadata},
+                }
+            )
+            updated_blueprint = blueprint.model_copy(
+                update={
+                    "status": "active",
+                    "active_version_id": version.version_id,
+                    "updated_at": now,
+                }
+            )
+        else:
+            updated_version = version.model_copy(
+                update={
+                    "status": "rejected",
+                    "rejected_by": payload.actor.participant_id,
+                    "rejected_at": now,
+                    "review_reason": payload.reason,
+                    "updated_at": now,
+                    "metadata": {**version.metadata, **payload.metadata},
+                }
+            )
+            updated_blueprint = blueprint.model_copy(update={"updated_at": now})
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_methodology_blueprint_version(
+                    conn,
+                    updated_version,
+                )
+                await self._repository.upsert_methodology_blueprint(conn, updated_blueprint)
+        return await self.get_methodology_blueprint_detail(blueprint_id)
+
+    async def apply_methodology_blueprint(
+        self,
+        blueprint_id: UUID,
+        payload: ApplyMethodologyBlueprintRequest,
+    ) -> WorkspaceDetail:
+        blueprint = await self._repository.fetch_methodology_blueprint(blueprint_id)
+        if blueprint is None:
+            raise KeyError(f"Methodology blueprint {blueprint_id} not found")
+        version_id = payload.version_id or blueprint.active_version_id
+        if version_id is None:
+            raise ValueError("Methodology blueprint has no active approved version")
+        version = await self._repository.fetch_methodology_blueprint_version(version_id)
+        if version is None or version.blueprint_id != blueprint_id:
+            raise KeyError(f"Methodology blueprint version {version_id} not found")
+        if version.status != "approved" or version.harness_draft is None:
+            raise ValueError("Only approved methodology blueprint versions can be applied")
+        workspace = await self._repository.fetch_workspace(payload.workspace_id)
+        if workspace is None or workspace.organization_id != blueprint.organization_id:
+            raise KeyError(f"Workspace {payload.workspace_id} not found")
+        await self._require_workspace_permission(
+            payload.workspace_id,
+            payload.actor,
+            permission="workspace.roles.write",
+        )
+        now = self._now()
+        current_harness = workspace.harness or WorkspaceHarness()
+        harness = version.harness_draft
+        if payload.preserve_moderation_policy:
+            harness = harness.model_copy(
+                update={"moderation_policy": current_harness.moderation_policy}
+            )
+        harness = harness.model_copy(
+            update={
+                "metadata": {
+                    **harness.metadata,
+                    **payload.metadata,
+                    "methodology_blueprint_id": str(blueprint.blueprint_id),
+                    "methodology_blueprint_version_id": str(version.version_id),
+                }
+            }
+        )
+        updated_workspace = workspace.model_copy(
+            update={
+                "harness": harness,
+                "updated_at": now,
+                "metadata": {
+                    **workspace.metadata,
+                    "methodology_blueprint_id": str(blueprint.blueprint_id),
+                    "methodology_blueprint_version_id": str(version.version_id),
+                    "methodology_blueprint_applied_at": now.isoformat(),
+                },
+            }
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_workspace(conn, updated_workspace)
+        return await self.get_workspace_detail(payload.workspace_id)
 
     async def create_methodic_execution(
         self,
@@ -11384,6 +12090,262 @@ class CollaborationKernel:
             workspace=workspace,
             agent=agent,
             now=now,
+        )
+
+    async def _organization_operations_workspace(
+        self,
+        organization_id: UUID,
+    ) -> Workspace:
+        workspaces = await self.list_workspaces(organization_id=organization_id)
+        for workspace in workspaces:
+            if (
+                workspace.metadata.get("managed") is True
+                and workspace.metadata.get("operations_workspace") is True
+                and workspace.metadata.get("operations_level") == "organization"
+            ):
+                return workspace
+        raise KeyError(
+            "Managed Organization Operations workspace for "
+            f"organization {organization_id} not found"
+        )
+
+    async def _ensure_operations_agent_participant(
+        self,
+        workspace: Workspace,
+        agent: AgentDefinition,
+        *,
+        now: datetime,
+    ) -> ParticipantProfile:
+        participant = self._operations_participant_for_agent(
+            workspace=workspace,
+            agent=agent,
+            now=now,
+        )
+        existing = await self._repository.fetch_agent_participant(
+            workspace.workspace_id,
+            agent.agent_id,
+        )
+        task_routing = agent.definition.get("task_routing")
+        metadata = {
+            **participant.metadata,
+            **({"task_routing": task_routing} if isinstance(task_routing, dict) else {}),
+        }
+        if existing is None:
+            return participant.model_copy(update={"metadata": metadata})
+        return participant.model_copy(
+            update={
+                "participant_id": existing.participant_id,
+                "created_at": existing.created_at,
+                "metadata": {**existing.metadata, **metadata},
+            }
+        )
+
+    async def _require_dossier_write_actor(
+        self,
+        dossier: ResearchDossier,
+        actor: ParticipantInput,
+    ) -> None:
+        if actor.participant_type != "user":
+            return
+        user_id = self._actor_user_id(actor)
+        if user_id is None:
+            raise PermissionError("Methodology dossier writes require an authenticated user")
+        await self._require_organization_permission(
+            dossier.organization_id,
+            user_id,
+            "methodology.write",
+        )
+
+    async def _validate_research_dossier_source_refs(
+        self,
+        dossier: ResearchDossier,
+        source: ResearchDossierSource,
+    ) -> None:
+        if source.library_id is not None:
+            library = await self._repository.fetch_library(source.library_id)
+            if library is None or library.organization_id != dossier.organization_id:
+                raise KeyError(
+                    f"Library {source.library_id} not found in "
+                    f"organization {dossier.organization_id}"
+                )
+        if source.library_item_id is not None:
+            item = await self._repository.fetch_library_item(source.library_item_id)
+            if item is None:
+                raise KeyError(f"Library item {source.library_item_id} not found")
+            item_library = await self._repository.fetch_library(item.library_id)
+            if (
+                item_library is None
+                or item_library.organization_id != dossier.organization_id
+            ):
+                raise KeyError(
+                    f"Library item {source.library_item_id} not found in "
+                    f"organization {dossier.organization_id}"
+                )
+            if source.library_id is not None and source.library_id != item.library_id:
+                raise ValueError(
+                    "Research dossier source library_id does not match library_item_id"
+                )
+        asset_id = source.asset_id
+        if source.asset_version_id is not None:
+            if asset_id is None:
+                version = await self._repository.fetch_workspace_asset_version(
+                    source.asset_version_id
+                )
+                if version is None:
+                    raise KeyError(
+                        f"Workspace asset version {source.asset_version_id} not found"
+                    )
+                asset_id = version.asset_id
+            else:
+                await self._resolve_asset_version_for_source(
+                    asset_id=asset_id,
+                    asset_version_id=source.asset_version_id,
+                )
+        if asset_id is not None:
+            asset = await self._repository.fetch_workspace_asset(asset_id)
+            if asset is None:
+                raise KeyError(f"Workspace asset {asset_id} not found")
+            if (
+                asset.organization_id is not None
+                and asset.organization_id != dossier.organization_id
+            ):
+                raise ValueError(
+                    "Research dossier source asset belongs to a different organization"
+                )
+        for context_pack_id in source.context_pack_ids:
+            context_pack = await self._repository.fetch_retrieval_context_pack(
+                context_pack_id
+            )
+            if context_pack is None:
+                raise KeyError(f"Retrieval context pack {context_pack_id} not found")
+            if (
+                context_pack.organization_id is not None
+                and context_pack.organization_id != dossier.organization_id
+            ):
+                raise ValueError(
+                    "Research dossier source context pack belongs to a different organization"
+                )
+
+    def _build_researcher_dossier_task(
+        self,
+        *,
+        dossier: ResearchDossier,
+        blueprint: MethodologyBlueprint,
+        version: MethodologyBlueprintVersion,
+        operations_workspace: Workspace,
+        researcher_participant: ParticipantProfile,
+        requested_by: UUID,
+        now: datetime,
+    ) -> Task:
+        if dossier.thread_id is None:
+            raise ValueError("Research dossier has no operations thread")
+        if dossier.researcher_system_agent_id is None:
+            raise ValueError("Research dossier has no Researcher system agent")
+        return Task(
+            task_id=uuid4(),
+            workspace_id=operations_workspace.workspace_id,
+            thread_id=dossier.thread_id,
+            title=f"Build research dossier for {blueprint.title}",
+            description=(
+                "Discover, collect, triage, and organize evidence into a durable "
+                "research dossier for a methodology blueprint version."
+            ),
+            requested_by=requested_by,
+            visibility="agents_only",
+            correlation_id=dossier.dossier_id,
+            causation_id=version.version_id,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "target_system_agent_id": str(dossier.researcher_system_agent_id),
+                "target_participant_id": str(researcher_participant.participant_id),
+                "response_visibility": "agents_only",
+                "routing_reason": METHODOLOGY_RESEARCH_DOSSIER_BUILD_TASK_KIND,
+                "task_kind": METHODOLOGY_RESEARCH_DOSSIER_BUILD_TASK_KIND,
+                "methodology_blueprint_id": str(blueprint.blueprint_id),
+                "methodology_blueprint_version_id": str(version.version_id),
+                "research_dossier_id": str(dossier.dossier_id),
+                "retained_library_id": (
+                    str(dossier.retained_library_id)
+                    if dossier.retained_library_id is not None
+                    else None
+                ),
+                "source_policy": version.source_policy,
+                "selected_library_ids": [
+                    str(item) for item in version.selected_library_ids
+                ],
+                "task_instructions": [
+                    "Build a research dossier for the supplied topic and tasks.",
+                    "Search local and selected organization libraries first.",
+                    "Use Retriever searches and context packs for pre-indexed sources.",
+                    "Use web follow-up for gaps, recency, and contradiction checks.",
+                    "Preserve fetched pages, papers, files, and media in the retained dossier library.",
+                    "Create dossier source records for included, excluded, duplicate, failed, and unresolved items.",
+                    "Record source-quality notes, contradictions, rationale, fetch metadata, and retained refs.",
+                    "Mark the dossier ready only when Methodologist has enough evidence and gaps are explicit.",
+                ],
+            },
+        )
+
+    def _build_methodologist_blueprint_task(
+        self,
+        *,
+        dossier: ResearchDossier,
+        version: MethodologyBlueprintVersion,
+        sources: list[ResearchDossierSource] | None = None,
+        requested_by: UUID,
+        now: datetime,
+    ) -> Task:
+        if dossier.operations_workspace_id is None or dossier.thread_id is None:
+            raise ValueError("Research dossier has no operations workspace/thread")
+        if dossier.methodologist_system_agent_id is None:
+            raise ValueError("Research dossier has no Methodologist system agent")
+        if dossier.methodologist_participant_id is None:
+            raise ValueError("Research dossier has no Methodologist participant")
+        return Task(
+            task_id=uuid4(),
+            workspace_id=dossier.operations_workspace_id,
+            thread_id=dossier.thread_id,
+            title=f"Draft methodology blueprint version {version.version_number}",
+            description=(
+                "Synthesize cited methodology, methodics, and a "
+                "WorkspaceHarness-compatible draft from the completed research dossier."
+            ),
+            requested_by=requested_by,
+            visibility="agents_only",
+            correlation_id=dossier.dossier_id,
+            causation_id=version.version_id,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "target_system_agent_id": str(dossier.methodologist_system_agent_id),
+                "target_participant_id": str(dossier.methodologist_participant_id),
+                "response_visibility": "agents_only",
+                "routing_reason": METHODOLOGY_BLUEPRINT_DRAFT_TASK_KIND,
+                "task_kind": METHODOLOGY_BLUEPRINT_DRAFT_TASK_KIND,
+                "methodology_blueprint_id": str(dossier.blueprint_id),
+                "methodology_blueprint_version_id": str(version.version_id),
+                "research_dossier_id": str(dossier.dossier_id),
+                "retained_library_id": (
+                    str(dossier.retained_library_id)
+                    if dossier.retained_library_id is not None
+                    else None
+                ),
+                "context_pack_ids": [str(item) for item in dossier.context_pack_ids],
+                "dossier_summary": dossier.summary,
+                "dossier_contradictions": dossier.contradictions,
+                "dossier_gaps": dossier.gaps,
+                "dossier_sources": [
+                    source.model_dump(mode="json") for source in sources or []
+                ],
+                "task_instructions": [
+                    "Read the completed research dossier before synthesis.",
+                    "Use dossier source records, context packs, contradictions, and gaps as the evidence boundary.",
+                    "Submit a cited markdown blueprint draft through methodology.blueprints.submit_draft.",
+                    "Submit a WorkspaceHarness-compatible harness_draft with methodology, methodics, execution_rules, and metadata.",
+                    "Do not approve or apply the blueprint, and do not start Conductor execution.",
+                ],
+            },
         )
 
     @staticmethod

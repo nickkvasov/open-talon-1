@@ -89,6 +89,45 @@ MethodicResourceKind = Literal[
     "other",
 ]
 MethodicResourceAction = Literal["attach", "link", "activate", "configure", "invite", "other"]
+MethodologyBlueprintStatus = Literal["draft", "active", "archived"]
+MethodologyBlueprintVersionStatus = Literal[
+    "researching",
+    "ready_for_methodologist",
+    "drafted",
+    "pending_review",
+    "approved",
+    "rejected",
+    "failed",
+]
+ResearchDossierStatus = Literal[
+    "created",
+    "researching",
+    "ready_for_methodologist",
+    "completed",
+    "failed",
+]
+ResearchDossierSourceKind = Literal[
+    "library_item",
+    "webpage",
+    "paper",
+    "file",
+    "media",
+    "image",
+    "video",
+    "audio",
+    "dataset",
+    "other",
+]
+ResearchDossierSourceStatus = Literal[
+    "discovered",
+    "fetched",
+    "included",
+    "excluded",
+    "duplicate",
+    "failed",
+    "rejected",
+    "unresolved",
+]
 AuditScopeType = Literal["global", "organization", "workspace", "thread"]
 AuditActorType = Literal["user", "agent", "system", "api_key", "unknown"]
 AuditOutcome = Literal["success", "failure", "denied", "error"]
@@ -1617,6 +1656,117 @@ class MethodicExecutionDetail(BaseModel):
     resource_requests: list[MethodicResourceRequest] = Field(default_factory=list)
 
 
+class MethodologyBlueprint(BaseModel):
+    blueprint_id: UUID
+    organization_id: UUID
+    title: str
+    topic: str
+    target_goal: str | None = None
+    tasks: list[str] = Field(default_factory=list)
+    status: MethodologyBlueprintStatus = "draft"
+    active_version_id: UUID | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodologyBlueprintVersion(BaseModel):
+    version_id: UUID
+    blueprint_id: UUID
+    organization_id: UUID
+    version_number: int = 1
+    status: MethodologyBlueprintVersionStatus = "researching"
+    research_dossier_id: UUID | None = None
+    source_policy: str = "hybrid"
+    selected_library_ids: list[UUID] = Field(default_factory=list)
+    cited_output: str | None = None
+    harness_draft: WorkspaceHarness | None = None
+    submitted_by_system_agent_id: UUID | None = None
+    submitted_at: datetime | None = None
+    approved_by: UUID | None = None
+    approved_at: datetime | None = None
+    rejected_by: UUID | None = None
+    rejected_at: datetime | None = None
+    review_reason: str | None = None
+    created_by: UUID
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchDossier(BaseModel):
+    dossier_id: UUID
+    blueprint_id: UUID
+    version_id: UUID
+    organization_id: UUID
+    retained_library_id: UUID | None = None
+    operations_workspace_id: UUID | None = None
+    thread_id: UUID | None = None
+    researcher_system_agent_id: UUID | None = None
+    researcher_participant_id: UUID | None = None
+    methodologist_system_agent_id: UUID | None = None
+    methodologist_participant_id: UUID | None = None
+    status: ResearchDossierStatus = "created"
+    topic: str
+    tasks: list[str] = Field(default_factory=list)
+    summary: str | None = None
+    contradictions: list[dict[str, Any]] = Field(default_factory=list)
+    gaps: list[str] = Field(default_factory=list)
+    context_pack_ids: list[UUID] = Field(default_factory=list)
+    created_by: UUID
+    ready_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchDossierSource(BaseModel):
+    source_id: UUID
+    dossier_id: UUID
+    organization_id: UUID
+    source_kind: ResearchDossierSourceKind = "other"
+    status: ResearchDossierSourceStatus = "discovered"
+    title: str
+    source_uri: str | None = None
+    library_id: UUID | None = None
+    library_item_id: UUID | None = None
+    asset_id: UUID | None = None
+    asset_version_id: UUID | None = None
+    context_pack_ids: list[UUID] = Field(default_factory=list)
+    citation_id: str | None = None
+    quality_notes: str | None = None
+    contradictions: list[dict[str, Any]] = Field(default_factory=list)
+    rationale: str | None = None
+    fetch_metadata: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    discovered_by_participant_id: UUID | None = None
+    discovered_by_system_agent_id: UUID | None = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchDossierEvent(BaseModel):
+    event_id: UUID
+    dossier_id: UUID
+    organization_id: UUID
+    event_type: str
+    actor_participant_id: UUID | None = None
+    system_agent_id: UUID | None = None
+    source_id: UUID | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodologyBlueprintDetail(BaseModel):
+    blueprint: MethodologyBlueprint
+    versions: list[MethodologyBlueprintVersion] = Field(default_factory=list)
+    dossier: ResearchDossier | None = None
+    sources: list[ResearchDossierSource] = Field(default_factory=list)
+
+
 class AgentDefinitionVersion(BaseModel):
     agent_version_id: UUID
     agent_id: UUID
@@ -2850,6 +3000,92 @@ class EvaluateMethodicStepRequest(BaseModel):
     evidence_refs: list[dict[str, Any]] = Field(default_factory=list)
     rework_instructions: str | None = None
     final_report: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateMethodologyBlueprintRequest(BaseModel):
+    actor: ParticipantInput
+    title: str
+    topic: str
+    target_goal: str | None = None
+    tasks: list[str] = Field(default_factory=list)
+    source_policy: str = "hybrid"
+    library_ids: list[UUID] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReviewMethodologyBlueprintVersionRequest(BaseModel):
+    actor: ParticipantInput
+    reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ApplyMethodologyBlueprintRequest(BaseModel):
+    actor: ParticipantInput
+    workspace_id: UUID
+    version_id: UUID | None = None
+    preserve_moderation_policy: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateResearchDossierSourceRequest(BaseModel):
+    actor: ParticipantInput
+    source_kind: ResearchDossierSourceKind = "other"
+    status: ResearchDossierSourceStatus = "discovered"
+    title: str
+    source_uri: str | None = None
+    library_id: UUID | None = None
+    library_item_id: UUID | None = None
+    asset_id: UUID | None = None
+    asset_version_id: UUID | None = None
+    context_pack_ids: list[UUID] = Field(default_factory=list)
+    citation_id: str | None = None
+    quality_notes: str | None = None
+    contradictions: list[dict[str, Any]] = Field(default_factory=list)
+    rationale: str | None = None
+    fetch_metadata: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateResearchDossierSourceRequest(BaseModel):
+    actor: ParticipantInput
+    status: ResearchDossierSourceStatus | None = None
+    title: str | None = None
+    source_uri: str | None = None
+    library_id: UUID | None = None
+    library_item_id: UUID | None = None
+    asset_id: UUID | None = None
+    asset_version_id: UUID | None = None
+    context_pack_ids: list[UUID] | None = None
+    citation_id: str | None = None
+    quality_notes: str | None = None
+    contradictions: list[dict[str, Any]] | None = None
+    rationale: str | None = None
+    fetch_metadata: dict[str, Any] | None = None
+    error: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class AttachResearchDossierContextPackRequest(BaseModel):
+    actor: ParticipantInput
+    context_pack_id: UUID
+    source_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MarkResearchDossierReadyRequest(BaseModel):
+    actor: ParticipantInput
+    summary: str | None = None
+    contradictions: list[dict[str, Any]] = Field(default_factory=list)
+    gaps: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SubmitMethodologyBlueprintDraftRequest(BaseModel):
+    actor: ParticipantInput
+    cited_output: str
+    harness_draft: WorkspaceHarness
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

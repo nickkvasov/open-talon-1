@@ -88,6 +88,24 @@ def test_mcp_library_operations_declare_scopes_and_permissions() -> None:
         assert operation.requires_workspace_actor is True
 
 
+def test_mcp_methodology_dossier_operations_declare_org_scope_and_permissions() -> None:
+    expected = {
+        "methodology.dossiers.get": "methodology.read",
+        "methodology.dossiers.sources.create": "methodology.write",
+        "methodology.dossiers.sources.update": "methodology.write",
+        "methodology.dossiers.context_pack.attach": "methodology.write",
+        "methodology.dossiers.mark_ready": "methodology.write",
+        "methodology.blueprints.submit_draft": "methodology.write",
+    }
+
+    for name, permission in expected.items():
+        operation = OPERATION_REGISTRY[name]
+        assert operation.allowed_scopes == frozenset({"organization"})
+        assert operation.required_permission_type == "identity"
+        assert operation.required_permission == permission
+        assert operation.requires_workspace_actor is False
+
+
 async def test_mcp_library_and_retriever_tools_execute_with_scoped_actor(
     client,
     mock_collaboration_service,

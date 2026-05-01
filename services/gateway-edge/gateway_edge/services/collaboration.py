@@ -41,7 +41,9 @@ from gateway_edge.models import (
     AgentGitWorktreeSession,
     AgentIdentity,
     AgentIdentityProvisioningResult,
+    ApplyMethodologyBlueprintRequest,
     AttachLibraryToWorkspaceRequest,
+    AttachResearchDossierContextPackRequest,
     AttachWorkspaceToolRequest,
     AssetLink,
     BindAgentRoleRequest,
@@ -64,6 +66,7 @@ from gateway_edge.models import (
     CreateMethodicAssignmentRequest,
     CreateMethodicExecutionRequest,
     CreateMethodicResourceRequestRequest,
+    CreateMethodologyBlueprintRequest,
     CreateOrganizationRequest,
     CreateProjectRequest,
     CreateRetrievalContextPackRequest,
@@ -71,6 +74,7 @@ from gateway_edge.models import (
     CreateRetrievalIngestionJobRequest,
     CreateRetrievalProfileRequest,
     CreateRetrievalSourceRequest,
+    CreateResearchDossierSourceRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
     ConfirmWorkspaceMemoryRequest,
@@ -113,6 +117,10 @@ from gateway_edge.models import (
     McpServerSyncResult,
     McpToolDefinition,
     LlmProviderDefinition,
+    MarkResearchDossierReadyRequest,
+    MethodologyBlueprint,
+    MethodologyBlueprintDetail,
+    MethodologyBlueprintVersion,
     MethodicExecution,
     MethodicExecutionDetail,
     MethodicResourceRequest,
@@ -134,6 +142,9 @@ from gateway_edge.models import (
     RetrievalSearchResponse,
     RetrievalSource,
     RetrievalSourceVersion,
+    ResearchDossier,
+    ResearchDossierEvent,
+    ResearchDossierSource,
     RunRetrievalSearchRequest,
     PublishAgentBundleFromGitRequest,
     ResolvedAssetBinding,
@@ -166,9 +177,12 @@ from gateway_edge.models import (
     UpdateMemoryEntryRequest,
     UpdateOrganizationRequest,
     UpdateProjectRequest,
+    UpdateResearchDossierSourceRequest,
     UpsertProjectAccessRequest,
+    ReviewMethodologyBlueprintVersionRequest,
     ReviewToolGenerationRevisionRequest,
     ReviewMethodicResourceRequest,
+    SubmitMethodologyBlueprintDraftRequest,
     RemoveProjectAccessRequest,
     UpdateWorkspaceToolRequest,
     UpdateWorkspaceMcpServerRequest,
@@ -2250,6 +2264,158 @@ class CollaborationService:
         context_pack_id: UUID,
     ) -> RetrievalContextPack | None:
         return await self._require_kernel().get_retrieval_context_pack(context_pack_id)
+
+    async def create_methodology_blueprint(
+        self,
+        organization_id: UUID,
+        payload: CreateMethodologyBlueprintRequest,
+    ) -> MethodologyBlueprintDetail:
+        result = await self._require_kernel().create_methodology_blueprint(
+            organization_id,
+            payload,
+        )
+        assert result.detail is not None
+        return result.detail
+
+    async def list_methodology_blueprints(
+        self,
+        organization_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+        status: str | None = None,
+    ) -> list[MethodologyBlueprint]:
+        return await self._require_kernel().list_methodology_blueprints(
+            organization_id,
+            actor=actor,
+            status=status,
+        )
+
+    async def get_methodology_blueprint_detail(
+        self,
+        blueprint_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+    ) -> MethodologyBlueprintDetail:
+        return await self._require_kernel().get_methodology_blueprint_detail(
+            blueprint_id,
+            actor=actor,
+        )
+
+    async def get_research_dossier(
+        self,
+        dossier_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+    ) -> ResearchDossier:
+        return await self._require_kernel().get_research_dossier(
+            dossier_id,
+            actor=actor,
+        )
+
+    async def get_methodology_blueprint_version(
+        self,
+        version_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+    ) -> MethodologyBlueprintVersion:
+        return await self._require_kernel().get_methodology_blueprint_version(
+            version_id,
+            actor=actor,
+        )
+
+    async def list_research_dossier_sources(
+        self,
+        dossier_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+        status: str | None = None,
+    ) -> list[ResearchDossierSource]:
+        return await self._require_kernel().list_research_dossier_sources(
+            dossier_id,
+            actor=actor,
+            status=status,
+        )
+
+    async def create_research_dossier_source(
+        self,
+        dossier_id: UUID,
+        payload: CreateResearchDossierSourceRequest,
+    ) -> ResearchDossierSource:
+        result = await self._require_kernel().create_research_dossier_source(
+            dossier_id,
+            payload,
+        )
+        assert result.source is not None
+        return result.source
+
+    async def update_research_dossier_source(
+        self,
+        dossier_id: UUID,
+        source_id: UUID,
+        payload: UpdateResearchDossierSourceRequest,
+    ) -> ResearchDossierSource:
+        result = await self._require_kernel().update_research_dossier_source(
+            dossier_id,
+            source_id,
+            payload,
+        )
+        assert result.source is not None
+        return result.source
+
+    async def attach_research_dossier_context_pack(
+        self,
+        dossier_id: UUID,
+        payload: AttachResearchDossierContextPackRequest,
+    ) -> ResearchDossier:
+        return await self._require_kernel().attach_research_dossier_context_pack(
+            dossier_id,
+            payload,
+        )
+
+    async def mark_research_dossier_ready(
+        self,
+        dossier_id: UUID,
+        payload: MarkResearchDossierReadyRequest,
+    ) -> ResearchDossier:
+        return await self._require_kernel().mark_research_dossier_ready(
+            dossier_id,
+            payload,
+        )
+
+    async def submit_methodology_blueprint_draft(
+        self,
+        version_id: UUID,
+        payload: SubmitMethodologyBlueprintDraftRequest,
+    ) -> MethodologyBlueprintDetail:
+        return await self._require_kernel().submit_methodology_blueprint_draft(
+            version_id,
+            payload,
+        )
+
+    async def review_methodology_blueprint_version(
+        self,
+        blueprint_id: UUID,
+        version_id: UUID,
+        payload: ReviewMethodologyBlueprintVersionRequest,
+        *,
+        approved: bool,
+    ) -> MethodologyBlueprintDetail:
+        return await self._require_kernel().review_methodology_blueprint_version(
+            blueprint_id,
+            version_id,
+            payload,
+            approved=approved,
+        )
+
+    async def apply_methodology_blueprint(
+        self,
+        blueprint_id: UUID,
+        payload: ApplyMethodologyBlueprintRequest,
+    ) -> WorkspaceDetail:
+        return await self._require_kernel().apply_methodology_blueprint(
+            blueprint_id,
+            payload,
+        )
 
     async def create_methodic_execution(
         self,

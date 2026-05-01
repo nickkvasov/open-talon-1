@@ -87,6 +87,36 @@ class OperationalBootstrapService:
                 identity = await self._ensure_identity(steward)
                 await self._ensure_role_binding(identity, role)
 
+        researcher = await self._find_agent(
+            scope="global",
+            organization_id=None,
+            agent_key="researcher",
+        )
+        if researcher is not None:
+            role = await self._find_role(
+                scope="global",
+                organization_id=None,
+                name="methodology_researcher",
+            )
+            if role is not None:
+                identity = await self._ensure_identity(researcher)
+                await self._ensure_role_binding(identity, role)
+
+        methodologist = await self._find_agent(
+            scope="global",
+            organization_id=None,
+            agent_key="methodologist",
+        )
+        if methodologist is not None:
+            role = await self._find_role(
+                scope="global",
+                organization_id=None,
+                name="methodology_methodologist",
+            )
+            if role is not None:
+                identity = await self._ensure_identity(methodologist)
+                await self._ensure_role_binding(identity, role)
+
         conductor = await self._find_agent(
             scope="global",
             organization_id=None,

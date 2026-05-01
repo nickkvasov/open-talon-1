@@ -122,7 +122,7 @@ The most important ownership rules are:
 - `organizations`, `projects`, `project_access_bindings`, and `organization_memberships` store the tenant and work hierarchy above workspaces
 - `system_agents` stores platform-global and organization-scoped agent definitions
 - managed operational contexts are seeded as `System Base / Administration / System Operations` plus `Administration / Organization Operations` for each non-system organization
-- managed agents are ordinary system agents: `Tinker` (`tool generation agent`), `Steward` (`platform operations steward`), organization-scoped `Curator` (`organization operations curator`), workspace-attached `Anchor` (`workspace topic alignment reviewer`), global `Methodologist` (`methodology extraction and workspace design agent`), and global `Conductor` (`workspace methodics execution conductor`)
+- managed agents are ordinary system agents: `Tinker` (`tool generation agent`), `Steward` (`platform operations steward`), organization-scoped `Curator` (`organization operations curator`), workspace-attached `Anchor` (`workspace topic alignment reviewer`), global `Researcher` (`evidence discovery and research dossier agent`), global `Methodologist` (`methodology extraction and workspace design agent`), and global `Conductor` (`workspace methodics execution conductor`)
 - the agent runtime is generic and must not branch on `agent_key`, display name, role text, capability text, or metadata tags; specialization belongs in agent definitions, harnesses, interaction contracts, task payloads, bindings, and tool/MCP allowlists
 - `participants` stores workspace-local attachment and state for both humans and agents
 - `threads` and `timeline_messages` are the shared collaboration surface
@@ -295,6 +295,12 @@ Current MCP system API operations:
 - `retriever.ingestion_jobs.list`
 - `retriever.search`
 - `retriever.context_pack.*`
+- `methodology.dossiers.get`
+- `methodology.dossiers.sources.create`
+- `methodology.dossiers.sources.update`
+- `methodology.dossiers.context_pack.attach`
+- `methodology.dossiers.mark_ready`
+- `methodology.blueprints.submit_draft`
 - `methodics.executions.create`
 - `methodics.executions.list`
 - `methodics.executions.get`
@@ -686,7 +692,9 @@ In the current implementation, org-scoped create/list routes are explicit. Updat
 
 System-agent definitions accept an optional typed `harness.compaction_policy` object. Current strategies are `full_context`, `recent_window`, `rolling_summary`, and `summary_plus_retrieval`; the runtime applies this policy immediately before prompt rendering without mutating the canonical `AgentExecutionContext`.
 
-`Methodologist` is a seeded global system agent for turning cited retrieval/source evidence into methodology basis, methodics, methods/tools, actor responsibilities, and workspace template drafts. It does not add a special runtime path; behavior comes from its agent definition, harness, response contract, retrieval context supplied to the run, and any workspace/tool/MCP bindings granted by IAM.
+`Researcher` is a seeded global system agent for durable methodology research dossiers. It works through targeted organization operations tasks, searches local libraries, pre-indexed Retriever context, local files, database-visible context, and web follow-up sources, then persists source records, retained-library references, contradiction maps, gaps, context-pack links, and a readiness decision. It does not add a special runtime path; behavior comes from its agent definition, harness, task payload, IAM binding, and private MCP allowlist.
+
+`Methodologist` is a seeded global system agent for turning completed research dossiers or cited retrieval/source evidence into methodology basis, methodics, methods/tools, actor responsibilities, and workspace template drafts. It does not add a special runtime path; behavior comes from its agent definition, harness, response contract, dossier or retrieval context supplied to the run, and any workspace/tool/MCP bindings granted by IAM.
 
 `Conductor` is a separate seeded global system agent for active workspace methodics execution. It is opt-in per workspace through normal agent attachment. If Conductor is not attached, `WorkspaceHarness.methodics` remains passive guidance and starting execution returns `409 Conflict`.
 
@@ -780,6 +788,44 @@ Git-managed system and organization agent definitions are authored as modular bu
 | `POST` | `/v1/workspaces/{workspace_id}/git-repositories` | register workspace Git repository |
 | `GET` | `/v1/workspaces/{workspace_id}/git-repositories` | list workspace Git repositories |
 | `POST` | `/v1/workspaces/{workspace_id}/assets/publish-from-git` | publish workspace asset version |
+
+### Methodology Blueprint And Dossier APIs
+
+Methodology blueprints are organization-scoped reusable methodology drafts.
+Creating a blueprint creates an initial version, a durable research dossier, a
+managed retained-source organization library, an operations thread, and a
+targeted Researcher task in the organization's `Administration / Organization
+Operations` workspace.
+
+A research dossier is its own system concept. It can reference internet
+sources, local files, database-visible context, Retriever context packs, library
+items, assets, and pre-indexed organization/project/workspace libraries. The
+retained-source library preserves fetched source bytes and scraps; the dossier
+records source status, quality notes, rationale, contradictions, gaps,
+metadata, events, and downstream readiness.
+
+When Researcher marks the dossier `ready_for_methodologist`, the service creates
+a targeted Methodologist task. Methodologist can submit a cited markdown draft
+and `WorkspaceHarness`-compatible draft, but a human must approve a version
+before it can become active or be applied to a workspace. Applying an approved
+blueprint updates the selected workspace harness. It does not attach or start
+Conductor.
+
+| Method | Path | Summary |
+| --- | --- | --- |
+| `POST` | `/v1/organizations/{organization_id}/methodology/blueprints` | create blueprint, initial version, dossier, retained-source library, and Researcher task |
+| `GET` | `/v1/organizations/{organization_id}/methodology/blueprints` | list methodology blueprints |
+| `GET` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}` | get blueprint detail with latest version, dossier, and sources |
+| `POST` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/versions/{version_id}/draft` | submit a cited blueprint draft and `WorkspaceHarness` draft |
+| `POST` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/versions/{version_id}/approve` | approve a draft version and make it active |
+| `POST` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/versions/{version_id}/reject` | reject a draft version |
+| `POST` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/apply` | apply an approved blueprint version to a workspace harness |
+| `GET` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}` | get a research dossier |
+| `GET` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sources` | list dossier source records |
+| `POST` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sources` | create a dossier source record |
+| `PATCH` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sources/{source_id}` | update a dossier source record |
+| `POST` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/context-packs` | attach a Retriever context pack to a dossier and optionally a source |
+| `POST` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/ready` | mark dossier ready and create the Methodologist task |
 
 ### Library APIs
 

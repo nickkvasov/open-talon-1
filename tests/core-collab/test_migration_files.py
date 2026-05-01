@@ -149,6 +149,39 @@ def test_methodologist_conductor_seed_migration_declares_managed_agent_contracts
     assert "normal_message_fanout" in sql
 
 
+def test_methodology_blueprint_research_dossier_migration_declares_dossier_tables() -> None:
+    sql = (
+        MIGRATIONS_DIR / "20260501105222_add_methodology_blueprints_and_research_dossiers.sql"
+    ).read_text(encoding="utf-8")
+
+    for table_name in (
+        "methodology_blueprints",
+        "methodology_blueprint_versions",
+        "research_dossiers",
+        "research_dossier_sources",
+        "research_dossier_events",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table_name}" in sql
+    assert "ready_for_methodologist" in sql
+    assert "retained_library_id UUID REFERENCES libraries" in sql
+    assert "idx_research_dossier_sources_dossier_status" in sql
+    assert "DEFERRABLE INITIALLY DEFERRED" in sql
+
+
+def test_researcher_seed_migration_declares_agent_role_and_dossier_mcp() -> None:
+    sql = (
+        MIGRATIONS_DIR / "20260501112237_seed_researcher_agent_and_methodology_dossier_mcp.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "'researcher'" in sql
+    assert "evidence discovery and research dossier agent" in sql
+    assert "methodology_research_dossier_build" in sql
+    assert "normal_message_fanout" in sql
+    assert "methodology_researcher" in sql
+    assert "methodology.dossiers.sources.create" in sql
+    assert "methodology.blueprints.submit_draft" in sql
+
+
 def test_conductor_control_plane_migration_declares_human_gates() -> None:
     sql = (
         MIGRATIONS_DIR / "20260427200100_add_conductor_control_plane_binding.sql"

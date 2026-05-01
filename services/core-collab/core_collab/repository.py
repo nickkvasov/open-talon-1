@@ -50,6 +50,8 @@ from .contracts import (
     LibraryItem,
     LibraryWorkspaceAttachment,
     Membership,
+    MethodologyBlueprint,
+    MethodologyBlueprintVersion,
     MethodicExecution,
     MethodicExecutionAssignment,
     MethodicExecutionCheck,
@@ -80,8 +82,12 @@ from .contracts import (
     RetrievalProfile,
     RetrievalRun,
     RetrievalSearchHit,
+    RetrievalSearchResponse,
     RetrievalSource,
     RetrievalSourceVersion,
+    ResearchDossier,
+    ResearchDossierEvent,
+    ResearchDossierSource,
     ResolvedAssetBinding,
     Run,
     RunStep,
@@ -5481,6 +5487,436 @@ class CollaborationRepository:
         )
         return self._retrieval_context_pack_from_row(row) if row else None
 
+    async def next_methodology_blueprint_version_number(
+        self,
+        conn: asyncpg.Connection,
+        blueprint_id: UUID,
+    ) -> int:
+        return await conn.fetchval(
+            """
+            SELECT COALESCE(MAX(version_number), 0) + 1
+            FROM methodology_blueprint_versions
+            WHERE blueprint_id = $1
+            """,
+            blueprint_id,
+        )
+
+    async def upsert_methodology_blueprint(
+        self,
+        conn: asyncpg.Connection,
+        blueprint: MethodologyBlueprint,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO methodology_blueprints (
+                blueprint_id, organization_id, title, topic, target_goal, tasks,
+                status, active_version_id, created_by, created_at, updated_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (blueprint_id) DO UPDATE
+                SET title = EXCLUDED.title,
+                    topic = EXCLUDED.topic,
+                    target_goal = EXCLUDED.target_goal,
+                    tasks = EXCLUDED.tasks,
+                    status = EXCLUDED.status,
+                    active_version_id = EXCLUDED.active_version_id,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            blueprint.blueprint_id,
+            blueprint.organization_id,
+            blueprint.title,
+            blueprint.topic,
+            blueprint.target_goal,
+            self._json_dumps(blueprint.tasks),
+            blueprint.status,
+            blueprint.active_version_id,
+            blueprint.created_by,
+            blueprint.created_at,
+            blueprint.updated_at,
+            self._json_dumps(blueprint.metadata),
+        )
+
+    async def upsert_methodology_blueprint_version(
+        self,
+        conn: asyncpg.Connection,
+        version: MethodologyBlueprintVersion,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO methodology_blueprint_versions (
+                version_id, blueprint_id, organization_id, version_number, status,
+                research_dossier_id, source_policy, selected_library_ids, cited_output,
+                harness_draft, submitted_by_system_agent_id, submitted_at, approved_by,
+                approved_at, rejected_by, rejected_at, review_reason, created_by,
+                created_at, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+            )
+            ON CONFLICT (version_id) DO UPDATE
+                SET status = EXCLUDED.status,
+                    research_dossier_id = EXCLUDED.research_dossier_id,
+                    source_policy = EXCLUDED.source_policy,
+                    selected_library_ids = EXCLUDED.selected_library_ids,
+                    cited_output = EXCLUDED.cited_output,
+                    harness_draft = EXCLUDED.harness_draft,
+                    submitted_by_system_agent_id = EXCLUDED.submitted_by_system_agent_id,
+                    submitted_at = EXCLUDED.submitted_at,
+                    approved_by = EXCLUDED.approved_by,
+                    approved_at = EXCLUDED.approved_at,
+                    rejected_by = EXCLUDED.rejected_by,
+                    rejected_at = EXCLUDED.rejected_at,
+                    review_reason = EXCLUDED.review_reason,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            version.version_id,
+            version.blueprint_id,
+            version.organization_id,
+            version.version_number,
+            version.status,
+            version.research_dossier_id,
+            version.source_policy,
+            self._json_dumps([str(item) for item in version.selected_library_ids]),
+            version.cited_output,
+            self._json_dumps(version.harness_draft.model_dump(mode="json"))
+            if version.harness_draft is not None
+            else None,
+            version.submitted_by_system_agent_id,
+            version.submitted_at,
+            version.approved_by,
+            version.approved_at,
+            version.rejected_by,
+            version.rejected_at,
+            version.review_reason,
+            version.created_by,
+            version.created_at,
+            version.updated_at,
+            self._json_dumps(version.metadata),
+        )
+
+    async def upsert_research_dossier(
+        self,
+        conn: asyncpg.Connection,
+        dossier: ResearchDossier,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO research_dossiers (
+                dossier_id, blueprint_id, version_id, organization_id, retained_library_id,
+                operations_workspace_id, thread_id, researcher_system_agent_id,
+                researcher_participant_id, methodologist_system_agent_id,
+                methodologist_participant_id, status, topic, tasks, summary,
+                contradictions, gaps, context_pack_ids, created_by, ready_at,
+                created_at, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+                $21, $22, $23
+            )
+            ON CONFLICT (dossier_id) DO UPDATE
+                SET retained_library_id = EXCLUDED.retained_library_id,
+                    operations_workspace_id = EXCLUDED.operations_workspace_id,
+                    thread_id = EXCLUDED.thread_id,
+                    researcher_system_agent_id = EXCLUDED.researcher_system_agent_id,
+                    researcher_participant_id = EXCLUDED.researcher_participant_id,
+                    methodologist_system_agent_id = EXCLUDED.methodologist_system_agent_id,
+                    methodologist_participant_id = EXCLUDED.methodologist_participant_id,
+                    status = EXCLUDED.status,
+                    summary = EXCLUDED.summary,
+                    contradictions = EXCLUDED.contradictions,
+                    gaps = EXCLUDED.gaps,
+                    context_pack_ids = EXCLUDED.context_pack_ids,
+                    ready_at = EXCLUDED.ready_at,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            dossier.dossier_id,
+            dossier.blueprint_id,
+            dossier.version_id,
+            dossier.organization_id,
+            dossier.retained_library_id,
+            dossier.operations_workspace_id,
+            dossier.thread_id,
+            dossier.researcher_system_agent_id,
+            dossier.researcher_participant_id,
+            dossier.methodologist_system_agent_id,
+            dossier.methodologist_participant_id,
+            dossier.status,
+            dossier.topic,
+            self._json_dumps(dossier.tasks),
+            dossier.summary,
+            self._json_dumps(dossier.contradictions),
+            self._json_dumps(dossier.gaps),
+            self._json_dumps([str(item) for item in dossier.context_pack_ids]),
+            dossier.created_by,
+            dossier.ready_at,
+            dossier.created_at,
+            dossier.updated_at,
+            self._json_dumps(dossier.metadata),
+        )
+
+    async def upsert_research_dossier_source(
+        self,
+        conn: asyncpg.Connection,
+        source: ResearchDossierSource,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO research_dossier_sources (
+                source_id, dossier_id, organization_id, source_kind, status, title,
+                source_uri, library_id, library_item_id, asset_id, asset_version_id,
+                context_pack_ids, citation_id, quality_notes, contradictions, rationale,
+                fetch_metadata, error, discovered_by_participant_id,
+                discovered_by_system_agent_id, created_at, updated_at, metadata
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19,
+                $20, $21, $22, $23
+            )
+            ON CONFLICT (source_id) DO UPDATE
+                SET source_kind = EXCLUDED.source_kind,
+                    status = EXCLUDED.status,
+                    title = EXCLUDED.title,
+                    source_uri = EXCLUDED.source_uri,
+                    library_id = EXCLUDED.library_id,
+                    library_item_id = EXCLUDED.library_item_id,
+                    asset_id = EXCLUDED.asset_id,
+                    asset_version_id = EXCLUDED.asset_version_id,
+                    context_pack_ids = EXCLUDED.context_pack_ids,
+                    citation_id = EXCLUDED.citation_id,
+                    quality_notes = EXCLUDED.quality_notes,
+                    contradictions = EXCLUDED.contradictions,
+                    rationale = EXCLUDED.rationale,
+                    fetch_metadata = EXCLUDED.fetch_metadata,
+                    error = EXCLUDED.error,
+                    updated_at = EXCLUDED.updated_at,
+                    metadata = EXCLUDED.metadata
+            """,
+            source.source_id,
+            source.dossier_id,
+            source.organization_id,
+            source.source_kind,
+            source.status,
+            source.title,
+            source.source_uri,
+            source.library_id,
+            source.library_item_id,
+            source.asset_id,
+            source.asset_version_id,
+            self._json_dumps([str(item) for item in source.context_pack_ids]),
+            source.citation_id,
+            source.quality_notes,
+            self._json_dumps(source.contradictions),
+            source.rationale,
+            self._json_dumps(source.fetch_metadata),
+            source.error,
+            source.discovered_by_participant_id,
+            source.discovered_by_system_agent_id,
+            source.created_at,
+            source.updated_at,
+            self._json_dumps(source.metadata),
+        )
+
+    async def append_research_dossier_event(
+        self,
+        conn: asyncpg.Connection,
+        event: ResearchDossierEvent,
+    ) -> None:
+        await conn.execute(
+            """
+            INSERT INTO research_dossier_events (
+                event_id, dossier_id, organization_id, event_type,
+                actor_participant_id, system_agent_id, source_id, payload,
+                created_at, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (event_id) DO NOTHING
+            """,
+            event.event_id,
+            event.dossier_id,
+            event.organization_id,
+            event.event_type,
+            event.actor_participant_id,
+            event.system_agent_id,
+            event.source_id,
+            self._json_dumps(event.payload),
+            event.created_at,
+            self._json_dumps(event.metadata),
+        )
+
+    async def fetch_methodology_blueprint(
+        self,
+        blueprint_id: UUID,
+    ) -> MethodologyBlueprint | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT blueprint_id, organization_id, title, topic, target_goal, tasks,
+                   status, active_version_id, created_by, created_at, updated_at, metadata
+            FROM methodology_blueprints
+            WHERE blueprint_id = $1
+            """,
+            blueprint_id,
+        )
+        return self._methodology_blueprint_from_row(row) if row else None
+
+    async def list_methodology_blueprints(
+        self,
+        organization_id: UUID,
+        *,
+        status: str | None = None,
+    ) -> list[MethodologyBlueprint]:
+        rows = await self._pool.fetch(
+            """
+            SELECT blueprint_id, organization_id, title, topic, target_goal, tasks,
+                   status, active_version_id, created_by, created_at, updated_at, metadata
+            FROM methodology_blueprints
+            WHERE organization_id = $1
+              AND ($2::text IS NULL OR status = $2)
+            ORDER BY created_at DESC
+            """,
+            organization_id,
+            status,
+        )
+        return [self._methodology_blueprint_from_row(row) for row in rows]
+
+    async def fetch_methodology_blueprint_version(
+        self,
+        version_id: UUID,
+    ) -> MethodologyBlueprintVersion | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT version_id, blueprint_id, organization_id, version_number, status,
+                   research_dossier_id, source_policy, selected_library_ids, cited_output,
+                   harness_draft, submitted_by_system_agent_id, submitted_at, approved_by,
+                   approved_at, rejected_by, rejected_at, review_reason, created_by,
+                   created_at, updated_at, metadata
+            FROM methodology_blueprint_versions
+            WHERE version_id = $1
+            """,
+            version_id,
+        )
+        return self._methodology_blueprint_version_from_row(row) if row else None
+
+    async def list_methodology_blueprint_versions(
+        self,
+        blueprint_id: UUID,
+    ) -> list[MethodologyBlueprintVersion]:
+        rows = await self._pool.fetch(
+            """
+            SELECT version_id, blueprint_id, organization_id, version_number, status,
+                   research_dossier_id, source_policy, selected_library_ids, cited_output,
+                   harness_draft, submitted_by_system_agent_id, submitted_at, approved_by,
+                   approved_at, rejected_by, rejected_at, review_reason, created_by,
+                   created_at, updated_at, metadata
+            FROM methodology_blueprint_versions
+            WHERE blueprint_id = $1
+            ORDER BY version_number DESC
+            """,
+            blueprint_id,
+        )
+        return [self._methodology_blueprint_version_from_row(row) for row in rows]
+
+    async def fetch_research_dossier(
+        self,
+        dossier_id: UUID,
+    ) -> ResearchDossier | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT dossier_id, blueprint_id, version_id, organization_id, retained_library_id,
+                   operations_workspace_id, thread_id, researcher_system_agent_id,
+                   researcher_participant_id, methodologist_system_agent_id,
+                   methodologist_participant_id, status, topic, tasks, summary,
+                   contradictions, gaps, context_pack_ids, created_by, ready_at,
+                   created_at, updated_at, metadata
+            FROM research_dossiers
+            WHERE dossier_id = $1
+            """,
+            dossier_id,
+        )
+        return self._research_dossier_from_row(row) if row else None
+
+    async def fetch_research_dossier_for_version(
+        self,
+        version_id: UUID,
+    ) -> ResearchDossier | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT dossier_id, blueprint_id, version_id, organization_id, retained_library_id,
+                   operations_workspace_id, thread_id, researcher_system_agent_id,
+                   researcher_participant_id, methodologist_system_agent_id,
+                   methodologist_participant_id, status, topic, tasks, summary,
+                   contradictions, gaps, context_pack_ids, created_by, ready_at,
+                   created_at, updated_at, metadata
+            FROM research_dossiers
+            WHERE version_id = $1
+            """,
+            version_id,
+        )
+        return self._research_dossier_from_row(row) if row else None
+
+    async def fetch_research_dossier_source(
+        self,
+        source_id: UUID,
+    ) -> ResearchDossierSource | None:
+        row = await self._pool.fetchrow(
+            """
+            SELECT source_id, dossier_id, organization_id, source_kind, status, title,
+                   source_uri, library_id, library_item_id, asset_id, asset_version_id,
+                   context_pack_ids, citation_id, quality_notes, contradictions, rationale,
+                   fetch_metadata, error, discovered_by_participant_id,
+                   discovered_by_system_agent_id, created_at, updated_at, metadata
+            FROM research_dossier_sources
+            WHERE source_id = $1
+            """,
+            source_id,
+        )
+        return self._research_dossier_source_from_row(row) if row else None
+
+    async def list_research_dossier_sources(
+        self,
+        dossier_id: UUID,
+        *,
+        status: str | None = None,
+    ) -> list[ResearchDossierSource]:
+        rows = await self._pool.fetch(
+            """
+            SELECT source_id, dossier_id, organization_id, source_kind, status, title,
+                   source_uri, library_id, library_item_id, asset_id, asset_version_id,
+                   context_pack_ids, citation_id, quality_notes, contradictions, rationale,
+                   fetch_metadata, error, discovered_by_participant_id,
+                   discovered_by_system_agent_id, created_at, updated_at, metadata
+            FROM research_dossier_sources
+            WHERE dossier_id = $1
+              AND ($2::text IS NULL OR status = $2)
+            ORDER BY created_at ASC
+            """,
+            dossier_id,
+            status,
+        )
+        return [self._research_dossier_source_from_row(row) for row in rows]
+
+    async def list_research_dossier_events(
+        self,
+        dossier_id: UUID,
+    ) -> list[ResearchDossierEvent]:
+        rows = await self._pool.fetch(
+            """
+            SELECT event_id, dossier_id, organization_id, event_type,
+                   actor_participant_id, system_agent_id, source_id, payload,
+                   created_at, metadata
+            FROM research_dossier_events
+            WHERE dossier_id = $1
+            ORDER BY created_at ASC
+            """,
+            dossier_id,
+        )
+        return [self._research_dossier_event_from_row(row) for row in rows]
+
     async def upsert_methodic_execution(
         self,
         conn: asyncpg.Connection,
@@ -8694,6 +9130,150 @@ class CollaborationRepository:
             ),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _uuid_list_from_json(value: Any) -> list[UUID]:
+        payload = CollaborationRepository._json_value(value, default=[])
+        return [UUID(str(item)) for item in payload if item]
+
+    @staticmethod
+    def _methodology_blueprint_from_row(row: asyncpg.Record) -> MethodologyBlueprint:
+        return MethodologyBlueprint(
+            blueprint_id=row["blueprint_id"],
+            organization_id=row["organization_id"],
+            title=row["title"],
+            topic=row["topic"],
+            target_goal=row["target_goal"],
+            tasks=CollaborationRepository._json_value(row["tasks"], default=[]),
+            status=row["status"],
+            active_version_id=row["active_version_id"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _methodology_blueprint_version_from_row(
+        row: asyncpg.Record,
+    ) -> MethodologyBlueprintVersion:
+        harness_payload = CollaborationRepository._json_value(
+            row["harness_draft"],
+            default=None,
+        )
+        return MethodologyBlueprintVersion(
+            version_id=row["version_id"],
+            blueprint_id=row["blueprint_id"],
+            organization_id=row["organization_id"],
+            version_number=row["version_number"],
+            status=row["status"],
+            research_dossier_id=row["research_dossier_id"],
+            source_policy=row["source_policy"],
+            selected_library_ids=CollaborationRepository._uuid_list_from_json(
+                row["selected_library_ids"]
+            ),
+            cited_output=row["cited_output"],
+            harness_draft=(
+                WorkspaceHarness.model_validate(harness_payload)
+                if harness_payload is not None
+                else None
+            ),
+            submitted_by_system_agent_id=row["submitted_by_system_agent_id"],
+            submitted_at=row["submitted_at"],
+            approved_by=row["approved_by"],
+            approved_at=row["approved_at"],
+            rejected_by=row["rejected_by"],
+            rejected_at=row["rejected_at"],
+            review_reason=row["review_reason"],
+            created_by=row["created_by"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _research_dossier_from_row(row: asyncpg.Record) -> ResearchDossier:
+        return ResearchDossier(
+            dossier_id=row["dossier_id"],
+            blueprint_id=row["blueprint_id"],
+            version_id=row["version_id"],
+            organization_id=row["organization_id"],
+            retained_library_id=row["retained_library_id"],
+            operations_workspace_id=row["operations_workspace_id"],
+            thread_id=row["thread_id"],
+            researcher_system_agent_id=row["researcher_system_agent_id"],
+            researcher_participant_id=row["researcher_participant_id"],
+            methodologist_system_agent_id=row["methodologist_system_agent_id"],
+            methodologist_participant_id=row["methodologist_participant_id"],
+            status=row["status"],
+            topic=row["topic"],
+            tasks=CollaborationRepository._json_value(row["tasks"], default=[]),
+            summary=row["summary"],
+            contradictions=CollaborationRepository._json_value(
+                row["contradictions"],
+                default=[],
+            ),
+            gaps=CollaborationRepository._json_value(row["gaps"], default=[]),
+            context_pack_ids=CollaborationRepository._uuid_list_from_json(
+                row["context_pack_ids"]
+            ),
+            created_by=row["created_by"],
+            ready_at=row["ready_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _research_dossier_source_from_row(row: asyncpg.Record) -> ResearchDossierSource:
+        return ResearchDossierSource(
+            source_id=row["source_id"],
+            dossier_id=row["dossier_id"],
+            organization_id=row["organization_id"],
+            source_kind=row["source_kind"],
+            status=row["status"],
+            title=row["title"],
+            source_uri=row["source_uri"],
+            library_id=row["library_id"],
+            library_item_id=row["library_item_id"],
+            asset_id=row["asset_id"],
+            asset_version_id=row["asset_version_id"],
+            context_pack_ids=CollaborationRepository._uuid_list_from_json(
+                row["context_pack_ids"]
+            ),
+            citation_id=row["citation_id"],
+            quality_notes=row["quality_notes"],
+            contradictions=CollaborationRepository._json_value(
+                row["contradictions"],
+                default=[],
+            ),
+            rationale=row["rationale"],
+            fetch_metadata=CollaborationRepository._json_value(
+                row["fetch_metadata"],
+                default={},
+            ),
+            error=row["error"],
+            discovered_by_participant_id=row["discovered_by_participant_id"],
+            discovered_by_system_agent_id=row["discovered_by_system_agent_id"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=CollaborationRepository._json_value(row["metadata"], default={}),
+        )
+
+    @staticmethod
+    def _research_dossier_event_from_row(row: asyncpg.Record) -> ResearchDossierEvent:
+        return ResearchDossierEvent(
+            event_id=row["event_id"],
+            dossier_id=row["dossier_id"],
+            organization_id=row["organization_id"],
+            event_type=row["event_type"],
+            actor_participant_id=row["actor_participant_id"],
+            system_agent_id=row["system_agent_id"],
+            source_id=row["source_id"],
+            payload=CollaborationRepository._json_value(row["payload"], default={}),
+            created_at=row["created_at"],
             metadata=CollaborationRepository._json_value(row["metadata"], default={}),
         )
 
