@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -3981,6 +3982,31 @@ async def test_seeded_agent_profiles_are_typed_and_match_docs_cards():
         if agent.definition.get("profile") is not None
     }
     assert seeded_profile_kinds == profiles_by_kind
+
+
+@pytest.mark.asyncio
+async def test_seeded_agent_card_profile_kind_rows_match_seeded_definitions():
+    repository = FakeRepository()
+
+    await ManagedSystemDefaultsRepairer(repository).repair()
+
+    for doc_name, (lookup_field, lookup_value, _display_name, _expected_kind) in (
+        SEEDED_AGENT_PROFILE_DOCS.items()
+    ):
+        agent = next(
+            agent
+            for agent in repository._agents.values()
+            if getattr(agent, lookup_field) == lookup_value
+        )
+        profile = agent.seeded_profile
+        assert profile is not None
+
+        card_path = ROOT_DIR / "docs" / "seeded-agents" / doc_name
+        card = card_path.read_text(encoding="utf-8")
+        match = re.search(r"^\| Profile kind \| `([^`]+)` \|$", card, re.MULTILINE)
+
+        assert match is not None, f"{card_path} is missing a Profile kind row"
+        assert match.group(1) == profile.kind
 
 
 def test_seeded_agent_profile_is_descriptive_not_runtime_task_authority():
