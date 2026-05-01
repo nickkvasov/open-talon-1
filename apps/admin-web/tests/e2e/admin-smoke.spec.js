@@ -42,3 +42,21 @@ test('admin portal smoke flow works in a real browser', async ({ page }) => {
   await page.getByRole('button', { name: /^delete$/i }).click();
   await expect(page.getByText(keyName)).not.toBeVisible();
 });
+
+test('seeded agent profiles are visible in swarm resources', async ({ page }) => {
+  attachBrowserLogging(page);
+
+  await signInIfNeeded(page);
+  await openAdminPage(page, /swarm resources/i, /swarm resources/i);
+
+  const researcherProfile = page.getByTestId('system-agent-profile-researcher');
+  await expect(researcherProfile).toBeVisible();
+  await expect(researcherProfile).toContainText('Seeded profile');
+  await expect(researcherProfile).toContainText('methodology_research_dossier_specialist');
+  await expect(researcherProfile).toContainText(
+    'dossier knowledge storage over retained data and indexed information',
+  );
+
+  const conductorProfile = page.getByTestId('system-agent-profile-conductor');
+  await expect(conductorProfile).toContainText('workspace_methodics_execution_specialist');
+});

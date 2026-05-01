@@ -74,6 +74,17 @@ from core_collab.system_defaults import (
 
 pytestmark = pytest.mark.integration
 
+EXPECTED_SEEDED_PROFILE_KINDS_BY_AGENT_REF = {
+    "Reasoning Planner": "example_planning_participant",
+    "tinker": "workspace_tool_generation_specialist",
+    "steward": "platform_operations_specialist",
+    "curator": "organization_operations_specialist",
+    "anchor": "workspace_topic_governance_reviewer",
+    "researcher": "methodology_research_dossier_specialist",
+    "methodologist": "methodology_blueprint_synthesis_specialist",
+    "conductor": "workspace_methodics_execution_specialist",
+}
+
 
 def _postgres_dsn() -> str:
     return (
@@ -149,31 +160,25 @@ async def test_fresh_database_migration_chain_builds_xwiki_dossier_schema():
                 "research_dossier_health_checks",
             }
             assert expected_tables.issubset(tables)
-            seeded_agents = {
-                row["agent_key"]
-                for row in await conn.fetch(
-                    """
-                    SELECT agent_key
-                    FROM system_agents
-                    WHERE agent_key IN ('researcher', 'methodologist')
-                    """
-                )
-            }
-            assert seeded_agents == {"researcher", "methodologist"}
+            profile_rows = await conn.fetch(
+                """
+                SELECT
+                    COALESCE(agent_key, display_name) AS agent_ref,
+                    definition->'profile'->>'kind' AS profile_kind,
+                    (definition->'profile'->>'profile_version')::integer AS profile_version
+                FROM system_agents
+                WHERE definition ? 'profile'
+                """
+            )
             profile_kinds = {
-                row["agent_key"]: row["profile_kind"]
-                for row in await conn.fetch(
-                    """
-                    SELECT agent_key, definition->'profile'->>'kind' AS profile_kind
-                    FROM system_agents
-                    WHERE agent_key IN ('researcher', 'methodologist')
-                    """
-                )
+                row["agent_ref"]: row["profile_kind"]
+                for row in profile_rows
             }
-            assert profile_kinds == {
-                "researcher": "methodology_research_dossier_specialist",
-                "methodologist": "methodology_blueprint_synthesis_specialist",
-            }
+            assert profile_kinds == EXPECTED_SEEDED_PROFILE_KINDS_BY_AGENT_REF
+            assert {row["profile_kind"] for row in profile_rows} == set(
+                EXPECTED_SEEDED_PROFILE_KINDS_BY_AGENT_REF.values()
+            )
+            assert {row["profile_version"] for row in profile_rows} == {1}
             private_tools = {
                 row["tool_name"]
                 for row in await conn.fetch(

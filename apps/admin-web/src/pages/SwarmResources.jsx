@@ -989,7 +989,11 @@ export default function SwarmResources() {
               <div className="p-8 text-slate-500 text-center italic">No system agents registered.</div>
             ) : (
               agents.map(agent => (
-                <div key={agent.agent_id} className="p-5 flex items-start justify-between hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors">
+                <div
+                  key={agent.agent_id}
+                  data-testid={`system-agent-card-${agent.agent_key || agent.agent_id}`}
+                  className="p-5 flex items-start justify-between hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-colors"
+                >
                   <div className="space-y-2 max-w-[70%]">
                     <div className="flex items-center gap-2">
                       <span className="font-bold text-slate-900 dark:text-white text-lg">{agent.display_name}</span>
@@ -1007,6 +1011,29 @@ export default function SwarmResources() {
                     {agent.metadata?.source === 'git' && (
                       <div className="text-[11px] text-slate-400 dark:text-slate-500 font-mono">
                         key {agent.agent_key || 'unknown'} · version {agent.metadata?.active_agent_version_id || agent.active_agent_version_id || 'pending'}
+                      </div>
+                    )}
+                    {agent.definition?.profile && (
+                      <div
+                        data-testid={`system-agent-profile-${agent.agent_key || agent.agent_id}`}
+                        className="rounded-lg border border-indigo-100 bg-indigo-50/70 p-3 text-xs text-slate-600 dark:border-indigo-900/60 dark:bg-indigo-950/20 dark:text-slate-300"
+                      >
+                        <div className="mb-2 flex flex-wrap items-center gap-2">
+                          <span className="font-bold uppercase tracking-wide text-indigo-700 dark:text-indigo-300">
+                            Seeded profile
+                          </span>
+                          <span className="rounded border border-indigo-200 bg-white px-2 py-0.5 font-mono text-[10px] text-indigo-700 dark:border-indigo-800 dark:bg-slate-900 dark:text-indigo-300">
+                            {agent.definition.profile.kind}
+                          </span>
+                        </div>
+                        <div className="line-clamp-2">
+                          {agent.definition.profile.mandate}
+                        </div>
+                        {agent.definition.profile.knowledge_layer && (
+                          <div className="mt-2 font-medium text-slate-500 dark:text-slate-400">
+                            Knowledge layer: {agent.definition.profile.knowledge_layer}
+                          </div>
+                        )}
                       </div>
                     )}
                     <div className="flex flex-wrap gap-1.5">

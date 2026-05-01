@@ -39,6 +39,16 @@ RunStepStatus = Literal["created", "claimed", "waiting_tools", "completed", "fai
 RunStepKind = Literal["model"]
 ToolCallStatus = Literal["created", "claimed", "completed", "failed"]
 AgentEndpointKind = Literal["local", "system", "remote"]
+SeededAgentProfileKind = Literal[
+    "example_planning_participant",
+    "workspace_tool_generation_specialist",
+    "platform_operations_specialist",
+    "organization_operations_specialist",
+    "workspace_topic_governance_reviewer",
+    "methodology_research_dossier_specialist",
+    "methodology_blueprint_synthesis_specialist",
+    "workspace_methodics_execution_specialist",
+]
 ExecutionBackendKind = Literal["docker", "local_process", "mcp"]
 ToolTrustLevel = Literal["sandboxed", "trusted"]
 McpTransportKind = Literal["stdio", "streamable_http", "sse"]
@@ -487,6 +497,19 @@ class AgentConfiguration(BaseModel):
     definition: dict[str, Any] = Field(default_factory=dict)
 
 
+class SeededAgentProfile(BaseModel):
+    profile_version: Literal[1] = 1
+    kind: SeededAgentProfileKind
+    mandate: str = Field(min_length=1)
+    activation: str = Field(min_length=1)
+    authority: list[str] = Field(min_length=1)
+    boundaries: list[str] = Field(min_length=1)
+    primary_inputs: list[str] = Field(default_factory=list)
+    primary_outputs: list[str] = Field(default_factory=list)
+    handoffs: list[str] = Field(default_factory=list)
+    knowledge_layer: str | None = Field(default=None, min_length=1)
+
+
 class AgentResponseContract(BaseModel):
     format: Literal["markdown", "text", "json"] = "markdown"
     title: str | None = None
@@ -524,6 +547,20 @@ class AgentDefinition(BaseModel):
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_seeded_profile(self) -> AgentDefinition:
+        profile = self.definition.get("profile")
+        if profile is not None:
+            SeededAgentProfile.model_validate(profile)
+        return self
+
+    @property
+    def seeded_profile(self) -> SeededAgentProfile | None:
+        profile = self.definition.get("profile")
+        if profile is None:
+            return None
+        return SeededAgentProfile.model_validate(profile)
 
 
 class Workspace(BaseModel):

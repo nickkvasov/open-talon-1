@@ -29,6 +29,7 @@ from .contracts import (
     ParticipantProfile,
     Project,
     ProjectAccessBinding,
+    SeededAgentProfile,
     SystemToolDefinition,
     ToolExecutionBinding,
     ToolParameterContract,
@@ -85,23 +86,18 @@ def _seeded_agent_profile(
     handoffs: list[str] | None = None,
     knowledge_layer: str | None = None,
 ) -> dict[str, object]:
-    profile: dict[str, object] = {
-        "profile_version": SEEDED_AGENT_PROFILE_VERSION,
-        "kind": kind,
-        "mandate": mandate,
-        "activation": activation,
-        "authority": authority,
-        "boundaries": boundaries,
-    }
-    if primary_inputs:
-        profile["primary_inputs"] = primary_inputs
-    if primary_outputs:
-        profile["primary_outputs"] = primary_outputs
-    if handoffs:
-        profile["handoffs"] = handoffs
-    if knowledge_layer:
-        profile["knowledge_layer"] = knowledge_layer
-    return profile
+    return SeededAgentProfile(
+        profile_version=SEEDED_AGENT_PROFILE_VERSION,
+        kind=kind,
+        mandate=mandate,
+        activation=activation,
+        authority=authority,
+        boundaries=boundaries,
+        primary_inputs=primary_inputs or [],
+        primary_outputs=primary_outputs or [],
+        handoffs=handoffs or [],
+        knowledge_layer=knowledge_layer,
+    ).model_dump(mode="json", exclude_none=True)
 
 
 def _default_reasoning_model() -> str:

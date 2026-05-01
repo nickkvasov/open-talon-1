@@ -128,6 +128,7 @@ from open_talon_contracts.models import (  # noqa: E402
     Run,
     RunStep,
     SearchMemoryRequest,
+    SeededAgentProfile,
     SubmitMethodologyBlueprintDraftRequest,
     SubmitResearchDossierHealthCheckRequest,
     SyncResearchDossierNotebookRequest,
@@ -175,12 +176,66 @@ from open_talon_contracts.models import (  # noqa: E402
 )
 from core_collab.kernel import ANCHOR_AGENT_ID, CollaborationKernel  # noqa: E402
 from core_collab.repository import CollaborationRepository  # noqa: E402
+from core_collab.runtime_execution import RuntimeExecutionService  # noqa: E402
 from core_collab.system_defaults import (  # noqa: E402
     CONDUCTOR_AGENT_ID,
     ManagedSystemDefaultsRepairer,
     curator_iam_role_for_organization,
     curator_agent_for_organization,
 )
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
+SEEDED_AGENT_PROFILE_DOCS = {
+    "reasoning-planner.md": (
+        "display_name",
+        "Reasoning Planner",
+        "Reasoning Planner",
+        "example_planning_participant",
+    ),
+    "tinker.md": (
+        "agent_key",
+        "tinker",
+        "Tinker",
+        "workspace_tool_generation_specialist",
+    ),
+    "steward.md": (
+        "agent_key",
+        "steward",
+        "Steward",
+        "platform_operations_specialist",
+    ),
+    "curator.md": (
+        "agent_key",
+        "curator",
+        "Curator",
+        "organization_operations_specialist",
+    ),
+    "anchor.md": (
+        "agent_key",
+        "anchor",
+        "Anchor",
+        "workspace_topic_governance_reviewer",
+    ),
+    "researcher.md": (
+        "agent_key",
+        "researcher",
+        "Researcher",
+        "methodology_research_dossier_specialist",
+    ),
+    "methodologist.md": (
+        "agent_key",
+        "methodologist",
+        "Methodologist",
+        "methodology_blueprint_synthesis_specialist",
+    ),
+    "conductor.md": (
+        "agent_key",
+        "conductor",
+        "Conductor",
+        "workspace_methodics_execution_specialist",
+    ),
+}
 
 
 class _FakeTransaction:
@@ -3860,6 +3915,229 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
         "methodics.read",
         "methodics.execute",
     ]
+
+
+def test_agent_definition_rejects_unknown_seeded_profile_kind():
+    with pytest.raises(ValueError):
+        AgentDefinition(
+            agent_id=uuid4(),
+            agent_key="custom",
+            display_name="Custom",
+            description="Invalid profile contract coverage.",
+            role="test agent",
+            capabilities=[],
+            endpoint=AgentEndpoint(kind="system"),
+            system_prompt="Test.",
+            definition={
+                "profile": {
+                    "profile_version": 1,
+                    "kind": "unknown_specialist",
+                    "mandate": "Test.",
+                    "activation": "Test.",
+                    "authority": ["test authority"],
+                    "boundaries": ["test boundary"],
+                }
+            },
+            created_by=uuid4(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_seeded_agent_profiles_are_typed_and_match_docs_cards():
+    repository = FakeRepository()
+
+    await ManagedSystemDefaultsRepairer(repository).repair()
+
+    concept_doc = (
+        ROOT_DIR / "docs" / "seeded-agents" / "system-and-roles-concept.md"
+    ).read_text(encoding="utf-8")
+    profiles_by_kind = set()
+    for doc_name, (lookup_field, lookup_value, display_name, expected_kind) in (
+        SEEDED_AGENT_PROFILE_DOCS.items()
+    ):
+        agent = next(
+            agent
+            for agent in repository._agents.values()
+            if getattr(agent, lookup_field) == lookup_value
+        )
+        profile = SeededAgentProfile.model_validate(agent.definition["profile"])
+
+        assert profile == agent.seeded_profile
+        assert profile.profile_version == 1
+        assert profile.kind == expected_kind
+        assert profile.authority
+        assert profile.boundaries
+        profiles_by_kind.add(profile.kind)
+
+        card = (ROOT_DIR / "docs" / "seeded-agents" / doc_name).read_text(
+            encoding="utf-8"
+        )
+        assert f"| Profile kind | `{profile.kind}` |" in card
+        assert f"| {display_name} | `{profile.kind}` |" in concept_doc
+
+    seeded_profile_kinds = {
+        SeededAgentProfile.model_validate(agent.definition["profile"]).kind
+        for agent in repository._agents.values()
+        if agent.definition.get("profile") is not None
+    }
+    assert seeded_profile_kinds == profiles_by_kind
+
+
+def test_seeded_agent_profile_is_descriptive_not_runtime_task_authority():
+    profile = SeededAgentProfile(
+        kind="workspace_methodics_execution_specialist",
+        mandate="Describe a specialist boundary without granting runtime authority.",
+        activation="Only explicit task routing should decide accepted task kinds.",
+        authority=["profile authority text is not executable authorization"],
+        boundaries=["must not claim blocked_task from the profile alone"],
+    ).model_dump(mode="json")
+    agent_definition = {
+        "profile": profile,
+        "task_routing": {"accepted_task_kinds": ["allowed_task"]},
+    }
+    now = datetime.now(timezone.utc)
+    allowed_task = Task(
+        task_id=uuid4(),
+        workspace_id=uuid4(),
+        thread_id=uuid4(),
+        title="Allowed",
+        requested_by=uuid4(),
+        created_at=now,
+        updated_at=now,
+        metadata={"task_kind": "allowed_task"},
+    )
+    blocked_task = allowed_task.model_copy(
+        update={
+            "task_id": uuid4(),
+            "title": "Blocked",
+            "metadata": {"task_kind": "blocked_task"},
+        }
+    )
+
+    assert RuntimeExecutionService._agent_accepts_task_kind(
+        agent_definition,
+        allowed_task,
+    )
+    assert not RuntimeExecutionService._agent_accepts_task_kind(
+        agent_definition,
+        blocked_task,
+    )
+    assert RuntimeExecutionService._agent_accepts_task_kind(
+        {"profile": profile},
+        blocked_task,
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_claimability_uses_task_routing_not_definition_profile():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    system_agent_id = uuid4()
+    participant_id = uuid4()
+    user_participant_id = uuid4()
+    profile = SeededAgentProfile(
+        kind="workspace_methodics_execution_specialist",
+        mandate="Describe a runtime profile without granting authorization.",
+        activation="Profile activation text is descriptive only.",
+        authority=["profile text claims blocked_task authority"],
+        boundaries=["profile text says allowed_task should not be claimed"],
+    ).model_dump(mode="json")
+
+    repository._workspaces[workspace_id] = Workspace(
+        workspace_id=workspace_id,
+        name="Runtime Profile Boundary",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._threads[thread_id] = Thread(
+        thread_id=thread_id,
+        workspace_id=workspace_id,
+        title="Runtime",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._agents[system_agent_id] = AgentDefinition(
+        agent_id=system_agent_id,
+        agent_key="profile-runtime-boundary",
+        display_name="Profile Runtime Boundary",
+        description="Verifies profile text is not runtime authorization.",
+        role="runtime test agent",
+        capabilities=["tests runtime routing"],
+        endpoint=AgentEndpoint(kind="system"),
+        system_prompt="Follow runtime task routing.",
+        definition={
+            "profile": profile,
+            "task_routing": {"accepted_task_kinds": ["allowed_task"]},
+        },
+        created_by=user_participant_id,
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, user_participant_id)] = ParticipantProfile(
+        participant_id=user_participant_id,
+        workspace_id=workspace_id,
+        participant_type="user",
+        user_id=uuid4(),
+        display_name="Nikolay",
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, participant_id)] = ParticipantProfile(
+        participant_id=participant_id,
+        workspace_id=workspace_id,
+        participant_type="agent",
+        system_agent_id=system_agent_id,
+        display_name="Profile Runtime Boundary",
+        roles=["runtime test agent"],
+        capabilities=["tests runtime routing"],
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    allowed_task = Task(
+        task_id=uuid4(),
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        title="Allowed by task routing",
+        requested_by=user_participant_id,
+        created_at=now,
+        updated_at=now,
+        metadata={
+            "target_system_agent_id": str(system_agent_id),
+            "target_participant_id": str(participant_id),
+            "task_kind": "allowed_task",
+        },
+    )
+    blocked_task = allowed_task.model_copy(
+        update={
+            "task_id": uuid4(),
+            "title": "Only profile text says this is authorized",
+            "metadata": {
+                "target_system_agent_id": str(system_agent_id),
+                "target_participant_id": str(participant_id),
+                "task_kind": "blocked_task",
+            },
+        }
+    )
+    repository._tasks[allowed_task.task_id] = allowed_task
+    repository._tasks[blocked_task.task_id] = blocked_task
+
+    pending = await kernel.list_pending_tasks_for_system_agent(system_agent_id)
+
+    assert [task.task_id for task in pending] == [allowed_task.task_id]
+    claim = await kernel.claim_task_for_system_agent(
+        allowed_task.task_id,
+        system_agent_id,
+    )
+    assert claim.task is not None
+    assert claim.task.task_id == allowed_task.task_id
+    assert claim.task.status == "claimed"
+    with pytest.raises(ValueError, match="task kind not accepted"):
+        await kernel.claim_task_for_system_agent(blocked_task.task_id, system_agent_id)
 
 
 @pytest.mark.asyncio
