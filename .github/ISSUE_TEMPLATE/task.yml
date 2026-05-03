@@ -1,0 +1,54 @@
+name: Engineering task
+description: Track implementation work that is already understood.
+title: "[Task]: "
+labels:
+  - type:task
+body:
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What should be changed?
+      placeholder: List the code, docs, schema, UI, or tests that need to move together.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Definition of done
+      description: What observable behavior and verification must be true before closing?
+      placeholder: Include tests, docs, migrations, and local-stack checks.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - gateway-edge
+        - core-collab
+        - agent-runtime
+        - retriever
+        - workspace-memory
+        - admin-web
+        - tui
+        - infrastructure
+        - docs
+        - repo-operations
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Link related issues, discussions, design notes, PRs, or test failures.
+  - type: checkboxes
+    id: impact
+    attributes:
+      label: Impact checklist
+      options:
+        - label: May need a database migration.
+        - label: May affect IAM or tenant boundaries.
+        - label: May affect audit, external access, or secret handling.
+        - label: May affect live local-stack behavior.

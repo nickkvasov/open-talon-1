@@ -1,0 +1,11 @@
+# Code owner rules are intentionally inactive until the GitHub organization and
+# reviewer teams exist. After creating the teams, uncomment and replace the
+# owner handles, then enable required code-owner review in branch protection.
+#
+# * @open-talon/maintainers
+# /db/migrations/ @open-talon/backend-maintainers
+# /services/core-collab/ @open-talon/backend-maintainers
+# /services/gateway-edge/ @open-talon/backend-maintainers
+# /services/agent-runtime/ @open-talon/runtime-maintainers
+# /apps/admin-web/ @open-talon/frontend-maintainers
+# /.github/ @open-talon/release-managers

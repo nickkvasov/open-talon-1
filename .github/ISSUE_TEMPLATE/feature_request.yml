@@ -1,0 +1,60 @@
+name: Feature request
+description: Propose a product, API, or developer-experience improvement.
+title: "[Feature]: "
+labels:
+  - type:feature
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What concrete user, operator, or agent workflow is blocked?
+      placeholder: Describe the current limitation and who is affected.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the implemented system you want, not only an abstract idea.
+      placeholder: Describe the expected API, UI, runtime, or operational behavior.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - gateway-edge
+        - core-collab
+        - agent-runtime
+        - retriever
+        - workspace-memory
+        - admin-web
+        - tui
+        - infrastructure
+        - docs
+        - unknown
+    validations:
+      required: true
+  - type: textarea
+    id: architecture
+    attributes:
+      label: Architecture notes
+      description: Call out tenancy, IAM, audit, durable state, migrations, or runtime impact if known.
+      placeholder: Mention schema, contracts, service boundaries, and authorization implications.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional, but useful for larger design changes.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Reporter checks
+      options:
+        - label: I searched existing issues and discussions for related work.
+          required: true
+        - label: I understand collaboration roles and capabilities are not IAM authorization layers.
+          required: true

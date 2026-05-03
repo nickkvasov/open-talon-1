@@ -1,0 +1,42 @@
+name: Documentation change
+description: Request or track docs, examples, or operational guide updates.
+title: "[Docs]: "
+labels:
+  - area:docs
+body:
+  - type: textarea
+    id: location
+    attributes:
+      label: Location
+      description: Which document, README, example, API reference, or comment is wrong or missing?
+      placeholder: Link the file or section if known.
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current state
+      description: What does the repo say today?
+  - type: textarea
+    id: needed
+    attributes:
+      label: Needed state
+      description: What should the documentation say after the change?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Product area
+      multiple: true
+      options:
+        - collaboration
+        - IAM
+        - external access
+        - audit
+        - retriever
+        - library
+        - methodics
+        - local infrastructure
+        - developer workflow
+        - unknown

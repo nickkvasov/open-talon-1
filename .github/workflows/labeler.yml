@@ -1,0 +1,26 @@
+name: Pull Request Labeler
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    name: Apply path labels
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Label pull request
+        uses: actions/labeler@v5
+        continue-on-error: true
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          sync-labels: true

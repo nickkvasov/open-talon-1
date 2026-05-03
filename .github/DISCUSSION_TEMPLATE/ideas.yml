@@ -1,0 +1,21 @@
+title: "[Idea]: "
+labels:
+  - type:discussion
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow
+      description: What human, agent, or operator workflow would this improve?
+    validations:
+      required: true
+  - type: textarea
+    id: shape
+    attributes:
+      label: Possible shape
+      description: Optional sketch of the UX, API, runtime behavior, or local development flow.
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Mention security, licensing, local-first, or infrastructure constraints if known.

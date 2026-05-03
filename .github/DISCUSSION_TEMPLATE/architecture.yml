@@ -1,0 +1,33 @@
+title: "[Architecture]: "
+labels:
+  - type:discussion
+  - area:architecture
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for design discussion before implementation. Keep the proposal grounded in the current system.
+  - type: textarea
+    id: context
+    attributes:
+      label: Current system context
+      description: What exists today, and where does this change fit?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the intended behavior, data ownership, service boundary, and user workflow.
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks and tradeoffs
+      description: Call out tenancy, IAM, audit, secret handling, operational behavior, and migration impact.
+  - type: textarea
+    id: open-questions
+    attributes:
+      label: Open questions
+      description: What needs a decision before implementation?

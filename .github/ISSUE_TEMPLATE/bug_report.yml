@@ -1,0 +1,75 @@
+name: Bug report
+description: Report a reproducible defect in Open Talon.
+title: "[Bug]: "
+labels:
+  - type:bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for defects in implemented behavior. For security-sensitive reports, use `SECURITY.md` instead of a public issue.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What broke, and what did you expect instead?
+      placeholder: Describe the current behavior and expected behavior.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - gateway-edge
+        - core-collab
+        - agent-runtime
+        - retriever
+        - workspace-memory
+        - admin-web
+        - tui
+        - infrastructure
+        - docs
+        - unknown
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include commands, API calls, UI steps, or a minimal test case.
+      placeholder: |
+        1. Start the stack with ...
+        2. Call ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, traces, or screenshots
+      description: Paste the smallest useful excerpt. Do not include secrets, bearer tokens, prompt bodies, or private data.
+      render: text
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, Python, Node, Docker, and local stack details when relevant.
+      placeholder: |
+        OS:
+        Python:
+        Node:
+        Docker:
+        Open Talon command:
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Reporter checks
+      options:
+        - label: I searched existing issues and discussions for a duplicate.
+          required: true
+        - label: I removed secrets, tokens, raw prompt bodies, and private payloads from this report.
+          required: true

@@ -1,0 +1,16 @@
+title: "[Question]: "
+labels:
+  - type:question
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to understand?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Include commands, docs, code paths, or local-stack state that led to the question.

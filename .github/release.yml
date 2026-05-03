@@ -1,0 +1,31 @@
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+    authors:
+      - dependabot
+      - dependabot[bot]
+  categories:
+    - title: Breaking Changes
+      labels:
+        - breaking-change
+    - title: Features
+      labels:
+        - type:feature
+    - title: Fixes
+      labels:
+        - type:bug
+    - title: Operations
+      labels:
+        - area:infrastructure
+        - area:repo-operations
+    - title: Documentation
+      labels:
+        - area:docs
+        - docs-only
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: Other Changes
+      labels:
+        - "*"

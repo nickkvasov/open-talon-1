@@ -1,0 +1,90 @@
+# Declarative label inventory for repository maintainers.
+# GitHub does not apply this file by itself; see docs/github-repository-setup.md.
+labels:
+  - name: type:bug
+    color: d73a4a
+    description: Confirmed or likely defect in implemented behavior.
+  - name: type:feature
+    color: 0e8a16
+    description: New user-facing, operator-facing, or developer-facing behavior.
+  - name: type:task
+    color: 5319e7
+    description: Implementation work with known scope.
+  - name: type:question
+    color: d876e3
+    description: Question that needs clarification.
+  - name: type:discussion
+    color: fbca04
+    description: Design or product discussion before implementation.
+  - name: dependencies
+    color: 0366d6
+    description: Dependency update.
+  - name: breaking-change
+    color: b60205
+    description: Breaking API, schema, operational, or behavior change.
+  - name: release:blocker
+    color: b60205
+    description: Must be resolved before the next release.
+  - name: ignore-for-release
+    color: cfd3d7
+    description: Exclude from generated release notes.
+  - name: area:architecture
+    color: 1d76db
+    description: Architecture or design boundaries.
+  - name: area:admin-web
+    color: 1d76db
+    description: Browser admin console.
+  - name: area:tui
+    color: 1d76db
+    description: Terminal UI clients.
+  - name: area:gateway-edge
+    color: 1d76db
+    description: Gateway API, auth, routing, and service layer.
+  - name: area:core-collab
+    color: 1d76db
+    description: Collaboration kernel, repository, and domain logic.
+  - name: area:agent-runtime
+    color: 1d76db
+    description: Runtime workers, model loop, tools, and leases.
+  - name: area:retriever
+    color: 1d76db
+    description: Retriever ingestion, extraction, embeddings, and search.
+  - name: area:workspace-memory
+    color: 1d76db
+    description: Workspace memory providers and projections.
+  - name: area:contracts
+    color: 1d76db
+    description: Shared contracts and Pydantic models.
+  - name: area:infrastructure
+    color: 1d76db
+    description: Docker Compose, local services, and scripts.
+  - name: area:docs
+    color: 0075ca
+    description: Documentation, examples, and comments.
+  - name: area:repo-operations
+    color: 0075ca
+    description: GitHub repository workflows, templates, and release operations.
+  - name: schema
+    color: 0052cc
+    description: Database schema or migration change.
+  - name: frontend
+    color: c2e0c6
+    description: Frontend implementation.
+  - name: python
+    color: c2e0c6
+    description: Python implementation.
+  - name: javascript
+    color: c2e0c6
+    description: JavaScript implementation.
+  - name: docs-only
+    color: cfd3d7
+    description: Documentation-only change.
+  - name: ecosystem:python
+    color: 2b67c6
+    description: Python ecosystem dependency.
+  - name: ecosystem:javascript
+    color: f1e05a
+    description: JavaScript ecosystem dependency.
+  - name: ecosystem:github-actions
+    color: 2088ff
+    description: GitHub Actions dependency.

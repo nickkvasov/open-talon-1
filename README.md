@@ -3,6 +3,9 @@
 This repository contains the local infrastructure, Python services, and client apps for Open Talon. The canonical developer Python environment is the repository-root `.venv`.
 
 For coding-agent-specific project guidance, see [`AGENTS.md`](./AGENTS.md).
+For contribution, support, and security reporting, see
+[`CONTRIBUTING.md`](./CONTRIBUTING.md), [`SUPPORT.md`](./SUPPORT.md), and
+[`SECURITY.md`](./SECURITY.md).
 
 ## License
 
@@ -22,6 +25,8 @@ holder; see [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md) and
 - [docs/tinker-tool-generation.md](./docs/tinker-tool-generation.md): Tinker request, approval, catalog, and live-test workflow
 - [docs/operational-agents-real-life-test-protocol.md](./docs/operational-agents-real-life-test-protocol.md): real local-stack test protocol for managed operational and specialist agents plus managed administration contexts
 - [docs/db-migrations.md](./docs/db-migrations.md): migration workflow and schema rules
+- [docs/github-repository-setup.md](./docs/github-repository-setup.md): GitHub issues, PRs, CI, dependency, security, labeling, and branch-protection setup
+- [docs/release-process.md](./docs/release-process.md): tag-driven release workflow and release-note process
 - [docs/collaboration-system-design.md](./docs/collaboration-system-design.md): historical design background from before the current collaboration implementation
 - [docs/research-comparison.md](./docs/research-comparison.md): external ecosystem comparison for multi-agent research and enterprise platforms
 - [AGENTS.md](./AGENTS.md): repository contribution rules for coding agents

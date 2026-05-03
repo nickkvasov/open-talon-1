@@ -1,0 +1,75 @@
+area:admin-web:
+  - changed-files:
+      - any-glob-to-any-file:
+          - apps/admin-web/**
+area:tui:
+  - changed-files:
+      - any-glob-to-any-file:
+          - apps/tui/**
+area:gateway-edge:
+  - changed-files:
+      - any-glob-to-any-file:
+          - services/gateway-edge/**
+area:core-collab:
+  - changed-files:
+      - any-glob-to-any-file:
+          - services/core-collab/**
+          - db/migrations/**
+area:agent-runtime:
+  - changed-files:
+      - any-glob-to-any-file:
+          - services/agent-runtime/**
+area:retriever:
+  - changed-files:
+      - any-glob-to-any-file:
+          - services/retriever/**
+area:workspace-memory:
+  - changed-files:
+      - any-glob-to-any-file:
+          - services/workspace-memory/**
+area:contracts:
+  - changed-files:
+      - any-glob-to-any-file:
+          - packages/contracts/**
+area:infrastructure:
+  - changed-files:
+      - any-glob-to-any-file:
+          - infrastructure/**
+          - open-talon
+          - scripts/**
+area:docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - README.md
+          - AGENTS.md
+          - CONTRIBUTING.md
+          - SECURITY.md
+          - SUPPORT.md
+          - CHANGELOG.md
+          - docs/**
+area:repo-operations:
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/**
+schema:
+  - changed-files:
+      - any-glob-to-any-file:
+          - db/migrations/**
+frontend:
+  - changed-files:
+      - any-glob-to-any-file:
+          - apps/admin-web/**
+python:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.py"
+javascript:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.js"
+          - "**/*.jsx"
+          - "**/*.mjs"
+docs-only:
+  - changed-files:
+      - all-globs-to-all-files:
+          - "**/*.md"
