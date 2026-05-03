@@ -7,7 +7,7 @@
 -e ./services/gateway-edge
 -e ./services/workspace-memory
 -e ./apps/tui
-pytest>=8
+pytest>=9.0.3
 pytest-asyncio>=0.23
 psycopg[binary]>=3.2
 redis>=5
