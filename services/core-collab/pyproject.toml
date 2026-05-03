@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "open-talon-core-collab"
 version = "0.1.0"
 description = "Canonical collaboration kernel for Open Talon"
+license = { text = "AGPL-3.0-only OR LicenseRef-Open-Talon-Commercial" }
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.7",

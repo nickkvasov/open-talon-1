@@ -4,6 +4,13 @@ This repository contains the local infrastructure, Python services, and client a
 
 For coding-agent-specific project guidance, see [`AGENTS.md`](./AGENTS.md).
 
+## License
+
+Open Talon is licensed under `AGPL-3.0-only` by default. Commercial licensing is
+available only through a separate written agreement with the Open Talon rights
+holder; see [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md) and
+[docs/licensing.md](./docs/licensing.md).
+
 ## Documentation Map
 
 - [docs/system-quickstart.md](./docs/system-quickstart.md): fastest path to a running local stack

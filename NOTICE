@@ -1,0 +1,22 @@
+Open Talon
+Copyright (c) 2026 Open Talon
+
+Open Talon is distributed under the GNU Affero General Public License version 3
+only (AGPL-3.0-only), as provided in the LICENSE file, unless the recipient has
+a separate written commercial license agreement with the Open Talon rights
+holder.
+
+The repository metadata may refer to:
+
+    AGPL-3.0-only OR LicenseRef-Open-Talon-Commercial
+
+LicenseRef-Open-Talon-Commercial is a project-specific reference to commercial
+terms that may be granted only by a separate written agreement. It is not an
+additional permission granted by this NOTICE file or by the public repository.
+
+This notice does not grant trademark rights, service-mark rights, trade-name
+rights, domain-name rights, or rights to use Open Talon branding except as
+required for reasonable and customary description of the origin of the work.
+
+Third-party dependencies, fixtures, generated artifacts, and external services
+remain subject to their own licenses and notices.
