@@ -40,6 +40,11 @@ Branch lifecycle:
 
 Enable automatic deletion of merged pull request head branches.
 
+Allow repository administrators to bypass branch rulesets on pull requests. This
+keeps direct-push protections in place while letting the repository owner merge
+their own pull requests when required checks are green. GitHub still does not
+count a pull request author's own review as an approval.
+
 Recommended ruleset for `main`:
 
 - require pull request review before merge
@@ -47,6 +52,7 @@ Recommended ruleset for `main`:
 - require status checks from `Python tests` and `Admin web`
 - restrict force pushes and deletions
 - allow only release and hotfix pull requests in normal operation
+- allow repository-admin pull-request bypass
 
 Recommended ruleset for `develop`:
 
@@ -54,12 +60,14 @@ Recommended ruleset for `develop`:
 - require status checks from `Python tests` and `Admin web`
 - restrict force pushes and deletions
 - use this branch for normal feature, fix, and Codex integration work
+- allow repository-admin pull-request bypass
 
 Recommended ruleset for `release/*`:
 
 - require pull request review before merge
 - require status checks from `Python tests` and `Admin web`
 - restrict force pushes and deletions while the release branch is active
+- allow repository-admin pull-request bypass
 
 Require linear history if the project wants a simple release graph.
 
