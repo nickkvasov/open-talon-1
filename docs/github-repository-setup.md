@@ -25,13 +25,51 @@ Enable these repository features in GitHub:
 - Dependabot alerts and security updates
 - Code scanning alerts
 
-Recommended branch protection for `main`:
+Use `develop` as the default branch for day-to-day pull requests. Keep `main`
+stable and release-only.
+
+Branch lifecycle:
+
+- `feature/*`, `fix/*`, and `codex/*` branch from `develop`, merge back into
+  `develop`, and are deleted after merge.
+- `release/*` branches are temporary stabilization branches from `develop`.
+  Merge releases into `main`, tag from `main`, then merge `main` back into
+  `develop`.
+- `hotfix/*` branches start from `main` for urgent release-line fixes. Merge or
+  cherry-pick the fix back into `develop`.
+
+Enable automatic deletion of merged pull request head branches.
+
+Allow repository administrators to bypass branch rulesets on pull requests. This
+keeps direct-push protections in place while letting the repository owner merge
+their own pull requests when required checks are green. GitHub still does not
+count a pull request author's own review as an approval.
+
+Recommended ruleset for `main`:
 
 - require pull request review before merge
 - require conversation resolution
 - require status checks from `Python tests` and `Admin web`
-- require linear history if the project wants a simple release graph
 - restrict force pushes and deletions
+- allow only release and hotfix pull requests in normal operation
+- allow repository-admin pull-request bypass
+
+Recommended ruleset for `develop`:
+
+- require pull request review before merge
+- require status checks from `Python tests` and `Admin web`
+- restrict force pushes and deletions
+- use this branch for normal feature, fix, and Codex integration work
+- allow repository-admin pull-request bypass
+
+Recommended ruleset for `release/*`:
+
+- require pull request review before merge
+- require status checks from `Python tests` and `Admin web`
+- restrict force pushes and deletions while the release branch is active
+- allow repository-admin pull-request bypass
+
+Require linear history if the project wants a simple release graph.
 
 Enable code-owner review only after replacing the placeholder owner handles in `.github/CODEOWNERS` with real GitHub users or teams.
 
@@ -52,7 +90,8 @@ The pull request labeler is non-blocking so a missing label inventory does not f
 
 ## CI Policy
 
-The required CI workflow runs:
+The required CI workflow runs for pull requests and for pushes to `main` and
+`develop`:
 
 - `python -m pytest -q`
 - `npm run test:unit` in `apps/admin-web`
