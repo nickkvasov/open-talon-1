@@ -20,6 +20,12 @@ service guides.
   lease recovery behavior.
 - Preserve normalized `run.output["usage"]` payloads when changing model runtime
   or provider integrations.
+- Keep the worker split explicit. `agent-task-worker` claims a task and owns the
+  initial run step it creates; that step is already `claimed` and should be
+  completed, requeued, or moved to `waiting_tools` by the same worker. The
+  `agent-loop-worker` claims `created` run steps through `claim_next_run_step`,
+  especially follow-up turns created after tool calls complete. Do not expect
+  `claim_next_run_step` to return the initial task-claim step.
 
 ## Providers and Secrets
 
@@ -40,6 +46,10 @@ service guides.
   `workspace_access=read_write`, `network=full`, and `local_process`.
 - Tinker authoring/build helpers are agent-internal tools and must not be exposed
   through `workspace_tools` or the normal workspace catalog.
+- When a Tinker or normal agent's initial model turn requests tools immediately
+  after task claim, queue those tool calls against the task-worker-owned run step
+  with worker id `agent-task-worker`; only the resumed post-tool turn should be
+  claimed by `agent-loop-worker`.
 - Approved high-risk MCP operations park the tool call until approval and requeue
   it after approval. The resumed execution path must mark the operation request
   `completed` or `failed`.

@@ -27,6 +27,7 @@ This guide applies under `docs/` and adds to the root guide.
 - `system-api-reference.md`
 - `system-quickstart.md`
 - `iam.md`
+- `methodology-research-console.md`
 - `db-migrations.md`
 - `operational-agents-real-life-test-protocol.md`
 - `tinker-tool-generation.md`

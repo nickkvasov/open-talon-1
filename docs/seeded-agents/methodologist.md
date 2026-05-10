@@ -11,6 +11,7 @@
 | Role | `methodology extraction and workspace design agent` |
 | Profile kind | `methodology_blueprint_synthesis_specialist` |
 | Endpoint | `openai-responses` through provider `openai` using `gpt-5.4-mini` |
+| Compaction | `rolling_summary`, `max_estimated_input_tokens=256000` |
 | Primary inputs | ready dossiers, dossier notebook navigation, cited retrieval evidence, source material, target goal, visible workspace context |
 | Primary outputs | methodology basis, methodics, methods/tools/actors, workspace template draft |
 
@@ -41,6 +42,11 @@ Methodologist does not perform open-ended research triage and does not execute
 the methodics. Researcher owns dossier discovery and contradiction mapping;
 active execution belongs to a workspace-attached Conductor after an explicit
 start call.
+
+In the methodology blueprint workflow, Methodologist starts only after the
+generic dossier lifecycle reaches `ready`. Successful draft submission marks
+that dossier `consumed`; human review still decides whether the submitted
+blueprint version becomes active.
 
 ## Harness And Contract
 
@@ -107,3 +113,13 @@ The live test verifies:
 
 Seed and migration coverage also verifies the local Ollama endpoint, required
 response sections, and workspace-harness output targets.
+
+For the full Researcher-to-Methodologist methodology creation path, run:
+
+```bash
+./scripts/run-live-tests.sh methodology-deep-research
+```
+
+That suite uses the real OpenAI-backed Methodologist, consumes a real ready
+dossier, checks draft submission and review/apply behavior, and verifies archive
+preservation of dossier/library/notebook materials.

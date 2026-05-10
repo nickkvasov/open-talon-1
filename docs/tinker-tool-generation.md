@@ -31,6 +31,18 @@ In `tui2`:
 
 The `--scope organization` form requests publication into the current organization catalog instead of the global catalog.
 
+## Runtime Step Semantics
+
+The first Tinker model turn is owned by `agent-task-worker`: task claim creates a
+`run`, creates the initial `run_step`, and marks that step `claimed` by
+`agent-task-worker`. If that initial turn requests build or validation tools,
+the tool calls are queued against that same task-worker-owned run step.
+
+`agent-loop-worker` claims later `created` run steps through
+`claim_next_run_step`, including follow-up model turns after tool results are
+available. Tests and debugging should not expect `claim_next_run_step` to return
+the initial task-claim step.
+
 ## Approval And Catalog Semantics
 
 - Approval creates a new `system_tool`.

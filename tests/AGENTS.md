@@ -79,6 +79,11 @@ pytest -m integration tests/infrastructure/test_infrastructure.py -v -s
   `tests/business-cases/test_tinker_tool_generation.py`, and
   `tests/agent-runtime/test_execution.py` when local helper execution or
   execution backends change.
+- Runtime business-case tests should model the real worker contract. The initial
+  run step returned by `claim_task_for_system_agent()` is already claimed by
+  `agent-task-worker`; use it for immediate model-turn completion or tool-call
+  queuing. Use `claim_next_run_step()` with `agent-loop-worker` for later
+  `created` follow-up steps, such as the resumed turn after tool results.
 - Operational agents, managed administration contexts, agent-private MCP
   bindings, or control-plane MCP operations: run
   `tests/core-collab/test_agent_contracts.py` and relevant gateway IAM/MCP tests.

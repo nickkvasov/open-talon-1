@@ -11,6 +11,7 @@
 | Role | `evidence discovery and dossier agent` |
 | Profile kind | `methodology_dossier_specialist` |
 | Endpoint | `openai-responses` through provider `openai` using `gpt-5.4-mini` |
+| Compaction | `rolling_summary`, `max_estimated_input_tokens=256000` |
 | Primary inputs | topic, target tasks, selected libraries, pre-indexed Retriever corpora, local files, database-visible context, web follow-up results |
 | Primary outputs | durable dossier, source records, concept notebook, claims, typed links, context pack links, contradiction map, gaps, health/sync state, readiness decision |
 
@@ -62,14 +63,15 @@ for downstream synthesis.
 Researcher seeds an explicit `AgentHarness`:
 
 - start with local libraries, selected organization resources, pre-indexed Retriever corpora, local files, and database-visible context
-- use web search only for follow-up discovery, recency checks, missing coverage, or contradiction resolution
+- use web search for follow-up discovery, recency checks, missing coverage, contradiction resolution, and full methodology research requests that require internet evidence
 - preserve fetched source snapshots in the retained dossier library whenever possible
 - create or update structured dossier source records for every included, excluded, duplicate, failed, and unresolved item
 - create or update notebook notes, concepts, claims, and typed links so the dossier stays navigable
 - record source quality notes, rationale, citation identifiers, fetch metadata, errors, and retained source references
 - map contradictions and disagreements instead of hiding them
+- ask clarifying or approval questions through thread interaction requests when human input is needed; do not invent a dossier "waiting" status
 - attach Retriever context packs when they define a reusable evidence boundary
-- run notebook health/sync checks and mark a dossier ready only after summary, contradictions, gaps, context packs, and unresolved notebook issues are explicit
+- run notebook health/sync checks and mark a dossier ready only after required knowledge components, summary, contradictions, gaps, context packs, and unresolved notebook issues are explicit
 
 The response contract is operational rather than conversational: Researcher
 persists dossier state through dossier MCP operations and uses
@@ -89,6 +91,13 @@ quality, saves fetched evidence into the retained dossier library when possible,
 attaches context packs, writes notebook notes/concepts/claims/links, submits
 notebook health, syncs the provider projection, and transitions the dossier
 lifecycle to `ready`.
+
+For methodology-created dossiers, Researcher must satisfy
+`completion_profile=full_methodology_research` before readiness. Required
+knowledge components are research plan, source bibliography, methodology basis,
+methodology principles, methodics inventory, participants and roles, tools and
+methods, information assets, libraries and dossiers, quality evaluation,
+contradictions, gaps, and synthesis.
 
 When the dossier is ready, the service creates a targeted Methodologist task
 with the dossier summary, source records, contradictions, gaps, context pack
@@ -110,3 +119,13 @@ Repository, gateway, and live-style tests should cover the durable dossier
 tables, cross-organization source rejection, human review gating, Methodologist
 handoff, XWiki adapter projection, cited blueprint draft submission, and the
 rule that Conductor is never started automatically.
+
+Primary full live workflow:
+
+```bash
+./scripts/run-live-tests.sh methodology-deep-research
+```
+
+That suite uses the real seeded Researcher, real runtime workers, web-search MCP,
+generic dossier lifecycle, XWiki notebook projection, and Methodologist handoff.
+It is the preferred proof when changing full methodology research behavior.

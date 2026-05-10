@@ -372,6 +372,7 @@ Identity and execution boundaries:
 - project grouping lives in `projects`; project creator, owner, editor, and viewer access live in `project_access_bindings`
 - managed agents are normal `system_agents`: `Tinker` advertises generated-tool authoring, `Steward` advertises platform operations, each organization receives a `Curator` advertising organization operations, every workspace receives `Anchor` for topic-alignment review, global `Researcher` advertises durable dossier creation, global `Methodologist` advertises evidence-backed methodology extraction and workspace template design, and global `Conductor` advertises opt-in workspace methodics execution
 - runtime execution is generic: workers do not branch on `agent_key`, display name, role text, capability text, or metadata tags; behavior comes from agent records, harnesses, interaction contracts, task payloads, IAM/project/workspace bindings, and tool/MCP allowlists
+- the task worker owns the initial claimed run step created during task claim; the loop worker claims later `created` run steps such as follow-up model turns after tool calls
 - organization project catalog listing is organization-permission scoped; specific project structure and project-workspace listings are project-access-scoped
 - agent identity/configuration is global in `system_agents`
 - Git-managed agent authoring is versioned in Forgejo and `agent_definition_versions`, but runtime execution still reads the active `system_agents` projection only.
@@ -653,6 +654,12 @@ The local schema seeds managed operational and specialist agents without adding 
 
 The operational purpose is advertised through `display_name`, `role`, and `capabilities`. Authorization still comes from IAM role bindings, project access bindings, participant attachment, and MCP/tool allowlists.
 
+Researcher and Methodologist currently use the `openai-responses` provider with
+`gpt-5.4-mini` and a per-agent `rolling_summary` compaction policy capped at
+`256000` estimated input tokens. For the admin Research Console, generic dossier
+lifecycle, required methodology knowledge components, and live-test reporting
+inputs, see [methodology-research-console.md](./methodology-research-console.md).
+
 Workspace harnesses include `moderation_policy` with `enabled`, `level` (`strict`, `balanced`, or `open`), `topic`, `allowed_adjacent_topics`, `blocked_topics`, and `explain_blocked_messages`. Strict mode creates a generic publication review before a message is published; approval publishes the message, suppression leaves it out of the public timeline and JSONL communication logs, and optional explanation is private to the issuer. Balanced and open mode publish first and may later flag drift.
 
 `Steward` and `Curator` use the managed `open_talon_control_plane` MCP server for gateway control-plane operations. The runtime mints OIDC client-credentials tokens from `agent_identities.secret_ref` when a private control-plane MCP tool is executed.
@@ -747,6 +754,18 @@ pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s
 ```
 
 The live Tinker system test is marked `integration`, so it is excluded from the default `pytest -q` run by `pytest.ini`. It expects the configured `OPEN_TALON_DEFAULT_REASONING_MODEL` to be available in the local Ollama instance.
+
+Methodology deep-research verification:
+
+```bash
+./scripts/run-live-tests.sh methodology-deep-research
+```
+
+This is the real seeded Researcher/Methodologist path. It starts the XWiki plus
+web-search stack profile, uses the OpenAI-backed methodology specialists,
+expects `OPENAI_API_KEY` or the equivalent OpenBao secret to be configured, and
+verifies multi-turn search, dossier knowledge coverage, XWiki sync,
+Methodologist draft, human review/apply, and archive preservation.
 
 For live tests that prove model-backed worker behavior, use the infrastructure
 Ollama service started by `./open-talon start`. Anchor moderation and Retriever

@@ -708,7 +708,7 @@ Global system-definition APIs are operator/admin APIs.
 
 In the current implementation, org-scoped create/list routes are explicit. Update and delete endpoints for providers, tools, and agents live on the top-level admin surface.
 
-System-agent definitions accept an optional typed `harness.compaction_policy` object. Current strategies are `full_context`, `recent_window`, `rolling_summary`, and `summary_plus_retrieval`; the runtime applies this policy immediately before prompt rendering without mutating the canonical `AgentExecutionContext`.
+System-agent definitions accept an optional typed `harness.compaction_policy` object. Current strategies are `full_context`, `recent_window`, `rolling_summary`, and `summary_plus_retrieval`; the runtime applies this policy immediately before prompt rendering without mutating the canonical `AgentExecutionContext`. The policy is stored per system-agent object, not as a global runtime constant. Researcher and Methodologist use `rolling_summary` with `max_estimated_input_tokens=256000`.
 
 `Researcher` is a seeded global system agent for durable dossiers. It works through targeted organization operations tasks, searches local libraries, pre-indexed Retriever context, local files, database-visible context, and web follow-up sources, then persists source records, retained-library references, contradiction maps, gaps, context-pack links, and a readiness decision. It does not add a special runtime path; behavior comes from its agent definition, harness, task payload, IAM binding, and private MCP allowlist.
 
@@ -895,6 +895,15 @@ before it can become active or be applied to a workspace. Applying an approved
 blueprint updates the selected workspace harness. It does not attach or start
 Conductor.
 
+Methodology-created dossiers use generic lifecycle statuses:
+`created`, `scoping`, `collecting`, `synthesizing`, `ready`, `consumed`,
+`archived`, and `failed`. Human clarification is represented by thread
+interaction requests, not by a special waiting dossier status. The
+`full_methodology_research` completion profile requires knowledge coverage for
+research plan, source bibliography, methodology basis/principles, methodics,
+participants and roles, tools and methods, information assets,
+libraries/dossiers, quality evaluation, contradictions, gaps, and synthesis.
+
 | Method | Path | Summary |
 | --- | --- | --- |
 | `POST` | `/v1/organizations/{organization_id}/methodology/blueprints` | create blueprint, initial version, dossier, retained-source library, and Researcher task |
@@ -906,7 +915,10 @@ Conductor.
 | `POST` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/versions/{version_id}/reject` | reject a draft version |
 | `POST` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/apply` | apply an approved blueprint version to a workspace harness |
 | `DELETE` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}` | archive a blueprint while preserving versions, dossier, sources, and notebook provenance |
+| `GET` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/research-state` | get Research Console state for the selected blueprint |
+| `POST` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/research-requests` | create a Researcher refine task; gateway does not run research inline |
 | `GET` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}` | get a dossier |
+| `GET` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/events` | list dossier lifecycle and curation events |
 | `GET` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/notebook` | get notebook binding, notes, concepts, claims, links, external refs, and latest health |
 | `GET` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/graph` | get the canonical dossier note/concept/claim/source graph |
 | `POST` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/navigate` | query or focus-navigate the dossier concept notebook |
@@ -916,6 +928,13 @@ Conductor.
 | `PATCH` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/sources/{source_id}` | update a dossier source record |
 | `POST` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/context-packs` | attach a Retriever context pack to a dossier and optionally a source |
 | `POST` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/lifecycle` | transition dossier lifecycle status; `ready` creates the Methodologist task |
+| `POST` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/notes` | upsert dossier notebook note knowledge |
+| `POST` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/concepts` | upsert dossier concept knowledge |
+| `POST` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/claims` | upsert dossier claim knowledge |
+| `POST` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/links` | upsert typed links between dossier knowledge items |
+
+For the admin module, agent handoff, live-test expectations, and report inputs,
+see [methodology-research-console.md](./methodology-research-console.md).
 
 ### Library APIs
 
@@ -1051,6 +1070,7 @@ Important request behavior:
 | `GET` | `/v1/admin/api-keys` | list API keys |
 | `DELETE` | `/v1/admin/api-keys/{key_id}` | revoke API key |
 | `GET` | `/v1/admin/runtime/overview` | runtime queue/failure/token overview |
+| `POST` | `/v1/organizations/{organization_id}/runtime/tasks/{task_id}/resume` | resume a failed runtime task or retryable provider-blocked claimed task |
 
 ## Canonical Workflow Examples
 

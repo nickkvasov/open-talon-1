@@ -70,6 +70,16 @@ Tinker live system test:
 ./.venv/bin/python -m pytest -m integration tests/infrastructure/test_tinker_live_system.py -q -s
 ```
 
+Real methodology deep-research workflow:
+
+```bash
+./scripts/run-live-tests.sh methodology-deep-research
+```
+
+This uses the real OpenAI-backed Researcher and Methodologist specialists, web
+search, generic dossier lifecycle, XWiki notebook projection, and methodology
+review/apply/archive flow.
+
 Seed and migration checks:
 
 ```bash

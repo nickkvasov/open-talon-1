@@ -22,6 +22,7 @@ holder; see [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md) and
 - [docs/external-access.md](./docs/external-access.md): external systems, participant-scoped identity grants, approvals, MCP external identity auth, and direct external operations
 - [docs/agent-operations-guide.md](./docs/agent-operations-guide.md): operating guide for software development agents and scripted test users
 - [docs/seeded-agents/README.md](./docs/seeded-agents/README.md): seeded-agent system concept plus one card per seeded agent, including idea, harness, live-test design, and tested behavior
+- [docs/methodology-research-console.md](./docs/methodology-research-console.md): methodology admin research console, generic dossier lifecycle, Researcher/Methodologist handoff, and real-agent live-test protocol
 - [docs/tinker-tool-generation.md](./docs/tinker-tool-generation.md): Tinker request, approval, catalog, and live-test workflow
 - [docs/operational-agents-real-life-test-protocol.md](./docs/operational-agents-real-life-test-protocol.md): real local-stack test protocol for managed operational and specialist agents plus managed administration contexts
 - [docs/db-migrations.md](./docs/db-migrations.md): migration workflow and schema rules
@@ -69,7 +70,7 @@ The typical flow is:
 | `services/workspace-memory` | shared memory-provider abstraction | Keeps Postgres canonical while letting Mem0 and optional Memgraph act as derived retrieval layers. |
 | `services/generated-tools-builder` | Tinker build/publish helper | Packages generated tools for the OCI-style registry flow used during tool approval. |
 | `services/presence-directory` | reusable thread-presence primitives | Provides Valkey-backed websocket presence tracking used by `gateway-edge`. |
-| `apps/admin-web` | operator browser console | Manages organizations, workspaces, providers, swarm resources, runtime overview, API keys, and tool-generation review. |
+| `apps/admin-web` | operator browser console | Manages organizations, workspaces, providers, swarm resources, runtime overview, API keys, tool-generation review, and methodology research/review workflows. |
 | `apps/web` | gateway-mounted browser session-chat UI | Compatibility browser client for the session-chat routes mounted at `/` by `gateway-edge` when the static app is present. |
 | `apps/tui` | human and scripted terminal clients | `tui2` is the preferred human client; `user-client` is the preferred scriptable client for multi-user tests. |
 | `packages/contracts` | shared contracts | Defines the Pydantic models and shared telemetry or registry contracts consumed across services. |
@@ -102,7 +103,7 @@ Open Talon separates:
 - `agent_identities`, `iam_role_definitions`, `human_role_bindings`, and `agent_role_bindings`: principal IAM state for agent identities and global or organization role bindings
 - `organizations`, `projects`, `project_access_bindings`, and `organization_memberships`: organization tenancy, project ownership/access, membership, and membership roles stored in Postgres
 - `participants`: workspace-local materializations of a human or agent inside a workspace
-- managed system agents are ordinary `system_agents`: `Tinker` for generated-tool authoring, global `Steward` for platform operations, organization-scoped `Curator` for organization operations, workspace-attached `Anchor` for topic-alignment review, global `Researcher` for durable research dossiers, global `Methodologist` for evidence-backed methodology extraction and workspace template design, and global `Conductor` for opt-in workspace methodics execution through the managed `local-ollama` provider. Researcher creates reusable dossiers with source records, retained-library refs, context packs, contradictions, and gaps; Conductor is not auto-attached, so human callers start/cancel executions and approve/reject resource requests, while Conductor can create assignments, evaluate DoD pass/fail/rework, advance steps, and produce a final execution report.
+- managed system agents are ordinary `system_agents`: `Tinker` for generated-tool authoring, global `Steward` for platform operations, organization-scoped `Curator` for organization operations, workspace-attached `Anchor` for topic-alignment review, global `Researcher` for durable research dossiers, global `Methodologist` for evidence-backed methodology extraction and workspace template design, and global `Conductor` for opt-in workspace methodics execution. Researcher and Methodologist use the `openai-responses` GPT provider by default; Anchor and Conductor use the managed `local-ollama` provider. Researcher creates reusable dossiers with source records, retained-library refs, context packs, contradictions, and gaps; Conductor is not auto-attached, so human callers start/cancel executions and approve/reject resource requests, while Conductor can create assignments, evaluate DoD pass/fail/rework, advance steps, and produce a final execution report.
 - agent runtime remains generic: it renders agent definitions, harnesses, response contracts, task metadata, workspace context, tools, MCP, and memory without branching on agent key, display name, role text, capability text, or metadata tags
 
 Role terminology in this repository:
@@ -396,8 +397,8 @@ Open Talon runs agent execution through durable stateless workers:
 - Postgres is the source of truth for execution state
 - Kafka is the wake-up and fanout bus
 - `gateway-edge` delegates agent-loop execution to `agent-runtime`
-- `agent-task-worker` claims `tasks`, creates `runs`, and resolves the target LLM engine
-- `agent-loop-worker` claims `run_steps` and executes model turns
+- `agent-task-worker` claims `tasks`, creates `runs`, resolves the target LLM engine, and owns the initial claimed run step
+- `agent-loop-worker` claims later `created` `run_steps`, especially follow-up model turns after tool calls complete
 - `tool-worker` claims `tool_calls` and dispatches isolated tool execution
 - `mcp-sync-worker` validates System Plugin MCP endpoints and durably refreshes cached plugin capabilities
 - `reconciler` requeues expired leases and republishes wakeup events
