@@ -7,22 +7,28 @@ from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 from gateway_edge.config import settings
-from gateway_edge.mcp_api import OPERATION_REGISTRY, notification_hub
+from gateway_edge.mcp_api import (
+    OPERATION_REGISTRY,
+    DossierNoteUpsertArgs,
+    DossierSourceCreateArgs,
+    MethodologyBlueprintSubmitDraftArgs,
+    notification_hub,
+)
 from gateway_edge.models import (
     AuthContext,
     Library,
     LibraryItem,
-    ResearchDossier,
-    ResearchDossierClaim,
-    ResearchDossierConcept,
-    ResearchDossierHealthCheck,
-    ResearchDossierLink,
-    ResearchDossierNavigationResult,
-    ResearchDossierNote,
-    ResearchDossierNotebook,
-    ResearchDossierNotebookDetail,
-    ResearchDossierProviderBinding,
-    ResearchDossierSyncRun,
+    Dossier,
+    DossierClaim,
+    DossierConcept,
+    DossierHealthCheck,
+    DossierLink,
+    DossierNavigationResult,
+    DossierNote,
+    DossierNotebook,
+    DossierNotebookDetail,
+    DossierProviderBinding,
+    DossierSyncRun,
     RetrievalIngestionJob,
 )
 
@@ -107,19 +113,19 @@ def test_mcp_library_operations_declare_scopes_and_permissions() -> None:
 
 def test_mcp_methodology_dossier_operations_declare_org_scope_and_permissions() -> None:
     expected = {
-        "methodology.dossiers.get": "methodology.read",
-        "methodology.dossiers.sources.create": "methodology.write",
-        "methodology.dossiers.sources.update": "methodology.write",
-        "methodology.dossiers.context_pack.attach": "methodology.write",
-        "methodology.dossiers.mark_ready": "methodology.write",
-        "methodology.dossiers.notebook.get": "methodology.read",
-        "methodology.dossiers.notes.upsert": "methodology.write",
-        "methodology.dossiers.concepts.upsert": "methodology.write",
-        "methodology.dossiers.claims.upsert": "methodology.write",
-        "methodology.dossiers.links.upsert": "methodology.write",
-        "methodology.dossiers.navigate": "methodology.read",
-        "methodology.dossiers.sync": "methodology.write",
-        "methodology.dossiers.health.submit": "methodology.write",
+        "dossiers.get": "methodology.read",
+        "dossiers.sources.create": "methodology.write",
+        "dossiers.sources.update": "methodology.write",
+        "dossiers.context_pack.attach": "methodology.write",
+        "dossiers.lifecycle.transition": "methodology.write",
+        "dossiers.notebook.get": "methodology.read",
+        "dossiers.notes.upsert": "methodology.write",
+        "dossiers.concepts.upsert": "methodology.write",
+        "dossiers.claims.upsert": "methodology.write",
+        "dossiers.links.upsert": "methodology.write",
+        "dossiers.navigate": "methodology.read",
+        "dossiers.sync": "methodology.write",
+        "dossiers.health.submit": "methodology.write",
         "methodology.blueprints.submit_draft": "methodology.write",
     }
 
@@ -131,6 +137,169 @@ def test_mcp_methodology_dossier_operations_declare_org_scope_and_permissions() 
         assert operation.requires_workspace_actor is False
 
 
+def test_mcp_methodology_submit_draft_normalizes_agent_harness_payload() -> None:
+    args = MethodologyBlueprintSubmitDraftArgs.model_validate(
+        {
+            "version_id": "c0df2585-82d-4d18-98d9-c9e7e6b9489b",
+            "cited_output": "# Draft",
+            "metadata": {"dossier_id": str(uuid4())},
+            "harness_draft": {
+                "summary": "B2C demand validation methodology.",
+                "methodology": {
+                    "principles": [
+                        {
+                            "name": "Prefer real-use behavior",
+                            "source_ids": ["source-1"],
+                        }
+                    ]
+                },
+                "methodics": [
+                    {
+                        "name": "Interview learning loop",
+                        "goal": "Find problem intensity.",
+                        "steps": [
+                            {
+                                "instruction": "Recruit target wellness subscribers.",
+                                "recommended_tool_patterns": ["interview guide"],
+                                "expected_artifacts": ["notes"],
+                                "verification": ["sample is screened"],
+                            }
+                        ],
+                        "success_criteria": "Interview findings distinguish stated interest from purchase intent.",
+                    },
+                    {
+                        "title": "Fake-door demand check",
+                        "description": "Measure concrete click and waitlist behavior.",
+                        "ordered_steps": [
+                            "Publish a landing page with one subscription value proposition.",
+                            {
+                                "action": "Review conversion and opt-in quality.",
+                                "expected_artifacts": "conversion report",
+                                "verification": "report separates clicks from qualified signups",
+                            },
+                        ],
+                        "success_criteria": [
+                            "Behavioral signal is interpreted conservatively.",
+                            {"summary": "Retention is not inferred from click intent."},
+                        ],
+                    }
+                ],
+                "execution_rules": [
+                    "Do not treat a single waitlist or fake-door metric as proof of demand.",
+                    {
+                        "name": "Evidence citation gate",
+                        "description": "Every decision must cite a dossier source.",
+                    }
+                ],
+            },
+        }
+    )
+
+    assert args.version_id == "c0df2585-82d-4d18-98d9-c9e7e6b9489b"
+    assert args.harness_draft.methodology is not None
+    assert args.harness_draft.methodology.principles == ["Prefer real-use behavior"]
+    assert args.harness_draft.methodics[0].success_criteria == [
+        "Interview findings distinguish stated interest from purchase intent."
+    ]
+    assert args.harness_draft.methodics[1].name == "Fake-door demand check"
+    assert args.harness_draft.methodics[1].goal == (
+        "Measure concrete click and waitlist behavior."
+    )
+    assert args.harness_draft.methodics[1].steps[0].instruction == (
+        "Publish a landing page with one subscription value proposition."
+    )
+    assert args.harness_draft.methodics[1].steps[1].expected_artifacts == [
+        "conversion report"
+    ]
+    assert args.harness_draft.methodics[1].success_criteria == [
+        "Behavioral signal is interpreted conservatively.",
+        '{"summary": "Retention is not inferred from click intent."}',
+    ]
+    assert args.harness_draft.execution_rules[0].instruction == (
+        "Do not treat a single waitlist or fake-door metric as proof of demand."
+    )
+    assert args.harness_draft.execution_rules[1].instruction == (
+        "Every decision must cite a dossier source."
+    )
+
+
+def test_mcp_methodology_submit_draft_builds_harness_from_cited_output_fallback() -> None:
+    dossier_id = uuid4()
+    args = MethodologyBlueprintSubmitDraftArgs.model_validate(
+        {
+            "version_id": uuid4(),
+            "cited_output": (
+                "# Methodology Extraction And Workspace Template\n\n"
+                "Use interview, survey, willingness, source, participant, tool, "
+                "and asset evidence for B2C subscription validation."
+            ),
+            "metadata": {"dossier_id": str(dossier_id)},
+        }
+    )
+
+    draft = args.harness_draft.model_dump(mode="json")
+    draft_json = json.dumps(draft, sort_keys=True).lower()
+    assert args.harness_draft.summary == "Methodology Extraction And Workspace Template"
+    assert args.harness_draft.methodics
+    assert any(methodic.steps for methodic in args.harness_draft.methodics)
+    assert args.harness_draft.metadata["generated_from"] == "cited_output_fallback"
+    assert args.harness_draft.metadata["dossier_id"] == str(dossier_id)
+    for marker in (
+        "participant",
+        "tool",
+        "asset",
+        "source",
+        "survey",
+        "interview",
+        "willingness",
+    ):
+        assert marker in draft_json
+
+
+def test_mcp_dossier_note_upsert_normalizes_unknown_agent_note_kind() -> None:
+    args = DossierNoteUpsertArgs.model_validate(
+        {
+            "dossier_id": uuid4(),
+            "note_kind": "plan",
+            "slug": "research-plan",
+            "title": "Research plan",
+            "body": "Plan content",
+        }
+    )
+
+    assert args.note_kind == "other"
+
+
+def test_mcp_dossier_note_upsert_promotes_component_shorthand() -> None:
+    args = DossierNoteUpsertArgs.model_validate(
+        {
+            "dossier_id": uuid4(),
+            "slug": "quality-evaluation",
+            "title": "Quality evaluation",
+            "body": "Quality criteria for the methodology.",
+            "component": "quality_evaluation",
+        }
+    )
+
+    assert args.metadata["knowledge_component"] == "quality_evaluation"
+
+
+def test_mcp_dossier_source_create_marks_http_sources_as_internet_search() -> None:
+    args = DossierSourceCreateArgs.model_validate(
+        {
+            "dossier_id": uuid4(),
+            "title": "Pricing research guide",
+            "source_uri": "https://example.com/pricing-research",
+            "status": "included",
+            "fetch_metadata": {"search_query": "pricing research b2c"},
+        }
+    )
+
+    assert args.source_kind == "webpage"
+    assert args.fetch_metadata["internet_search"] is True
+    assert args.fetch_metadata["search_query"] == "pricing research b2c"
+
+
 async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
     client,
     mock_collaboration_service,
@@ -140,19 +309,19 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
     admin = _oidc_context(roles=["admin"]).model_copy(update={"platform_admin": True})
     _patch_oidc_tokens(monkeypatch, {"admin-token": admin})
     now = datetime.now(timezone.utc)
-    dossier = ResearchDossier(
+    dossier = Dossier(
         dossier_id=uuid4(),
         blueprint_id=uuid4(),
         version_id=uuid4(),
         organization_id=organization_id,
-        status="researching",
+        status="scoping",
         topic="MCP dossier notebook",
         tasks=["organize concepts"],
         created_by=admin.user_id,
         created_at=now,
         updated_at=now,
     )
-    notebook = ResearchDossierNotebook(
+    notebook = DossierNotebook(
         notebook_id=uuid4(),
         dossier_id=dossier.dossier_id,
         organization_id=organization_id,
@@ -165,7 +334,7 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
         created_at=now,
         updated_at=now,
     )
-    binding = ResearchDossierProviderBinding(
+    binding = DossierProviderBinding(
         binding_id=uuid4(),
         notebook_id=notebook.notebook_id,
         dossier_id=dossier.dossier_id,
@@ -179,7 +348,7 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
         created_at=now,
         updated_at=now,
     )
-    note = ResearchDossierNote(
+    note = DossierNote(
         note_id=uuid4(),
         notebook_id=notebook.notebook_id,
         dossier_id=dossier.dossier_id,
@@ -193,7 +362,7 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
         created_at=now,
         updated_at=now,
     )
-    concept = ResearchDossierConcept(
+    concept = DossierConcept(
         concept_id=uuid4(),
         notebook_id=notebook.notebook_id,
         dossier_id=dossier.dossier_id,
@@ -206,7 +375,7 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
         created_at=now,
         updated_at=now,
     )
-    claim = ResearchDossierClaim(
+    claim = DossierClaim(
         claim_id=uuid4(),
         notebook_id=notebook.notebook_id,
         dossier_id=dossier.dossier_id,
@@ -218,7 +387,7 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
         created_at=now,
         updated_at=now,
     )
-    link = ResearchDossierLink(
+    link = DossierLink(
         link_id=uuid4(),
         notebook_id=notebook.notebook_id,
         dossier_id=dossier.dossier_id,
@@ -233,7 +402,7 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
         created_at=now,
         updated_at=now,
     )
-    detail = ResearchDossierNotebookDetail(
+    detail = DossierNotebookDetail(
         notebook=notebook,
         provider_bindings=[binding],
         notes=[note],
@@ -241,7 +410,7 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
         claims=[claim],
         links=[link],
     )
-    sync_run = ResearchDossierSyncRun(
+    sync_run = DossierSyncRun(
         sync_run_id=uuid4(),
         binding_id=binding.binding_id,
         notebook_id=notebook.notebook_id,
@@ -252,7 +421,7 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
         created_at=now,
         updated_at=now,
     )
-    health = ResearchDossierHealthCheck(
+    health = DossierHealthCheck(
         check_id=uuid4(),
         notebook_id=notebook.notebook_id,
         dossier_id=dossier.dossier_id,
@@ -261,24 +430,24 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
         summary="Notebook is navigable.",
         created_at=now,
     )
-    mock_collaboration_service.get_research_dossier = AsyncMock(return_value=dossier)
-    mock_collaboration_service.get_research_dossier_notebook_detail = AsyncMock(
+    mock_collaboration_service.get_dossier = AsyncMock(return_value=dossier)
+    mock_collaboration_service.get_dossier_notebook_detail = AsyncMock(
         return_value=detail
     )
-    mock_collaboration_service.upsert_research_dossier_note = AsyncMock(
+    mock_collaboration_service.upsert_dossier_note = AsyncMock(
         return_value=note
     )
-    mock_collaboration_service.upsert_research_dossier_concept = AsyncMock(
+    mock_collaboration_service.upsert_dossier_concept = AsyncMock(
         return_value=concept
     )
-    mock_collaboration_service.upsert_research_dossier_claim = AsyncMock(
+    mock_collaboration_service.upsert_dossier_claim = AsyncMock(
         return_value=claim
     )
-    mock_collaboration_service.upsert_research_dossier_link = AsyncMock(
+    mock_collaboration_service.upsert_dossier_link = AsyncMock(
         return_value=link
     )
-    mock_collaboration_service.navigate_research_dossier = AsyncMock(
-        return_value=ResearchDossierNavigationResult(
+    mock_collaboration_service.navigate_dossier = AsyncMock(
+        return_value=DossierNavigationResult(
             dossier_id=dossier.dossier_id,
             notebook_id=notebook.notebook_id,
             query="mcp",
@@ -288,11 +457,14 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
             links=[link],
         )
     )
-    mock_collaboration_service.sync_research_dossier_notebook = AsyncMock(
+    mock_collaboration_service.sync_dossier_notebook = AsyncMock(
         return_value=sync_run
     )
-    mock_collaboration_service.submit_research_dossier_health_check = AsyncMock(
+    mock_collaboration_service.submit_dossier_health_check = AsyncMock(
         return_value=health
+    )
+    mock_collaboration_service.transition_dossier_lifecycle = AsyncMock(
+        return_value=dossier.model_copy(update={"status": "collecting"})
     )
 
     session_id = await _mcp_initialize(client, token="admin-token")
@@ -309,7 +481,7 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
             client,
             token="admin-token",
             session_id=session_id,
-            name="methodology.dossiers.notebook.get",
+            name="dossiers.notebook.get",
             arguments={"dossier_id": str(dossier.dossier_id)},
             request_id=10,
         ),
@@ -317,7 +489,7 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
             client,
             token="admin-token",
             session_id=session_id,
-            name="methodology.dossiers.notes.upsert",
+            name="dossiers.notes.upsert",
             arguments={
                 "dossier_id": str(dossier.dossier_id),
                 "note_kind": "concept",
@@ -331,7 +503,7 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
             client,
             token="admin-token",
             session_id=session_id,
-            name="methodology.dossiers.concepts.upsert",
+            name="dossiers.concepts.upsert",
             arguments={
                 "dossier_id": str(dossier.dossier_id),
                 "slug": "mcp-concept",
@@ -344,7 +516,7 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
             client,
             token="admin-token",
             session_id=session_id,
-            name="methodology.dossiers.claims.upsert",
+            name="dossiers.claims.upsert",
             arguments={
                 "dossier_id": str(dossier.dossier_id),
                 "statement": claim.statement,
@@ -356,7 +528,7 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
             client,
             token="admin-token",
             session_id=session_id,
-            name="methodology.dossiers.links.upsert",
+            name="dossiers.links.upsert",
             arguments={
                 "dossier_id": str(dossier.dossier_id),
                 "source_type": "concept",
@@ -371,7 +543,7 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
             client,
             token="admin-token",
             session_id=session_id,
-            name="methodology.dossiers.navigate",
+            name="dossiers.navigate",
             arguments={"dossier_id": str(dossier.dossier_id), "query": "mcp"},
             request_id=15,
         ),
@@ -379,7 +551,7 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
             client,
             token="admin-token",
             session_id=session_id,
-            name="methodology.dossiers.sync",
+            name="dossiers.sync",
             arguments={
                 "dossier_id": str(dossier.dossier_id),
                 "provider_key": "xwiki",
@@ -391,13 +563,25 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
             client,
             token="admin-token",
             session_id=session_id,
-            name="methodology.dossiers.health.submit",
+            name="dossiers.health.submit",
             arguments={
                 "dossier_id": str(dossier.dossier_id),
                 "status": "passed",
                 "summary": "Notebook is navigable.",
             },
             request_id=17,
+        ),
+        await _mcp_tool_call(
+            client,
+            token="admin-token",
+            session_id=session_id,
+            name="dossiers.lifecycle.transition",
+            arguments={
+                "dossier_id": str(dossier.dossier_id),
+                "target_status": "collecting",
+                "reason": "mcp-test",
+            },
+            request_id=18,
         ),
     ]
 
@@ -412,7 +596,8 @@ async def test_mcp_methodology_dossier_notebook_tools_execute_in_org_scope(
     )
     assert calls[6].json()["result"]["structuredContent"]["stats"]["pages_synced"] == 4
     assert calls[7].json()["result"]["structuredContent"]["status"] == "passed"
-    note_payload = mock_collaboration_service.upsert_research_dossier_note.await_args.args[1]
+    assert calls[8].json()["result"]["structuredContent"]["status"] == "collecting"
+    note_payload = mock_collaboration_service.upsert_dossier_note.await_args.args[1]
     assert note_payload.actor.user_id == admin.user_id
     assert note_payload.slug == "mcp-note"
 

@@ -97,7 +97,7 @@ service guides.
 - Cross-organization or cross-project library attachments must be rejected.
 - Keep the storage taxonomy explicit: MinIO/object storage is immutable bytes and
   snapshots; Library plus Retriever indexes are retained indexed information;
-  research dossiers are concept organization, claims, contradictions, methods,
+  dossiers are concept organization, claims, contradictions, methods,
   synthesis, provenance, and navigation.
 - Dossier notebooks are external provider projections owned by Open Talon
   control-plane state. Open Talon stores lifecycle, source provenance, IAM,

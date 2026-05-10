@@ -16,7 +16,7 @@ Seeded agents provide the initial operating layer for:
 - generated-tool creation
 - platform and organization operations
 - workspace topic governance
-- research dossier creation
+- dossier creation
 - methodology extraction and workspace design
 - opt-in methodics execution
 
@@ -56,7 +56,7 @@ This keeps seeded agents useful without making their names magical.
 | Identity and IAM | Human users, system agents, agent identities, role bindings, permissions | Steward, Curator, Researcher, Methodologist, and Conductor receive authority through IAM and scoped bindings |
 | Collaboration | Organizations, projects, workspaces, participants, threads, messages, requests | All seeded agents participate through ordinary workspace attachment when used in a workspace |
 | Execution | Durable tasks, runs, run steps, tool calls, runtime workers | Agent behavior is executed through the generic runtime and persisted in Postgres |
-| Knowledge and evidence | Research dossiers, retained dossier libraries, Retriever context, workspace memory, files, assets, citations | Researcher builds reusable dossiers; Methodologist uses dossier evidence; Conductor can search/read evidence needed for active methodics |
+| Knowledge and evidence | Dossiers, retained dossier libraries, Retriever context, workspace memory, files, assets, citations | Researcher builds reusable dossiers; Methodologist uses dossier evidence; Conductor can search/read evidence needed for active methodics |
 | Operations | Control-plane MCP, provider/catalog management, audit, runtime overview | Steward operates globally; Curator operates inside one organization |
 | Governance | Topic policy, methodics execution gates, review and approval flows | Anchor governs topic fit; Conductor uses human gates for start/cancel/resource approval; Tinker uses review gates for generated tools |
 
@@ -69,7 +69,7 @@ This keeps seeded agents useful without making their names magical.
 | Steward | `platform_operations_specialist` | Platform operations specialist for global control-plane work | Global IAM plus System Operations workspace; destructive tools remain denied unless explicitly granted later |
 | Curator | `organization_operations_specialist` | Organization operations specialist for one tenant | Organization-scoped IAM and Organization Operations workspace; cannot cross organization boundaries |
 | Anchor | `workspace_topic_governance_reviewer` | Workspace topic-alignment reviewer | Auto-attached per workspace, but receives only topic-moderation tasks and no normal message fanout |
-| Researcher | `methodology_research_dossier_specialist` | Evidence discovery and durable research dossier specialist | Builds dossier source records, contradiction maps, gaps, and context-pack links; does not synthesize methodology |
+| Researcher | `methodology_dossier_specialist` | Evidence discovery and durable dossier specialist | Builds dossier source records, contradiction maps, gaps, and context-pack links; does not synthesize methodology |
 | Methodologist | `methodology_blueprint_synthesis_specialist` | Evidence-backed methodology extraction and workspace-template design specialist | Produces cited methodology/methodics/template drafts; does not execute methodics |
 | Conductor | `workspace_methodics_execution_specialist` | Active methodics execution coordinator | Must be explicitly attached and explicitly started; human-gated start/cancel/resource decisions |
 
@@ -117,10 +117,10 @@ methodics execution from the active `WorkspaceHarness.methodics`.
 A typical methodology-driven workflow can look like this:
 
 1. Users create a methodology blueprint request with a topic, tasks, and optional selected libraries.
-2. The service creates a research dossier and a retained-source library, then creates a targeted Researcher task in the organization's operations workspace.
+2. The service creates a dossier and a retained-source library, then creates a targeted Researcher task in the organization's operations workspace.
 3. Researcher searches local libraries, Retriever corpora, files, database-visible context, and web follow-up sources, then records included, excluded, duplicate, failed, and unresolved source records.
 4. Researcher maps contradictions, attaches context packs, stores fetched source snapshots in the retained dossier library when possible, and marks the dossier ready.
-5. Methodologist receives the completed dossier and drafts methodology basis,
+5. Methodologist receives the ready dossier and drafts methodology basis,
    methodics, methods/tools/actors, and a workspace template.
 6. Humans decide whether to approve the draft and materialize the template into workspace harness
    fields, participants, tools, retrieval corpora, and artifacts.
@@ -157,7 +157,7 @@ Examples:
 - Researcher is not a normal workspace chat participant; methodology blueprint
   creation targets it in the organization operations workspace for dossier work.
 - Methodologist can be attached, but source-backed extraction requires visible or
-  cited evidence in the task context, often from a completed dossier.
+  cited evidence in the task context, often from a ready dossier.
 
 ## Human Gates
 

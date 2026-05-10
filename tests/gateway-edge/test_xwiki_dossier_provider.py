@@ -7,11 +7,11 @@ import pytest
 from open_talon_contracts.secrets import EnvironmentSecretProvider, SecretResolver
 
 from gateway_edge.models import (
-    ResearchDossierConcept,
-    ResearchDossierNote,
-    ResearchDossierNotebook,
-    ResearchDossierNotebookDetail,
-    ResearchDossierProviderBinding,
+    DossierConcept,
+    DossierNote,
+    DossierNotebook,
+    DossierNotebookDetail,
+    DossierProviderBinding,
 )
 from gateway_edge.services import dossier_notebook_provider as provider_module
 from gateway_edge.services.dossier_notebook_provider import XWikiDossierNotebookProvider
@@ -61,12 +61,12 @@ class _FailingAsyncClient(_FakeAsyncClient):
 
 def _notebook_detail(
     *,
-    binding: ResearchDossierProviderBinding,
-    note: ResearchDossierNote | None = None,
-    concept: ResearchDossierConcept | None = None,
-) -> ResearchDossierNotebookDetail:
+    binding: DossierProviderBinding,
+    note: DossierNote | None = None,
+    concept: DossierConcept | None = None,
+) -> DossierNotebookDetail:
     now = datetime.now(timezone.utc)
-    note = note or ResearchDossierNote(
+    note = note or DossierNote(
         note_id=uuid4(),
         notebook_id=binding.notebook_id,
         dossier_id=binding.dossier_id,
@@ -84,8 +84,8 @@ def _notebook_detail(
         created_at=now,
         updated_at=now,
     )
-    return ResearchDossierNotebookDetail(
-        notebook=ResearchDossierNotebook(
+    return DossierNotebookDetail(
+        notebook=DossierNotebook(
             notebook_id=binding.notebook_id,
             dossier_id=binding.dossier_id,
             organization_id=binding.organization_id,
@@ -105,7 +105,7 @@ def _notebook_detail(
     )
 
 
-def _provider_binding(*, with_secret_refs: bool = True) -> ResearchDossierProviderBinding:
+def _provider_binding(*, with_secret_refs: bool = True) -> DossierProviderBinding:
     now = datetime.now(timezone.utc)
     secret_config = (
         {
@@ -115,7 +115,7 @@ def _provider_binding(*, with_secret_refs: bool = True) -> ResearchDossierProvid
         if with_secret_refs
         else {}
     )
-    return ResearchDossierProviderBinding(
+    return DossierProviderBinding(
         binding_id=uuid4(),
         notebook_id=uuid4(),
         dossier_id=uuid4(),
@@ -166,7 +166,7 @@ async def test_xwiki_dossier_provider_syncs_without_auth_and_renders_concepts(
     _FakeAsyncClient.calls = []
     binding = _provider_binding(with_secret_refs=False)
     now = datetime.now(timezone.utc)
-    concept = ResearchDossierConcept(
+    concept = DossierConcept(
         concept_id=uuid4(),
         notebook_id=binding.notebook_id,
         dossier_id=binding.dossier_id,
@@ -207,7 +207,7 @@ async def test_xwiki_dossier_provider_reports_page_failures(monkeypatch) -> None
     monkeypatch.setattr(provider_module.httpx, "AsyncClient", _FailingAsyncClient)
     _FailingAsyncClient.calls = []
     binding = _provider_binding(with_secret_refs=False)
-    note = ResearchDossierNote(
+    note = DossierNote(
         note_id=uuid4(),
         notebook_id=binding.notebook_id,
         dossier_id=binding.dossier_id,

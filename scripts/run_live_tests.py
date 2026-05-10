@@ -103,7 +103,10 @@ SUITES: dict[str, LiveSuite] = {
     ),
     "xwiki": LiveSuite(
         name="xwiki",
-        description="Live XWiki-backed dossier provider and agent MCP workflow tests.",
+        description=(
+            "Live XWiki-backed dossier provider, web-search-assisted methodology, "
+            "and agent MCP workflow tests."
+        ),
         paths=("tests/infrastructure/test_xwiki_dossier_live_system.py",),
         stack_mode="xwiki",
         env={"OPEN_TALON_RUN_XWIKI_LIVE": "1"},
@@ -111,6 +114,34 @@ SUITES: dict[str, LiveSuite] = {
             "OPEN_TALON_XWIKI_USERNAME": "superadmin",
             "OPEN_TALON_XWIKI_PASSWORD": "system",
             "OPEN_TALON_XWIKI_STARTUP_WAIT_SECONDS": "240",
+        },
+    ),
+    "methodology-deep-research": LiveSuite(
+        name="methodology-deep-research",
+        description=(
+            "Real seeded Researcher and Methodologist end-to-end deep methodology "
+            "research with runtime workers, web-search, XWiki, review, apply, and archive."
+        ),
+        paths=("tests/infrastructure/test_xwiki_dossier_live_system.py",),
+        stack_mode="xwiki",
+        pytest_args=(
+            "-q",
+            "-s",
+            "-k",
+            "real_agent_deep_research",
+        ),
+        env={
+            "OPEN_TALON_RUN_XWIKI_LIVE": "1",
+            "OPEN_TALON_RUN_METHODOLOGY_DEEP_RESEARCH_LIVE": "1",
+        },
+        default_env={
+            "OPEN_TALON_XWIKI_USERNAME": "superadmin",
+            "OPEN_TALON_XWIKI_PASSWORD": "system",
+            "OPEN_TALON_XWIKI_STARTUP_WAIT_SECONDS": "240",
+            "AGENT_LOOP_MODEL_TIMEOUT_SECONDS": "900",
+            "OPEN_TALON_METHODOLOGY_DEEP_RESEARCH_TIMEOUT_SECONDS": "1800",
+            "OPEN_TALON_METHODOLOGY_DEEP_RESEARCH_DRAFT_TIMEOUT_SECONDS": "1800",
+            "OPEN_TALON_METHODOLOGY_DEEP_RESEARCH_MIN_SEARCH_TURNS": "3",
         },
     ),
 }
@@ -127,6 +158,7 @@ SUITE_ORDER: tuple[str, ...] = (
     "system-plugins",
     "web-search-internet",
     "xwiki",
+    "methodology-deep-research",
 )
 
 GROUPS: dict[str, tuple[str, ...]] = {
@@ -136,7 +168,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "providers": ("system-plugins", "web-search-internet", "retriever", "xwiki"),
     "default-stack": ("operational", "anchor", "retriever"),
     "web-search": ("system-plugins", "web-search-internet"),
-    "knowledge": ("xwiki",),
+    "knowledge": ("xwiki", "methodology-deep-research"),
 }
 
 STACK_PHASE_ORDER: tuple[str, ...] = ("none", "self", "default", "xwiki")
@@ -259,7 +291,7 @@ def run_suite(
 def stack_command(mode: str, action: str) -> list[str]:
     command = [str(ROOT_DIR / "open-talon"), action]
     if action == "start" and mode == "xwiki":
-        command.append("--xwiki")
+        command.extend(["--xwiki", "--web-search"])
     return command
 
 

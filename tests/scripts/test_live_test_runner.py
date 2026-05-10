@@ -34,6 +34,7 @@ def test_live_test_runner_exposes_all_expected_suites_and_groups() -> None:
         "system-plugins",
         "web-search-internet",
         "xwiki",
+        "methodology-deep-research",
     }
     assert runner.GROUPS["all"] == runner.SUITE_ORDER
     assert runner.GROUPS["default-stack"] == ("operational", "anchor", "retriever")
@@ -43,6 +44,7 @@ def test_live_test_runner_exposes_all_expected_suites_and_groups() -> None:
         "retriever",
         "xwiki",
     )
+    assert runner.GROUPS["knowledge"] == ("xwiki", "methodology-deep-research")
 
 
 def test_live_test_runner_expands_fractional_groups_without_duplicates() -> None:
@@ -70,6 +72,16 @@ def test_live_test_runner_builds_commands_and_default_env(monkeypatch) -> None:
     assert env["OPEN_TALON_XWIKI_USERNAME"] == "superadmin"
     assert env["OPEN_TALON_XWIKI_PASSWORD"] == "system"
 
+    deep_research = runner.SUITES["methodology-deep-research"]
+    deep_command = runner.suite_command(deep_research)
+    deep_env = runner.suite_env(deep_research)
+    assert "-k" in deep_command
+    assert "real_agent_deep_research" in deep_command
+    assert deep_env["OPEN_TALON_RUN_XWIKI_LIVE"] == "1"
+    assert deep_env["OPEN_TALON_RUN_METHODOLOGY_DEEP_RESEARCH_LIVE"] == "1"
+    assert deep_env["AGENT_LOOP_MODEL_TIMEOUT_SECONDS"] == "900"
+    assert deep_env["OPEN_TALON_METHODOLOGY_DEEP_RESEARCH_MIN_SEARCH_TURNS"] == "3"
+
 
 def test_live_test_runner_dry_run_keeps_stack_lifecycle_visible(capsys) -> None:
     runner = _load_runner()
@@ -84,7 +96,7 @@ def test_live_test_runner_dry_run_keeps_stack_lifecycle_visible(capsys) -> None:
 
     output = capsys.readouterr().out
     assert "open-talon stop" in output
-    assert "open-talon start --xwiki" in output
+    assert "open-talon start --xwiki --web-search" in output
     assert "test_xwiki_dossier_live_system.py" in output
     assert results[0].suite == "xwiki"
     assert results[0].return_code == 0

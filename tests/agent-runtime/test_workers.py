@@ -184,6 +184,7 @@ def _settings() -> RuntimeWorkerSettings:
         reconcile_interval_seconds=1,
         poll_interval_seconds=1,
         model_timeout_seconds=60,
+        provider_failure_retry_seconds=900,
         global_daily_token_cap=0,
         workspace_daily_token_cap_default=0,
         enable_kafka_wakeups=False,

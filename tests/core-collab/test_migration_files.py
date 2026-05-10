@@ -149,37 +149,94 @@ def test_methodologist_conductor_seed_migration_declares_managed_agent_contracts
     assert "normal_message_fanout" in sql
 
 
-def test_methodology_blueprint_research_dossier_migration_declares_dossier_tables() -> None:
+def test_generic_dossier_lifecycle_migration_renames_tables_and_statuses() -> None:
     sql = (
-        MIGRATIONS_DIR / "20260501105222_add_methodology_blueprints_and_research_dossiers.sql"
+        MIGRATIONS_DIR / "20260508090000_generic_dossier_lifecycle.sql"
     ).read_text(encoding="utf-8")
 
     for table_name in (
-        "methodology_blueprints",
-        "methodology_blueprint_versions",
-        "research_dossiers",
-        "research_dossier_sources",
-        "research_dossier_events",
+        "dossiers",
+        "dossier_sources",
+        "dossier_events",
+        "dossier_notebooks",
     ):
-        assert f"CREATE TABLE IF NOT EXISTS {table_name}" in sql
-    assert "ready_for_methodologist" in sql
-    assert "retained_library_id UUID REFERENCES libraries" in sql
-    assert "idx_research_dossier_sources_dossier_status" in sql
-    assert "DEFERRABLE INITIALLY DEFERRED" in sql
+        assert f"RENAME TO {table_name}" in sql
+    assert "ready_for_draft" in sql
+    assert "WHEN 'researching' THEN 'collecting'" in sql
+    assert "WHEN 'ready_for_methodologist' THEN 'ready'" in sql
+    assert "idx_dossier_sources_dossier_status" in sql
+    assert "dossiers.lifecycle.transition" in sql
 
 
 def test_researcher_seed_migration_declares_agent_role_and_dossier_mcp() -> None:
-    sql = (
+    seed_sql = (
         MIGRATIONS_DIR / "20260501112237_seed_researcher_agent_and_methodology_dossier_mcp.sql"
     ).read_text(encoding="utf-8")
+    lifecycle_sql = (
+        MIGRATIONS_DIR / "20260508090000_generic_dossier_lifecycle.sql"
+    ).read_text(encoding="utf-8")
 
+    assert "'researcher'" in seed_sql
+    assert "evidence discovery and research dossier agent" in seed_sql
+    assert "methodology_research_dossier_build" in seed_sql
+    assert "normal_message_fanout" in seed_sql
+    assert "methodology_researcher" in seed_sql
+    assert "dossiers.sources.create" in lifecycle_sql
+    assert "dossiers.lifecycle.transition" in lifecycle_sql
+    assert "methodology_dossier" in lifecycle_sql
+
+
+def test_methodology_specialists_gpt_runtime_migration_updates_seeded_agents() -> None:
+    sql = (
+        MIGRATIONS_DIR / "20260509010000_use_gpt_for_methodology_specialists.sql"
+    ).read_text(encoding="utf-8")
+    compaction_sql = (
+        MIGRATIONS_DIR
+        / "20260509020000_configure_methodology_specialist_compaction.sql"
+    ).read_text(encoding="utf-8")
+    rolling_compaction_sql = (
+        MIGRATIONS_DIR
+        / "20260509030000_configure_methodology_specialist_rolling_summary_compaction.sql"
+    ).read_text(encoding="utf-8")
+    stronger_gpt_sql = (
+        MIGRATIONS_DIR
+        / "20260509040000_use_stronger_gpt_for_methodology_specialists.sql"
+    ).read_text(encoding="utf-8")
+    mini_gpt_sql = (
+        MIGRATIONS_DIR
+        / "20260509060000_use_gpt_mini_for_methodology_specialists.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "'methodologist'" in sql
     assert "'researcher'" in sql
-    assert "evidence discovery and research dossier agent" in sql
-    assert "methodology_research_dossier_build" in sql
-    assert "normal_message_fanout" in sql
-    assert "methodology_researcher" in sql
-    assert "methodology.dossiers.sources.create" in sql
-    assert "methodology.blueprints.submit_draft" in sql
+    assert '"engine_id": "openai-responses"' in sql
+    assert '"provider": "openai"' in sql
+    assert '"model": "gpt-5.4-mini"' in sql
+    assert '"required_capabilities": ["tool_calling", "reasoning"]' in sql
+    assert '"max_estimated_input_tokens": 256000' in sql
+    assert "agent_key = 'researcher' THEN 256000" in compaction_sql
+    assert "agent_key = 'methodologist' THEN 256000" in compaction_sql
+    assert "compaction_policy_source" in compaction_sql
+    assert "'strategy', 'rolling_summary'" in rolling_compaction_sql
+    assert "agent_key = 'researcher' THEN 256000" in rolling_compaction_sql
+    assert "agent_key = 'methodologist' THEN 256000" in rolling_compaction_sql
+    assert "compaction_policy_strategy', 'rolling_summary'" in rolling_compaction_sql
+    assert '"gpt-5.4"' in stronger_gpt_sql
+    assert '"runtime_model": "gpt-5.4"' in stronger_gpt_sql
+    assert "agent_key IN ('researcher', 'methodologist')" in stronger_gpt_sql
+    assert '"gpt-5.4-mini"' in mini_gpt_sql
+    assert '"runtime_model": "gpt-5.4-mini"' in mini_gpt_sql
+    assert "agent_key IN ('researcher', 'methodologist')" in mini_gpt_sql
+
+
+def test_runtime_resume_permission_migration_updates_operational_roles() -> None:
+    sql = (
+        MIGRATIONS_DIR / "20260509050000_add_runtime_resume_permission.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "organization.runtime.write" in sql
+    assert "organization.runtime.read" in sql
+    assert "runtime_resume_permission" in sql
 
 
 def test_xwiki_dossier_notebook_migration_declares_knowledge_tables() -> None:
@@ -205,14 +262,14 @@ def test_xwiki_dossier_notebook_migration_declares_knowledge_tables() -> None:
 
 def test_xwiki_dossier_notebook_seed_migration_declares_mcp_allowlists() -> None:
     sql = (
-        MIGRATIONS_DIR / "20260501125656_seed_xwiki_dossier_notebook_mcp.sql"
+        MIGRATIONS_DIR / "20260508090000_generic_dossier_lifecycle.sql"
     ).read_text(encoding="utf-8")
 
-    assert "methodology.dossiers.notebook.get" in sql
-    assert "methodology.dossiers.notes.upsert" in sql
-    assert "methodology.dossiers.concepts.upsert" in sql
-    assert "methodology.dossiers.navigate" in sql
-    assert "methodology.dossiers.health.submit" in sql
+    assert "dossiers.notebook.get" in sql
+    assert "dossiers.notes.upsert" in sql
+    assert "dossiers.concepts.upsert" in sql
+    assert "dossiers.navigate" in sql
+    assert "dossiers.health.submit" in sql
 
 
 def test_external_identity_grants_migration_declares_control_plane_tables() -> None:
@@ -244,6 +301,9 @@ def test_seeded_agent_profile_migration_declares_all_managed_profiles() -> None:
     sql = (
         MIGRATIONS_DIR / "20260501180000_seed_seeded_agent_profiles.sql"
     ).read_text(encoding="utf-8")
+    lifecycle_sql = (
+        MIGRATIONS_DIR / "20260508090000_generic_dossier_lifecycle.sql"
+    ).read_text(encoding="utf-8")
 
     for profile_kind in (
         "example_planning_participant",
@@ -251,11 +311,12 @@ def test_seeded_agent_profile_migration_declares_all_managed_profiles() -> None:
         "platform_operations_specialist",
         "organization_operations_specialist",
         "workspace_topic_governance_reviewer",
-        "methodology_research_dossier_specialist",
         "methodology_blueprint_synthesis_specialist",
         "workspace_methodics_execution_specialist",
     ):
         assert profile_kind in sql
+    assert "methodology_research_dossier_specialist" in sql
+    assert "methodology_dossier" in lifecycle_sql
     assert "profile_version" in sql
     assert "dossier knowledge storage over retained data and indexed information" in sql
     assert "methodology synthesis over dossier knowledge storage" in sql

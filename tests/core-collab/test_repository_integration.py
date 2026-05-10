@@ -33,7 +33,7 @@ from open_talon_contracts.models import (
     AssetLink,
     AuditEventDraft,
     CreateMethodologyBlueprintRequest,
-    CreateResearchDossierSourceRequest,
+    CreateDossierSourceRequest,
     ExternalAccount,
     ExternalIdentityGrant,
     ExternalSystemDefinition,
@@ -44,7 +44,7 @@ from open_talon_contracts.models import (
     McpResourceDefinition,
     McpServerDefinition,
     McpToolDefinition,
-    NavigateResearchDossierRequest,
+    NavigateDossierRequest,
     Organization,
     OrganizationMembership,
     ParticipantInput,
@@ -53,12 +53,12 @@ from open_talon_contracts.models import (
     ProjectAccessBinding,
     RequestMcpServerSyncRequest,
     ResolvedAssetBinding,
-    SubmitResearchDossierHealthCheckRequest,
-    SyncResearchDossierNotebookRequest,
-    UpsertResearchDossierClaimRequest,
-    UpsertResearchDossierConceptRequest,
-    UpsertResearchDossierLinkRequest,
-    UpsertResearchDossierNoteRequest,
+    SubmitDossierHealthCheckRequest,
+    SyncDossierNotebookRequest,
+    UpsertDossierClaimRequest,
+    UpsertDossierConceptRequest,
+    UpsertDossierLinkRequest,
+    UpsertDossierNoteRequest,
     Workspace,
     WorkspaceHarness,
     WorkspaceMethodology,
@@ -84,7 +84,7 @@ EXPECTED_SEEDED_PROFILE_KINDS_BY_AGENT_REF = {
     "steward": "platform_operations_specialist",
     "curator": "organization_operations_specialist",
     "anchor": "workspace_topic_governance_reviewer",
-    "researcher": "methodology_research_dossier_specialist",
+    "researcher": "methodology_dossier_specialist",
     "methodologist": "methodology_blueprint_synthesis_specialist",
     "conductor": "workspace_methodics_execution_specialist",
 }
@@ -145,23 +145,23 @@ async def test_fresh_database_migration_chain_builds_xwiki_dossier_schema():
                     SELECT table_name
                     FROM information_schema.tables
                     WHERE table_schema = 'public'
-                      AND table_name LIKE 'research_dossier%'
+                      AND table_name LIKE 'dossier%'
                     """
                 )
             }
             expected_tables = {
-                "research_dossiers",
-                "research_dossier_sources",
-                "research_dossier_events",
-                "research_dossier_notebooks",
-                "research_dossier_notes",
-                "research_dossier_concepts",
-                "research_dossier_claims",
-                "research_dossier_links",
-                "research_dossier_provider_bindings",
-                "research_dossier_provider_external_refs",
-                "research_dossier_sync_runs",
-                "research_dossier_health_checks",
+                "dossiers",
+                "dossier_sources",
+                "dossier_events",
+                "dossier_notebooks",
+                "dossier_notes",
+                "dossier_concepts",
+                "dossier_claims",
+                "dossier_links",
+                "dossier_provider_bindings",
+                "dossier_provider_external_refs",
+                "dossier_sync_runs",
+                "dossier_health_checks",
             }
             assert expected_tables.issubset(tables)
             profile_rows = await conn.fetch(
@@ -193,20 +193,20 @@ async def test_fresh_database_migration_chain_builds_xwiki_dossier_schema():
                         FROM agent_internal_mcp_servers
                     ) AS allowed_tools
                     WHERE tool_name IN (
-                        'methodology.dossiers.notes.upsert',
-                        'methodology.dossiers.concepts.upsert',
-                        'methodology.dossiers.navigate',
-                        'methodology.dossiers.sync',
+                        'dossiers.notes.upsert',
+                        'dossiers.concepts.upsert',
+                        'dossiers.navigate',
+                        'dossiers.sync',
                         'methodology.blueprints.submit_draft'
                     )
                     """
                 )
             }
             assert {
-                "methodology.dossiers.notes.upsert",
-                "methodology.dossiers.concepts.upsert",
-                "methodology.dossiers.navigate",
-                "methodology.dossiers.sync",
+                "dossiers.notes.upsert",
+                "dossiers.concepts.upsert",
+                "dossiers.navigate",
+                "dossiers.sync",
                 "methodology.blueprints.submit_draft",
             }.issubset(private_tools)
     finally:
@@ -479,7 +479,7 @@ async def test_repository_methodology_dossier_notebook_round_trips():
         )
         assert blueprint_result.detail is not None
         dossier = blueprint_result.detail.dossier
-        notebook_detail = await kernel.get_research_dossier_notebook_detail(
+        notebook_detail = await kernel.get_dossier_notebook_detail(
             dossier.dossier_id,
             actor=actor,
         )
@@ -507,9 +507,9 @@ async def test_repository_methodology_dossier_notebook_round_trips():
             display_name=researcher.display_name,
         )
 
-        source_result = await kernel.create_research_dossier_source(
+        source_result = await kernel.create_dossier_source(
             dossier.dossier_id,
-            CreateResearchDossierSourceRequest(
+            CreateDossierSourceRequest(
                 actor=agent_actor,
                 source_kind="webpage",
                 status="included",
@@ -523,9 +523,9 @@ async def test_repository_methodology_dossier_notebook_round_trips():
         assert source is not None
         assert source.discovered_by_system_agent_id == researcher.agent_id
 
-        concept_result = await kernel.upsert_research_dossier_concept(
+        concept_result = await kernel.upsert_dossier_concept(
             dossier.dossier_id,
-            UpsertResearchDossierConceptRequest(
+            UpsertDossierConceptRequest(
                 actor=agent_actor,
                 slug="repository-evidence-loop",
                 name="Repository Evidence Loop",
@@ -536,9 +536,9 @@ async def test_repository_methodology_dossier_notebook_round_trips():
         )
         concept = concept_result.concept
         assert concept is not None
-        note_result = await kernel.upsert_research_dossier_note(
+        note_result = await kernel.upsert_dossier_note(
             dossier.dossier_id,
-            UpsertResearchDossierNoteRequest(
+            UpsertDossierNoteRequest(
                 actor=agent_actor,
                 note_kind="concept",
                 status="active",
@@ -551,9 +551,9 @@ async def test_repository_methodology_dossier_notebook_round_trips():
         )
         note = note_result.note
         assert note is not None
-        claim_result = await kernel.upsert_research_dossier_claim(
+        claim_result = await kernel.upsert_dossier_claim(
             dossier.dossier_id,
-            UpsertResearchDossierClaimRequest(
+            UpsertDossierClaimRequest(
                 actor=agent_actor,
                 claim_key=f"claim:{uuid4().hex[:8]}",
                 statement="Dossier notebooks preserve conceptual research structure.",
@@ -564,9 +564,9 @@ async def test_repository_methodology_dossier_notebook_round_trips():
         )
         claim = claim_result.claim
         assert claim is not None
-        link_result = await kernel.upsert_research_dossier_link(
+        link_result = await kernel.upsert_dossier_link(
             dossier.dossier_id,
-            UpsertResearchDossierLinkRequest(
+            UpsertDossierLinkRequest(
                 actor=agent_actor,
                 source_type="concept",
                 source_ref_id=concept.concept_id,
@@ -577,31 +577,31 @@ async def test_repository_methodology_dossier_notebook_round_trips():
             ),
         )
         assert link_result.link is not None
-        navigation = await kernel.navigate_research_dossier(
+        navigation = await kernel.navigate_dossier(
             dossier.dossier_id,
-            NavigateResearchDossierRequest(
+            NavigateDossierRequest(
                 actor=agent_actor,
                 query="repository evidence",
             ),
         )
         assert [item.concept_id for item in navigation.concepts] == [concept.concept_id]
-        health = await kernel.submit_research_dossier_health_check(
+        health = await kernel.submit_dossier_health_check(
             dossier.dossier_id,
-            SubmitResearchDossierHealthCheckRequest(
+            SubmitDossierHealthCheckRequest(
                 actor=agent_actor,
                 status="passed",
                 summary="Repository notebook round-trip passed.",
             ),
         )
-        sync = await kernel.sync_research_dossier_notebook(
+        sync = await kernel.sync_dossier_notebook(
             dossier.dossier_id,
-            SyncResearchDossierNotebookRequest(
+            SyncDossierNotebookRequest(
                 actor=agent_actor,
                 provider_key="xwiki",
             ),
             stats={"pages_synced": len(notebook_detail.notes) + 2},
         )
-        fetched = await repository.fetch_research_dossier_notebook_detail(
+        fetched = await repository.fetch_dossier_notebook_detail(
             dossier.dossier_id
         )
         assert fetched is not None
@@ -1193,8 +1193,9 @@ async def test_repository_migrations_seed_operational_agents_and_contexts_idempo
         assert methodologist.agent_key == "methodologist"
         assert methodologist.display_name == "Methodologist"
         assert methodologist.role == "methodology extraction and workspace design agent"
-        assert methodologist.endpoint.engine_id == "local-ollama"
-        assert methodologist.endpoint.provider == "ollama"
+        assert methodologist.endpoint.engine_id == "openai-responses"
+        assert methodologist.endpoint.provider == "openai"
+        assert methodologist.endpoint.model == "gpt-5.4-mini"
         assert "extracts methodology basis" in " ".join(methodologist.capabilities)
         assert "Methodology Basis" in (
             methodologist.interaction_contract.response_contract.required_sections
@@ -1202,7 +1203,8 @@ async def test_repository_migrations_seed_operational_agents_and_contexts_idempo
         assert "Workspace Template" in (
             methodologist.interaction_contract.response_contract.required_sections
         )
-        assert methodologist.definition["runtime"]["engine_id"] == "local-ollama"
+        assert methodologist.definition["runtime"]["engine_id"] == "openai-responses"
+        assert methodologist.definition["runtime"]["model"] == "gpt-5.4-mini"
         assert (
             methodologist.definition["profile"]["kind"]
             == "methodology_blueprint_synthesis_specialist"

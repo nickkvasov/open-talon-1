@@ -41,12 +41,18 @@ For matrix runs, prefer the live-test runner:
 ./scripts/run-live-tests.sh all
 ./scripts/run-live-tests.sh providers
 ./scripts/run-live-tests.sh default-stack
+./scripts/run-live-tests.sh methodology-deep-research
 ```
 
 The runner keeps suite fractions explicit: self-managed fixtures still own their
 own stack lifecycle, operational/Anchor/Retriever share one default stack phase,
-and XWiki runs under one `./open-talon start --xwiki` phase with local test
-credentials supplied by default.
+and XWiki runs under one `./open-talon start --xwiki --web-search` phase with
+local test credentials supplied by default. `methodology-deep-research` is the
+real-agent B2C methodology path: it does not patch Researcher or Methodologist
+with deterministic harnesses, uses the `openai-responses` GPT provider for both
+specialists, and verifies runtime worker, web-search, dossier knowledge, XWiki,
+Methodologist draft, review/apply, and archive outcomes. Configure
+`OPENAI_API_KEY` or the equivalent OpenBao secret before running it.
 
 Anchor follows this protocol with:
 
@@ -118,5 +124,8 @@ run log:
 - whether web-search live tests used `./open-talon start --web-search`, because
   the managed web-search System Plugin needs the optional SearXNG and MCP bridge
   services
+- whether XWiki methodology runs used `./open-talon start --xwiki --web-search`,
+  because the B2C methodology workflow records live web-search results before
+  syncing the dossier notebook to XWiki
 
 The longer operational-agent run history remains in [operational-agents-test-run-log-2026-04-26.md](./operational-agents-test-run-log-2026-04-26.md).

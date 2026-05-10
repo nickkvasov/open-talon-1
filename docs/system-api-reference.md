@@ -123,7 +123,7 @@ The most important ownership rules are:
 - `organizations`, `projects`, `project_access_bindings`, and `organization_memberships` store the tenant and work hierarchy above workspaces
 - `system_agents` stores platform-global and organization-scoped agent definitions
 - managed operational contexts are seeded as `System Base / Administration / System Operations` plus `Administration / Organization Operations` for each non-system organization
-- managed agents are ordinary system agents: `Tinker` (`tool generation agent`), `Steward` (`platform operations steward`), organization-scoped `Curator` (`organization operations curator`), workspace-attached `Anchor` (`workspace topic alignment reviewer`), global `Researcher` (`evidence discovery and research dossier agent`), global `Methodologist` (`methodology extraction and workspace design agent`), and global `Conductor` (`workspace methodics execution conductor`)
+- managed agents are ordinary system agents: `Tinker` (`tool generation agent`), `Steward` (`platform operations steward`), organization-scoped `Curator` (`organization operations curator`), workspace-attached `Anchor` (`workspace topic alignment reviewer`), global `Researcher` (`evidence discovery and dossier agent`), global `Methodologist` (`methodology extraction and workspace design agent`), and global `Conductor` (`workspace methodics execution conductor`)
 - the agent runtime is generic and must not branch on `agent_key`, display name, role text, capability text, or metadata tags; specialization belongs in agent definitions, harnesses, interaction contracts, task payloads, bindings, and tool/MCP allowlists
 - `participants` stores workspace-local attachment and state for both humans and agents
 - `threads` and `timeline_messages` are the shared collaboration surface
@@ -299,19 +299,19 @@ Current MCP system API operations:
 - `retriever.ingestion_jobs.list`
 - `retriever.search`
 - `retriever.context_pack.*`
-- `methodology.dossiers.get`
-- `methodology.dossiers.sources.create`
-- `methodology.dossiers.sources.update`
-- `methodology.dossiers.context_pack.attach`
-- `methodology.dossiers.mark_ready`
-- `methodology.dossiers.notebook.get`
-- `methodology.dossiers.notes.upsert`
-- `methodology.dossiers.concepts.upsert`
-- `methodology.dossiers.claims.upsert`
-- `methodology.dossiers.links.upsert`
-- `methodology.dossiers.navigate`
-- `methodology.dossiers.sync`
-- `methodology.dossiers.health.submit`
+- `dossiers.get`
+- `dossiers.sources.create`
+- `dossiers.sources.update`
+- `dossiers.context_pack.attach`
+- `dossiers.lifecycle.transition`
+- `dossiers.notebook.get`
+- `dossiers.notes.upsert`
+- `dossiers.concepts.upsert`
+- `dossiers.claims.upsert`
+- `dossiers.links.upsert`
+- `dossiers.navigate`
+- `dossiers.sync`
+- `dossiers.health.submit`
 - `methodology.blueprints.submit_draft`
 - `methodics.executions.create`
 - `methodics.executions.list`
@@ -710,9 +710,9 @@ In the current implementation, org-scoped create/list routes are explicit. Updat
 
 System-agent definitions accept an optional typed `harness.compaction_policy` object. Current strategies are `full_context`, `recent_window`, `rolling_summary`, and `summary_plus_retrieval`; the runtime applies this policy immediately before prompt rendering without mutating the canonical `AgentExecutionContext`.
 
-`Researcher` is a seeded global system agent for durable methodology research dossiers. It works through targeted organization operations tasks, searches local libraries, pre-indexed Retriever context, local files, database-visible context, and web follow-up sources, then persists source records, retained-library references, contradiction maps, gaps, context-pack links, and a readiness decision. It does not add a special runtime path; behavior comes from its agent definition, harness, task payload, IAM binding, and private MCP allowlist.
+`Researcher` is a seeded global system agent for durable dossiers. It works through targeted organization operations tasks, searches local libraries, pre-indexed Retriever context, local files, database-visible context, and web follow-up sources, then persists source records, retained-library references, contradiction maps, gaps, context-pack links, and a readiness decision. It does not add a special runtime path; behavior comes from its agent definition, harness, task payload, IAM binding, and private MCP allowlist.
 
-`Methodologist` is a seeded global system agent for turning completed research dossiers or cited retrieval/source evidence into methodology basis, methodics, methods/tools, actor responsibilities, and workspace template drafts. It does not add a special runtime path; behavior comes from its agent definition, harness, response contract, dossier or retrieval context supplied to the run, and any workspace/tool/MCP bindings granted by IAM.
+`Methodologist` is a seeded global system agent for turning ready dossiers or cited retrieval/source evidence into methodology basis, methodics, methods/tools, actor responsibilities, and workspace template drafts. It does not add a special runtime path; behavior comes from its agent definition, harness, response contract, dossier or retrieval context supplied to the run, and any workspace/tool/MCP bindings granted by IAM.
 
 `Conductor` is a separate seeded global system agent for active workspace methodics execution. It is opt-in per workspace through normal agent attachment. If Conductor is not attached, `WorkspaceHarness.methodics` remains passive guidance and starting execution returns `409 Conflict`.
 
@@ -861,12 +861,12 @@ configuration, and focused tests, see [external-access.md](./external-access.md)
 ### Methodology Blueprint And Dossier APIs
 
 Methodology blueprints are organization-scoped reusable methodology drafts.
-Creating a blueprint creates an initial version, a durable research dossier, a
+Creating a blueprint creates an initial version, a durable dossier, a
 managed retained-source organization library, an operations thread, and a
 targeted Researcher task in the organization's `Administration / Organization
 Operations` workspace.
 
-A research dossier is its own system concept. It can reference internet
+A dossier is its own system concept. It can reference internet
 sources, local files, database-visible context, Retriever context packs, library
 items, assets, and pre-indexed organization/project/workspace libraries. The
 retained-source library preserves fetched source bytes and scraps; the dossier
@@ -888,7 +888,7 @@ navigable concept repository under one space per dossier, such as
 `Dossiers.<dossier_slug>`, with `Home`, `Sources`, `Concepts`, `Entities`,
 `Methods`, `Questions`, `Contradictions`, `Gaps`, and `Synthesis` pages.
 
-When Researcher marks the dossier `ready_for_methodologist`, the service creates
+When Researcher transitions the dossier lifecycle to `ready`, the service creates
 a targeted Methodologist task. Methodologist can submit a cited markdown draft
 and `WorkspaceHarness`-compatible draft, but a human must approve a version
 before it can become active or be applied to a workspace. Applying an approved
@@ -900,20 +900,22 @@ Conductor.
 | `POST` | `/v1/organizations/{organization_id}/methodology/blueprints` | create blueprint, initial version, dossier, retained-source library, and Researcher task |
 | `GET` | `/v1/organizations/{organization_id}/methodology/blueprints` | list methodology blueprints |
 | `GET` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}` | get blueprint detail with latest version, dossier, and sources |
+| `POST` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/versions` | create a new pending-review edited version from an existing version |
 | `POST` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/versions/{version_id}/draft` | submit a cited blueprint draft and `WorkspaceHarness` draft |
 | `POST` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/versions/{version_id}/approve` | approve a draft version and make it active |
 | `POST` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/versions/{version_id}/reject` | reject a draft version |
 | `POST` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/apply` | apply an approved blueprint version to a workspace harness |
-| `GET` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}` | get a research dossier |
-| `GET` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/notebook` | get notebook binding, notes, concepts, claims, links, external refs, and latest health |
-| `GET` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/graph` | get the canonical dossier note/concept/claim/source graph |
-| `POST` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/navigate` | query or focus-navigate the dossier concept notebook |
-| `POST` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sync` | record or run provider projection sync for the dossier notebook |
-| `GET` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sources` | list dossier source records |
-| `POST` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sources` | create a dossier source record |
-| `PATCH` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sources/{source_id}` | update a dossier source record |
-| `POST` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/context-packs` | attach a Retriever context pack to a dossier and optionally a source |
-| `POST` | `/v1/organizations/{organization_id}/methodology/dossiers/{dossier_id}/ready` | mark dossier ready and create the Methodologist task |
+| `DELETE` | `/v1/organizations/{organization_id}/methodology/blueprints/{blueprint_id}` | archive a blueprint while preserving versions, dossier, sources, and notebook provenance |
+| `GET` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}` | get a dossier |
+| `GET` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/notebook` | get notebook binding, notes, concepts, claims, links, external refs, and latest health |
+| `GET` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/graph` | get the canonical dossier note/concept/claim/source graph |
+| `POST` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/navigate` | query or focus-navigate the dossier concept notebook |
+| `POST` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/sync` | record or run provider projection sync for the dossier notebook |
+| `GET` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/sources` | list dossier source records |
+| `POST` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/sources` | create a dossier source record |
+| `PATCH` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/sources/{source_id}` | update a dossier source record |
+| `POST` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/context-packs` | attach a Retriever context pack to a dossier and optionally a source |
+| `POST` | `/v1/organizations/{organization_id}/dossiers/{dossier_id}/lifecycle` | transition dossier lifecycle status; `ready` creates the Methodologist task |
 
 ### Library APIs
 

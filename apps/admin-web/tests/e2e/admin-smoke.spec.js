@@ -52,7 +52,7 @@ test('seeded agent profiles are visible in swarm resources', async ({ page }) =>
   const researcherProfile = page.getByTestId('system-agent-profile-researcher');
   await expect(researcherProfile).toBeVisible();
   await expect(researcherProfile).toContainText('Seeded profile');
-  await expect(researcherProfile).toContainText('methodology_research_dossier_specialist');
+  await expect(researcherProfile).toContainText('methodology_dossier_specialist');
   await expect(researcherProfile).toContainText(
     'dossier knowledge storage over retained data and indexed information',
   );

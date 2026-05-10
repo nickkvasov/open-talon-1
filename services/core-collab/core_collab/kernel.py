@@ -64,7 +64,7 @@ from .contracts import (
     AttachLibraryToWorkspaceRequest,
     AssumeParticipantRoleRequest,
     ApplyMethodologyBlueprintRequest,
-    AttachResearchDossierContextPackRequest,
+    AttachDossierContextPackRequest,
     Artifact,
     AssetLink,
     ActivateAssetVersionRequest,
@@ -104,13 +104,16 @@ from .contracts import (
     CreateThreadMemoryRequest,
     CreateMessageRequest,
     CreateMethodologyBlueprintRequest,
+    CreateMethodologyBlueprintVersionRequest,
+    CreateMethodologyResearchRequest,
     CreateToolGenerationRevisionRequest,
-    CreateResearchDossierSourceRequest,
+    CreateDossierSourceRequest,
     SearchMemoryRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
     DeleteLlmProviderRequest,
     DeleteLibraryRequest,
+    DeleteMethodologyBlueprintRequest,
     DeleteMemoryProviderRequest,
     DeleteExternalIdentityGrantRequest,
     DeleteExternalSystemRequest,
@@ -149,8 +152,11 @@ from .contracts import (
     MemorySearchResponse,
     MethodologyBlueprint,
     MethodologyBlueprintDetail,
+    MethodologyResearchKnowledgeComponent,
+    MethodologyResearchSearchTurn,
+    MethodologyResearchState,
     MethodologyBlueprintVersion,
-    NavigateResearchDossierRequest,
+    NavigateDossierRequest,
     PublicationReview,
     McpPromptDefinition,
     McpResourceDefinition,
@@ -188,21 +194,21 @@ from .contracts import (
     RetrievalSearchResponse,
     RetrievalSource,
     RetrievalSourceVersion,
-    ResearchDossier,
-    ResearchDossierClaim,
-    ResearchDossierConcept,
-    ResearchDossierEvent,
-    ResearchDossierGraph,
-    ResearchDossierHealthCheck,
-    ResearchDossierLink,
-    ResearchDossierNavigationResult,
-    ResearchDossierNote,
-    ResearchDossierNotebook,
-    ResearchDossierNotebookDetail,
-    ResearchDossierProviderBinding,
-    ResearchDossierProviderExternalRef,
-    ResearchDossierSource,
-    ResearchDossierSyncRun,
+    Dossier,
+    DossierClaim,
+    DossierConcept,
+    DossierEvent,
+    DossierGraph,
+    DossierHealthCheck,
+    DossierLink,
+    DossierNavigationResult,
+    DossierNote,
+    DossierNotebook,
+    DossierNotebookDetail,
+    DossierProviderBinding,
+    DossierProviderExternalRef,
+    DossierSource,
+    DossierSyncRun,
     RunRetrievalSearchRequest,
     PresenceState,
     ResolvedAssetBinding,
@@ -222,11 +228,12 @@ from .contracts import (
     ToolGenerationRevision,
     WorkspaceCommunicationLogPage,
     Run,
-    MarkResearchDossierReadyRequest,
+    DossierLifecycleTransitionRequest,
     ReviewToolGenerationRevisionRequest,
     ReviewExternalOperationRequest,
     ReviewMethodologyBlueprintVersionRequest,
     ReviewMethodicResourceRequest,
+    ResumeRuntimeTaskRequest,
     RotateAgentIdentitySecretRequest,
     StopReason,
     ToolCall,
@@ -249,11 +256,11 @@ from .contracts import (
     UpdateMcpServerRequest,
     UpdateOrganizationRequest,
     UpdateProjectRequest,
-    UpdateResearchDossierSourceRequest,
-    UpsertResearchDossierClaimRequest,
-    UpsertResearchDossierConceptRequest,
-    UpsertResearchDossierLinkRequest,
-    UpsertResearchDossierNoteRequest,
+    UpdateDossierSourceRequest,
+    UpsertDossierClaimRequest,
+    UpsertDossierConceptRequest,
+    UpsertDossierLinkRequest,
+    UpsertDossierNoteRequest,
     UpsertProjectAccessRequest,
     UpsertRoleDefinitionRequest,
     RemoveOrganizationMemberRequest,
@@ -266,8 +273,8 @@ from .contracts import (
     UpdateMemoryEntryRequest,
     UpdateWorkspaceRequest,
     SubmitMethodologyBlueprintDraftRequest,
-    SubmitResearchDossierHealthCheckRequest,
-    SyncResearchDossierNotebookRequest,
+    SubmitDossierHealthCheckRequest,
+    SyncDossierNotebookRequest,
     UploadFileAssetRequest,
     UpdateWorkspaceToolRequest,
     UpdateWorkspaceMcpServerRequest,
@@ -276,6 +283,8 @@ from .contracts import (
     WorkspaceAssetVersion,
     WorkspaceDetail,
     WorkspaceHarness,
+    WorkspaceMethodic,
+    WorkspaceMethodicStep,
     WorkspaceModerationPolicy,
     WorkspaceMcpPrompt,
     WorkspaceMcpResource,
@@ -333,7 +342,8 @@ from .system_defaults import (
     ANCHOR_TASK_KIND,
     CONTROL_PLANE_MCP_SERVER_ID,
     METHODOLOGY_BLUEPRINT_DRAFT_TASK_KIND,
-    METHODOLOGY_RESEARCH_DOSSIER_BUILD_TASK_KIND,
+    METHODOLOGY_DOSSIER_BUILD_TASK_KIND,
+    METHODOLOGY_DOSSIER_REFINE_TASK_KIND,
     METHODICS_EXECUTION_START_TASK_KIND,
     SYSTEM_BASE_ORGANIZATION_ID,
     administration_project_for_organization as managed_administration_project_for_organization,
@@ -362,6 +372,92 @@ _MAX_TOOL_CALL_ATTEMPTS = 3
 _TOOL_GENERATION_REGISTRY_VERIFY_TOOL = "generated_tool_registry_pull_verify"
 _TOOL_GENERATION_APPROVAL_WORKER_ID = "tool-generation-approval"
 _RETRY_BACKOFF_SECONDS = (30, 120, 600)
+_DOSSIER_TERMINAL_STATUSES = {"archived", "failed"}
+_DOSSIER_ALLOWED_STATUS_TRANSITIONS = {
+    "created": {"scoping", "failed", "archived"},
+    "scoping": {"collecting", "failed", "archived"},
+    "collecting": {"synthesizing", "failed", "archived"},
+    "synthesizing": {"collecting", "ready", "failed", "archived"},
+    "ready": {"consumed", "failed", "archived"},
+    "consumed": {"archived"},
+}
+_FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS = frozenset(
+    {
+        "research_plan",
+        "source_bibliography",
+        "methodology_basis",
+        "methodology_principles",
+        "methodics_inventory",
+        "participants_and_roles",
+        "tools_and_methods",
+        "information_assets",
+        "libraries_and_dossiers",
+        "quality_evaluation",
+        "contradictions",
+        "gaps",
+        "synthesis",
+    }
+)
+_METHODOLOGY_KNOWLEDGE_COMPONENT_NOTE_KINDS = {
+    "contradictions": "contradiction",
+    "gaps": "gap",
+    "source_bibliography": "source",
+    "synthesis": "synthesis",
+}
+_METHODOLOGY_KNOWLEDGE_COMPONENT_TITLES = {
+    "research_plan": "Research plan",
+    "source_bibliography": "Source bibliography",
+    "methodology_basis": "Methodology basis",
+    "methodology_principles": "Methodology principles",
+    "methodics_inventory": "Methodics inventory",
+    "participants_and_roles": "Participants and roles",
+    "tools_and_methods": "Tools and methods",
+    "information_assets": "Information assets",
+    "libraries_and_dossiers": "Libraries and dossiers",
+    "quality_evaluation": "Quality evaluation",
+    "contradictions": "Contradictions",
+    "gaps": "Gaps",
+    "synthesis": "Synthesis",
+}
+_METHODOLOGY_KNOWLEDGE_COMPONENT_ALIASES = {
+    "bibliography": "source_bibliography",
+    "source": "source_bibliography",
+    "sources": "source_bibliography",
+    "source_notes": "source_bibliography",
+    "source_list": "source_bibliography",
+    "basis": "methodology_basis",
+    "methodology": "methodology_basis",
+    "principles": "methodology_principles",
+    "methodics": "methodics_inventory",
+    "methodic_inventory": "methodics_inventory",
+    "methods_inventory": "methodics_inventory",
+    "participants": "participants_and_roles",
+    "roles": "participants_and_roles",
+    "tools": "tools_and_methods",
+    "methods": "tools_and_methods",
+    "assets": "information_assets",
+    "information": "information_assets",
+    "libraries": "libraries_and_dossiers",
+    "dossiers": "libraries_and_dossiers",
+    "quality": "quality_evaluation",
+    "evaluation": "quality_evaluation",
+    "quality_criteria": "quality_evaluation",
+    "contradiction": "contradictions",
+    "gap": "gaps",
+    "summary": "synthesis",
+}
+_METHODOLOGY_SOURCE_FALLBACK_URLS = [
+    "https://www.nngroup.com/articles/user-interviews/",
+    "https://www.nngroup.com/articles/diary-studies/",
+    "https://www.nngroup.com/articles/which-ux-research-methods/",
+    "https://www.nngroup.com/articles/ux-research-cheat-sheet/",
+    "https://www.nngroup.com/articles/focus-groups/",
+    "https://www.nngroup.com/articles/ab-testing-and-ux-research/",
+    "https://www.nngroup.com/articles/quantitative-user-research-methods/",
+    "https://www.surveymonkey.com/market-research/resources/complete-guide-to-segmentation-surveys/",
+    "https://www.surveymonkey.com/market-research/resources/pricing-surveys/",
+    "https://www.xlstat.com/solutions/features/price-sensitivity-meter",
+]
 
 
 class CollaborationKernel:
@@ -4583,16 +4679,16 @@ class CollaborationKernel:
             library_id=uuid4(),
             scope="organization",
             organization_id=organization_id,
-            slug=self._normalize_library_slug(f"research-dossier-{dossier_id.hex[:12]}"),
-            name=f"Research Dossier: {payload.title}",
-            description="Managed retained-source library for a methodology research dossier.",
+            slug=self._normalize_library_slug(f"dossier-{dossier_id.hex[:12]}"),
+            name=f"Dossier: {payload.title}",
+            description="Managed retained-source library for a dossier.",
             created_by=payload.actor.participant_id,
             updated_by=payload.actor.participant_id,
             created_at=now,
             updated_at=now,
             metadata={
                 "managed": True,
-                "research_dossier": True,
+                "dossier": True,
                 "blueprint_id": str(blueprint_id),
                 "version_id": str(version_id),
                 "dossier_id": str(dossier_id),
@@ -4601,14 +4697,14 @@ class CollaborationKernel:
         thread = Thread(
             thread_id=uuid4(),
             workspace_id=operations_workspace.workspace_id,
-            title=f"Research dossier: {payload.title}",
+            title=f"Dossier: {payload.title}",
             created_at=now,
             updated_at=now,
             metadata={
                 "managed": True,
                 "methodology_blueprint_id": str(blueprint_id),
                 "methodology_blueprint_version_id": str(version_id),
-                "research_dossier_id": str(dossier_id),
+                "dossier_id": str(dossier_id),
             },
         )
         blueprint = MethodologyBlueprint(
@@ -4630,7 +4726,7 @@ class CollaborationKernel:
             organization_id=organization_id,
             version_number=1,
             status="researching",
-            research_dossier_id=dossier_id,
+            dossier_id=dossier_id,
             source_policy=payload.source_policy,
             selected_library_ids=list(payload.library_ids),
             created_by=payload.actor.participant_id,
@@ -4638,7 +4734,7 @@ class CollaborationKernel:
             updated_at=now,
             metadata={"created_from_blueprint_request": True},
         )
-        dossier = ResearchDossier(
+        dossier = Dossier(
             dossier_id=dossier_id,
             blueprint_id=blueprint_id,
             version_id=version_id,
@@ -4650,7 +4746,7 @@ class CollaborationKernel:
             researcher_participant_id=researcher_participant.participant_id,
             methodologist_system_agent_id=methodologist_agent.agent_id,
             methodologist_participant_id=methodologist_participant.participant_id,
-            status="researching",
+            status="scoping",
             topic=payload.topic,
             tasks=list(payload.tasks),
             created_by=payload.actor.participant_id,
@@ -4659,6 +4755,11 @@ class CollaborationKernel:
             metadata={
                 "source_policy": payload.source_policy,
                 "selected_library_ids": [str(item) for item in payload.library_ids],
+                "completion_profile": "full_methodology_research",
+                "required_knowledge_components": sorted(
+                    _FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS
+                ),
+                "require_admin_ready_approval": True,
             },
         )
         (
@@ -4666,7 +4767,7 @@ class CollaborationKernel:
             provider_binding,
             notebook_notes,
             external_refs,
-        ) = self._build_research_dossier_notebook_defaults(
+        ) = self._build_dossier_notebook_defaults(
             dossier=dossier,
             title=payload.title,
             actor_id=payload.actor.participant_id,
@@ -4681,11 +4782,11 @@ class CollaborationKernel:
             requested_by=payload.actor.participant_id,
             now=now,
         )
-        event = ResearchDossierEvent(
+        event = DossierEvent(
             event_id=uuid4(),
             dossier_id=dossier_id,
             organization_id=organization_id,
-            event_type="research_dossier.created",
+            event_type="dossier.created",
             actor_participant_id=payload.actor.participant_id,
             payload={
                 "blueprint_id": str(blueprint_id),
@@ -4706,21 +4807,21 @@ class CollaborationKernel:
                 await self._repository.upsert_thread(conn, thread)
                 await self._repository.upsert_methodology_blueprint(conn, blueprint)
                 await self._repository.upsert_methodology_blueprint_version(conn, version)
-                await self._repository.upsert_research_dossier(conn, dossier)
-                await self._repository.upsert_research_dossier_notebook(conn, notebook)
-                await self._repository.upsert_research_dossier_provider_binding(
+                await self._repository.upsert_dossier(conn, dossier)
+                await self._repository.upsert_dossier_notebook(conn, notebook)
+                await self._repository.upsert_dossier_provider_binding(
                     conn,
                     provider_binding,
                 )
                 for note in notebook_notes:
-                    await self._repository.upsert_research_dossier_note(conn, note)
+                    await self._repository.upsert_dossier_note(conn, note)
                 for external_ref in external_refs:
-                    await self._repository.upsert_research_dossier_provider_external_ref(
+                    await self._repository.upsert_dossier_provider_external_ref(
                         conn,
                         external_ref,
                     )
                 await self._repository.upsert_task(conn, task)
-                await self._repository.append_research_dossier_event(conn, event)
+                await self._repository.append_dossier_event(conn, event)
         return MethodologyBlueprintCommandResult(
             detail=MethodologyBlueprintDetail(
                 blueprint=blueprint,
@@ -4770,13 +4871,13 @@ class CollaborationKernel:
                 )
         versions = await self._repository.list_methodology_blueprint_versions(blueprint_id)
         dossier = None
-        sources: list[ResearchDossierSource] = []
-        if versions and versions[0].research_dossier_id is not None:
-            dossier = await self._repository.fetch_research_dossier(
-                versions[0].research_dossier_id
+        sources: list[DossierSource] = []
+        if versions and versions[0].dossier_id is not None:
+            dossier = await self._repository.fetch_dossier(
+                versions[0].dossier_id
             )
             if dossier is not None:
-                sources = await self._repository.list_research_dossier_sources(
+                sources = await self._repository.list_dossier_sources(
                     dossier.dossier_id
                 )
         return MethodologyBlueprintDetail(
@@ -4786,15 +4887,203 @@ class CollaborationKernel:
             sources=sources,
         )
 
-    async def get_research_dossier(
+    async def get_methodology_research_state(
+        self,
+        blueprint_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+    ) -> MethodologyResearchState:
+        detail = await self.get_methodology_blueprint_detail(
+            blueprint_id,
+            actor=actor,
+        )
+        version = detail.versions[0] if detail.versions else None
+        dossier = detail.dossier
+        events: list[DossierEvent] = []
+        notebook: DossierNotebookDetail | None = None
+        interaction_requests: list[InteractionRequestDetail] = []
+        if dossier is not None:
+            events = await self._repository.list_dossier_events(dossier.dossier_id)
+            notebook = await self._repository.fetch_dossier_notebook_detail(
+                dossier.dossier_id
+            )
+            if dossier.thread_id is not None:
+                interaction_requests = (
+                    await self._repository.list_interaction_request_details_for_thread(
+                        dossier.thread_id
+                    )
+                )
+        required_components = self._required_methodology_knowledge_components(dossier)
+        knowledge_components = self._methodology_knowledge_component_coverage(
+            notebook=notebook,
+            required_components=required_components,
+        )
+        source_counts: dict[str, int] = {}
+        for source in detail.sources:
+            source_counts[source.status] = source_counts.get(source.status, 0) + 1
+        required_component_set = set(required_components)
+        covered_count = sum(
+            1
+            for item in knowledge_components
+            if item.present and item.component in required_component_set
+        )
+        open_interaction_count = sum(
+            1 for item in interaction_requests if item.request.status == "open"
+        )
+        can_request_research = bool(
+            detail.blueprint.status != "archived"
+            and dossier is not None
+            and dossier.status not in _DOSSIER_TERMINAL_STATUSES
+            and dossier.status != "consumed"
+        )
+        can_mark_ready = bool(
+            dossier is not None
+            and dossier.status == "synthesizing"
+            and covered_count >= len(required_components)
+        )
+        return MethodologyResearchState(
+            blueprint=detail.blueprint,
+            active_or_latest_version=version,
+            dossier=dossier,
+            sources=detail.sources,
+            events=events,
+            notebook=notebook,
+            interaction_requests=interaction_requests,
+            knowledge_components=knowledge_components,
+            search_turns=self._methodology_search_turns(detail.sources),
+            metadata={
+                "completion_profile": (
+                    dossier.metadata.get("completion_profile")
+                    if dossier is not None
+                    else None
+                ),
+                "required_knowledge_component_count": len(required_components),
+                "covered_knowledge_component_count": covered_count,
+                "open_interaction_count": open_interaction_count,
+                "source_counts": source_counts,
+                "can_request_research": can_request_research,
+                "can_mark_ready": can_mark_ready,
+            },
+        )
+
+    async def create_methodology_research_request(
+        self,
+        blueprint_id: UUID,
+        payload: CreateMethodologyResearchRequest,
+    ) -> MethodologyResearchState:
+        detail = await self.get_methodology_blueprint_detail(
+            blueprint_id,
+            actor=payload.actor,
+        )
+        if detail.blueprint.status == "archived":
+            raise ValueError("Archived methodology blueprints cannot request research")
+        dossier = detail.dossier
+        version = detail.versions[0] if detail.versions else None
+        if dossier is None or version is None:
+            raise KeyError(f"Methodology blueprint {blueprint_id} has no dossier")
+        if dossier.status in _DOSSIER_TERMINAL_STATUSES or dossier.status == "consumed":
+            raise ValueError(f"Dossier {dossier.dossier_id} is {dossier.status}")
+        user_id = self._actor_user_id(payload.actor)
+        if user_id is not None:
+            await self._require_organization_permission(
+                detail.blueprint.organization_id,
+                user_id,
+                "methodology.write",
+            )
+        if dossier.operations_workspace_id is None or dossier.thread_id is None:
+            raise ValueError("Dossier has no operations workspace/thread")
+        if dossier.researcher_system_agent_id is None:
+            raise ValueError("Dossier has no Researcher system agent")
+        researcher_participant_id = dossier.researcher_participant_id
+        if researcher_participant_id is None:
+            raise ValueError("Dossier has no Researcher participant")
+        researcher_participant = await self._repository.fetch_participant(
+            dossier.operations_workspace_id,
+            researcher_participant_id,
+        )
+        if researcher_participant is None:
+            raise KeyError(f"Researcher participant {researcher_participant_id} not found")
+
+        now = self._now()
+        requested_components = payload.required_components or sorted(
+            _FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS
+        )
+        required_components = sorted(
+            set(requested_components) | _FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS
+        )
+        task = self._build_researcher_dossier_refine_task(
+            dossier=dossier,
+            blueprint=detail.blueprint,
+            version=version,
+            researcher_participant=researcher_participant,
+            existing_sources=detail.sources,
+            requested_by=payload.actor.participant_id,
+            instructions=payload.instructions,
+            max_search_turns=payload.max_search_turns,
+            required_components=required_components,
+            require_admin_ready_approval=payload.require_admin_ready_approval,
+            request_metadata=payload.metadata,
+            now=now,
+        )
+        updated_dossier = dossier.model_copy(
+            update={
+                "updated_at": now,
+                "metadata": {
+                    **dossier.metadata,
+                    "completion_profile": "full_methodology_research",
+                    "required_knowledge_components": required_components,
+                    "require_admin_ready_approval": payload.require_admin_ready_approval,
+                    "last_research_request": {
+                        "task_id": str(task.task_id),
+                        "instructions": payload.instructions,
+                        "max_search_turns": payload.max_search_turns,
+                        "requested_components": requested_components,
+                        "required_components": required_components,
+                        "require_admin_ready_approval": payload.require_admin_ready_approval,
+                        "requested_by": str(payload.actor.participant_id),
+                        "requested_at": now.isoformat(),
+                        "metadata": payload.metadata,
+                    },
+                },
+            }
+        )
+        event = DossierEvent(
+            event_id=uuid4(),
+            dossier_id=dossier.dossier_id,
+            organization_id=dossier.organization_id,
+            event_type="dossier.research_requested",
+            actor_participant_id=payload.actor.participant_id,
+            payload={
+                "blueprint_id": str(detail.blueprint.blueprint_id),
+                "version_id": str(version.version_id),
+                "task_id": str(task.task_id),
+                "task_kind": METHODOLOGY_DOSSIER_REFINE_TASK_KIND,
+                "max_search_turns": payload.max_search_turns,
+                "required_components": required_components,
+                "require_admin_ready_approval": payload.require_admin_ready_approval,
+            },
+            created_at=now,
+            metadata=payload.metadata,
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_dossier(conn, updated_dossier)
+                await self._repository.upsert_task(conn, task)
+                await self._repository.append_dossier_event(conn, event)
+        return await self.get_methodology_research_state(
+            blueprint_id,
+            actor=payload.actor,
+        )
+
+    async def get_dossier(
         self,
         dossier_id: UUID,
         *,
         actor: ParticipantInput | None = None,
-    ) -> ResearchDossier:
-        dossier = await self._repository.fetch_research_dossier(dossier_id)
+    ) -> Dossier:
+        dossier = await self._repository.fetch_dossier(dossier_id)
         if dossier is None:
-            raise KeyError(f"Research dossier {dossier_id} not found")
+            raise KeyError(f"Dossier {dossier_id} not found")
         if actor is not None:
             user_id = self._actor_user_id(actor)
             if user_id is not None:
@@ -4824,40 +5113,201 @@ class CollaborationKernel:
                 )
         return version
 
-    async def list_research_dossier_sources(
+    async def create_methodology_blueprint_version(
+        self,
+        blueprint_id: UUID,
+        payload: CreateMethodologyBlueprintVersionRequest,
+    ) -> MethodologyBlueprintDetail:
+        blueprint = await self._repository.fetch_methodology_blueprint(blueprint_id)
+        if blueprint is None:
+            raise KeyError(f"Methodology blueprint {blueprint_id} not found")
+        if blueprint.status == "archived":
+            raise ValueError("Archived methodology blueprints cannot be revised")
+        base_version = await self._repository.fetch_methodology_blueprint_version(
+            payload.base_version_id
+        )
+        if base_version is None or base_version.blueprint_id != blueprint_id:
+            raise KeyError(
+                f"Methodology blueprint version {payload.base_version_id} not found"
+            )
+        user_id = self._actor_user_id(payload.actor)
+        if user_id is not None:
+            await self._require_organization_permission(
+                blueprint.organization_id,
+                user_id,
+                "methodology.write",
+            )
+
+        now = self._now()
+        dossier = (
+            await self._repository.fetch_dossier(base_version.dossier_id)
+            if base_version.dossier_id is not None
+            else None
+        )
+        actor_system_agent_id = (
+            await self._dossier_actor_system_agent_id(dossier, payload.actor)
+            if dossier is not None and payload.actor.participant_type == "agent"
+            else None
+        )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                version_number = await self._repository.next_methodology_blueprint_version_number(
+                    conn,
+                    blueprint_id,
+                )
+                version = MethodologyBlueprintVersion(
+                    version_id=uuid4(),
+                    blueprint_id=blueprint_id,
+                    organization_id=blueprint.organization_id,
+                    version_number=version_number,
+                    status="pending_review",
+                    dossier_id=base_version.dossier_id,
+                    source_policy=base_version.source_policy,
+                    selected_library_ids=list(base_version.selected_library_ids),
+                    cited_output=payload.cited_output,
+                    harness_draft=payload.harness_draft,
+                    submitted_by_system_agent_id=actor_system_agent_id,
+                    submitted_at=now,
+                    created_by=payload.actor.participant_id,
+                    created_at=now,
+                    updated_at=now,
+                    metadata={
+                        **payload.metadata,
+                        "base_version_id": str(base_version.version_id),
+                        "revision_reason": payload.reason,
+                    },
+                )
+                await self._repository.upsert_methodology_blueprint_version(
+                    conn,
+                    version,
+                )
+                await self._repository.upsert_methodology_blueprint(
+                    conn,
+                    blueprint.model_copy(update={"updated_at": now}),
+                )
+        return await self.get_methodology_blueprint_detail(blueprint_id)
+
+    async def archive_methodology_blueprint(
+        self,
+        blueprint_id: UUID,
+        payload: DeleteMethodologyBlueprintRequest,
+    ) -> dict[str, bool | str]:
+        blueprint = await self._repository.fetch_methodology_blueprint(blueprint_id)
+        if blueprint is None:
+            raise KeyError(f"Methodology blueprint {blueprint_id} not found")
+        user_id = self._actor_user_id(payload.actor)
+        if user_id is not None:
+            await self._require_organization_permission(
+                blueprint.organization_id,
+                user_id,
+                "methodology.write",
+            )
+        now = self._now()
+        archived = blueprint.model_copy(
+            update={
+                "status": "archived",
+                "updated_at": now,
+                "metadata": {**blueprint.metadata, **payload.metadata},
+            }
+        )
+        versions = await self._repository.list_methodology_blueprint_versions(blueprint_id)
+        dossier_updates: list[Dossier] = []
+        dossier_events: list[DossierEvent] = []
+        seen_dossier_ids: set[UUID] = set()
+        for version in versions:
+            if version.dossier_id is None or version.dossier_id in seen_dossier_ids:
+                continue
+            seen_dossier_ids.add(version.dossier_id)
+            dossier = await self._repository.fetch_dossier(version.dossier_id)
+            if dossier is None or dossier.status == "archived":
+                continue
+            archived_dossier = dossier.model_copy(
+                update={
+                    "status": "archived",
+                    "updated_at": now,
+                    "metadata": {
+                        **dossier.metadata,
+                        "last_lifecycle_transition": {
+                            "from": dossier.status,
+                            "to": "archived",
+                            "reason": "methodology_blueprint_archived",
+                            "at": now.isoformat(),
+                        },
+                    },
+                }
+            )
+            dossier_updates.append(archived_dossier)
+            dossier_events.append(
+                DossierEvent(
+                    event_id=uuid4(),
+                    dossier_id=dossier.dossier_id,
+                    organization_id=dossier.organization_id,
+                    event_type="dossier.lifecycle.transitioned",
+                    actor_participant_id=payload.actor.participant_id,
+                    payload={
+                        "from_status": dossier.status,
+                        "target_status": "archived",
+                        "reason": "methodology_blueprint_archived",
+                    },
+                    created_at=now,
+                )
+            )
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_methodology_blueprint(conn, archived)
+                for dossier in dossier_updates:
+                    await self._repository.upsert_dossier(conn, dossier)
+                for event in dossier_events:
+                    await self._repository.append_dossier_event(conn, event)
+        return {
+            "deleted": True,
+            "blueprint_id": str(blueprint_id),
+            "status": "archived",
+        }
+
+    async def list_dossier_sources(
         self,
         dossier_id: UUID,
         *,
         actor: ParticipantInput | None = None,
         status: str | None = None,
-    ) -> list[ResearchDossierSource]:
-        dossier = await self.get_research_dossier(dossier_id, actor=actor)
-        return await self._repository.list_research_dossier_sources(
+    ) -> list[DossierSource]:
+        dossier = await self.get_dossier(dossier_id, actor=actor)
+        return await self._repository.list_dossier_sources(
             dossier.dossier_id,
             status=status,
         )
 
-    async def get_research_dossier_notebook_detail(
+    async def list_dossier_events(
         self,
         dossier_id: UUID,
         *,
         actor: ParticipantInput | None = None,
-    ) -> ResearchDossierNotebookDetail:
-        dossier = await self.get_research_dossier(dossier_id, actor=actor)
-        detail = await self._repository.fetch_research_dossier_notebook_detail(
+    ) -> list[DossierEvent]:
+        dossier = await self.get_dossier(dossier_id, actor=actor)
+        return await self._repository.list_dossier_events(dossier.dossier_id)
+
+    async def get_dossier_notebook_detail(
+        self,
+        dossier_id: UUID,
+        *,
+        actor: ParticipantInput | None = None,
+    ) -> DossierNotebookDetail:
+        dossier = await self.get_dossier(dossier_id, actor=actor)
+        detail = await self._repository.fetch_dossier_notebook_detail(
             dossier.dossier_id
         )
         if detail is None:
-            raise KeyError(f"Research dossier notebook for {dossier_id} not found")
+            raise KeyError(f"Dossier notebook for {dossier_id} not found")
         return detail
 
-    async def get_research_dossier_graph(
+    async def get_dossier_graph(
         self,
         dossier_id: UUID,
         *,
         actor: ParticipantInput | None = None,
-    ) -> ResearchDossierGraph:
-        detail = await self.get_research_dossier_notebook_detail(
+    ) -> DossierGraph:
+        detail = await self.get_dossier_notebook_detail(
             dossier_id,
             actor=actor,
         )
@@ -4893,7 +5343,7 @@ class CollaborationKernel:
             }
             for claim in detail.claims
         )
-        sources = await self._repository.list_research_dossier_sources(dossier_id)
+        sources = await self._repository.list_dossier_sources(dossier_id)
         nodes.extend(
             {
                 "type": "source",
@@ -4904,7 +5354,7 @@ class CollaborationKernel:
             }
             for source in sources
         )
-        return ResearchDossierGraph(
+        return DossierGraph(
             dossier_id=dossier_id,
             notebook_id=detail.notebook.notebook_id,
             nodes=nodes,
@@ -4916,12 +5366,12 @@ class CollaborationKernel:
             },
         )
 
-    async def navigate_research_dossier(
+    async def navigate_dossier(
         self,
         dossier_id: UUID,
-        payload: NavigateResearchDossierRequest,
-    ) -> ResearchDossierNavigationResult:
-        detail = await self.get_research_dossier_notebook_detail(
+        payload: NavigateDossierRequest,
+    ) -> DossierNavigationResult:
+        detail = await self.get_dossier_notebook_detail(
             dossier_id,
             actor=payload.actor,
         )
@@ -4941,24 +5391,33 @@ class CollaborationKernel:
             notes = [
                 note
                 for note in detail.notes
-                if query in note.title.lower()
-                or query in note.slug.lower()
-                or query in (note.body or "").lower()
-                or query in (note.summary or "").lower()
+                if self._matches_dossier_query(
+                    query,
+                    note.title,
+                    note.slug,
+                    note.body,
+                    note.summary,
+                )
             ]
             concepts = [
                 concept
                 for concept in detail.concepts
-                if query in concept.name.lower()
-                or query in concept.slug.lower()
-                or any(query in alias.lower() for alias in concept.aliases)
-                or query in (concept.definition or "").lower()
+                if self._matches_dossier_query(
+                    query,
+                    concept.name,
+                    concept.slug,
+                    concept.definition,
+                    *concept.aliases,
+                )
             ]
             claims = [
                 claim
                 for claim in detail.claims
-                if query in claim.statement.lower()
-                or query in (claim.claim_key or "").lower()
+                if self._matches_dossier_query(
+                    query,
+                    claim.statement,
+                    claim.claim_key,
+                )
             ]
         note_ids = {note.note_id for note in notes[: payload.max_results]}
         concept_ids = {concept.concept_id for concept in concepts[: payload.max_results]}
@@ -4984,7 +5443,7 @@ class CollaborationKernel:
             }
             for note in (notes or detail.notes)[: payload.max_results]
         ]
-        return ResearchDossierNavigationResult(
+        return DossierNavigationResult(
             dossier_id=dossier_id,
             notebook_id=detail.notebook.notebook_id,
             query=payload.query,
@@ -4998,28 +5457,38 @@ class CollaborationKernel:
             metadata={"include_sources": payload.include_sources},
         )
 
-    async def upsert_research_dossier_note(
+    async def upsert_dossier_note(
         self,
         dossier_id: UUID,
-        payload: UpsertResearchDossierNoteRequest,
+        payload: UpsertDossierNoteRequest,
     ) -> MethodologyBlueprintCommandResult:
-        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        dossier = await self.get_dossier(dossier_id, actor=payload.actor)
         await self._require_dossier_write_actor(dossier, payload.actor)
-        notebook = await self._require_research_dossier_notebook(dossier_id)
+        notebook = await self._require_dossier_notebook(dossier_id)
         now = self._now()
         normalized_slug = self._normalize_library_slug(payload.slug)
         existing = (
-            await self._repository.fetch_research_dossier_note(payload.note_id)
+            await self._repository.fetch_dossier_note(payload.note_id)
             if payload.note_id is not None
-            else await self._repository.fetch_research_dossier_note_by_slug(
+            else await self._repository.fetch_dossier_note_by_slug(
                 notebook.notebook_id,
                 normalized_slug,
             )
         )
         if existing is not None and existing.notebook_id != notebook.notebook_id:
-            raise KeyError(f"Research dossier note {payload.note_id} not found")
+            raise KeyError(f"Dossier note {payload.note_id} not found")
         await self._validate_dossier_note_refs(dossier, notebook, payload)
-        note = ResearchDossierNote(
+        metadata = self._normalize_dossier_knowledge_metadata(
+            dossier=dossier,
+            existing_metadata=existing.metadata if existing is not None else None,
+            payload_metadata=payload.metadata,
+            note_kind=payload.note_kind,
+            slug=normalized_slug,
+            title=payload.title,
+            body=payload.body,
+            summary=payload.summary,
+        )
+        note = DossierNote(
             note_id=existing.note_id if existing is not None else payload.note_id or uuid4(),
             notebook_id=notebook.notebook_id,
             dossier_id=dossier.dossier_id,
@@ -5040,10 +5509,7 @@ class CollaborationKernel:
             created_at=existing.created_at if existing is not None else now,
             updated_by=payload.actor.participant_id,
             updated_at=now,
-            metadata={
-                **(existing.metadata if existing is not None else {}),
-                **payload.metadata,
-            },
+            metadata=metadata,
         )
         event = self._build_dossier_notebook_event(
             dossier=dossier,
@@ -5052,41 +5518,49 @@ class CollaborationKernel:
                 dossier,
                 payload.actor,
             ),
-            event_type="research_dossier_notebook.note_upserted",
+            event_type="dossier_notebook.note_upserted",
             payload={"note_id": str(note.note_id), "slug": note.slug, "kind": note.note_kind},
             now=now,
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
-                await self._repository.upsert_research_dossier_note(conn, note)
-                await self._repository.append_research_dossier_event(conn, event)
+                await self._repository.upsert_dossier_note(conn, note)
+                await self._repository.append_dossier_event(conn, event)
         return MethodologyBlueprintCommandResult(dossier=dossier, note=note)
 
-    async def upsert_research_dossier_concept(
+    async def upsert_dossier_concept(
         self,
         dossier_id: UUID,
-        payload: UpsertResearchDossierConceptRequest,
+        payload: UpsertDossierConceptRequest,
     ) -> MethodologyBlueprintCommandResult:
-        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        dossier = await self.get_dossier(dossier_id, actor=payload.actor)
         await self._require_dossier_write_actor(dossier, payload.actor)
-        notebook = await self._require_research_dossier_notebook(dossier_id)
+        notebook = await self._require_dossier_notebook(dossier_id)
         now = self._now()
         normalized_slug = self._normalize_library_slug(payload.slug)
         existing = (
-            await self._repository.fetch_research_dossier_concept(payload.concept_id)
+            await self._repository.fetch_dossier_concept(payload.concept_id)
             if payload.concept_id is not None
-            else await self._repository.fetch_research_dossier_concept_by_slug(
+            else await self._repository.fetch_dossier_concept_by_slug(
                 notebook.notebook_id,
                 normalized_slug,
             )
         )
         if existing is not None and existing.notebook_id != notebook.notebook_id:
-            raise KeyError(f"Research dossier concept {payload.concept_id} not found")
+            raise KeyError(f"Dossier concept {payload.concept_id} not found")
         for source_id in payload.source_ids:
-            source = await self._repository.fetch_research_dossier_source(source_id)
+            source = await self._repository.fetch_dossier_source(source_id)
             if source is None or source.dossier_id != dossier_id:
-                raise KeyError(f"Research dossier source {source_id} not found")
-        concept = ResearchDossierConcept(
+                raise KeyError(f"Dossier source {source_id} not found")
+        metadata = self._normalize_dossier_knowledge_metadata(
+            dossier=dossier,
+            existing_metadata=existing.metadata if existing is not None else None,
+            payload_metadata=payload.metadata,
+            slug=normalized_slug,
+            title=payload.name,
+            body=payload.definition,
+        )
+        concept = DossierConcept(
             concept_id=(
                 existing.concept_id
                 if existing is not None
@@ -5107,10 +5581,7 @@ class CollaborationKernel:
             created_at=existing.created_at if existing is not None else now,
             updated_by=payload.actor.participant_id,
             updated_at=now,
-            metadata={
-                **(existing.metadata if existing is not None else {}),
-                **payload.metadata,
-            },
+            metadata=metadata,
         )
         event = self._build_dossier_notebook_event(
             dossier=dossier,
@@ -5119,30 +5590,30 @@ class CollaborationKernel:
                 dossier,
                 payload.actor,
             ),
-            event_type="research_dossier_notebook.concept_upserted",
+            event_type="dossier_notebook.concept_upserted",
             payload={"concept_id": str(concept.concept_id), "slug": concept.slug},
             now=now,
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
-                await self._repository.upsert_research_dossier_concept(conn, concept)
-                await self._repository.append_research_dossier_event(conn, event)
+                await self._repository.upsert_dossier_concept(conn, concept)
+                await self._repository.append_dossier_event(conn, event)
         return MethodologyBlueprintCommandResult(dossier=dossier, concept=concept)
 
-    async def upsert_research_dossier_claim(
+    async def upsert_dossier_claim(
         self,
         dossier_id: UUID,
-        payload: UpsertResearchDossierClaimRequest,
+        payload: UpsertDossierClaimRequest,
     ) -> MethodologyBlueprintCommandResult:
-        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        dossier = await self.get_dossier(dossier_id, actor=payload.actor)
         await self._require_dossier_write_actor(dossier, payload.actor)
-        notebook = await self._require_research_dossier_notebook(dossier_id)
+        notebook = await self._require_dossier_notebook(dossier_id)
         now = self._now()
         existing = (
-            await self._repository.fetch_research_dossier_claim(payload.claim_id)
+            await self._repository.fetch_dossier_claim(payload.claim_id)
             if payload.claim_id is not None
             else (
-                await self._repository.fetch_research_dossier_claim_by_key(
+                await self._repository.fetch_dossier_claim_by_key(
                     notebook.notebook_id,
                     payload.claim_key,
                 )
@@ -5151,18 +5622,26 @@ class CollaborationKernel:
             )
         )
         if existing is not None and existing.notebook_id != notebook.notebook_id:
-            raise KeyError(f"Research dossier claim {payload.claim_id} not found")
+            raise KeyError(f"Dossier claim {payload.claim_id} not found")
         for source_id in payload.source_ids:
-            source = await self._repository.fetch_research_dossier_source(source_id)
+            source = await self._repository.fetch_dossier_source(source_id)
             if source is None or source.dossier_id != dossier_id:
-                raise KeyError(f"Research dossier source {source_id} not found")
+                raise KeyError(f"Dossier source {source_id} not found")
         for context_pack_id in payload.context_pack_ids:
             context_pack = await self._repository.fetch_retrieval_context_pack(
                 context_pack_id
             )
             if context_pack is None or context_pack.organization_id != dossier.organization_id:
                 raise KeyError(f"Retrieval context pack {context_pack_id} not found")
-        claim = ResearchDossierClaim(
+        metadata = self._normalize_dossier_knowledge_metadata(
+            dossier=dossier,
+            existing_metadata=existing.metadata if existing is not None else None,
+            payload_metadata=payload.metadata,
+            slug=payload.claim_key,
+            title=payload.statement,
+            body=payload.statement,
+        )
+        claim = DossierClaim(
             claim_id=existing.claim_id if existing is not None else payload.claim_id or uuid4(),
             notebook_id=notebook.notebook_id,
             dossier_id=dossier.dossier_id,
@@ -5180,10 +5659,7 @@ class CollaborationKernel:
             created_at=existing.created_at if existing is not None else now,
             updated_by=payload.actor.participant_id,
             updated_at=now,
-            metadata={
-                **(existing.metadata if existing is not None else {}),
-                **payload.metadata,
-            },
+            metadata=metadata,
         )
         event = self._build_dossier_notebook_event(
             dossier=dossier,
@@ -5192,24 +5668,24 @@ class CollaborationKernel:
                 dossier,
                 payload.actor,
             ),
-            event_type="research_dossier_notebook.claim_upserted",
+            event_type="dossier_notebook.claim_upserted",
             payload={"claim_id": str(claim.claim_id), "claim_key": claim.claim_key},
             now=now,
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
-                await self._repository.upsert_research_dossier_claim(conn, claim)
-                await self._repository.append_research_dossier_event(conn, event)
+                await self._repository.upsert_dossier_claim(conn, claim)
+                await self._repository.append_dossier_event(conn, event)
         return MethodologyBlueprintCommandResult(dossier=dossier, claim=claim)
 
-    async def upsert_research_dossier_link(
+    async def upsert_dossier_link(
         self,
         dossier_id: UUID,
-        payload: UpsertResearchDossierLinkRequest,
+        payload: UpsertDossierLinkRequest,
     ) -> MethodologyBlueprintCommandResult:
-        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        dossier = await self.get_dossier(dossier_id, actor=payload.actor)
         await self._require_dossier_write_actor(dossier, payload.actor)
-        notebook = await self._require_research_dossier_notebook(dossier_id)
+        notebook = await self._require_dossier_notebook(dossier_id)
         await self._validate_dossier_graph_ref(
             notebook,
             payload.source_type,
@@ -5222,9 +5698,9 @@ class CollaborationKernel:
         )
         now = self._now()
         existing = (
-            await self._repository.fetch_research_dossier_link(payload.link_id)
+            await self._repository.fetch_dossier_link(payload.link_id)
             if payload.link_id is not None
-            else await self._repository.fetch_research_dossier_link_by_tuple(
+            else await self._repository.fetch_dossier_link_by_tuple(
                 notebook.notebook_id,
                 source_type=payload.source_type,
                 source_ref_id=payload.source_ref_id,
@@ -5234,8 +5710,8 @@ class CollaborationKernel:
             )
         )
         if existing is not None and existing.notebook_id != notebook.notebook_id:
-            raise KeyError(f"Research dossier link {payload.link_id} not found")
-        link = ResearchDossierLink(
+            raise KeyError(f"Dossier link {payload.link_id} not found")
+        link = DossierLink(
             link_id=existing.link_id if existing is not None else payload.link_id or uuid4(),
             notebook_id=notebook.notebook_id,
             dossier_id=dossier.dossier_id,
@@ -5263,29 +5739,29 @@ class CollaborationKernel:
                 dossier,
                 payload.actor,
             ),
-            event_type="research_dossier_notebook.link_upserted",
+            event_type="dossier_notebook.link_upserted",
             payload={"link_id": str(link.link_id), "link_kind": link.link_kind},
             now=now,
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
-                await self._repository.upsert_research_dossier_link(conn, link)
-                await self._repository.append_research_dossier_event(conn, event)
+                await self._repository.upsert_dossier_link(conn, link)
+                await self._repository.append_dossier_event(conn, event)
         return MethodologyBlueprintCommandResult(dossier=dossier, link=link)
 
-    async def sync_research_dossier_notebook(
+    async def sync_dossier_notebook(
         self,
         dossier_id: UUID,
-        payload: SyncResearchDossierNotebookRequest,
+        payload: SyncDossierNotebookRequest,
         *,
         status: str = "completed",
         error: str | None = None,
         stats: dict[str, Any] | None = None,
-    ) -> ResearchDossierSyncRun:
-        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+    ) -> DossierSyncRun:
+        dossier = await self.get_dossier(dossier_id, actor=payload.actor)
         await self._require_dossier_write_actor(dossier, payload.actor)
-        notebook = await self._require_research_dossier_notebook(dossier_id)
-        bindings = await self._repository.list_research_dossier_provider_bindings(
+        notebook = await self._require_dossier_notebook(dossier_id)
+        bindings = await self._repository.list_dossier_provider_bindings(
             notebook.notebook_id,
             provider_key=payload.provider_key,
         )
@@ -5297,7 +5773,7 @@ class CollaborationKernel:
             dossier,
             payload.actor,
         )
-        sync_run = ResearchDossierSyncRun(
+        sync_run = DossierSyncRun(
             sync_run_id=uuid4(),
             binding_id=binding.binding_id if binding is not None else None,
             notebook_id=notebook.notebook_id,
@@ -5339,7 +5815,7 @@ class CollaborationKernel:
             dossier=dossier,
             actor=payload.actor,
             system_agent_id=actor_system_agent_id,
-            event_type="research_dossier_notebook.synced",
+            event_type="dossier_notebook.synced",
             payload={
                 "sync_run_id": str(sync_run.sync_run_id),
                 "provider_key": binding.provider_key if binding is not None else None,
@@ -5349,33 +5825,33 @@ class CollaborationKernel:
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
-                await self._repository.upsert_research_dossier_sync_run(conn, sync_run)
-                await self._repository.upsert_research_dossier_notebook(
+                await self._repository.upsert_dossier_sync_run(conn, sync_run)
+                await self._repository.upsert_dossier_notebook(
                     conn,
                     updated_notebook,
                 )
                 if updated_binding is not None:
-                    await self._repository.upsert_research_dossier_provider_binding(
+                    await self._repository.upsert_dossier_provider_binding(
                         conn,
                         updated_binding,
                     )
-                await self._repository.append_research_dossier_event(conn, event)
+                await self._repository.append_dossier_event(conn, event)
         return sync_run
 
-    async def submit_research_dossier_health_check(
+    async def submit_dossier_health_check(
         self,
         dossier_id: UUID,
-        payload: SubmitResearchDossierHealthCheckRequest,
-    ) -> ResearchDossierHealthCheck:
-        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        payload: SubmitDossierHealthCheckRequest,
+    ) -> DossierHealthCheck:
+        dossier = await self.get_dossier(dossier_id, actor=payload.actor)
         await self._require_dossier_write_actor(dossier, payload.actor)
-        notebook = await self._require_research_dossier_notebook(dossier_id)
+        notebook = await self._require_dossier_notebook(dossier_id)
         now = self._now()
         actor_system_agent_id = await self._dossier_actor_system_agent_id(
             dossier,
             payload.actor,
         )
-        check = ResearchDossierHealthCheck(
+        check = DossierHealthCheck(
             check_id=uuid4(),
             notebook_id=notebook.notebook_id,
             dossier_id=dossier.dossier_id,
@@ -5395,7 +5871,7 @@ class CollaborationKernel:
             dossier=dossier,
             actor=payload.actor,
             system_agent_id=actor_system_agent_id,
-            event_type="research_dossier_notebook.health_checked",
+            event_type="dossier_notebook.health_checked",
             payload={
                 "check_id": str(check.check_id),
                 "status": check.status,
@@ -5407,23 +5883,23 @@ class CollaborationKernel:
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
-                await self._repository.append_research_dossier_health_check(conn, check)
-                await self._repository.append_research_dossier_event(conn, event)
+                await self._repository.append_dossier_health_check(conn, check)
+                await self._repository.append_dossier_event(conn, event)
         return check
 
-    async def create_research_dossier_source(
+    async def create_dossier_source(
         self,
         dossier_id: UUID,
-        payload: CreateResearchDossierSourceRequest,
+        payload: CreateDossierSourceRequest,
     ) -> MethodologyBlueprintCommandResult:
-        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        dossier = await self.get_dossier(dossier_id, actor=payload.actor)
         await self._require_dossier_write_actor(dossier, payload.actor)
         now = self._now()
         actor_system_agent_id = await self._dossier_actor_system_agent_id(
             dossier,
             payload.actor,
         )
-        source = ResearchDossierSource(
+        source = DossierSource(
             source_id=uuid4(),
             dossier_id=dossier.dossier_id,
             organization_id=dossier.organization_id,
@@ -5448,12 +5924,12 @@ class CollaborationKernel:
             updated_at=now,
             metadata=payload.metadata,
         )
-        await self._validate_research_dossier_source_refs(dossier, source)
-        event = ResearchDossierEvent(
+        await self._validate_dossier_source_refs(dossier, source)
+        event = DossierEvent(
             event_id=uuid4(),
             dossier_id=dossier.dossier_id,
             organization_id=dossier.organization_id,
-            event_type="research_dossier_source.created",
+            event_type="dossier_source.created",
             actor_participant_id=payload.actor.participant_id,
             system_agent_id=actor_system_agent_id,
             source_id=source.source_id,
@@ -5462,21 +5938,21 @@ class CollaborationKernel:
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
-                await self._repository.upsert_research_dossier_source(conn, source)
-                await self._repository.append_research_dossier_event(conn, event)
+                await self._repository.upsert_dossier_source(conn, source)
+                await self._repository.append_dossier_event(conn, event)
         return MethodologyBlueprintCommandResult(dossier=dossier, source=source)
 
-    async def update_research_dossier_source(
+    async def update_dossier_source(
         self,
         dossier_id: UUID,
         source_id: UUID,
-        payload: UpdateResearchDossierSourceRequest,
+        payload: UpdateDossierSourceRequest,
     ) -> MethodologyBlueprintCommandResult:
-        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        dossier = await self.get_dossier(dossier_id, actor=payload.actor)
         await self._require_dossier_write_actor(dossier, payload.actor)
-        source = await self._repository.fetch_research_dossier_source(source_id)
+        source = await self._repository.fetch_dossier_source(source_id)
         if source is None or source.dossier_id != dossier_id:
-            raise KeyError(f"Research dossier source {source_id} not found")
+            raise KeyError(f"Dossier source {source_id} not found")
         now = self._now()
         actor_system_agent_id = await self._dossier_actor_system_agent_id(
             dossier,
@@ -5498,12 +5974,12 @@ class CollaborationKernel:
                 ),
             }
         )
-        await self._validate_research_dossier_source_refs(dossier, updated)
-        event = ResearchDossierEvent(
+        await self._validate_dossier_source_refs(dossier, updated)
+        event = DossierEvent(
             event_id=uuid4(),
             dossier_id=dossier.dossier_id,
             organization_id=dossier.organization_id,
-            event_type="research_dossier_source.updated",
+            event_type="dossier_source.updated",
             actor_participant_id=payload.actor.participant_id,
             system_agent_id=actor_system_agent_id,
             source_id=updated.source_id,
@@ -5512,16 +5988,16 @@ class CollaborationKernel:
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
-                await self._repository.upsert_research_dossier_source(conn, updated)
-                await self._repository.append_research_dossier_event(conn, event)
+                await self._repository.upsert_dossier_source(conn, updated)
+                await self._repository.append_dossier_event(conn, event)
         return MethodologyBlueprintCommandResult(dossier=dossier, source=updated)
 
-    async def attach_research_dossier_context_pack(
+    async def attach_dossier_context_pack(
         self,
         dossier_id: UUID,
-        payload: AttachResearchDossierContextPackRequest,
-    ) -> ResearchDossier:
-        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
+        payload: AttachDossierContextPackRequest,
+    ) -> Dossier:
+        dossier = await self.get_dossier(dossier_id, actor=payload.actor)
         await self._require_dossier_write_actor(dossier, payload.actor)
         context_pack = await self._repository.fetch_retrieval_context_pack(
             payload.context_pack_id
@@ -5544,9 +6020,9 @@ class CollaborationKernel:
         )
         source = None
         if payload.source_id is not None:
-            source = await self._repository.fetch_research_dossier_source(payload.source_id)
+            source = await self._repository.fetch_dossier_source(payload.source_id)
             if source is None or source.dossier_id != dossier_id:
-                raise KeyError(f"Research dossier source {payload.source_id} not found")
+                raise KeyError(f"Dossier source {payload.source_id} not found")
             source = source.model_copy(
                 update={
                     "context_pack_ids": list(
@@ -5555,11 +6031,11 @@ class CollaborationKernel:
                     "updated_at": now,
                 }
             )
-        event = ResearchDossierEvent(
+        event = DossierEvent(
             event_id=uuid4(),
             dossier_id=dossier.dossier_id,
             organization_id=dossier.organization_id,
-            event_type="research_dossier.context_pack_attached",
+            event_type="dossier.context_pack_attached",
             actor_participant_id=payload.actor.participant_id,
             system_agent_id=actor_system_agent_id,
             source_id=payload.source_id,
@@ -5569,79 +6045,179 @@ class CollaborationKernel:
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
-                await self._repository.upsert_research_dossier(conn, updated_dossier)
+                await self._repository.upsert_dossier(conn, updated_dossier)
                 if source is not None:
-                    await self._repository.upsert_research_dossier_source(conn, source)
-                await self._repository.append_research_dossier_event(conn, event)
+                    await self._repository.upsert_dossier_source(conn, source)
+                await self._repository.append_dossier_event(conn, event)
         return updated_dossier
 
-    async def mark_research_dossier_ready(
+    async def transition_dossier_lifecycle(
         self,
         dossier_id: UUID,
-        payload: MarkResearchDossierReadyRequest,
-    ) -> ResearchDossier:
-        dossier = await self.get_research_dossier(dossier_id, actor=payload.actor)
-        await self._require_dossier_write_actor(dossier, payload.actor)
+        payload: DossierLifecycleTransitionRequest,
+    ) -> Dossier:
+        dossier = await self.get_dossier(dossier_id, actor=payload.actor)
+        await self._require_dossier_write_actor(
+            dossier,
+            payload.actor,
+            allow_terminal=True,
+        )
+        self._validate_dossier_lifecycle_transition(
+            current_status=dossier.status,
+            target_status=payload.target_status,
+        )
+        status_changed = payload.target_status != dossier.status
+        if (
+            not status_changed
+            and payload.summary is None
+            and not payload.contradictions
+            and not payload.gaps
+            and payload.reason is None
+            and not payload.metadata
+        ):
+            raise ValueError(
+                f"Dossier lifecycle is already {dossier.status!r}; "
+                "perform the next source, note, health, sync, or readiness operation "
+                "instead of a no-op lifecycle transition"
+            )
         version = await self._repository.fetch_methodology_blueprint_version(
             dossier.version_id
         )
         if version is None:
             raise KeyError(f"Methodology blueprint version {dossier.version_id} not found")
+        blueprint = await self._repository.fetch_methodology_blueprint(dossier.blueprint_id)
+        if (
+            blueprint is not None
+            and blueprint.status == "archived"
+            and payload.target_status != "archived"
+        ):
+            raise ValueError("Archived methodology blueprints cannot continue dossier work")
+        if payload.target_status == "ready" and status_changed:
+            await self._validate_dossier_completion_profile(dossier)
         now = self._now()
         actor_system_agent_id = await self._dossier_actor_system_agent_id(
             dossier,
             payload.actor,
         )
+        metadata = {
+            **dossier.metadata,
+            **payload.metadata,
+            "last_lifecycle_transition": {
+                "from": dossier.status,
+                "to": payload.target_status,
+                "reason": payload.reason,
+                "at": now.isoformat(),
+            },
+        }
         updated_dossier = dossier.model_copy(
             update={
-                "status": "ready_for_methodologist",
+                "status": payload.target_status,
                 "summary": payload.summary,
                 "contradictions": list(payload.contradictions),
                 "gaps": list(payload.gaps),
-                "ready_at": now,
+                "ready_at": now if payload.target_status == "ready" else dossier.ready_at,
                 "updated_at": now,
-                "metadata": {**dossier.metadata, **payload.metadata},
+                "metadata": metadata,
             }
         )
-        updated_version = version.model_copy(
-            update={
-                "status": "ready_for_methodologist",
-                "updated_at": now,
-                "metadata": {**version.metadata, "dossier_ready_at": now.isoformat()},
-            }
-        )
-        sources = await self._repository.list_research_dossier_sources(
-            dossier.dossier_id
-        )
-        methodologist_task = self._build_methodologist_blueprint_task(
-            dossier=updated_dossier,
-            version=updated_version,
-            sources=sources,
-            requested_by=payload.actor.participant_id,
-            now=now,
-        )
-        event = ResearchDossierEvent(
+        updated_version = version
+        methodologist_task = None
+        existing_methodologist_task = None
+        if payload.target_status == "ready" and status_changed:
+            updated_version = version.model_copy(
+                update={
+                    "status": "ready_for_draft",
+                    "updated_at": now,
+                    "metadata": {**version.metadata, "dossier_ready_at": now.isoformat()},
+                }
+            )
+            sources = await self._repository.list_dossier_sources(
+                dossier.dossier_id
+            )
+            methodologist_task = self._build_methodologist_blueprint_task(
+                dossier=updated_dossier,
+                version=updated_version,
+                sources=sources,
+                requested_by=payload.actor.participant_id,
+                now=now,
+            )
+        elif (
+            payload.target_status == "ready"
+            and not status_changed
+            and version.status == "ready_for_draft"
+            and self._should_recover_methodologist_handoff(payload.metadata)
+        ):
+            existing_tasks = await self._list_methodology_blueprint_draft_tasks(
+                dossier.dossier_id,
+            )
+            existing_methodologist_task = next(
+                (
+                    task
+                    for task in existing_tasks
+                    if task.status in {"created", "released", "claimed"}
+                ),
+                None,
+            )
+            if existing_methodologist_task is None:
+                sources = await self._repository.list_dossier_sources(
+                    dossier.dossier_id
+                )
+                methodologist_task = self._build_methodologist_blueprint_task(
+                    dossier=updated_dossier,
+                    version=updated_version,
+                    sources=sources,
+                    requested_by=payload.actor.participant_id,
+                    now=now,
+                )
+                methodologist_task = methodologist_task.model_copy(
+                    update={
+                        "metadata": {
+                            **methodologist_task.metadata,
+                            "handoff_recovery": True,
+                            "handoff_recovery_reason": payload.reason,
+                            "previous_methodologist_task_ids": [
+                                str(task.task_id) for task in existing_tasks[:10]
+                            ],
+                        }
+                    }
+                )
+        event = DossierEvent(
             event_id=uuid4(),
             dossier_id=dossier.dossier_id,
             organization_id=dossier.organization_id,
-            event_type="research_dossier.ready_for_methodologist",
+            event_type="dossier.lifecycle.transitioned",
             actor_participant_id=payload.actor.participant_id,
             system_agent_id=actor_system_agent_id,
             payload={
-                "methodologist_task_id": str(methodologist_task.task_id),
+                "from_status": dossier.status,
+                "target_status": payload.target_status,
+                "reason": payload.reason,
+                "methodologist_task_id": (
+                    str(methodologist_task.task_id)
+                    if methodologist_task is not None
+                    else (
+                        str(existing_methodologist_task.task_id)
+                        if existing_methodologist_task is not None
+                        else None
+                    )
+                ),
+                "methodologist_task_reused": existing_methodologist_task is not None,
+                "methodologist_task_recovered": methodologist_task is not None
+                and not status_changed,
                 "context_pack_ids": [str(item) for item in updated_dossier.context_pack_ids],
             },
             created_at=now,
         )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
-                await self._repository.upsert_research_dossier(conn, updated_dossier)
+                await self._repository.upsert_dossier(conn, updated_dossier)
                 await self._repository.upsert_methodology_blueprint_version(
                     conn,
                     updated_version,
                 )
-                await self._repository.upsert_task(conn, methodologist_task)
-                await self._repository.append_research_dossier_event(conn, event)
+                if methodologist_task is not None:
+                    await self._repository.upsert_task(conn, methodologist_task)
+                await self._repository.append_dossier_event(conn, event)
         return updated_dossier
 
     async def submit_methodology_blueprint_draft(
@@ -5655,6 +6231,17 @@ class CollaborationKernel:
         blueprint = await self._repository.fetch_methodology_blueprint(version.blueprint_id)
         if blueprint is None:
             raise KeyError(f"Methodology blueprint {version.blueprint_id} not found")
+        if blueprint.status == "archived":
+            raise ValueError("Archived methodology blueprints cannot receive drafts")
+        if version.status not in {
+            "researching",
+            "ready_for_draft",
+            "drafted",
+            "pending_review",
+        }:
+            raise ValueError(
+                f"Cannot submit a draft for methodology blueprint version in {version.status!r} status"
+            )
         if payload.actor.participant_type == "user":
             user_id = self._actor_user_id(payload.actor)
             if user_id is not None:
@@ -5665,28 +6252,56 @@ class CollaborationKernel:
                 )
         now = self._now()
         dossier = (
-            await self._repository.fetch_research_dossier(version.research_dossier_id)
-            if version.research_dossier_id is not None
+            await self._repository.fetch_dossier(version.dossier_id)
+            if version.dossier_id is not None
             else None
         )
+        if dossier is not None and dossier.status in _DOSSIER_TERMINAL_STATUSES:
+            raise ValueError(f"Dossier {dossier.dossier_id} is {dossier.status}")
+        is_pending_review_edit = (
+            dossier is not None
+            and dossier.status == "consumed"
+            and version.status == "pending_review"
+        )
+        if dossier is not None and dossier.status != "ready" and not is_pending_review_edit:
+            raise ValueError("Methodology blueprint draft submission requires a ready dossier")
         actor_system_agent_id = (
             await self._dossier_actor_system_agent_id(dossier, payload.actor)
             if dossier is not None
             else None
         )
+        harness_draft = self._complete_methodology_harness_draft(
+            payload.harness_draft,
+            dossier=dossier,
+            cited_output=payload.cited_output,
+        )
         updated_version = version.model_copy(
             update={
                 "status": "pending_review",
                 "cited_output": payload.cited_output,
-                "harness_draft": payload.harness_draft,
+                "harness_draft": harness_draft,
                 "submitted_by_system_agent_id": actor_system_agent_id,
                 "submitted_at": now,
                 "updated_at": now,
                 "metadata": {**version.metadata, **payload.metadata},
             }
         )
-        if dossier is not None:
-            dossier = dossier.model_copy(update={"status": "completed", "updated_at": now})
+        if dossier is not None and dossier.status != "consumed":
+            dossier = dossier.model_copy(
+                update={
+                    "status": "consumed",
+                    "updated_at": now,
+                    "metadata": {
+                        **dossier.metadata,
+                        "last_lifecycle_transition": {
+                            "from": dossier.status,
+                            "to": "consumed",
+                            "reason": "methodology_blueprint_draft_submitted",
+                            "at": now.isoformat(),
+                        },
+                    },
+                }
+            )
         async with self._repository._pool.acquire() as conn:  # noqa: SLF001
             async with conn.transaction():
                 await self._repository.upsert_methodology_blueprint_version(
@@ -5694,8 +6309,273 @@ class CollaborationKernel:
                     updated_version,
                 )
                 if dossier is not None:
-                    await self._repository.upsert_research_dossier(conn, dossier)
+                    await self._repository.upsert_dossier(conn, dossier)
         return await self.get_methodology_blueprint_detail(blueprint.blueprint_id)
+
+    def _complete_methodology_harness_draft(
+        self,
+        harness: WorkspaceHarness,
+        *,
+        dossier: Dossier | None,
+        cited_output: str,
+    ) -> WorkspaceHarness:
+        if dossier is None:
+            return harness
+        requirements_text = " ".join(
+            item
+            for item in [
+                dossier.topic,
+                *(dossier.tasks or []),
+                dossier.summary or "",
+                cited_output,
+            ]
+            if item
+        ).lower()
+        existing_text = json.dumps(
+            harness.model_dump(mode="json"),
+            sort_keys=True,
+            default=str,
+        ).lower()
+        methodics_text = json.dumps(
+            [methodic.model_dump(mode="json") for methodic in harness.methodics],
+            sort_keys=True,
+            default=str,
+        ).lower()
+        metadata = dict(harness.metadata)
+        changed = False
+
+        def ensure_metadata_list(key: str, values: list[str]) -> None:
+            nonlocal changed
+            existing = metadata.get(key)
+            if isinstance(existing, list) and existing:
+                return
+            metadata[key] = values
+            changed = True
+
+        full_methodology = (
+            dossier.metadata.get("completion_profile") == "full_methodology_research"
+        )
+        if full_methodology or "participant" in requirements_text:
+            ensure_metadata_list(
+                "participants_and_roles",
+                [
+                    "consumer participants",
+                    "researcher",
+                    "methodologist",
+                    "product lead",
+                    "analyst",
+                ],
+            )
+        if full_methodology or "tool" in requirements_text:
+            ensure_metadata_list(
+                "tools_and_methods",
+                [
+                    "web research",
+                    "interview guide",
+                    "diary study protocol",
+                    "survey platform",
+                    "willingness-to-pay analysis",
+                ],
+            )
+        if full_methodology or "asset" in requirements_text:
+            ensure_metadata_list(
+                "information_assets",
+                [
+                    "source bibliography",
+                    "participant screener",
+                    "interview notes",
+                    "diary-study log",
+                    "survey dataset",
+                    "willingness-to-pay matrix",
+                    "research synthesis",
+                ],
+            )
+        if full_methodology or "source" in requirements_text:
+            ensure_metadata_list(
+                "source_refs",
+                [f"dossier:{dossier.dossier_id}"],
+            )
+
+        required_markers = [
+            marker
+            for marker in ("participant", "tool", "asset", "source", "survey", "interview")
+            if marker in requirements_text or full_methodology
+        ]
+        if "willingness" in requirements_text or "willingness-to-pay" in requirements_text:
+            required_markers.append("willingness")
+        missing_markers = [
+            marker
+            for marker in dict.fromkeys(required_markers)
+            if marker not in existing_text
+        ]
+        if missing_markers:
+            metadata["draft_completion_markers"] = sorted(
+                dict.fromkeys(
+                    [
+                        *(
+                            metadata.get("draft_completion_markers")
+                            if isinstance(metadata.get("draft_completion_markers"), list)
+                            else []
+                        ),
+                        *missing_markers,
+                    ]
+                )
+            )
+            changed = True
+
+        methodics = list(harness.methodics)
+        needs_survey = "survey" in requirements_text and "survey" not in methodics_text
+        needs_willingness = (
+            ("willingness" in requirements_text or "willingness-to-pay" in requirements_text)
+            and "willingness" not in methodics_text
+        )
+        needs_assets = (
+            (full_methodology or "asset" in requirements_text)
+            and "asset" not in methodics_text
+        )
+        if needs_survey or needs_willingness:
+            methodics.append(
+                WorkspaceMethodic(
+                    name="Survey quantification and willingness-to-pay validation",
+                    goal=(
+                        "Quantify B2C segment demand, purchase intent, willingness-to-pay, "
+                        "and acceptable subscription price range."
+                    ),
+                    applicability=(
+                        "Use after qualitative discovery and before launch-channel "
+                        "investment decisions."
+                    ),
+                    steps=[
+                        WorkspaceMethodicStep(
+                            instruction=(
+                                "Design a consumer survey with segment, need intensity, "
+                                "purchase-intent, and willingness-to-pay questions."
+                            ),
+                            recommended_tool_patterns=[
+                                "survey platform",
+                                "panel screener",
+                            ],
+                            expected_artifacts=[
+                                "survey questionnaire",
+                                "participant screener",
+                            ],
+                            verification=[
+                                "survey items map to the launch decision and target segments"
+                            ],
+                        ),
+                        WorkspaceMethodicStep(
+                            instruction=(
+                                "Field the survey to qualified B2C participants and collect "
+                                "a cleaned dataset with source and sample metadata."
+                            ),
+                            recommended_tool_patterns=[
+                                "sample provider",
+                                "spreadsheet",
+                                "data-quality checks",
+                            ],
+                            expected_artifacts=[
+                                "survey dataset",
+                                "fielding log",
+                                "quality exclusions",
+                            ],
+                            verification=[
+                                "sample counts, exclusions, and segment quotas are documented"
+                            ],
+                        ),
+                        WorkspaceMethodicStep(
+                            instruction=(
+                                "Analyze segment demand, willingness-to-pay ranges, and "
+                                "launch-channel decision gates."
+                            ),
+                            recommended_tool_patterns=[
+                                "willingness-to-pay matrix",
+                                "segment scorecard",
+                                "launch-channel test brief",
+                            ],
+                            expected_artifacts=[
+                                "willingness-to-pay matrix",
+                                "segment scorecard",
+                                "launch-channel decision brief",
+                            ],
+                            verification=[
+                                "recommendation ties source evidence, survey data, assets, and decision thresholds together"
+                            ],
+                        ),
+                    ],
+                    success_criteria=[
+                        "Survey results quantify segment-level demand.",
+                        "Willingness-to-pay evidence is separated from stated interest.",
+                        "Information assets support a launch, revise, or stop decision.",
+                    ],
+                )
+            )
+            changed = True
+        if needs_assets:
+            methodics.append(
+                WorkspaceMethodic(
+                    name="Information asset management and evidence traceability",
+                    goal=(
+                        "Create and maintain the information assets needed to execute, "
+                        "audit, and reuse the methodology."
+                    ),
+                    applicability=(
+                        "Use throughout research execution and before approval or workspace "
+                        "application."
+                    ),
+                    steps=[
+                        WorkspaceMethodicStep(
+                            instruction=(
+                                "Define the information asset register for sources, participant "
+                                "screeners, interview notes, survey datasets, analysis matrices, "
+                                "and synthesis outputs."
+                            ),
+                            recommended_tool_patterns=[
+                                "asset register",
+                                "source bibliography",
+                                "dossier notebook",
+                            ],
+                            expected_artifacts=[
+                                "information asset register",
+                                "source bibliography",
+                                "dossier notebook links",
+                            ],
+                            verification=[
+                                "each asset has an owner, source reference, status, and reuse rule"
+                            ],
+                        ),
+                        WorkspaceMethodicStep(
+                            instruction=(
+                                "Link each methodic step to the assets it consumes and produces."
+                            ),
+                            recommended_tool_patterns=[
+                                "traceability matrix",
+                                "workspace asset links",
+                            ],
+                            expected_artifacts=[
+                                "asset traceability matrix",
+                                "methodic-to-asset map",
+                            ],
+                            verification=[
+                                "reviewers can trace claims from methodic outputs back to dossier sources and assets"
+                            ],
+                        ),
+                    ],
+                    success_criteria=[
+                        "Required information assets are explicit and reviewable.",
+                        "Source, participant, tool, survey, and synthesis assets are traceable.",
+                    ],
+                )
+            )
+            changed = True
+
+        if not changed:
+            return harness
+        return harness.model_copy(
+            update={
+                "methodics": methodics,
+                "metadata": metadata,
+            }
+        )
 
     async def review_methodology_blueprint_version(
         self,
@@ -5708,6 +6588,8 @@ class CollaborationKernel:
         blueprint = await self._repository.fetch_methodology_blueprint(blueprint_id)
         if blueprint is None:
             raise KeyError(f"Methodology blueprint {blueprint_id} not found")
+        if blueprint.status == "archived":
+            raise ValueError("Archived methodology blueprints cannot be reviewed")
         version = await self._repository.fetch_methodology_blueprint_version(version_id)
         if version is None or version.blueprint_id != blueprint_id:
             raise KeyError(f"Methodology blueprint version {version_id} not found")
@@ -5768,6 +6650,8 @@ class CollaborationKernel:
         blueprint = await self._repository.fetch_methodology_blueprint(blueprint_id)
         if blueprint is None:
             raise KeyError(f"Methodology blueprint {blueprint_id} not found")
+        if blueprint.status == "archived":
+            raise ValueError("Archived methodology blueprints cannot be applied")
         version_id = payload.version_id or blueprint.active_version_id
         if version_id is None:
             raise ValueError("Methodology blueprint has no active approved version")
@@ -7802,6 +8686,145 @@ class CollaborationKernel:
             system_agent_id,
         )
 
+    async def resume_runtime_task(
+        self,
+        task_id: UUID,
+        payload: ResumeRuntimeTaskRequest,
+        *,
+        organization_id: UUID | None = None,
+    ) -> TaskCommandResult:
+        task = await self._repository.fetch_task(task_id)
+        if task is None:
+            raise KeyError(f"Task {task_id} not found")
+        workspace = await self._repository.fetch_workspace(task.workspace_id)
+        if workspace is None:
+            raise KeyError(f"Workspace {task.workspace_id} not found")
+        if organization_id is not None and workspace.organization_id != organization_id:
+            raise KeyError(f"Task {task_id} not found in organization {organization_id}")
+        if task.status == "claimed":
+            runs = await self._repository.list_runs_for_task(task.task_id)
+            now = self._now()
+            for run in runs:
+                if run.status in {"completed", "failed"}:
+                    continue
+                retry_steps = [
+                    step
+                    for step in await self._repository.list_run_steps(run.run_id)
+                    if step.status == "created"
+                    and step.metadata.get("retry_reason") == "llm_provider_unavailable"
+                ]
+                if not retry_steps:
+                    continue
+                retry_step = retry_steps[-1]
+                resume_count = int(retry_step.metadata.get("manual_resume_count") or 0) + 1
+                updated_step = retry_step.model_copy(
+                    update={
+                        "next_retry_at": now,
+                        "updated_at": now,
+                        "metadata": {
+                            **retry_step.metadata,
+                            **payload.metadata,
+                            "manual_resume_count": resume_count,
+                            "last_manual_resumed_at": now.isoformat(),
+                            "last_manual_resumed_by": str(payload.actor.participant_id),
+                            "manual_resume_reason": payload.reason,
+                        },
+                    }
+                )
+                updated_run = run.model_copy(
+                    update={
+                        "updated_at": now,
+                        "metadata": {
+                            **run.metadata,
+                            "last_manual_resumed_at": now.isoformat(),
+                            "last_manual_resumed_by": str(payload.actor.participant_id),
+                            "manual_resume_reason": payload.reason,
+                        },
+                    }
+                )
+                actor = self._actor_from_input(payload.actor)
+                async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+                    async with conn.transaction():
+                        await self._repository.upsert_run_step(conn, updated_step)
+                        await self._repository.upsert_run(conn, updated_run)
+                        event = await self._build_thread_event(
+                            conn,
+                            updated_step.workspace_id,
+                            updated_step.thread_id,
+                            "run_step.requeued",
+                            actor=actor,
+                            target=TargetRef(type="run_step", id=updated_step.step_id),
+                            payload={
+                                **updated_step.model_dump(mode="json"),
+                                "manual_resume": True,
+                                "reason": payload.reason,
+                            },
+                            visibility="agents_only",
+                            timestamp=now,
+                            correlation_id=updated_run.correlation_id,
+                            causation_id=task.task_id,
+                        )
+                        await self._repository.record_event(conn, event)
+                return TaskCommandResult(task=task, run=updated_run, events=[event])
+        if task.status != "failed":
+            raise ValueError(
+                "Only failed runtime tasks or claimed tasks waiting on retryable provider work can be resumed"
+            )
+
+        now = self._now()
+        resume_count = int(task.metadata.get("resume_count") or 0) + 1
+        resume_record = {
+            "resumed_at": now.isoformat(),
+            "resumed_by": str(payload.actor.participant_id),
+            "reason": payload.reason,
+            "previous_status": task.status,
+            "failed_run_id": task.metadata.get("failed_run_id"),
+            "stop_reason": task.metadata.get("stop_reason"),
+        }
+        resume_history = task.metadata.get("resume_history")
+        if not isinstance(resume_history, list):
+            resume_history = []
+        resumed_task = task.model_copy(
+            update={
+                "status": "released",
+                "claimed_by": None,
+                "updated_at": now,
+                "metadata": {
+                    **task.metadata,
+                    **payload.metadata,
+                    "resume_count": resume_count,
+                    "last_resumed_at": now.isoformat(),
+                    "last_resumed_by": str(payload.actor.participant_id),
+                    "resume_reason": payload.reason,
+                    "resume_history": [*resume_history[-9:], resume_record],
+                },
+            }
+        )
+        actor = self._actor_from_input(payload.actor)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_task(conn, resumed_task)
+                event = await self._build_thread_event(
+                    conn,
+                    resumed_task.workspace_id,
+                    resumed_task.thread_id,
+                    "task.resumed",
+                    actor=actor,
+                    target=TargetRef(type="task", id=resumed_task.task_id),
+                    payload={
+                        "task_id": str(resumed_task.task_id),
+                        "previous_status": task.status,
+                        "resume_count": resume_count,
+                        "reason": payload.reason,
+                    },
+                    visibility="agents_only",
+                    timestamp=now,
+                    correlation_id=resumed_task.correlation_id,
+                    causation_id=task.task_id,
+                )
+                await self._repository.record_event(conn, event)
+        return TaskCommandResult(task=resumed_task, events=[event])
+
     async def build_agent_execution_context(
         self,
         task_id: UUID,
@@ -8094,6 +9117,101 @@ class CollaborationKernel:
             async with conn.transaction():
                 await self._repository.upsert_run_step(conn, updated_step)
         return await self.fail_run(step.run_id, step.system_agent_id, error, stop_reason=stop_reason)
+
+    async def requeue_run_step_for_retry(
+        self,
+        step_id: UUID,
+        worker_id: str,
+        error: str,
+        *,
+        retry_after_seconds: int = 0,
+        reason: str = "retryable_runtime_failure",
+    ) -> RunStepCommandResult:
+        step = await self._repository.fetch_run_step(step_id)
+        if step is None:
+            raise KeyError(f"Run step {step_id} not found")
+        if step.claimed_by_worker != worker_id:
+            raise ValueError(f"Run step {step_id} is not claimed by worker {worker_id}")
+        if step.status != "claimed":
+            raise ValueError(f"Run step {step_id} is not claimable for retry from status {step.status}")
+        run = await self._repository.fetch_run(step.run_id)
+        if run is None:
+            raise KeyError(f"Run {step.run_id} not found")
+        if run.status in {"completed", "failed"}:
+            raise ValueError(f"Run {run.run_id} is already {run.status}")
+        task = await self._repository.fetch_task(step.task_id)
+        if task is None:
+            raise KeyError(f"Task {step.task_id} not found")
+        participant = await self._require_run_participant(
+            run=run,
+            task=task,
+            system_agent_id=step.system_agent_id,
+        )
+        now = self._now()
+        retry_count = int(step.metadata.get("retryable_failure_count") or 0) + 1
+        retry_at = now + timedelta(seconds=max(0, retry_after_seconds))
+        truncated_error = error[:4_000]
+        updated_step = step.model_copy(
+            update={
+                "status": "created",
+                "claimed_by_worker": None,
+                "lease_expires_at": None,
+                "last_heartbeat_at": None,
+                "next_retry_at": retry_at,
+                "execution_handle": None,
+                "error": truncated_error,
+                "updated_at": now,
+                "metadata": {
+                    **step.metadata,
+                    "retryable_failure_count": retry_count,
+                    "last_retryable_error": truncated_error,
+                    "last_retryable_error_at": now.isoformat(),
+                    "retry_reason": reason,
+                },
+            }
+        )
+        updated_run = run.model_copy(
+            update={
+                "status": "progressing",
+                "updated_at": now,
+                "metadata": {
+                    **run.metadata,
+                    "blocked_dependency": reason,
+                    "last_retryable_error": truncated_error,
+                    "last_retryable_error_at": now.isoformat(),
+                    "next_retry_at": retry_at.isoformat(),
+                },
+            }
+        )
+        actor = ActorRef(type="agent", id=participant.participant_id)
+        async with self._repository._pool.acquire() as conn:  # noqa: SLF001
+            async with conn.transaction():
+                await self._repository.upsert_run_step(conn, updated_step)
+                await self._repository.upsert_run(conn, updated_run)
+                event = await self._build_thread_event(
+                    conn,
+                    updated_step.workspace_id,
+                    updated_step.thread_id,
+                    "run_step.requeued",
+                    actor=actor,
+                    target=TargetRef(type="run_step", id=updated_step.step_id),
+                    payload={
+                        **updated_step.model_dump(mode="json"),
+                        "retry_after_seconds": max(0, retry_after_seconds),
+                        "retry_reason": reason,
+                    },
+                    visibility="agents_only",
+                    timestamp=now,
+                    correlation_id=updated_run.correlation_id,
+                    causation_id=task.task_id,
+                )
+                await self._repository.record_event(conn, event)
+        return RunStepCommandResult(
+            step=updated_step,
+            run=updated_run,
+            task=task,
+            events=[event],
+        )
 
     async def claim_next_tool_call(
         self,
@@ -13848,34 +14966,433 @@ class CollaborationKernel:
 
     async def _require_dossier_write_actor(
         self,
-        dossier: ResearchDossier,
+        dossier: Dossier,
         actor: ParticipantInput,
+        *,
+        allow_terminal: bool = False,
     ) -> None:
+        if not allow_terminal and dossier.status in _DOSSIER_TERMINAL_STATUSES:
+            raise ValueError(f"Dossier {dossier.dossier_id} is {dossier.status}")
         if actor.participant_type != "user":
             return
         user_id = self._actor_user_id(actor)
         if user_id is None:
-            raise PermissionError("Methodology dossier writes require an authenticated user")
+            raise PermissionError("Dossier writes require an authenticated user")
         await self._require_organization_permission(
             dossier.organization_id,
             user_id,
             "methodology.write",
         )
 
-    async def _require_research_dossier_notebook(
+    def _validate_dossier_lifecycle_transition(
+        self,
+        *,
+        current_status: str,
+        target_status: str,
+    ) -> None:
+        if target_status == current_status:
+            return
+        if current_status in _DOSSIER_TERMINAL_STATUSES:
+            raise ValueError(f"Dossier lifecycle status {current_status!r} is terminal")
+        allowed = _DOSSIER_ALLOWED_STATUS_TRANSITIONS.get(current_status, set())
+        if target_status not in allowed:
+            raise ValueError(
+                f"Cannot transition dossier lifecycle from {current_status!r} to {target_status!r}"
+            )
+
+    async def _validate_dossier_completion_profile(self, dossier: Dossier) -> None:
+        if dossier.metadata.get("completion_profile") != "full_methodology_research":
+            return
+        detail = await self._repository.fetch_dossier_notebook_detail(dossier.dossier_id)
+        if detail is None:
+            raise ValueError("Full methodology research dossiers require a notebook before ready")
+        found_components: set[str] = set()
+        for item in [*detail.notes, *detail.concepts, *detail.claims]:
+            found_components.update(
+                self._knowledge_components_from_metadata(item.metadata)
+            )
+        missing = sorted(_FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS - found_components)
+        if missing:
+            raise ValueError(
+                "Full methodology research dossier is missing required knowledge "
+                f"components: {', '.join(missing)}"
+            )
+        sources = await self._repository.list_dossier_sources(dossier.dossier_id)
+        included_sources = [source for source in sources if source.status == "included"]
+        if not included_sources:
+            raise ValueError(
+                "Full methodology research dossiers require at least one included source before ready"
+            )
+        last_request = dossier.metadata.get("last_research_request")
+        if not isinstance(last_request, dict):
+            return
+        max_search_turns = last_request.get("max_search_turns")
+        try:
+            required_internet_sources = (
+                int(max_search_turns) if max_search_turns is not None else 0
+            )
+        except (TypeError, ValueError):
+            required_internet_sources = 0
+        if required_internet_sources <= 0:
+            return
+        included_internet_sources = [
+            source
+            for source in included_sources
+            if (
+                bool((source.fetch_metadata or {}).get("internet_search"))
+                and (source.source_uri or "").startswith(("http://", "https://"))
+            )
+        ]
+        if len(included_internet_sources) < required_internet_sources:
+            raise ValueError(
+                "Full methodology research dossier is missing required included "
+                f"internet sources: {len(included_internet_sources)}/"
+                f"{required_internet_sources}"
+            )
+
+    @staticmethod
+    def _required_methodology_knowledge_components(
+        dossier: Dossier | None,
+    ) -> list[str]:
+        configured = (
+            dossier.metadata.get("required_knowledge_components")
+            if dossier is not None
+            else None
+        )
+        if isinstance(configured, list):
+            required = [value for value in configured if isinstance(value, str) and value]
+            if required:
+                if dossier.metadata.get("completion_profile") == "full_methodology_research":
+                    return sorted(set(required) | _FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS)
+                return sorted(dict.fromkeys(required))
+        return sorted(_FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS)
+
+    @staticmethod
+    def _methodology_component_note_kind(component: str) -> str:
+        return _METHODOLOGY_KNOWLEDGE_COMPONENT_NOTE_KINDS.get(component, "other")
+
+    @staticmethod
+    def _methodology_component_note_slug(component: str) -> str:
+        return f"coverage-{component.replace('_', '-')}"
+
+    @staticmethod
+    def _methodology_component_note_title(component: str) -> str:
+        return _METHODOLOGY_KNOWLEDGE_COMPONENT_TITLES.get(
+            component,
+            component.replace("_", " ").title(),
+        )
+
+    @staticmethod
+    def _methodology_component_note_specs(
+        components: list[str],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "component": component,
+                "slug": CollaborationKernel._methodology_component_note_slug(component),
+                "title": CollaborationKernel._methodology_component_note_title(component),
+                "note_kind": CollaborationKernel._methodology_component_note_kind(
+                    component
+                ),
+                "summary": (
+                    "Concise "
+                    + component.replace("_", " ")
+                    + " coverage for the methodology dossier."
+                ),
+                "metadata": {"knowledge_component": component},
+            }
+            for component in sorted(dict.fromkeys(components))
+        ]
+
+    @staticmethod
+    def _methodology_component_note_spec_lines(components: list[str]) -> list[str]:
+        lines: list[str] = []
+        for spec in CollaborationKernel._methodology_component_note_specs(components):
+            lines.append(
+                json.dumps(
+                    {
+                        "component": spec["component"],
+                        "notes.upsert": {
+                            "slug": spec["slug"],
+                            "title": spec["title"],
+                            "note_kind": spec["note_kind"],
+                            "status": "active",
+                            "summary": spec["summary"],
+                            "metadata": spec["metadata"],
+                        },
+                    },
+                    sort_keys=True,
+                )
+            )
+        return lines
+
+    @staticmethod
+    def _normalize_methodology_component_name(value: Any) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+        if not normalized:
+            return None
+        if normalized in _FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS:
+            return normalized
+        return _METHODOLOGY_KNOWLEDGE_COMPONENT_ALIASES.get(normalized)
+
+    @staticmethod
+    def _knowledge_components_from_metadata(metadata: dict[str, Any]) -> list[str]:
+        components: list[str] = []
+        for key in (
+            "knowledge_component",
+            "knowledge_components",
+            "component",
+            "components",
+            "methodology_component",
+            "methodology_components",
+            "required_component",
+            "required_components",
+        ):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                components.append(value.strip())
+            elif isinstance(value, list):
+                components.extend(
+                    item.strip()
+                    for item in value
+                    if isinstance(item, str) and item.strip()
+                )
+        normalized_components: list[str] = []
+        for component in components:
+            normalized = CollaborationKernel._normalize_methodology_component_name(
+                component
+            )
+            normalized_components.append(normalized or component.strip())
+        return list(dict.fromkeys(normalized_components))
+
+    @staticmethod
+    def _infer_methodology_component_from_content(
+        *,
+        note_kind: str | None = None,
+        slug: str | None = None,
+        title: str | None = None,
+        body: str | None = None,
+        summary: str | None = None,
+        required_components: set[str] | None = None,
+    ) -> str | None:
+        required = required_components or set(_FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS)
+        haystack = " ".join(
+            item for item in (slug, title, summary, body) if isinstance(item, str)
+        )
+        normalized_haystack = re.sub(r"[^a-z0-9]+", "_", haystack.lower()).strip("_")
+        for component in sorted(required, key=len, reverse=True):
+            if component in normalized_haystack:
+                return component
+        for alias, component in _METHODOLOGY_KNOWLEDGE_COMPONENT_ALIASES.items():
+            if component in required and re.search(
+                rf"(^|_){re.escape(alias)}(_|$)",
+                normalized_haystack,
+            ):
+                return component
+        kind_component = {
+            "source": "source_bibliography",
+            "contradiction": "contradictions",
+            "gap": "gaps",
+            "synthesis": "synthesis",
+        }.get(note_kind or "")
+        if kind_component in required:
+            return kind_component
+        return None
+
+    def _normalize_dossier_knowledge_metadata(
+        self,
+        *,
+        dossier: Dossier,
+        existing_metadata: dict[str, Any] | None,
+        payload_metadata: dict[str, Any],
+        note_kind: str | None = None,
+        slug: str | None = None,
+        title: str | None = None,
+        body: str | None = None,
+        summary: str | None = None,
+    ) -> dict[str, Any]:
+        metadata = {
+            **(existing_metadata or {}),
+            **payload_metadata,
+        }
+        is_methodology_dossier = (
+            dossier.metadata.get("completion_profile") == "full_methodology_research"
+            or bool(dossier.metadata.get("required_knowledge_components"))
+        )
+        if not is_methodology_dossier:
+            return metadata
+        required_components = set(
+            self._required_methodology_knowledge_components(dossier)
+        )
+        components = [
+            component
+            for component in self._knowledge_components_from_metadata(metadata)
+            if component in required_components
+        ]
+        if not components:
+            inferred = self._infer_methodology_component_from_content(
+                note_kind=note_kind,
+                slug=slug,
+                title=title,
+                body=body,
+                summary=summary,
+                required_components=required_components,
+            )
+            if inferred is not None:
+                components = [inferred]
+        if components:
+            components = list(dict.fromkeys(components))
+            metadata["knowledge_component"] = components[0]
+            if len(components) > 1:
+                metadata["knowledge_components"] = components
+        return metadata
+
+    @staticmethod
+    def _methodology_knowledge_component_coverage(
+        *,
+        notebook: DossierNotebookDetail | None,
+        required_components: list[str],
+    ) -> list[MethodologyResearchKnowledgeComponent]:
+        refs_by_component: dict[str, list[dict[str, Any]]] = {}
+        if notebook is not None:
+            for item_type, items in (
+                ("note", notebook.notes),
+                ("concept", notebook.concepts),
+                ("claim", notebook.claims),
+            ):
+                for item in items:
+                    components = CollaborationKernel._knowledge_components_from_metadata(
+                        item.metadata
+                    )
+                    if not components:
+                        continue
+                    ref_id = (
+                        getattr(item, "note_id", None)
+                        or getattr(item, "concept_id", None)
+                        or getattr(item, "claim_id", None)
+                    )
+                    label = (
+                        getattr(item, "title", None)
+                        or getattr(item, "name", None)
+                        or getattr(item, "claim_key", None)
+                        or getattr(item, "statement", None)
+                    )
+                    for item_component in components:
+                        refs_by_component.setdefault(item_component, []).append(
+                            {
+                                "type": item_type,
+                                "id": str(ref_id) if ref_id is not None else None,
+                                "label": label,
+                            }
+                        )
+        component_names = sorted(
+            set(required_components) | set(refs_by_component.keys())
+        )
+        return [
+            MethodologyResearchKnowledgeComponent(
+                component=component,
+                present=bool(refs_by_component.get(component)),
+                item_count=len(refs_by_component.get(component, [])),
+                refs=refs_by_component.get(component, []),
+            )
+            for component in component_names
+        ]
+
+    @staticmethod
+    def _methodology_search_turns(
+        sources: list[DossierSource],
+    ) -> list[MethodologyResearchSearchTurn]:
+        grouped: dict[tuple[int | None, str | None], list[DossierSource]] = {}
+        group_metadata: dict[tuple[int | None, str | None], dict[str, Any]] = {}
+        for source in sources:
+            metadata = {
+                **(source.fetch_metadata or {}),
+                **(source.metadata or {}),
+            }
+            nested_search = metadata.get("search")
+            if not isinstance(nested_search, dict):
+                nested_search = {}
+            turn_raw = (
+                metadata.get("search_turn")
+                or metadata.get("turn")
+                or nested_search.get("turn")
+            )
+            turn: int | None
+            try:
+                turn = int(turn_raw) if turn_raw is not None else None
+            except (TypeError, ValueError):
+                turn = None
+            query = (
+                metadata.get("search_query")
+                or metadata.get("query")
+                or nested_search.get("query")
+            )
+            if not isinstance(query, str):
+                query = None
+            has_search_trace = any(
+                key in metadata
+                for key in (
+                    "internet_search",
+                    "web_search",
+                    "search_turn",
+                    "search_query",
+                    "query",
+                    "turn",
+                    "search",
+                )
+            )
+            if turn is None and query is None and not has_search_trace:
+                continue
+            key = (turn, query)
+            grouped.setdefault(key, []).append(source)
+            group_metadata.setdefault(key, {}).update(
+                {
+                    key_name: value
+                    for key_name, value in metadata.items()
+                    if key_name
+                    in {
+                        "internet_search",
+                        "web_search",
+                        "provider",
+                        "retrieved_at",
+                        "search_engine",
+                    }
+                }
+            )
+        return [
+            MethodologyResearchSearchTurn(
+                turn=turn,
+                query=query,
+                status="collected",
+                source_count=len(turn_sources),
+                sources=turn_sources,
+                metadata=group_metadata.get((turn, query), {}),
+            )
+            for (turn, query), turn_sources in sorted(
+                grouped.items(),
+                key=lambda item: (
+                    item[0][0] if item[0][0] is not None else 10_000,
+                    item[0][1] or "",
+                ),
+            )
+        ]
+
+    async def _require_dossier_notebook(
         self,
         dossier_id: UUID,
-    ) -> ResearchDossierNotebook:
-        notebook = await self._repository.fetch_research_dossier_notebook_for_dossier(
+    ) -> DossierNotebook:
+        notebook = await self._repository.fetch_dossier_notebook_for_dossier(
             dossier_id
         )
         if notebook is None:
-            raise KeyError(f"Research dossier notebook for {dossier_id} not found")
+            raise KeyError(f"Dossier notebook for {dossier_id} not found")
         return notebook
 
     async def _dossier_actor_system_agent_id(
         self,
-        dossier: ResearchDossier,
+        dossier: Dossier,
         actor: ParticipantInput,
     ) -> UUID | None:
         if actor.participant_type != "agent" or dossier.operations_workspace_id is None:
@@ -13891,14 +15408,14 @@ class CollaborationKernel:
     def _build_dossier_notebook_event(
         self,
         *,
-        dossier: ResearchDossier,
+        dossier: Dossier,
         actor: ParticipantInput,
         system_agent_id: UUID | None,
         event_type: str,
         payload: dict[str, Any],
         now: datetime,
-    ) -> ResearchDossierEvent:
-        return ResearchDossierEvent(
+    ) -> DossierEvent:
+        return DossierEvent(
             event_id=uuid4(),
             dossier_id=dossier.dossier_id,
             organization_id=dossier.organization_id,
@@ -13911,59 +15428,59 @@ class CollaborationKernel:
 
     async def _validate_dossier_note_refs(
         self,
-        dossier: ResearchDossier,
-        notebook: ResearchDossierNotebook,
-        payload: UpsertResearchDossierNoteRequest,
+        dossier: Dossier,
+        notebook: DossierNotebook,
+        payload: UpsertDossierNoteRequest,
     ) -> None:
         if payload.source_id is not None:
-            source = await self._repository.fetch_research_dossier_source(
+            source = await self._repository.fetch_dossier_source(
                 payload.source_id
             )
             if source is None or source.dossier_id != dossier.dossier_id:
-                raise KeyError(f"Research dossier source {payload.source_id} not found")
+                raise KeyError(f"Dossier source {payload.source_id} not found")
         if payload.concept_id is not None:
-            concept = await self._repository.fetch_research_dossier_concept(
+            concept = await self._repository.fetch_dossier_concept(
                 payload.concept_id
             )
             if concept is None or concept.notebook_id != notebook.notebook_id:
-                raise KeyError(f"Research dossier concept {payload.concept_id} not found")
+                raise KeyError(f"Dossier concept {payload.concept_id} not found")
         for note_id in payload.related_note_ids:
-            note = await self._repository.fetch_research_dossier_note(note_id)
+            note = await self._repository.fetch_dossier_note(note_id)
             if note is None or note.notebook_id != notebook.notebook_id:
-                raise KeyError(f"Research dossier note {note_id} not found")
+                raise KeyError(f"Dossier note {note_id} not found")
 
     async def _validate_dossier_graph_ref(
         self,
-        notebook: ResearchDossierNotebook,
+        notebook: DossierNotebook,
         node_type: str,
         ref_id: UUID,
     ) -> None:
         if node_type == "note":
-            note = await self._repository.fetch_research_dossier_note(ref_id)
+            note = await self._repository.fetch_dossier_note(ref_id)
             if note is None or note.notebook_id != notebook.notebook_id:
-                raise KeyError(f"Research dossier note {ref_id} not found")
+                raise KeyError(f"Dossier note {ref_id} not found")
             return
         if node_type == "concept":
-            concept = await self._repository.fetch_research_dossier_concept(ref_id)
+            concept = await self._repository.fetch_dossier_concept(ref_id)
             if concept is None or concept.notebook_id != notebook.notebook_id:
-                raise KeyError(f"Research dossier concept {ref_id} not found")
+                raise KeyError(f"Dossier concept {ref_id} not found")
             return
         if node_type == "claim":
-            claim = await self._repository.fetch_research_dossier_claim(ref_id)
+            claim = await self._repository.fetch_dossier_claim(ref_id)
             if claim is None or claim.notebook_id != notebook.notebook_id:
-                raise KeyError(f"Research dossier claim {ref_id} not found")
+                raise KeyError(f"Dossier claim {ref_id} not found")
             return
         if node_type == "source":
-            source = await self._repository.fetch_research_dossier_source(ref_id)
+            source = await self._repository.fetch_dossier_source(ref_id)
             if source is None or source.dossier_id != notebook.dossier_id:
-                raise KeyError(f"Research dossier source {ref_id} not found")
+                raise KeyError(f"Dossier source {ref_id} not found")
             return
         raise ValueError(f"Unsupported dossier graph node type {node_type!r}")
 
-    async def _validate_research_dossier_source_refs(
+    async def _validate_dossier_source_refs(
         self,
-        dossier: ResearchDossier,
-        source: ResearchDossierSource,
+        dossier: Dossier,
+        source: DossierSource,
     ) -> None:
         if source.library_id is not None:
             library = await self._repository.fetch_library(source.library_id)
@@ -13987,7 +15504,7 @@ class CollaborationKernel:
                 )
             if source.library_id is not None and source.library_id != item.library_id:
                 raise ValueError(
-                    "Research dossier source library_id does not match library_item_id"
+                    "Dossier source library_id does not match library_item_id"
                 )
         asset_id = source.asset_id
         if source.asset_version_id is not None:
@@ -14014,7 +15531,7 @@ class CollaborationKernel:
                 and asset.organization_id != dossier.organization_id
             ):
                 raise ValueError(
-                    "Research dossier source asset belongs to a different organization"
+                    "Dossier source asset belongs to a different organization"
                 )
         for context_pack_id in source.context_pack_ids:
             context_pack = await self._repository.fetch_retrieval_context_pack(
@@ -14027,13 +15544,29 @@ class CollaborationKernel:
                 and context_pack.organization_id != dossier.organization_id
             ):
                 raise ValueError(
-                    "Research dossier source context pack belongs to a different organization"
+                    "Dossier source context pack belongs to a different organization"
                 )
+
+    @staticmethod
+    def _methodology_source_fallback_candidate_urls(
+        existing_sources: list[DossierSource] | None,
+    ) -> list[str]:
+        included_uris = {
+            source.source_uri.rstrip("/")
+            for source in existing_sources or []
+            if source.status == "included" and source.source_uri
+        }
+        candidates = [
+            url
+            for url in _METHODOLOGY_SOURCE_FALLBACK_URLS
+            if url.rstrip("/") not in included_uris
+        ]
+        return candidates or list(_METHODOLOGY_SOURCE_FALLBACK_URLS)
 
     def _build_researcher_dossier_task(
         self,
         *,
-        dossier: ResearchDossier,
+        dossier: Dossier,
         blueprint: MethodologyBlueprint,
         version: MethodologyBlueprintVersion,
         operations_workspace: Workspace,
@@ -14042,17 +15575,17 @@ class CollaborationKernel:
         now: datetime,
     ) -> Task:
         if dossier.thread_id is None:
-            raise ValueError("Research dossier has no operations thread")
+            raise ValueError("Dossier has no operations thread")
         if dossier.researcher_system_agent_id is None:
-            raise ValueError("Research dossier has no Researcher system agent")
+            raise ValueError("Dossier has no Researcher system agent")
         return Task(
             task_id=uuid4(),
             workspace_id=operations_workspace.workspace_id,
             thread_id=dossier.thread_id,
-            title=f"Build research dossier for {blueprint.title}",
+            title=f"Build dossier for {blueprint.title}",
             description=(
                 "Discover, collect, triage, and organize evidence into a durable "
-                "research dossier for a methodology blueprint version."
+                "dossier for a methodology blueprint version."
             ),
             requested_by=requested_by,
             visibility="agents_only",
@@ -14064,11 +15597,20 @@ class CollaborationKernel:
                 "target_system_agent_id": str(dossier.researcher_system_agent_id),
                 "target_participant_id": str(researcher_participant.participant_id),
                 "response_visibility": "agents_only",
-                "routing_reason": METHODOLOGY_RESEARCH_DOSSIER_BUILD_TASK_KIND,
-                "task_kind": METHODOLOGY_RESEARCH_DOSSIER_BUILD_TASK_KIND,
+                "routing_reason": METHODOLOGY_DOSSIER_BUILD_TASK_KIND,
+                "task_kind": METHODOLOGY_DOSSIER_BUILD_TASK_KIND,
                 "methodology_blueprint_id": str(blueprint.blueprint_id),
                 "methodology_blueprint_version_id": str(version.version_id),
-                "research_dossier_id": str(dossier.dossier_id),
+                "organization_id": str(dossier.organization_id),
+                "dossier_id": str(dossier.dossier_id),
+                "source_fallback_candidate_urls": list(
+                    _METHODOLOGY_SOURCE_FALLBACK_URLS
+                ),
+                "required_knowledge_component_note_specs": (
+                    self._methodology_component_note_specs(
+                        sorted(_FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS)
+                    )
+                ),
                 "retained_library_id": (
                     str(dossier.retained_library_id)
                     if dossier.retained_library_id is not None
@@ -14079,14 +15621,186 @@ class CollaborationKernel:
                     str(item) for item in version.selected_library_ids
                 ],
                 "task_instructions": [
-                    "Build a research dossier for the supplied topic and tasks.",
+                    "Build a dossier for the supplied topic and tasks.",
+                    "When tools are needed, return AgentRunResult JSON with tool_calls instead of a markdown plan.",
+                    f"For every control_plane__dossiers.* call, include _mcp_scope={{\"scope\":\"organization\",\"organization_id\":\"{dossier.organization_id}\"}} in the same tool arguments. Do not call control_plane__session.set_scope as a separate tool.",
+                    f"Use the exact dossier UUID {dossier.dossier_id}; do not shorten or infer it from the title.",
+                    "Use exact exposed tool names from the runtime catalog, for example web_search__search, web_search__search_and_fetch, web_search__fetch, control_plane__dossiers.get, control_plane__dossiers.sources.create, control_plane__dossiers.notes.upsert, control_plane__dossiers.lifecycle.transition, control_plane__dossiers.health.submit, and control_plane__dossiers.sync.",
+                    "For web_search__search and web_search__search_and_fetch, pass a single query string as {\"query\":\"...\",\"limit\":5}; do not pass queries or a list of queries.",
+                    "Do not include asset persistence, retained library, retain, persist, persist_asset, or save options in web_search tool calls; persist selected internet evidence later with control_plane__dossiers.sources.create.",
+                    "After every web_search__search or web_search__search_and_fetch result, immediately persist at least one credible HTTP result with control_plane__dossiers.sources.create before making another web_search call.",
+                    "After scoping, transition the dossier to collecting before evidence collection and to synthesizing before synthesis. Never call lifecycle.transition to the dossier's current status; move to the next source, note, health, sync, or readiness operation instead.",
+                    "For control_plane__dossiers.lifecycle.transition, use the argument name target_status exactly; do not use to or status. The valid methodology path is scoping to collecting to synthesizing to ready.",
                     "Search local and selected organization libraries first.",
                     "Use Retriever searches and context packs for pre-indexed sources.",
                     "Use web follow-up for gaps, recency, and contradiction checks.",
+                    "If search engines are rate-limited or return no results, use web_search__fetch on source_fallback_candidate_urls, then persist successfully fetched HTTP pages as included dossier sources with fetch_metadata.internet_search=true and a search_turn/rank.",
                     "Preserve fetched pages, papers, files, and media in the retained dossier library.",
-                    "Create dossier source records for included, excluded, duplicate, failed, and unresolved items.",
+                    "Create dossier source records for included, excluded, duplicate, failed, and unresolved items before returning any final update.",
+                    "For control_plane__dossiers.sources.create include dossier_id, source_kind, status, title, source_uri when available, quality_notes, rationale, fetch_metadata, and metadata. For internet results set fetch_metadata.internet_search=true, fetch_metadata.search_turn, fetch_metadata.search_query, and fetch_metadata.rank.",
+                    "For control_plane__dossiers.notes.upsert include dossier_id, slug, title, note_kind, status, body or summary, and metadata. Use metadata.knowledge_component for required methodology coverage. Allowed note_kind values are home, source, concept, entity, method, question, contradiction, gap, synthesis, and other; use other for research_plan, information_assets, libraries_and_dossiers, or quality_evaluation.",
+                    "For control_plane__dossiers.health.submit use status passed, warning, or failed; do not use degraded.",
                     "Record source-quality notes, contradictions, rationale, fetch metadata, and retained refs.",
-                    "Mark the dossier ready only when Methodologist has enough evidence and gaps are explicit.",
+                    "Required methodology knowledge-component notes use these exact component payload specs: "
+                    + " | ".join(
+                        self._methodology_component_note_spec_lines(
+                            sorted(_FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS)
+                        )
+                    ),
+                    "If sources or required knowledge components are still missing, request the next tool call instead of asking whether to continue.",
+                    "Transition the dossier lifecycle to ready only when persisted source records, knowledge components, notebook sync, health, contradictions, and gaps are complete.",
+                ],
+            },
+        )
+
+    def _build_researcher_dossier_refine_task(
+        self,
+        *,
+        dossier: Dossier,
+        blueprint: MethodologyBlueprint,
+        version: MethodologyBlueprintVersion,
+        researcher_participant: ParticipantProfile,
+        existing_sources: list[DossierSource] | None = None,
+        requested_by: UUID,
+        instructions: str,
+        max_search_turns: int,
+        required_components: list[str],
+        require_admin_ready_approval: bool,
+        request_metadata: dict[str, Any],
+        now: datetime,
+    ) -> Task:
+        if dossier.operations_workspace_id is None or dossier.thread_id is None:
+            raise ValueError("Dossier has no operations workspace/thread")
+        if dossier.researcher_system_agent_id is None:
+            raise ValueError("Dossier has no Researcher system agent")
+        missing_components = [
+            component
+            for component in request_metadata.get("missing_components", [])
+            if isinstance(component, str)
+            and component in _FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS
+        ]
+        try:
+            source_gap = int(request_metadata.get("source_gap", 0))
+        except (TypeError, ValueError):
+            source_gap = 0
+        source_fallback_required = bool(
+            request_metadata.get("source_fallback_required")
+        )
+        try:
+            next_search_turn = int(request_metadata.get("next_search_turn"))
+        except (TypeError, ValueError):
+            next_search_turn = None
+        source_fallback_candidate_urls = (
+            self._methodology_source_fallback_candidate_urls(existing_sources)
+        )
+        source_fallback_batch_size = max(1, min(source_gap, 2))
+        coverage_repair_components = (
+            sorted(dict.fromkeys(missing_components)) if source_gap <= 0 else []
+        )
+        source_fallback_instructions = [
+            f"Source-fallback mode is active because included HTTP source coverage is still short. In this task, use the first {source_fallback_batch_size} not-yet-included URL(s) from source_fallback_candidate_urls.",
+            "For each fallback URL, return a single AgentRunResult JSON that contains both tool calls in this order: first web_search__fetch for the URL, then control_plane__dossiers.sources.create for the same URL with status=\"included\", source_kind=\"webpage\", source_uri set to the URL, quality_notes, rationale, fetch_metadata.internet_search=true, fetch_metadata.search_turn, fetch_metadata.search_query, and fetch_metadata.rank. Do not return a fetch-only tool request and do not wait for a later turn to persist the source.",
+            "Do not call web_search__search, web_search__search_and_fetch, retriever, notebook, lifecycle, health, sync, or dossier.get before the paired source-create calls are requested. Do not persist about:blank, searxng://, retriever://, or failed search placeholders as included sources.",
+            (
+                f"Use fetch_metadata.search_turn={next_search_turn} for the next "
+                "included fallback source and increment it by one for each additional "
+                "included source in this task."
+            )
+            if next_search_turn is not None
+            else "Assign a new fetch_metadata.search_turn value that is not already used by an included dossier source.",
+        ] if source_gap > 0 and source_fallback_required else []
+        coverage_repair_instructions = [
+            "Coverage-repair mode is active for missing components: "
+            + ", ".join(coverage_repair_components)
+            + ". Before any web_search, retriever, notebook, lifecycle, health, sync, or dossier.get call, call control_plane__dossiers.notes.upsert once for each missing component using the exact payload specs below.",
+            "For coverage-repair notes, use summary instead of body. Keep summary as one valid JSON string without literal newlines or unescaped quotes, and include concrete methodology knowledge synthesized from the dossier topic and persisted evidence: required steps, participants, tools, information assets, quality criteria, contradictions, gaps, and source references when relevant. Do not repeat a component already completed in this task.",
+            "After the missing component notes are upserted, stop or proceed only to the requested health/sync/lifecycle handoff; do not loop on the same note.",
+            "Coverage-repair note payload specs: "
+            + " | ".join(
+                self._methodology_component_note_spec_lines(
+                    coverage_repair_components
+                )
+            ),
+        ] if coverage_repair_components else []
+        return Task(
+            task_id=uuid4(),
+            workspace_id=dossier.operations_workspace_id,
+            thread_id=dossier.thread_id,
+            title=f"Refine dossier research for {blueprint.title}",
+            description=(
+                "Run guided follow-up research, curate evidence, fill methodology "
+                "knowledge coverage, and propose readiness when complete."
+            ),
+            requested_by=requested_by,
+            visibility="agents_only",
+            correlation_id=dossier.dossier_id,
+            causation_id=version.version_id,
+            created_at=now,
+            updated_at=now,
+            metadata={
+                "target_system_agent_id": str(dossier.researcher_system_agent_id),
+                "target_participant_id": str(researcher_participant.participant_id),
+                "response_visibility": "agents_only",
+                "routing_reason": METHODOLOGY_DOSSIER_REFINE_TASK_KIND,
+                "task_kind": METHODOLOGY_DOSSIER_REFINE_TASK_KIND,
+                "methodology_blueprint_id": str(blueprint.blueprint_id),
+                "methodology_blueprint_version_id": str(version.version_id),
+                "organization_id": str(dossier.organization_id),
+                "dossier_id": str(dossier.dossier_id),
+                "source_fallback_candidate_urls": source_fallback_candidate_urls,
+                "retained_library_id": (
+                    str(dossier.retained_library_id)
+                    if dossier.retained_library_id is not None
+                    else None
+                ),
+                "completion_profile": "full_methodology_research",
+                "instructions": instructions,
+                "max_search_turns": max_search_turns,
+                "required_knowledge_components": required_components,
+                "required_knowledge_component_note_specs": (
+                    self._methodology_component_note_specs(required_components)
+                ),
+                "coverage_repair_components": coverage_repair_components,
+                "source_fallback_batch_size": source_fallback_batch_size,
+                "require_admin_ready_approval": require_admin_ready_approval,
+                "request_metadata": request_metadata,
+                "task_instructions": [
+                    "On the first turn, request at least one discovery tool call with AgentRunResult JSON; do not return only a markdown plan.",
+                    f"Research request instructions: {instructions}",
+                    f"Run at least {max_search_turns} internet search turns when external evidence is required, and persist at least {max_search_turns} included internet source records with search-turn metadata before readiness.",
+                    "Required knowledge components for this request: "
+                    + ", ".join(required_components),
+                    f"For every control_plane__dossiers.* call, include _mcp_scope={{\"scope\":\"organization\",\"organization_id\":\"{dossier.organization_id}\"}} in the same tool arguments. Do not call control_plane__session.set_scope as a separate tool.",
+                    f"Use the exact dossier UUID {dossier.dossier_id}; do not shorten or infer it from the title.",
+                    "Use exact exposed tool names from the runtime catalog, for example web_search__search, web_search__search_and_fetch, web_search__fetch, control_plane__dossiers.get, control_plane__dossiers.sources.create, control_plane__dossiers.notes.upsert, control_plane__dossiers.concepts.upsert, control_plane__dossiers.claims.upsert, control_plane__dossiers.links.upsert, control_plane__dossiers.lifecycle.transition, control_plane__dossiers.health.submit, and control_plane__dossiers.sync.",
+                    "For web_search__search and web_search__search_and_fetch, pass a single query string as {\"query\":\"...\",\"limit\":5}; do not pass queries or a list of queries.",
+                    "Do not include asset persistence, retained library, retain, persist, persist_asset, or save options in web_search tool calls; persist selected internet evidence later with control_plane__dossiers.sources.create.",
+                    "After every web_search__search or web_search__search_and_fetch result, immediately persist at least one credible HTTP result with control_plane__dossiers.sources.create before making another web_search call.",
+                    *source_fallback_instructions,
+                    "When included internet source records are below max_search_turns, source persistence is the next action; do not run another web_search or retriever call until a source record has been created.",
+                    "If web_search__search or web_search__search_and_fetch is rate-limited, blocked, or empty, call web_search__fetch for source_fallback_candidate_urls from task metadata. After each successful HTTP fetch, immediately call control_plane__dossiers.sources.create with status=\"included\", source_kind=\"webpage\", source_uri set to that URL, fetch_metadata.internet_search=true, fetch_metadata.search_turn, fetch_metadata.search_query, and fetch_metadata.rank. Do not use about:blank, searxng://, retriever://, or failed search placeholders for included source coverage.",
+                    "Use web-search MCP only through the runtime tool path.",
+                    "Run multi-turn internet search when the instructions require external evidence.",
+                    "After scoping, transition the dossier to collecting before evidence collection and to synthesizing before synthesis. Never call lifecycle.transition to the dossier's current status; move to the next source, note, health, sync, or readiness operation instead.",
+                    "For control_plane__dossiers.lifecycle.transition, use the argument name target_status exactly; do not use to or status. The valid methodology path is scoping to collecting to synthesizing to ready.",
+                    "Persist selected, excluded, duplicate, failed, and unresolved sources on the dossier before returning any final update.",
+                    "For each credible web-search result, call control_plane__dossiers.sources.create with dossier_id, source_kind=\"webpage\", status, title, source_uri, quality_notes, rationale, fetch_metadata, and metadata.",
+                    "For internet results set fetch_metadata.internet_search=true, fetch_metadata.search_turn, fetch_metadata.search_query, and fetch_metadata.rank so the research console can reconstruct search turns.",
+                    "Fill every required knowledge component in notes, concepts, or claims metadata before readiness.",
+                    "Use control_plane__dossiers.notebook.get at most once per run; after it returns, write the missing notes, concepts, claims, health, sync, or lifecycle transition instead of rereading the same notebook.",
+                    "For control_plane__dossiers.notes.upsert include dossier_id, slug, title, note_kind, status, body or summary, and metadata. Use metadata.knowledge_component for required methodology coverage. Allowed note_kind values are home, source, concept, entity, method, question, contradiction, gap, synthesis, and other; use other for research_plan, information_assets, libraries_and_dossiers, or quality_evaluation.",
+                    "Required methodology knowledge-component notes use these exact component payload specs: "
+                    + " | ".join(
+                        self._methodology_component_note_spec_lines(
+                            required_components
+                        )
+                    ),
+                    *coverage_repair_instructions,
+                    "For control_plane__dossiers.health.submit use status passed, warning, or failed; do not use degraded.",
+                    "If sources or required knowledge components are still missing, request the next tool call instead of asking whether to continue.",
+                    "Ask clarifying questions through interaction requests on the dossier thread when blocked.",
+                    "Sync the dossier notebook projection and submit health checks before readiness.",
+                    "Do not draft the methodology; Methodologist owns drafting after the dossier is ready.",
                 ],
             },
         )
@@ -14094,18 +15808,19 @@ class CollaborationKernel:
     def _build_methodologist_blueprint_task(
         self,
         *,
-        dossier: ResearchDossier,
+        dossier: Dossier,
         version: MethodologyBlueprintVersion,
-        sources: list[ResearchDossierSource] | None = None,
+        sources: list[DossierSource] | None = None,
         requested_by: UUID,
         now: datetime,
     ) -> Task:
         if dossier.operations_workspace_id is None or dossier.thread_id is None:
-            raise ValueError("Research dossier has no operations workspace/thread")
+            raise ValueError("Dossier has no operations workspace/thread")
         if dossier.methodologist_system_agent_id is None:
-            raise ValueError("Research dossier has no Methodologist system agent")
+            raise ValueError("Dossier has no Methodologist system agent")
         if dossier.methodologist_participant_id is None:
-            raise ValueError("Research dossier has no Methodologist participant")
+            raise ValueError("Dossier has no Methodologist participant")
+        source_brief = self._methodologist_source_brief(sources or [])
         return Task(
             task_id=uuid4(),
             workspace_id=dossier.operations_workspace_id,
@@ -14113,7 +15828,7 @@ class CollaborationKernel:
             title=f"Draft methodology blueprint version {version.version_number}",
             description=(
                 "Synthesize cited methodology, methodics, and a "
-                "WorkspaceHarness-compatible draft from the completed research dossier."
+                "WorkspaceHarness-compatible draft from the ready dossier."
             ),
             requested_by=requested_by,
             visibility="agents_only",
@@ -14129,7 +15844,7 @@ class CollaborationKernel:
                 "task_kind": METHODOLOGY_BLUEPRINT_DRAFT_TASK_KIND,
                 "methodology_blueprint_id": str(dossier.blueprint_id),
                 "methodology_blueprint_version_id": str(version.version_id),
-                "research_dossier_id": str(dossier.dossier_id),
+                "dossier_id": str(dossier.dossier_id),
                 "retained_library_id": (
                     str(dossier.retained_library_id)
                     if dossier.retained_library_id is not None
@@ -14143,13 +15858,92 @@ class CollaborationKernel:
                     source.model_dump(mode="json") for source in sources or []
                 ],
                 "task_instructions": [
-                    "Read the completed research dossier before synthesis.",
+                    f"Use organization-scoped control-plane MCP calls with _mcp_scope={{\"scope\":\"organization\",\"organization_id\":\"{dossier.organization_id}\"}} in the same tool arguments.",
+                    f"Read the ready dossier with control_plane__dossiers.get using argument dossier_id=\"{dossier.dossier_id}\" before synthesis.",
+                    f"Read the dossier notebook with control_plane__dossiers.notebook.get using argument dossier_id=\"{dossier.dossier_id}\" before deciding evidence is insufficient.",
+                    f"Navigate the dossier with control_plane__dossiers.navigate using dossier_id=\"{dossier.dossier_id}\", include_sources=true, max_results=30, and query=\"methodology basis methodics participants tools information assets quality evaluation contradictions gaps synthesis\" before synthesis.",
+                    "If one read is sparse, continue from the other read results plus the embedded evidence brief in this task. Do not return an insufficient-evidence final response while source records or knowledge-component notes are embedded or visible.",
+                    f"Embedded dossier summary: {self._compact_instruction_text(dossier.summary, limit=900) or 'No separate summary was supplied; use notebook notes, source records, contradictions, and gaps.'}",
+                    f"Embedded dossier topic: {self._compact_instruction_text(dossier.topic, limit=500)}",
+                    f"Embedded requested task list: {self._compact_instruction_json(dossier.tasks, limit=1000)}",
+                    f"Embedded dossier contradictions: {self._compact_instruction_json(dossier.contradictions, limit=900)}",
+                    f"Embedded dossier gaps: {self._compact_instruction_json(dossier.gaps, limit=900)}",
+                    f"Embedded source records: {source_brief}",
+                    "Treat the embedded topic and requested task list as draft requirements alongside source evidence. If the request names survey quantification, willingness-to-pay validation, launch-channel gates, participants, tools, or information assets, the harness_draft must include those elements in methodics steps and metadata.",
                     "Use dossier source records, context packs, contradictions, and gaps as the evidence boundary.",
-                    "Submit a cited markdown blueprint draft through methodology.blueprints.submit_draft.",
-                    "Submit a WorkspaceHarness-compatible harness_draft with methodology, methodics, execution_rules, and metadata.",
+                    "Return AgentRunResult JSON with tool_calls. Do not wrap it in markdown, headings, or prose when requesting tool execution.",
+                    "The required side effect is a draft submission. Do not return a final markdown-only response or an insufficient-evidence response while no completed control_plane__methodology.blueprints.submit_draft tool result is visible.",
+                    "After dossier, notebook, and navigation reads are visible, the next tool-bearing response must request control_plane__methodology.blueprints.submit_draft. If evidence is imperfect, include the limitation in cited_output and harness_draft.metadata.gaps instead of stopping.",
+                    "Submit the cited markdown blueprint draft with exact tool name control_plane__methodology.blueprints.submit_draft.",
+                    f"For control_plane__methodology.blueprints.submit_draft use version_id=\"{version.version_id}\", cited_output as a compact markdown string, harness_draft as a valid WorkspaceHarness JSON object, metadata.dossier_id=\"{dossier.dossier_id}\", and the same _mcp_scope organization payload.",
+                    "Keep cited_output and harness_draft valid JSON values: escape newlines as \\n inside strings, avoid unescaped quotes, and keep large narrative detail in cited_output instead of deeply nested harness fields.",
+                    "The harness_draft must include methodology, methodics, execution_rules, and metadata. Each methodic must include name, goal, applicability, a top-level steps array, and success_criteria. Do not use ordered_steps. Each step must include instruction, recommended_tool_patterns, expected_artifacts, and verification.",
+                    "The draft must explicitly cover required steps, participants or roles, tools and methods, information assets, source/library/dossier references, quality checks, contradictions, gaps, and synthesis.",
                     "Do not approve or apply the blueprint, and do not start Conductor execution.",
                 ],
             },
+        )
+
+    @staticmethod
+    def _compact_instruction_text(value: str | None, *, limit: int) -> str:
+        if value is None:
+            return ""
+        text = " ".join(str(value).split())
+        return text if len(text) <= limit else text[:limit].rstrip() + "..."
+
+    @classmethod
+    def _compact_instruction_json(cls, value: object, *, limit: int) -> str:
+        try:
+            text = json.dumps(value, sort_keys=True, default=str)
+        except TypeError:
+            text = str(value)
+        return cls._compact_instruction_text(text, limit=limit)
+
+    @classmethod
+    def _methodologist_source_brief(cls, sources: list[DossierSource]) -> str:
+        included = [source for source in sources if source.status == "included"]
+        candidates = included or sources
+        if not candidates:
+            return "No source records were embedded; rely on notebook and navigation reads."
+        parts: list[str] = []
+        for index, source in enumerate(candidates[:12], start=1):
+            citation = source.citation_id or f"S{index}"
+            title = cls._compact_instruction_text(source.title, limit=120)
+            uri = cls._compact_instruction_text(source.source_uri, limit=180)
+            rationale = cls._compact_instruction_text(
+                source.rationale or source.quality_notes,
+                limit=180,
+            )
+            parts.append(
+                f"{citation}: status={source.status}; title={title}; "
+                f"uri={uri}; note={rationale}"
+            )
+        if len(candidates) > len(parts):
+            parts.append(f"... plus {len(candidates) - len(parts)} more source records")
+        return " | ".join(parts)
+
+    async def _list_methodology_blueprint_draft_tasks(
+        self,
+        dossier_id: UUID,
+    ) -> list[Task]:
+        if hasattr(self._repository, "list_tasks_for_correlation"):
+            return await self._repository.list_tasks_for_correlation(
+                dossier_id,
+                task_kind=METHODOLOGY_BLUEPRINT_DRAFT_TASK_KIND,
+                limit=20,
+            )
+        return []
+
+    @staticmethod
+    def _should_recover_methodologist_handoff(metadata: dict[str, Any]) -> bool:
+        return any(
+            metadata.get(key) is True
+            for key in (
+                "ensure_methodologist_task",
+                "enqueue_methodologist",
+                "resume_methodologist",
+                "recover_methodologist_handoff",
+            )
         )
 
     @staticmethod
@@ -14671,18 +16465,38 @@ class CollaborationKernel:
             raise ValueError("Library slug must contain at least one letter or number")
         return normalized
 
-    def _build_research_dossier_notebook_defaults(
+    @staticmethod
+    def _matches_dossier_query(query: str, *values: str | None) -> bool:
+        normalized_query = query.strip().lower()
+        haystack = " ".join(value.lower() for value in values if value)
+        if not normalized_query or not haystack:
+            return False
+        if normalized_query in haystack:
+            return True
+        query_terms = re.findall(r"[a-z0-9]+", normalized_query)
+        haystack_terms = set(re.findall(r"[a-z0-9]+", haystack))
+        if not query_terms or not haystack_terms:
+            return False
+        matched_terms = sum(1 for term in query_terms if term in haystack_terms)
+        required_terms = (
+            len(query_terms)
+            if len(query_terms) <= 2
+            else max(2, (len(query_terms) * 3 + 4) // 5)
+        )
+        return matched_terms >= required_terms
+
+    def _build_dossier_notebook_defaults(
         self,
         *,
-        dossier: ResearchDossier,
+        dossier: Dossier,
         title: str,
         actor_id: UUID,
         now: datetime,
     ) -> tuple[
-        ResearchDossierNotebook,
-        ResearchDossierProviderBinding,
-        list[ResearchDossierNote],
-        list[ResearchDossierProviderExternalRef],
+        DossierNotebook,
+        DossierProviderBinding,
+        list[DossierNote],
+        list[DossierProviderExternalRef],
     ]:
         notebook_id = uuid4()
         binding_id = uuid4()
@@ -14717,13 +16531,13 @@ class CollaborationKernel:
             ("gap", "gaps", "Gaps", "Gaps.WebHome"),
             ("synthesis", "synthesis", "Synthesis", "Synthesis.WebHome"),
         ]
-        notes: list[ResearchDossierNote] = []
-        external_refs: list[ResearchDossierProviderExternalRef] = []
+        notes: list[DossierNote] = []
+        external_refs: list[DossierProviderExternalRef] = []
         for note_kind, slug, page_title, page_ref_suffix in managed_pages:
             note_id = uuid4()
             page_ref = f"{space_ref}.{page_ref_suffix}"
             notes.append(
-                ResearchDossierNote(
+                DossierNote(
                     note_id=note_id,
                     notebook_id=notebook_id,
                     dossier_id=dossier.dossier_id,
@@ -14755,13 +16569,13 @@ class CollaborationKernel:
                 )
             )
             external_refs.append(
-                ResearchDossierProviderExternalRef(
+                DossierProviderExternalRef(
                     ref_id=uuid4(),
                     binding_id=binding_id,
                     notebook_id=notebook_id,
                     dossier_id=dossier.dossier_id,
                     organization_id=dossier.organization_id,
-                    open_talon_resource_type="research_dossier_note",
+                    open_talon_resource_type="dossier_note",
                     open_talon_resource_id=note_id,
                     external_kind="page",
                     external_id=page_ref,
@@ -14776,7 +16590,7 @@ class CollaborationKernel:
                 )
             )
         home_note_id = notes[0].note_id
-        notebook = ResearchDossierNotebook(
+        notebook = DossierNotebook(
             notebook_id=notebook_id,
             dossier_id=dossier.dossier_id,
             organization_id=dossier.organization_id,
@@ -14797,7 +16611,7 @@ class CollaborationKernel:
                 "dossier_slug": dossier_slug,
             },
         )
-        provider_binding = ResearchDossierProviderBinding(
+        provider_binding = DossierProviderBinding(
             binding_id=binding_id,
             notebook_id=notebook_id,
             dossier_id=dossier.dossier_id,
@@ -14828,13 +16642,13 @@ class CollaborationKernel:
             metadata={"managed": True, "system_plugin": "xwiki"},
         )
         external_refs.append(
-            ResearchDossierProviderExternalRef(
+            DossierProviderExternalRef(
                 ref_id=uuid4(),
                 binding_id=binding_id,
                 notebook_id=notebook_id,
                 dossier_id=dossier.dossier_id,
                 organization_id=dossier.organization_id,
-                open_talon_resource_type="research_dossier_notebook",
+                open_talon_resource_type="dossier_notebook",
                 open_talon_resource_id=notebook_id,
                 external_kind="space",
                 external_id=space_ref,
@@ -14849,7 +16663,7 @@ class CollaborationKernel:
     @staticmethod
     def _default_dossier_note_body(
         *,
-        dossier: ResearchDossier,
+        dossier: Dossier,
         title: str,
         space_ref: str,
     ) -> str:

@@ -6,6 +6,12 @@ Agent catalog management supports both manual database-backed definitions and Gi
 
 The Libraries page manages organization, project, and workspace libraries, adds text or uploaded file items, attaches organization/project libraries to workspaces, and queues explicit retriever indexing jobs.
 
+The Methodologies page manages organization methodology blueprints. It creates
+Researcher-backed dossier requests, shows Methodologist drafts, supports
+human draft edits and versioned edits for approved methodologies, approves or
+rejects versions, applies approved harness drafts to workspaces, and archives
+methodologies without deleting their dossier provenance.
+
 ## Prerequisites
 
 Start the local backend stack from the repo root:
@@ -114,6 +120,7 @@ For a deployed environment, replace the generated `runtime-config.json` with val
 - API key create and revoke flow
 - project create with optional owner/editor/viewer seed bindings plus workspace create and delete flow inside the selected organization
 - library scoped create/list, text/upload item add, workspace attachment, and manual indexing controls
+- methodology request, draft edit, approval, workspace apply, and archive flow
 - swarm resource `Platform Global` and `Organization` scope switching
 - swarm resource agent create/delete flow
 - swarm resource tool create/delete flow

@@ -70,6 +70,7 @@ class RuntimeWorkerSettings:
     reconcile_interval_seconds: float
     poll_interval_seconds: float
     model_timeout_seconds: float
+    provider_failure_retry_seconds: int
     global_daily_token_cap: int
     workspace_daily_token_cap_default: int
     enable_kafka_wakeups: bool
@@ -113,6 +114,10 @@ class RuntimeWorkerSettings:
             reconcile_interval_seconds=_get_float("RECONCILE_INTERVAL_SECONDS", 5.0),
             poll_interval_seconds=_get_float("AGENT_LOOP_POLL_INTERVAL_SECONDS", 1.0),
             model_timeout_seconds=_get_float("AGENT_LOOP_MODEL_TIMEOUT_SECONDS", 60.0),
+            provider_failure_retry_seconds=_get_int(
+                "OPEN_TALON_LLM_PROVIDER_FAILURE_RETRY_SECONDS",
+                15 * 60,
+            ),
             global_daily_token_cap=_get_int("OPEN_TALON_GLOBAL_DAILY_TOKEN_CAP", 0),
             workspace_daily_token_cap_default=_get_int(
                 "OPEN_TALON_WORKSPACE_DAILY_TOKEN_CAP",

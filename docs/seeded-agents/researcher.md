@@ -8,11 +8,11 @@
 | Agent id | `44444444-4444-4444-4444-444444444449` |
 | Agent key | `researcher` |
 | Scope | global |
-| Role | `evidence discovery and research dossier agent` |
-| Profile kind | `methodology_research_dossier_specialist` |
-| Endpoint | `local-ollama` through provider `ollama` |
+| Role | `evidence discovery and dossier agent` |
+| Profile kind | `methodology_dossier_specialist` |
+| Endpoint | `openai-responses` through provider `openai` using `gpt-5.4-mini` |
 | Primary inputs | topic, target tasks, selected libraries, pre-indexed Retriever corpora, local files, database-visible context, web follow-up results |
-| Primary outputs | durable research dossier, source records, concept notebook, claims, typed links, context pack links, contradiction map, gaps, health/sync state, readiness decision |
+| Primary outputs | durable dossier, source records, concept notebook, claims, typed links, context pack links, contradiction map, gaps, health/sync state, readiness decision |
 
 ## Agent Profile
 
@@ -27,7 +27,7 @@ information.
 
 ## Idea
 
-Researcher is the seeded specialist for building reusable research dossiers.
+Researcher is the seeded specialist for building reusable dossiers.
 It performs multi-step evidence discovery and triage before Methodologist or
 another participant synthesizes methodology, decisions, or implementation
 plans.
@@ -45,7 +45,7 @@ The storage taxonomy is:
 - Libraries plus Retriever indexes are information storage for retained, indexed, and vectorized pieces.
 - Dossiers are knowledge storage for concept organization, claims, contradictions, gaps, methods, synthesis, provenance, and navigation.
 
-Each methodology dossier also has a notebook. The default notebook provider is
+Each dossier also has a notebook. The default notebook provider is
 XWiki, mapped as one XWiki space per dossier (`Dossiers.<dossier_slug>`).
 Open Talon stores the canonical lifecycle, source provenance, IAM, audit,
 concept/claim/link metadata, provider binding, external refs, health, and sync
@@ -72,23 +72,23 @@ Researcher seeds an explicit `AgentHarness`:
 - run notebook health/sync checks and mark a dossier ready only after summary, contradictions, gaps, context packs, and unresolved notebook issues are explicit
 
 The response contract is operational rather than conversational: Researcher
-persists dossier state through methodology dossier MCP operations and uses
+persists dossier state through dossier MCP operations and uses
 thread messages only for progress, summaries, or blocker notes.
 
 ## Dossier Workflow
 
 Creating a methodology blueprint creates the initial blueprint version, a
-research dossier, an organization-managed retained-source library, and a
+dossier, an organization-managed retained-source library, and a
 notebook provider binding for the XWiki dossier space, then creates a targeted
 Researcher task in the organization's `Administration / Organization Operations`
 workspace.
 
 Researcher can use least-privilege access to Library, Retriever, and Web Search
-plus private methodology dossier MCP operations. It records source status and
+plus private dossier MCP operations. It records source status and
 quality, saves fetched evidence into the retained dossier library when possible,
 attaches context packs, writes notebook notes/concepts/claims/links, submits
-notebook health, syncs the provider projection, and marks the dossier
-`ready_for_methodologist`.
+notebook health, syncs the provider projection, and transitions the dossier
+lifecycle to `ready`.
 
 When the dossier is ready, the service creates a targeted Methodologist task
 with the dossier summary, source records, contradictions, gaps, context pack
@@ -101,7 +101,7 @@ Seed and migration coverage verifies:
 
 - Researcher exists as a seeded global agent
 - Researcher uses `normal_message_fanout=false`
-- Researcher accepts `methodology_research_dossier_build` and `methodology_research_dossier_refine`
+- Researcher accepts `methodology_dossier_build` and `methodology_dossier_refine`
 - the harness includes local-library-first research, web follow-up, source quality, contradiction mapping, retained refs, and source status labels
 - the `methodology_researcher` IAM role grants least-privilege library, retrieval, web search, and methodology permissions
 - the private MCP allowlist includes dossier read/write, source update, context-pack attach, notebook get, note/concept/claim/link upsert, navigation, sync, health, and readiness operations

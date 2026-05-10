@@ -174,7 +174,9 @@ class RuntimeExecutionService:
                     thread_id=claimed_task.thread_id,
                     system_agent_id=system_agent_id,
                     step_index=0,
-                    status="created",
+                    status="claimed",
+                    claimed_by_worker="agent-task-worker",
+                    started_at=now,
                     submitted_at=now,
                     created_at=now,
                     updated_at=now,
@@ -220,6 +222,7 @@ class RuntimeExecutionService:
                     await self._repository.record_event(conn, event)
 
         context = await self.build_agent_execution_context(task_id, system_agent_id, run.run_id)
+        context = context.model_copy(update={"run_step": initial_step})
         return TaskCommandResult(task=claimed_task, run=run, context=context, events=events)
 
     async def build_agent_execution_context(

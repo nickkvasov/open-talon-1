@@ -33,7 +33,7 @@ from .execution import (
     McpExecutionBackend,
 )
 from .execution.utils import to_tool_call_result
-from .runtime import RuntimeExecutionManager
+from .runtime import RuntimeExecutionManager, is_retryable_llm_provider_error
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +286,22 @@ class AgentLoopWorker:
                     "worker_id": "agent-loop-worker",
                 },
             )
+            if is_retryable_llm_provider_error(exc):
+                try:
+                    requeued = await self._kernel.requeue_run_step_for_retry(
+                        step_id,
+                        "agent-loop-worker",
+                        str(exc),
+                        retry_after_seconds=self._settings.provider_failure_retry_seconds,
+                        reason="llm_provider_unavailable",
+                    )
+                    await self._publisher.publish(requeued.events)
+                    return
+                except Exception:
+                    logger.exception(
+                        "Failed to requeue retryable provider failure step_id=%s",
+                        step_id,
+                    )
             failure = await self._kernel.fail_run_step(
                 step_id,
                 "agent-loop-worker",

@@ -45,7 +45,7 @@ SeededAgentProfileKind = Literal[
     "platform_operations_specialist",
     "organization_operations_specialist",
     "workspace_topic_governance_reviewer",
-    "methodology_research_dossier_specialist",
+    "methodology_dossier_specialist",
     "methodology_blueprint_synthesis_specialist",
     "workspace_methodics_execution_specialist",
 ]
@@ -110,21 +110,24 @@ MethodicResourceAction = Literal["attach", "link", "activate", "configure", "inv
 MethodologyBlueprintStatus = Literal["draft", "active", "archived"]
 MethodologyBlueprintVersionStatus = Literal[
     "researching",
-    "ready_for_methodologist",
+    "ready_for_draft",
     "drafted",
     "pending_review",
     "approved",
     "rejected",
     "failed",
 ]
-ResearchDossierStatus = Literal[
+DossierStatus = Literal[
     "created",
-    "researching",
-    "ready_for_methodologist",
-    "completed",
+    "scoping",
+    "collecting",
+    "synthesizing",
+    "ready",
+    "consumed",
+    "archived",
     "failed",
 ]
-ResearchDossierSourceKind = Literal[
+DossierSourceKind = Literal[
     "library_item",
     "webpage",
     "paper",
@@ -136,7 +139,7 @@ ResearchDossierSourceKind = Literal[
     "dataset",
     "other",
 ]
-ResearchDossierSourceStatus = Literal[
+DossierSourceStatus = Literal[
     "discovered",
     "fetched",
     "included",
@@ -399,6 +402,18 @@ class WorkspaceMethodic(BaseModel):
     applicability: str | None = None
     steps: list[WorkspaceMethodicStep] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_step_aliases(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or value.get("steps") is not None:
+            return value
+        normalized = dict(value)
+        if "ordered_steps" in normalized:
+            normalized["steps"] = normalized.pop("ordered_steps")
+        elif "orderedSteps" in normalized:
+            normalized["steps"] = normalized.pop("orderedSteps")
+        return normalized
 
 
 class HarnessExecutionRule(BaseModel):
@@ -1918,7 +1933,7 @@ class MethodologyBlueprintVersion(BaseModel):
     organization_id: UUID
     version_number: int = 1
     status: MethodologyBlueprintVersionStatus = "researching"
-    research_dossier_id: UUID | None = None
+    dossier_id: UUID | None = None
     source_policy: str = "hybrid"
     selected_library_ids: list[UUID] = Field(default_factory=list)
     cited_output: str | None = None
@@ -1936,7 +1951,7 @@ class MethodologyBlueprintVersion(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResearchDossier(BaseModel):
+class Dossier(BaseModel):
     dossier_id: UUID
     blueprint_id: UUID
     version_id: UUID
@@ -1948,7 +1963,7 @@ class ResearchDossier(BaseModel):
     researcher_participant_id: UUID | None = None
     methodologist_system_agent_id: UUID | None = None
     methodologist_participant_id: UUID | None = None
-    status: ResearchDossierStatus = "created"
+    status: DossierStatus = "created"
     topic: str
     tasks: list[str] = Field(default_factory=list)
     summary: str | None = None
@@ -1962,12 +1977,12 @@ class ResearchDossier(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResearchDossierSource(BaseModel):
+class DossierSource(BaseModel):
     source_id: UUID
     dossier_id: UUID
     organization_id: UUID
-    source_kind: ResearchDossierSourceKind = "other"
-    status: ResearchDossierSourceStatus = "discovered"
+    source_kind: DossierSourceKind = "other"
+    status: DossierSourceStatus = "discovered"
     title: str
     source_uri: str | None = None
     library_id: UUID | None = None
@@ -1988,7 +2003,7 @@ class ResearchDossierSource(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResearchDossierEvent(BaseModel):
+class DossierEvent(BaseModel):
     event_id: UUID
     dossier_id: UUID
     organization_id: UUID
@@ -2001,7 +2016,7 @@ class ResearchDossierEvent(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResearchDossierNotebook(BaseModel):
+class DossierNotebook(BaseModel):
     notebook_id: UUID
     dossier_id: UUID
     organization_id: UUID
@@ -2019,7 +2034,7 @@ class ResearchDossierNotebook(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResearchDossierNote(BaseModel):
+class DossierNote(BaseModel):
     note_id: UUID
     notebook_id: UUID
     dossier_id: UUID
@@ -2043,7 +2058,7 @@ class ResearchDossierNote(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResearchDossierConcept(BaseModel):
+class DossierConcept(BaseModel):
     concept_id: UUID
     notebook_id: UUID
     dossier_id: UUID
@@ -2063,7 +2078,7 @@ class ResearchDossierConcept(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResearchDossierClaim(BaseModel):
+class DossierClaim(BaseModel):
     claim_id: UUID
     notebook_id: UUID
     dossier_id: UUID
@@ -2084,7 +2099,7 @@ class ResearchDossierClaim(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResearchDossierLink(BaseModel):
+class DossierLink(BaseModel):
     link_id: UUID
     notebook_id: UUID
     dossier_id: UUID
@@ -2103,7 +2118,7 @@ class ResearchDossierLink(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResearchDossierProviderBinding(BaseModel):
+class DossierProviderBinding(BaseModel):
     binding_id: UUID
     notebook_id: UUID
     dossier_id: UUID
@@ -2124,7 +2139,7 @@ class ResearchDossierProviderBinding(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResearchDossierProviderExternalRef(BaseModel):
+class DossierProviderExternalRef(BaseModel):
     ref_id: UUID
     binding_id: UUID
     notebook_id: UUID
@@ -2142,7 +2157,7 @@ class ResearchDossierProviderExternalRef(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResearchDossierSyncRun(BaseModel):
+class DossierSyncRun(BaseModel):
     sync_run_id: UUID
     binding_id: UUID | None = None
     notebook_id: UUID
@@ -2161,7 +2176,7 @@ class ResearchDossierSyncRun(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResearchDossierHealthCheck(BaseModel):
+class DossierHealthCheck(BaseModel):
     check_id: UUID
     notebook_id: UUID
     dossier_id: UUID
@@ -2178,35 +2193,35 @@ class ResearchDossierHealthCheck(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResearchDossierNotebookDetail(BaseModel):
-    notebook: ResearchDossierNotebook
-    provider_bindings: list[ResearchDossierProviderBinding] = Field(default_factory=list)
-    notes: list[ResearchDossierNote] = Field(default_factory=list)
-    concepts: list[ResearchDossierConcept] = Field(default_factory=list)
-    claims: list[ResearchDossierClaim] = Field(default_factory=list)
-    links: list[ResearchDossierLink] = Field(default_factory=list)
-    external_refs: list[ResearchDossierProviderExternalRef] = Field(default_factory=list)
-    latest_health_check: ResearchDossierHealthCheck | None = None
+class DossierNotebookDetail(BaseModel):
+    notebook: DossierNotebook
+    provider_bindings: list[DossierProviderBinding] = Field(default_factory=list)
+    notes: list[DossierNote] = Field(default_factory=list)
+    concepts: list[DossierConcept] = Field(default_factory=list)
+    claims: list[DossierClaim] = Field(default_factory=list)
+    links: list[DossierLink] = Field(default_factory=list)
+    external_refs: list[DossierProviderExternalRef] = Field(default_factory=list)
+    latest_health_check: DossierHealthCheck | None = None
 
 
-class ResearchDossierGraph(BaseModel):
+class DossierGraph(BaseModel):
     dossier_id: UUID
     notebook_id: UUID
     nodes: list[dict[str, Any]] = Field(default_factory=list)
-    links: list[ResearchDossierLink] = Field(default_factory=list)
+    links: list[DossierLink] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResearchDossierNavigationResult(BaseModel):
+class DossierNavigationResult(BaseModel):
     dossier_id: UUID
     notebook_id: UUID
     query: str | None = None
-    entry_notes: list[ResearchDossierNote] = Field(default_factory=list)
-    concepts: list[ResearchDossierConcept] = Field(default_factory=list)
-    claims: list[ResearchDossierClaim] = Field(default_factory=list)
-    links: list[ResearchDossierLink] = Field(default_factory=list)
-    gaps: list[ResearchDossierNote] = Field(default_factory=list)
-    contradictions: list[ResearchDossierNote] = Field(default_factory=list)
+    entry_notes: list[DossierNote] = Field(default_factory=list)
+    concepts: list[DossierConcept] = Field(default_factory=list)
+    claims: list[DossierClaim] = Field(default_factory=list)
+    links: list[DossierLink] = Field(default_factory=list)
+    gaps: list[DossierNote] = Field(default_factory=list)
+    contradictions: list[DossierNote] = Field(default_factory=list)
     recommended_next: list[dict[str, Any]] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -2214,8 +2229,8 @@ class ResearchDossierNavigationResult(BaseModel):
 class MethodologyBlueprintDetail(BaseModel):
     blueprint: MethodologyBlueprint
     versions: list[MethodologyBlueprintVersion] = Field(default_factory=list)
-    dossier: ResearchDossier | None = None
-    sources: list[ResearchDossierSource] = Field(default_factory=list)
+    dossier: Dossier | None = None
+    sources: list[DossierSource] = Field(default_factory=list)
 
 
 class AgentDefinitionVersion(BaseModel):
@@ -2402,6 +2417,37 @@ class InteractionRequestDetail(BaseModel):
     answers: list[InteractionAnswer] = Field(default_factory=list)
 
 
+class MethodologyResearchKnowledgeComponent(BaseModel):
+    component: str
+    present: bool = False
+    item_count: int = 0
+    refs: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class MethodologyResearchSearchTurn(BaseModel):
+    turn: int | None = None
+    query: str | None = None
+    status: str | None = None
+    source_count: int = 0
+    sources: list[DossierSource] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MethodologyResearchState(BaseModel):
+    blueprint: MethodologyBlueprint
+    active_or_latest_version: MethodologyBlueprintVersion | None = None
+    dossier: Dossier | None = None
+    sources: list[DossierSource] = Field(default_factory=list)
+    events: list[DossierEvent] = Field(default_factory=list)
+    notebook: DossierNotebookDetail | None = None
+    interaction_requests: list[InteractionRequestDetail] = Field(default_factory=list)
+    knowledge_components: list[MethodologyResearchKnowledgeComponent] = Field(
+        default_factory=list
+    )
+    search_turns: list[MethodologyResearchSearchTurn] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class PublicationReview(BaseModel):
     review_id: UUID
     review_kind: str
@@ -2506,6 +2552,12 @@ class RunStep(BaseModel):
     finished_at: datetime | None = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResumeRuntimeTaskRequest(BaseModel):
+    actor: ParticipantInput
+    reason: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -3575,6 +3627,29 @@ class CreateMethodologyBlueprintRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class CreateMethodologyResearchRequest(BaseModel):
+    actor: ParticipantInput
+    instructions: str
+    max_search_turns: int = Field(default=5, ge=1, le=20)
+    required_components: list[str] = Field(default_factory=list)
+    require_admin_ready_approval: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateMethodologyBlueprintVersionRequest(BaseModel):
+    actor: ParticipantInput
+    base_version_id: UUID
+    cited_output: str
+    harness_draft: WorkspaceHarness
+    reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class DeleteMethodologyBlueprintRequest(BaseModel):
+    actor: ParticipantInput
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class ReviewMethodologyBlueprintVersionRequest(BaseModel):
     actor: ParticipantInput
     reason: str | None = None
@@ -3589,10 +3664,10 @@ class ApplyMethodologyBlueprintRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class CreateResearchDossierSourceRequest(BaseModel):
+class CreateDossierSourceRequest(BaseModel):
     actor: ParticipantInput
-    source_kind: ResearchDossierSourceKind = "other"
-    status: ResearchDossierSourceStatus = "discovered"
+    source_kind: DossierSourceKind = "other"
+    status: DossierSourceStatus = "discovered"
     title: str
     source_uri: str | None = None
     library_id: UUID | None = None
@@ -3609,9 +3684,9 @@ class CreateResearchDossierSourceRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class UpdateResearchDossierSourceRequest(BaseModel):
+class UpdateDossierSourceRequest(BaseModel):
     actor: ParticipantInput
-    status: ResearchDossierSourceStatus | None = None
+    status: DossierSourceStatus | None = None
     title: str | None = None
     source_uri: str | None = None
     library_id: UUID | None = None
@@ -3628,22 +3703,24 @@ class UpdateResearchDossierSourceRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
-class AttachResearchDossierContextPackRequest(BaseModel):
+class AttachDossierContextPackRequest(BaseModel):
     actor: ParticipantInput
     context_pack_id: UUID
     source_id: UUID | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class MarkResearchDossierReadyRequest(BaseModel):
+class DossierLifecycleTransitionRequest(BaseModel):
     actor: ParticipantInput
+    target_status: DossierStatus
     summary: str | None = None
     contradictions: list[dict[str, Any]] = Field(default_factory=list)
     gaps: list[str] = Field(default_factory=list)
+    reason: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class UpsertResearchDossierNoteRequest(BaseModel):
+class UpsertDossierNoteRequest(BaseModel):
     actor: ParticipantInput
     note_id: UUID | None = None
     note_kind: DossierNoteKind = "other"
@@ -3661,7 +3738,7 @@ class UpsertResearchDossierNoteRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class UpsertResearchDossierConceptRequest(BaseModel):
+class UpsertDossierConceptRequest(BaseModel):
     actor: ParticipantInput
     concept_id: UUID | None = None
     slug: str
@@ -3675,7 +3752,7 @@ class UpsertResearchDossierConceptRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class UpsertResearchDossierClaimRequest(BaseModel):
+class UpsertDossierClaimRequest(BaseModel):
     actor: ParticipantInput
     claim_id: UUID | None = None
     claim_key: str | None = None
@@ -3690,7 +3767,7 @@ class UpsertResearchDossierClaimRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class UpsertResearchDossierLinkRequest(BaseModel):
+class UpsertDossierLinkRequest(BaseModel):
     actor: ParticipantInput
     link_id: UUID | None = None
     source_type: DossierGraphNodeType
@@ -3703,7 +3780,7 @@ class UpsertResearchDossierLinkRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class NavigateResearchDossierRequest(BaseModel):
+class NavigateDossierRequest(BaseModel):
     actor: ParticipantInput
     query: str | None = None
     focus_note_id: UUID | None = None
@@ -3713,14 +3790,14 @@ class NavigateResearchDossierRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class SyncResearchDossierNotebookRequest(BaseModel):
+class SyncDossierNotebookRequest(BaseModel):
     actor: ParticipantInput
     provider_key: str | None = None
     force: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class SubmitResearchDossierHealthCheckRequest(BaseModel):
+class SubmitDossierHealthCheckRequest(BaseModel):
     actor: ParticipantInput
     status: DossierHealthStatus = "warning"
     summary: str | None = None
