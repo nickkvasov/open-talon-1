@@ -82,7 +82,10 @@ The runner has three stack modes:
   `methodology-deep-research` suite uses this same stack profile and runs only
   the real seeded Researcher/Methodologist deep methodology workflow. That
   workflow uses the `openai-responses` GPT provider for both specialists, so
-  `OPENAI_API_KEY` or the equivalent OpenBao secret must be configured.
+  `OPENAI_API_KEY` or the equivalent OpenBao secret must be configured. It is
+  the full methodology/methodics creation proof: multi-turn web search, generic
+  dossier lifecycle, required knowledge coverage, XWiki sync, Methodologist
+  draft, human review/apply, and archive preservation.
 
 The `compose` suite runs the raw Docker Compose infrastructure smoke test and
 resets compose volumes through its fixture. Use named fractions when you need a

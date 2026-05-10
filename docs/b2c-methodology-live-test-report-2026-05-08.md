@@ -4,6 +4,14 @@ This report describes the implemented B2C market research methodology live test,
 the agent activities it now demonstrates, the expected durable results, and the
 verification performed during implementation.
 
+Current implementation note: the methodology workflow has since moved to the
+generic dossier lifecycle and the `methodology-deep-research` live suite, which
+uses the real seeded Researcher and Methodologist agents with the
+`openai-responses` GPT provider. For the current Research Console workflow,
+required full-methodology knowledge coverage, resume behavior, and run-reporting
+expectations, see
+[methodology-research-console.md](./methodology-research-console.md).
+
 ## Status
 
 - Test implementation: complete.

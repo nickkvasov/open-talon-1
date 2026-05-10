@@ -30,6 +30,11 @@ service guides.
   use them as an authorization layer.
 - Humans and agents share permission names, but not the same global or
   organization role bindings.
+- Do not use weak hash helpers such as MD5/SHA-1 UUID generation for
+  deterministic identifiers, even when the input is "only" an internal id.
+  Prefer an explicit SHA-256 based deterministic UUID helper, and preserve
+  existing persisted participant IDs during repair/backfill instead of creating
+  duplicate participants.
 
 ## External Access
 
@@ -125,6 +130,9 @@ service guides.
   `Organization Operations` workspace must attach the global Anchor participant
   immediately. If a prior path could have created workspaces without Anchor, add
   an explicit migration/backfill.
+- Anchor participant repair must be idempotent: when an Anchor participant is
+  already attached, keep its existing `participant_id` and creation timestamp
+  while updating managed metadata and routing defaults.
 - `Methodologist` is a managed global specialist agent for evidence-backed
   methodology extraction and workspace template design. Keep it a normal
   `system_agents` definition.

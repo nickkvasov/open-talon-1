@@ -54,6 +54,15 @@ specialists, and verifies runtime worker, web-search, dossier knowledge, XWiki,
 Methodologist draft, review/apply, and archive outcomes. Configure
 `OPENAI_API_KEY` or the equivalent OpenBao secret before running it.
 
+For methodology deep-research runs, keep a separate progress track when the goal
+is later reporting. Sample Postgres state for blueprints, dossiers, events,
+sources, knowledge items, tasks, runs, run steps, and tool calls, and correlate
+it with Langfuse traces when runtime observability is enabled. Store raw samples
+in an ignored local file such as `tmp/live-methodology-runs/<run-id>.jsonl`, then
+write a human report that summarizes agent turns, collected information,
+knowledge coverage, draft/review/apply/archive outcomes, and any provider
+failures or manual resumes. Do not put provider secrets in run logs or reports.
+
 Anchor follows this protocol with:
 
 ```bash
@@ -127,5 +136,8 @@ run log:
 - whether XWiki methodology runs used `./open-talon start --xwiki --web-search`,
   because the B2C methodology workflow records live web-search results before
   syncing the dossier notebook to XWiki
+- whether methodology deep-research used the real seeded Researcher and
+  Methodologist with the OpenAI `openai-responses` provider, because deterministic
+  harnesses do not prove the full methodology/methodics creation process
 
 The longer operational-agent run history remains in [operational-agents-test-run-log-2026-04-26.md](./operational-agents-test-run-log-2026-04-26.md).
