@@ -10,8 +10,8 @@
 | Scope | global |
 | Role | `methodology extraction and workspace design agent` |
 | Profile kind | `methodology_blueprint_synthesis_specialist` |
-| Endpoint | `local-ollama` through provider `ollama` |
-| Primary inputs | completed research dossiers, dossier notebook navigation, cited retrieval evidence, source material, target goal, visible workspace context |
+| Endpoint | `openai-responses` through provider `openai` using `gpt-5.4-mini` |
+| Primary inputs | ready dossiers, dossier notebook navigation, cited retrieval evidence, source material, target goal, visible workspace context |
 | Primary outputs | methodology basis, methodics, methods/tools/actors, workspace template draft |
 
 ## Agent Profile
@@ -27,7 +27,7 @@ methodology synthesis over dossier knowledge storage.
 
 ## Idea
 
-Methodologist turns completed research dossiers or narrow-domain source
+Methodologist turns ready dossiers or narrow-domain source
 material into an Open Talon workspace operating template. When a dossier is
 supplied, Methodologist navigates its concept notebook first: source summaries,
 concept pages, claims, typed links, contradictions, gaps, methods, and synthesis
@@ -46,7 +46,7 @@ start call.
 
 Methodologist seeds an explicit `AgentHarness`:
 
-- start from the user's target goal and the completed dossier notebook or cited source corpus
+- start from the user's target goal and the ready dossier notebook or cited source corpus
 - do not treat general knowledge as source evidence
 - use dossier source records, concept pages, claims, links, contradictions, gaps, and context packs as the evidence boundary when a dossier is supplied
 - separate methodology basis, methodics, methods, tools, actors, artifacts, and workspace template decisions

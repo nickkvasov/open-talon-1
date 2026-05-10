@@ -40,7 +40,7 @@ from gateway_edge.models import (
     AuditExportResult,
     ApplyMethodologyBlueprintRequest,
     AttachLibraryToWorkspaceRequest,
-    AttachResearchDossierContextPackRequest,
+    AttachDossierContextPackRequest,
     AttachWorkspaceToolRequest,
     AttachWorkspaceMcpServerRequest,
     AttachWorkspaceSystemPluginRequest,
@@ -62,6 +62,8 @@ from gateway_edge.models import (
     CreateMethodicExecutionRequest,
     CreateMethodicResourceRequestRequest,
     CreateMethodologyBlueprintRequest,
+    CreateMethodologyBlueprintVersionRequest,
+    CreateMethodologyResearchRequest,
     CreateOrganizationRequest,
     CreateProjectRequest,
     CreateRetrievalContextPackRequest,
@@ -69,7 +71,7 @@ from gateway_edge.models import (
     CreateRetrievalIngestionJobRequest,
     CreateRetrievalProfileRequest,
     CreateRetrievalSourceRequest,
-    CreateResearchDossierSourceRequest,
+    CreateDossierSourceRequest,
     CreateSystemAgentRequest,
     CreateSystemToolRequest,
     ConfirmWorkspaceMemoryRequest,
@@ -93,17 +95,19 @@ from gateway_edge.models import (
     DeleteWorkspaceMcpServerRequest,
     DeleteWorkspaceSystemPluginRequest,
     DeleteWorkspaceRequest,
+    DeleteMethodologyBlueprintRequest,
     MemoryEntry,
     MemoryProviderDefinition,
     MemoryProviderHealthReport,
     MemorySearchResponse,
-    MarkResearchDossierReadyRequest,
+    DossierLifecycleTransitionRequest,
     MethodologyBlueprint,
     MethodologyBlueprintDetail,
+    MethodologyResearchState,
     MethodicExecution,
     MethodicExecutionDetail,
     MethodicResourceRequest,
-    NavigateResearchDossierRequest,
+    NavigateDossierRequest,
     McpPromptDefinition,
     McpResourceDefinition,
     McpServerDefinition,
@@ -111,6 +115,7 @@ from gateway_edge.models import (
     McpServerSyncResult,
     McpToolDefinition,
     RuntimeOverviewResponse,
+    ResumeRuntimeTaskRequest,
     LlmEngineDescriptor,
     LlmProviderDefinition,
     LlmProviderHealthReport,
@@ -138,17 +143,18 @@ from gateway_edge.models import (
     RetrievalProfile,
     RetrievalSearchResponse,
     RetrievalSource,
-    ResearchDossier,
-    ResearchDossierClaim,
-    ResearchDossierConcept,
-    ResearchDossierGraph,
-    ResearchDossierHealthCheck,
-    ResearchDossierLink,
-    ResearchDossierNavigationResult,
-    ResearchDossierNote,
-    ResearchDossierNotebookDetail,
-    ResearchDossierSource,
-    ResearchDossierSyncRun,
+    Dossier,
+    DossierClaim,
+    DossierConcept,
+    DossierEvent,
+    DossierGraph,
+    DossierHealthCheck,
+    DossierLink,
+    DossierNavigationResult,
+    DossierNote,
+    DossierNotebookDetail,
+    DossierSource,
+    DossierSyncRun,
     ResolvedAssetBinding,
     RoleDefinition,
     RunRetrievalSearchRequest,
@@ -157,6 +163,7 @@ from gateway_edge.models import (
     SystemPluginDefinition,
     SystemPluginSyncJob,
     SystemPluginSyncResult,
+    Task,
     Thread,
     ThreadDetail,
     TimelineMessage,
@@ -177,18 +184,18 @@ from gateway_edge.models import (
     UpdateMemoryEntryRequest,
     UpdateOrganizationRequest,
     UpdateProjectRequest,
-    UpdateResearchDossierSourceRequest,
+    UpdateDossierSourceRequest,
     UpsertProjectAccessRequest,
-    UpsertResearchDossierClaimRequest,
-    UpsertResearchDossierConceptRequest,
-    UpsertResearchDossierLinkRequest,
-    UpsertResearchDossierNoteRequest,
+    UpsertDossierClaimRequest,
+    UpsertDossierConceptRequest,
+    UpsertDossierLinkRequest,
+    UpsertDossierNoteRequest,
     ReviewMethodologyBlueprintVersionRequest,
     ReviewToolGenerationRevisionRequest,
     ReviewMethodicResourceRequest,
     SubmitMethodologyBlueprintDraftRequest,
-    SubmitResearchDossierHealthCheckRequest,
-    SyncResearchDossierNotebookRequest,
+    SubmitDossierHealthCheckRequest,
+    SyncDossierNotebookRequest,
     EvaluateMethodicStepRequest,
     RemoveProjectAccessRequest,
     UpdateWorkspaceToolRequest,
@@ -1374,7 +1381,7 @@ async def remove_organization_member(
 @router.post(
     "/organizations/{organization_id}/methodology/blueprints",
     response_model=MethodologyBlueprintDetail,
-    summary="Create a methodology blueprint and start a research dossier",
+    summary="Create a methodology blueprint and start a dossier",
 )
 async def create_methodology_blueprint(
     request: Request,
@@ -1454,6 +1461,165 @@ async def get_methodology_blueprint(
         raise _http_error(exc) from exc
 
 
+@router.get(
+    "/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/research-state",
+    response_model=MethodologyResearchState,
+    summary="Get methodology dossier research console state",
+)
+async def get_methodology_research_state(
+    request: Request,
+    organization_id: UUID,
+    blueprint_id: UUID,
+) -> MethodologyResearchState:
+    await _require_identity_permission(
+        request,
+        permission="methodology.read",
+        organization_id=organization_id,
+    )
+    try:
+        state = await collab_svc.collaboration_service.get_methodology_research_state(
+            blueprint_id,
+            actor=_request_actor_if_oidc(request),
+        )
+        _require_resource_in_organization(
+            resource_name="Methodology blueprint",
+            resource_id=blueprint_id,
+            organization_id=organization_id,
+            resource_organization_id=state.blueprint.organization_id,
+        )
+        return state
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/research-requests",
+    response_model=MethodologyResearchState,
+    summary="Request or refine Researcher-led methodology research",
+)
+async def create_methodology_research_request(
+    request: Request,
+    organization_id: UUID,
+    blueprint_id: UUID,
+    payload: CreateMethodologyResearchRequest,
+) -> MethodologyResearchState:
+    await _require_identity_permission(
+        request,
+        permission="methodology.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        existing = await collab_svc.collaboration_service.get_methodology_blueprint_detail(
+            blueprint_id,
+            actor=payload.actor,
+        )
+        _require_resource_in_organization(
+            resource_name="Methodology blueprint",
+            resource_id=blueprint_id,
+            organization_id=organization_id,
+            resource_organization_id=existing.blueprint.organization_id,
+        )
+        state = await collab_svc.collaboration_service.create_methodology_research_request(
+            blueprint_id,
+            payload,
+        )
+        _require_resource_in_organization(
+            resource_name="Methodology blueprint",
+            resource_id=blueprint_id,
+            organization_id=organization_id,
+            resource_organization_id=state.blueprint.organization_id,
+        )
+        return state
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/versions",
+    response_model=MethodologyBlueprintDetail,
+    summary="Create a new editable methodology blueprint version",
+)
+async def create_methodology_blueprint_version(
+    request: Request,
+    organization_id: UUID,
+    blueprint_id: UUID,
+    payload: CreateMethodologyBlueprintVersionRequest,
+) -> MethodologyBlueprintDetail:
+    await _require_identity_permission(
+        request,
+        permission="methodology.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        existing = await collab_svc.collaboration_service.get_methodology_blueprint_detail(
+            blueprint_id,
+            actor=payload.actor,
+        )
+        _require_resource_in_organization(
+            resource_name="Methodology blueprint",
+            resource_id=blueprint_id,
+            organization_id=organization_id,
+            resource_organization_id=existing.blueprint.organization_id,
+        )
+        detail = await collab_svc.collaboration_service.create_methodology_blueprint_version(
+            blueprint_id,
+            payload,
+        )
+        _require_resource_in_organization(
+            resource_name="Methodology blueprint",
+            resource_id=blueprint_id,
+            organization_id=organization_id,
+            resource_organization_id=detail.blueprint.organization_id,
+        )
+        return detail
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete(
+    "/organizations/{organization_id}/methodology/blueprints/{blueprint_id}",
+    response_model=dict,
+    summary="Archive a methodology blueprint",
+)
+async def archive_methodology_blueprint(
+    request: Request,
+    organization_id: UUID,
+    blueprint_id: UUID,
+    payload: DeleteMethodologyBlueprintRequest = Body(...),
+) -> dict[str, bool | str]:
+    await _require_identity_permission(
+        request,
+        permission="methodology.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        existing = await collab_svc.collaboration_service.get_methodology_blueprint_detail(
+            blueprint_id,
+            actor=payload.actor,
+        )
+        _require_resource_in_organization(
+            resource_name="Methodology blueprint",
+            resource_id=blueprint_id,
+            organization_id=organization_id,
+            resource_organization_id=existing.blueprint.organization_id,
+        )
+        return await collab_svc.collaboration_service.archive_methodology_blueprint(
+            blueprint_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.post(
     "/organizations/{organization_id}/methodology/blueprints/{blueprint_id}/apply",
     response_model=WorkspaceDetail,
@@ -1470,8 +1636,16 @@ async def apply_methodology_blueprint(
         permission="methodology.write",
         organization_id=organization_id,
     )
+    workspace_actor = await _require_workspace_permission(
+        request,
+        payload.workspace_id,
+        permission="workspace.roles.write",
+    )
     payload = payload.model_copy(
-        update={"actor": _resolve_organization_actor(request, payload.actor)}
+        update={
+            "actor": workspace_actor
+            or _resolve_organization_actor(request, payload.actor)
+        }
     )
     try:
         detail = await collab_svc.collaboration_service.get_methodology_blueprint_detail(
@@ -1607,27 +1781,27 @@ async def submit_methodology_blueprint_draft(
 
 
 @router.get(
-    "/organizations/{organization_id}/methodology/dossiers/{dossier_id}",
-    response_model=ResearchDossier,
-    summary="Get a research dossier",
+    "/organizations/{organization_id}/dossiers/{dossier_id}",
+    response_model=Dossier,
+    summary="Get a dossier",
 )
-async def get_research_dossier(
+async def get_dossier(
     request: Request,
     organization_id: UUID,
     dossier_id: UUID,
-) -> ResearchDossier:
+) -> Dossier:
     await _require_identity_permission(
         request,
         permission="methodology.read",
         organization_id=organization_id,
     )
     try:
-        dossier = await collab_svc.collaboration_service.get_research_dossier(
+        dossier = await collab_svc.collaboration_service.get_dossier(
             dossier_id,
             actor=_request_actor_if_oidc(request),
         )
         _require_resource_in_organization(
-            resource_name="Research dossier",
+            resource_name="Dossier",
             resource_id=dossier_id,
             organization_id=organization_id,
             resource_organization_id=dossier.organization_id,
@@ -1638,33 +1812,33 @@ async def get_research_dossier(
 
 
 @router.get(
-    "/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sources",
-    response_model=list[ResearchDossierSource],
-    summary="List research dossier sources",
+    "/organizations/{organization_id}/dossiers/{dossier_id}/sources",
+    response_model=list[DossierSource],
+    summary="List dossier sources",
 )
-async def list_research_dossier_sources(
+async def list_dossier_sources(
     request: Request,
     organization_id: UUID,
     dossier_id: UUID,
     status: str | None = Query(default=None),
-) -> list[ResearchDossierSource]:
+) -> list[DossierSource]:
     await _require_identity_permission(
         request,
         permission="methodology.read",
         organization_id=organization_id,
     )
     try:
-        dossier = await collab_svc.collaboration_service.get_research_dossier(
+        dossier = await collab_svc.collaboration_service.get_dossier(
             dossier_id,
             actor=_request_actor_if_oidc(request),
         )
         _require_resource_in_organization(
-            resource_name="Research dossier",
+            resource_name="Dossier",
             resource_id=dossier_id,
             organization_id=organization_id,
             resource_organization_id=dossier.organization_id,
         )
-        return await collab_svc.collaboration_service.list_research_dossier_sources(
+        return await collab_svc.collaboration_service.list_dossier_sources(
             dossier_id,
             actor=_request_actor_if_oidc(request),
             status=status,
@@ -1674,32 +1848,32 @@ async def list_research_dossier_sources(
 
 
 @router.get(
-    "/organizations/{organization_id}/methodology/dossiers/{dossier_id}/notebook",
-    response_model=ResearchDossierNotebookDetail,
-    summary="Get a research dossier concept notebook",
+    "/organizations/{organization_id}/dossiers/{dossier_id}/events",
+    response_model=list[DossierEvent],
+    summary="List dossier lifecycle and curation events",
 )
-async def get_research_dossier_notebook(
+async def list_dossier_events(
     request: Request,
     organization_id: UUID,
     dossier_id: UUID,
-) -> ResearchDossierNotebookDetail:
+) -> list[DossierEvent]:
     await _require_identity_permission(
         request,
         permission="methodology.read",
         organization_id=organization_id,
     )
     try:
-        dossier = await collab_svc.collaboration_service.get_research_dossier(
+        dossier = await collab_svc.collaboration_service.get_dossier(
             dossier_id,
             actor=_request_actor_if_oidc(request),
         )
         _require_resource_in_organization(
-            resource_name="Research dossier",
+            resource_name="Dossier",
             resource_id=dossier_id,
             organization_id=organization_id,
             resource_organization_id=dossier.organization_id,
         )
-        return await collab_svc.collaboration_service.get_research_dossier_notebook_detail(
+        return await collab_svc.collaboration_service.list_dossier_events(
             dossier_id,
             actor=_request_actor_if_oidc(request),
         )
@@ -1708,32 +1882,66 @@ async def get_research_dossier_notebook(
 
 
 @router.get(
-    "/organizations/{organization_id}/methodology/dossiers/{dossier_id}/graph",
-    response_model=ResearchDossierGraph,
-    summary="Get a research dossier concept graph",
+    "/organizations/{organization_id}/dossiers/{dossier_id}/notebook",
+    response_model=DossierNotebookDetail,
+    summary="Get a dossier concept notebook",
 )
-async def get_research_dossier_graph(
+async def get_dossier_notebook(
     request: Request,
     organization_id: UUID,
     dossier_id: UUID,
-) -> ResearchDossierGraph:
+) -> DossierNotebookDetail:
     await _require_identity_permission(
         request,
         permission="methodology.read",
         organization_id=organization_id,
     )
     try:
-        dossier = await collab_svc.collaboration_service.get_research_dossier(
+        dossier = await collab_svc.collaboration_service.get_dossier(
             dossier_id,
             actor=_request_actor_if_oidc(request),
         )
         _require_resource_in_organization(
-            resource_name="Research dossier",
+            resource_name="Dossier",
             resource_id=dossier_id,
             organization_id=organization_id,
             resource_organization_id=dossier.organization_id,
         )
-        return await collab_svc.collaboration_service.get_research_dossier_graph(
+        return await collab_svc.collaboration_service.get_dossier_notebook_detail(
+            dossier_id,
+            actor=_request_actor_if_oidc(request),
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get(
+    "/organizations/{organization_id}/dossiers/{dossier_id}/graph",
+    response_model=DossierGraph,
+    summary="Get a dossier concept graph",
+)
+async def get_dossier_graph(
+    request: Request,
+    organization_id: UUID,
+    dossier_id: UUID,
+) -> DossierGraph:
+    await _require_identity_permission(
+        request,
+        permission="methodology.read",
+        organization_id=organization_id,
+    )
+    try:
+        dossier = await collab_svc.collaboration_service.get_dossier(
+            dossier_id,
+            actor=_request_actor_if_oidc(request),
+        )
+        _require_resource_in_organization(
+            resource_name="Dossier",
+            resource_id=dossier_id,
+            organization_id=organization_id,
+            resource_organization_id=dossier.organization_id,
+        )
+        return await collab_svc.collaboration_service.get_dossier_graph(
             dossier_id,
             actor=_request_actor_if_oidc(request),
         )
@@ -1742,16 +1950,16 @@ async def get_research_dossier_graph(
 
 
 @router.post(
-    "/organizations/{organization_id}/methodology/dossiers/{dossier_id}/navigate",
-    response_model=ResearchDossierNavigationResult,
-    summary="Navigate a research dossier concept notebook",
+    "/organizations/{organization_id}/dossiers/{dossier_id}/navigate",
+    response_model=DossierNavigationResult,
+    summary="Navigate a dossier concept notebook",
 )
-async def navigate_research_dossier(
+async def navigate_dossier(
     request: Request,
     organization_id: UUID,
     dossier_id: UUID,
-    payload: NavigateResearchDossierRequest,
-) -> ResearchDossierNavigationResult:
+    payload: NavigateDossierRequest,
+) -> DossierNavigationResult:
     await _require_identity_permission(
         request,
         permission="methodology.read",
@@ -1761,17 +1969,17 @@ async def navigate_research_dossier(
         update={"actor": _resolve_organization_actor(request, payload.actor)}
     )
     try:
-        dossier = await collab_svc.collaboration_service.get_research_dossier(
+        dossier = await collab_svc.collaboration_service.get_dossier(
             dossier_id,
             actor=payload.actor,
         )
         _require_resource_in_organization(
-            resource_name="Research dossier",
+            resource_name="Dossier",
             resource_id=dossier_id,
             organization_id=organization_id,
             resource_organization_id=dossier.organization_id,
         )
-        return await collab_svc.collaboration_service.navigate_research_dossier(
+        return await collab_svc.collaboration_service.navigate_dossier(
             dossier_id,
             payload,
         )
@@ -1780,16 +1988,16 @@ async def navigate_research_dossier(
 
 
 @router.post(
-    "/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sync",
-    response_model=ResearchDossierSyncRun,
-    summary="Sync a research dossier notebook provider projection",
+    "/organizations/{organization_id}/dossiers/{dossier_id}/sync",
+    response_model=DossierSyncRun,
+    summary="Sync a dossier notebook provider projection",
 )
-async def sync_research_dossier_notebook(
+async def sync_dossier_notebook(
     request: Request,
     organization_id: UUID,
     dossier_id: UUID,
-    payload: SyncResearchDossierNotebookRequest,
-) -> ResearchDossierSyncRun:
+    payload: SyncDossierNotebookRequest,
+) -> DossierSyncRun:
     await _require_identity_permission(
         request,
         permission="methodology.write",
@@ -1799,17 +2007,17 @@ async def sync_research_dossier_notebook(
         update={"actor": _resolve_organization_actor(request, payload.actor)}
     )
     try:
-        dossier = await collab_svc.collaboration_service.get_research_dossier(
+        dossier = await collab_svc.collaboration_service.get_dossier(
             dossier_id,
             actor=payload.actor,
         )
         _require_resource_in_organization(
-            resource_name="Research dossier",
+            resource_name="Dossier",
             resource_id=dossier_id,
             organization_id=organization_id,
             resource_organization_id=dossier.organization_id,
         )
-        return await collab_svc.collaboration_service.sync_research_dossier_notebook(
+        return await collab_svc.collaboration_service.sync_dossier_notebook(
             dossier_id,
             payload,
         )
@@ -1818,16 +2026,16 @@ async def sync_research_dossier_notebook(
 
 
 @router.post(
-    "/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sources",
-    response_model=ResearchDossierSource,
-    summary="Create a research dossier source record",
+    "/organizations/{organization_id}/dossiers/{dossier_id}/sources",
+    response_model=DossierSource,
+    summary="Create a dossier source record",
 )
-async def create_research_dossier_source(
+async def create_dossier_source(
     request: Request,
     organization_id: UUID,
     dossier_id: UUID,
-    payload: CreateResearchDossierSourceRequest,
-) -> ResearchDossierSource:
+    payload: CreateDossierSourceRequest,
+) -> DossierSource:
     await _require_identity_permission(
         request,
         permission="methodology.write",
@@ -1837,17 +2045,17 @@ async def create_research_dossier_source(
         update={"actor": _resolve_organization_actor(request, payload.actor)}
     )
     try:
-        dossier = await collab_svc.collaboration_service.get_research_dossier(
+        dossier = await collab_svc.collaboration_service.get_dossier(
             dossier_id,
             actor=payload.actor,
         )
         _require_resource_in_organization(
-            resource_name="Research dossier",
+            resource_name="Dossier",
             resource_id=dossier_id,
             organization_id=organization_id,
             resource_organization_id=dossier.organization_id,
         )
-        return await collab_svc.collaboration_service.create_research_dossier_source(
+        return await collab_svc.collaboration_service.create_dossier_source(
             dossier_id,
             payload,
         )
@@ -1856,17 +2064,17 @@ async def create_research_dossier_source(
 
 
 @router.patch(
-    "/organizations/{organization_id}/methodology/dossiers/{dossier_id}/sources/{source_id}",
-    response_model=ResearchDossierSource,
-    summary="Update a research dossier source record",
+    "/organizations/{organization_id}/dossiers/{dossier_id}/sources/{source_id}",
+    response_model=DossierSource,
+    summary="Update a dossier source record",
 )
-async def update_research_dossier_source(
+async def update_dossier_source(
     request: Request,
     organization_id: UUID,
     dossier_id: UUID,
     source_id: UUID,
-    payload: UpdateResearchDossierSourceRequest,
-) -> ResearchDossierSource:
+    payload: UpdateDossierSourceRequest,
+) -> DossierSource:
     await _require_identity_permission(
         request,
         permission="methodology.write",
@@ -1876,17 +2084,17 @@ async def update_research_dossier_source(
         update={"actor": _resolve_organization_actor(request, payload.actor)}
     )
     try:
-        dossier = await collab_svc.collaboration_service.get_research_dossier(
+        dossier = await collab_svc.collaboration_service.get_dossier(
             dossier_id,
             actor=payload.actor,
         )
         _require_resource_in_organization(
-            resource_name="Research dossier",
+            resource_name="Dossier",
             resource_id=dossier_id,
             organization_id=organization_id,
             resource_organization_id=dossier.organization_id,
         )
-        return await collab_svc.collaboration_service.update_research_dossier_source(
+        return await collab_svc.collaboration_service.update_dossier_source(
             dossier_id,
             source_id,
             payload,
@@ -1896,16 +2104,16 @@ async def update_research_dossier_source(
 
 
 @router.post(
-    "/organizations/{organization_id}/methodology/dossiers/{dossier_id}/context-packs",
-    response_model=ResearchDossier,
-    summary="Attach a retrieval context pack to a research dossier",
+    "/organizations/{organization_id}/dossiers/{dossier_id}/notes",
+    response_model=DossierNote,
+    summary="Create or update a dossier notebook note",
 )
-async def attach_research_dossier_context_pack(
+async def upsert_dossier_note(
     request: Request,
     organization_id: UUID,
     dossier_id: UUID,
-    payload: AttachResearchDossierContextPackRequest,
-) -> ResearchDossier:
+    payload: UpsertDossierNoteRequest,
+) -> DossierNote:
     await _require_identity_permission(
         request,
         permission="methodology.write",
@@ -1915,12 +2123,164 @@ async def attach_research_dossier_context_pack(
         update={"actor": _resolve_organization_actor(request, payload.actor)}
     )
     try:
-        dossier = await collab_svc.collaboration_service.attach_research_dossier_context_pack(
+        dossier = await collab_svc.collaboration_service.get_dossier(
+            dossier_id,
+            actor=payload.actor,
+        )
+        _require_resource_in_organization(
+            resource_name="Dossier",
+            resource_id=dossier_id,
+            organization_id=organization_id,
+            resource_organization_id=dossier.organization_id,
+        )
+        return await collab_svc.collaboration_service.upsert_dossier_note(
+            dossier_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/dossiers/{dossier_id}/concepts",
+    response_model=DossierConcept,
+    summary="Create or update a dossier notebook concept",
+)
+async def upsert_dossier_concept(
+    request: Request,
+    organization_id: UUID,
+    dossier_id: UUID,
+    payload: UpsertDossierConceptRequest,
+) -> DossierConcept:
+    await _require_identity_permission(
+        request,
+        permission="methodology.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        dossier = await collab_svc.collaboration_service.get_dossier(
+            dossier_id,
+            actor=payload.actor,
+        )
+        _require_resource_in_organization(
+            resource_name="Dossier",
+            resource_id=dossier_id,
+            organization_id=organization_id,
+            resource_organization_id=dossier.organization_id,
+        )
+        return await collab_svc.collaboration_service.upsert_dossier_concept(
+            dossier_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/dossiers/{dossier_id}/claims",
+    response_model=DossierClaim,
+    summary="Create or update a dossier notebook claim",
+)
+async def upsert_dossier_claim(
+    request: Request,
+    organization_id: UUID,
+    dossier_id: UUID,
+    payload: UpsertDossierClaimRequest,
+) -> DossierClaim:
+    await _require_identity_permission(
+        request,
+        permission="methodology.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        dossier = await collab_svc.collaboration_service.get_dossier(
+            dossier_id,
+            actor=payload.actor,
+        )
+        _require_resource_in_organization(
+            resource_name="Dossier",
+            resource_id=dossier_id,
+            organization_id=organization_id,
+            resource_organization_id=dossier.organization_id,
+        )
+        return await collab_svc.collaboration_service.upsert_dossier_claim(
+            dossier_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/dossiers/{dossier_id}/links",
+    response_model=DossierLink,
+    summary="Create or update a dossier notebook graph link",
+)
+async def upsert_dossier_link(
+    request: Request,
+    organization_id: UUID,
+    dossier_id: UUID,
+    payload: UpsertDossierLinkRequest,
+) -> DossierLink:
+    await _require_identity_permission(
+        request,
+        permission="methodology.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        dossier = await collab_svc.collaboration_service.get_dossier(
+            dossier_id,
+            actor=payload.actor,
+        )
+        _require_resource_in_organization(
+            resource_name="Dossier",
+            resource_id=dossier_id,
+            organization_id=organization_id,
+            resource_organization_id=dossier.organization_id,
+        )
+        return await collab_svc.collaboration_service.upsert_dossier_link(
+            dossier_id,
+            payload,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/dossiers/{dossier_id}/context-packs",
+    response_model=Dossier,
+    summary="Attach a retrieval context pack to a dossier",
+)
+async def attach_dossier_context_pack(
+    request: Request,
+    organization_id: UUID,
+    dossier_id: UUID,
+    payload: AttachDossierContextPackRequest,
+) -> Dossier:
+    await _require_identity_permission(
+        request,
+        permission="methodology.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        dossier = await collab_svc.collaboration_service.attach_dossier_context_pack(
             dossier_id,
             payload,
         )
         _require_resource_in_organization(
-            resource_name="Research dossier",
+            resource_name="Dossier",
             resource_id=dossier_id,
             organization_id=organization_id,
             resource_organization_id=dossier.organization_id,
@@ -1931,16 +2291,16 @@ async def attach_research_dossier_context_pack(
 
 
 @router.post(
-    "/organizations/{organization_id}/methodology/dossiers/{dossier_id}/ready",
-    response_model=ResearchDossier,
-    summary="Mark a research dossier ready for downstream methodology synthesis",
+    "/organizations/{organization_id}/dossiers/{dossier_id}/lifecycle",
+    response_model=Dossier,
+    summary="Transition a dossier lifecycle status",
 )
-async def mark_research_dossier_ready(
+async def transition_dossier_lifecycle(
     request: Request,
     organization_id: UUID,
     dossier_id: UUID,
-    payload: MarkResearchDossierReadyRequest,
-) -> ResearchDossier:
+    payload: DossierLifecycleTransitionRequest,
+) -> Dossier:
     await _require_identity_permission(
         request,
         permission="methodology.write",
@@ -1950,12 +2310,12 @@ async def mark_research_dossier_ready(
         update={"actor": _resolve_organization_actor(request, payload.actor)}
     )
     try:
-        dossier = await collab_svc.collaboration_service.mark_research_dossier_ready(
+        dossier = await collab_svc.collaboration_service.transition_dossier_lifecycle(
             dossier_id,
             payload,
         )
         _require_resource_in_organization(
-            resource_name="Research dossier",
+            resource_name="Dossier",
             resource_id=dossier_id,
             organization_id=organization_id,
             resource_organization_id=dossier.organization_id,
@@ -2433,6 +2793,35 @@ async def organization_runtime_overview(
             await collab_svc.collaboration_service.get_runtime_overview(
                 organization_id=organization_id
             )
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post(
+    "/organizations/{organization_id}/runtime/tasks/{task_id}/resume",
+    response_model=Task,
+    summary="Resume a failed runtime task after a recoverable provider or runtime issue",
+)
+async def resume_organization_runtime_task(
+    request: Request,
+    organization_id: UUID,
+    task_id: UUID,
+    payload: ResumeRuntimeTaskRequest = Body(...),
+) -> Task:
+    await _require_identity_permission(
+        request,
+        permission="organization.runtime.write",
+        organization_id=organization_id,
+    )
+    payload = payload.model_copy(
+        update={"actor": _resolve_organization_actor(request, payload.actor)}
+    )
+    try:
+        return await collab_svc.collaboration_service.resume_runtime_task(
+            task_id,
+            payload,
+            organization_id=organization_id,
         )
     except Exception as exc:
         raise _http_error(exc) from exc

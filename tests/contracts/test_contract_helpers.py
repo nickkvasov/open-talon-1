@@ -182,6 +182,30 @@ def test_workspace_moderation_policy_defaults_and_normalization() -> None:
     assert policy.model_dump(mode="json")["explain_blocked_messages"] is True
 
 
+def test_workspace_harness_accepts_ordered_steps_alias() -> None:
+    harness = WorkspaceHarness.model_validate(
+        {
+            "methodics": [
+                {
+                    "name": "Decision scope",
+                    "goal": "Bound the validation decision.",
+                    "ordered_steps": [
+                        {
+                            "instruction": "Write the launch decision question.",
+                            "expected_artifacts": ["research brief"],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert harness.methodics[0].steps[0].instruction == (
+        "Write the launch decision question."
+    )
+    assert harness.methodics[0].model_dump(mode="json").get("ordered_steps") is None
+
+
 def test_publication_review_serialization_is_generic() -> None:
     review_id = uuid4()
     workspace_id = uuid4()

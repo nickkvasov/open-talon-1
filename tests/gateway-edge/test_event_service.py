@@ -62,6 +62,15 @@ def test_event_service_routes_tool_call_created_to_agent_tasks_topic():
 
 
 def test_event_service_routes_requeue_wake_events_to_agent_tasks_topic():
+    task_event = EventEnvelope(
+        event_type="task.resumed",
+        workspace_id=uuid4(),
+        thread_id=uuid4(),
+        actor=ActorRef(type="agent", id=uuid4()),
+        target=TargetRef(type="task", id=uuid4()),
+        visibility="agents_only",
+        payload={},
+    )
     tool_event = EventEnvelope(
         event_type="tool_call.requeued",
         workspace_id=uuid4(),
@@ -81,6 +90,7 @@ def test_event_service_routes_requeue_wake_events_to_agent_tasks_topic():
         payload={},
     )
 
+    assert EventService._topic_for_event(task_event).endswith("agent.tasks")
     assert EventService._topic_for_event(tool_event).endswith("agent.tasks")
     assert EventService._topic_for_event(step_event).endswith("agent.tasks")
 

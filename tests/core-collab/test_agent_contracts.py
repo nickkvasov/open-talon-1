@@ -53,15 +53,16 @@ from open_talon_contracts.models import (  # noqa: E402
     ApplyMethodologyBlueprintRequest,
     AssumeParticipantRoleRequest,
     ArtifactRef,
-    AttachResearchDossierContextPackRequest,
+    AttachDossierContextPackRequest,
     CreateAgentParticipantRequest,
     CreateGitRepositoryRequest,
     CreateThreadRequest,
     CreateLlmProviderRequest,
     CreateMethodologyBlueprintRequest,
+    CreateMethodologyBlueprintVersionRequest,
     CreateOrganizationRequest,
     CreateProjectRequest,
-    CreateResearchDossierSourceRequest,
+    CreateDossierSourceRequest,
     CreateWorkspaceRequest,
     CreateSystemToolRequest,
     EventEnvelope,
@@ -76,7 +77,9 @@ from open_talon_contracts.models import (  # noqa: E402
     CreateMethodicExecutionRequest,
     CreateMethodicResourceRequestRequest,
     CreateMessageRequest,
+    CreateMethodologyResearchRequest,
     CreateToolGenerationRevisionRequest,
+    DeleteMethodologyBlueprintRequest,
     DeleteLlmProviderRequest,
     GeneratedToolManifest,
     GeneratedToolValidationReport,
@@ -90,11 +93,11 @@ from open_talon_contracts.models import (  # noqa: E402
     Library,
     LibraryItem,
     LlmProviderDefinition,
-    MarkResearchDossierReadyRequest,
+    DossierLifecycleTransitionRequest,
     MemoryEntry,
     MemoryProviderDefinition,
     MemoryProviderRecord,
-    NavigateResearchDossierRequest,
+    NavigateDossierRequest,
     MethodicExecution,
     MethodicExecutionAssignment,
     MethodicExecutionCheck,
@@ -112,27 +115,28 @@ from open_talon_contracts.models import (  # noqa: E402
     Project,
     ProjectAccessBinding,
     ProjectSubjectRef,
-    ResearchDossier,
-    ResearchDossierClaim,
-    ResearchDossierConcept,
-    ResearchDossierEvent,
-    ResearchDossierHealthCheck,
-    ResearchDossierLink,
-    ResearchDossierNote,
-    ResearchDossierNotebook,
-    ResearchDossierNotebookDetail,
-    ResearchDossierProviderBinding,
-    ResearchDossierProviderExternalRef,
-    ResearchDossierSource,
-    ResearchDossierSyncRun,
+    Dossier,
+    DossierClaim,
+    DossierConcept,
+    DossierEvent,
+    DossierHealthCheck,
+    DossierLink,
+    DossierNote,
+    DossierNotebook,
+    DossierNotebookDetail,
+    DossierProviderBinding,
+    DossierProviderExternalRef,
+    DossierSource,
+    DossierSyncRun,
     RetrievalContextPack,
+    ResumeRuntimeTaskRequest,
     Run,
     RunStep,
     SearchMemoryRequest,
     SeededAgentProfile,
     SubmitMethodologyBlueprintDraftRequest,
-    SubmitResearchDossierHealthCheckRequest,
-    SyncResearchDossierNotebookRequest,
+    SubmitDossierHealthCheckRequest,
+    SyncDossierNotebookRequest,
     TargetRef,
     ToolCall,
     ToolCallResult,
@@ -150,12 +154,12 @@ from open_talon_contracts.models import (  # noqa: E402
     UpdateInteractionRequestRequest,
     UpdateLlmProviderRequest,
     UpdateProjectRequest,
-    UpdateResearchDossierSourceRequest,
+    UpdateDossierSourceRequest,
     UpsertProjectAccessRequest,
-    UpsertResearchDossierClaimRequest,
-    UpsertResearchDossierConceptRequest,
-    UpsertResearchDossierLinkRequest,
-    UpsertResearchDossierNoteRequest,
+    UpsertDossierClaimRequest,
+    UpsertDossierConceptRequest,
+    UpsertDossierLinkRequest,
+    UpsertDossierNoteRequest,
     EvaluateMethodicStepRequest,
     ReviewToolGenerationRevisionRequest,
     RemoveProjectAccessRequest,
@@ -222,7 +226,7 @@ SEEDED_AGENT_PROFILE_DOCS = {
         "agent_key",
         "researcher",
         "Researcher",
-        "methodology_research_dossier_specialist",
+        "methodology_dossier_specialist",
     ),
     "methodologist.md": (
         "agent_key",
@@ -378,18 +382,18 @@ class FakeRepository:
         self._retrieval_context_packs = {}
         self._methodology_blueprints = {}
         self._methodology_blueprint_versions = {}
-        self._research_dossiers = {}
-        self._research_dossier_sources = {}
-        self._research_dossier_events = {}
-        self._research_dossier_notebooks = {}
-        self._research_dossier_notes = {}
-        self._research_dossier_concepts = {}
-        self._research_dossier_claims = {}
-        self._research_dossier_links = {}
-        self._research_dossier_provider_bindings = {}
-        self._research_dossier_provider_external_refs = {}
-        self._research_dossier_sync_runs = {}
-        self._research_dossier_health_checks = {}
+        self._dossiers = {}
+        self._dossier_sources = {}
+        self._dossier_events = {}
+        self._dossier_notebooks = {}
+        self._dossier_notes = {}
+        self._dossier_concepts = {}
+        self._dossier_claims = {}
+        self._dossier_links = {}
+        self._dossier_provider_bindings = {}
+        self._dossier_provider_external_refs = {}
+        self._dossier_sync_runs = {}
+        self._dossier_health_checks = {}
         default_organization = Organization(
             organization_id=UUID("11111111-1111-1111-1111-111111111111"),
             slug="default",
@@ -487,6 +491,22 @@ class FakeRepository:
     async def upsert_task(self, conn, task):
         self._tasks[task.task_id] = task
 
+    async def list_tasks_for_correlation(
+        self,
+        correlation_id,
+        *,
+        task_kind=None,
+        limit=20,
+    ):
+        tasks = [
+            task
+            for task in self._tasks.values()
+            if task.correlation_id == correlation_id
+            and (task_kind is None or task.metadata.get("task_kind") == task_kind)
+        ]
+        tasks.sort(key=lambda item: item.created_at, reverse=True)
+        return tasks[:limit]
+
     async def list_pending_tasks_for_system_agent(self, system_agent_id, *, limit=10):
         tasks = [
             task
@@ -514,8 +534,18 @@ class FakeRepository:
     async def fetch_run(self, run_id):
         return self._runs.get(run_id)
 
+    async def list_runs_for_task(self, task_id):
+        runs = [run for run in self._runs.values() if run.task_id == task_id]
+        runs.sort(key=lambda item: item.created_at, reverse=True)
+        return runs
+
     async def fetch_run_step(self, step_id):
         return self._run_steps.get(step_id)
+
+    async def list_run_steps(self, run_id):
+        steps = [step for step in self._run_steps.values() if step.run_id == run_id]
+        steps.sort(key=lambda item: (item.step_index, item.created_at))
+        return steps
 
     async def claim_next_run_step(self, *, worker_id, lease_expires_at, now):
         candidates = [
@@ -771,85 +801,85 @@ class FakeRepository:
     ) -> None:
         self._methodology_blueprint_versions[version.version_id] = version
 
-    async def upsert_research_dossier(self, conn, dossier: ResearchDossier) -> None:
-        self._research_dossiers[dossier.dossier_id] = dossier
+    async def upsert_dossier(self, conn, dossier: Dossier) -> None:
+        self._dossiers[dossier.dossier_id] = dossier
 
-    async def upsert_research_dossier_notebook(
+    async def upsert_dossier_notebook(
         self,
         conn,
-        notebook: ResearchDossierNotebook,
+        notebook: DossierNotebook,
     ) -> None:
-        self._research_dossier_notebooks[notebook.notebook_id] = notebook
+        self._dossier_notebooks[notebook.notebook_id] = notebook
 
-    async def upsert_research_dossier_note(
+    async def upsert_dossier_note(
         self,
         conn,
-        note: ResearchDossierNote,
+        note: DossierNote,
     ) -> None:
-        self._research_dossier_notes[note.note_id] = note
+        self._dossier_notes[note.note_id] = note
 
-    async def upsert_research_dossier_concept(
+    async def upsert_dossier_concept(
         self,
         conn,
-        concept: ResearchDossierConcept,
+        concept: DossierConcept,
     ) -> None:
-        self._research_dossier_concepts[concept.concept_id] = concept
+        self._dossier_concepts[concept.concept_id] = concept
 
-    async def upsert_research_dossier_claim(
+    async def upsert_dossier_claim(
         self,
         conn,
-        claim: ResearchDossierClaim,
+        claim: DossierClaim,
     ) -> None:
-        self._research_dossier_claims[claim.claim_id] = claim
+        self._dossier_claims[claim.claim_id] = claim
 
-    async def upsert_research_dossier_link(
+    async def upsert_dossier_link(
         self,
         conn,
-        link: ResearchDossierLink,
+        link: DossierLink,
     ) -> None:
-        self._research_dossier_links[link.link_id] = link
+        self._dossier_links[link.link_id] = link
 
-    async def upsert_research_dossier_provider_binding(
+    async def upsert_dossier_provider_binding(
         self,
         conn,
-        binding: ResearchDossierProviderBinding,
+        binding: DossierProviderBinding,
     ) -> None:
-        self._research_dossier_provider_bindings[binding.binding_id] = binding
+        self._dossier_provider_bindings[binding.binding_id] = binding
 
-    async def upsert_research_dossier_provider_external_ref(
+    async def upsert_dossier_provider_external_ref(
         self,
         conn,
-        external_ref: ResearchDossierProviderExternalRef,
+        external_ref: DossierProviderExternalRef,
     ) -> None:
-        self._research_dossier_provider_external_refs[external_ref.ref_id] = external_ref
+        self._dossier_provider_external_refs[external_ref.ref_id] = external_ref
 
-    async def upsert_research_dossier_sync_run(
+    async def upsert_dossier_sync_run(
         self,
         conn,
-        sync_run: ResearchDossierSyncRun,
+        sync_run: DossierSyncRun,
     ) -> None:
-        self._research_dossier_sync_runs[sync_run.sync_run_id] = sync_run
+        self._dossier_sync_runs[sync_run.sync_run_id] = sync_run
 
-    async def append_research_dossier_health_check(
+    async def append_dossier_health_check(
         self,
         conn,
-        check: ResearchDossierHealthCheck,
+        check: DossierHealthCheck,
     ) -> None:
-        self._research_dossier_health_checks[check.check_id] = check
+        self._dossier_health_checks[check.check_id] = check
 
-    async def upsert_research_dossier_source(
+    async def upsert_dossier_source(
         self,
         conn,
-        source: ResearchDossierSource,
+        source: DossierSource,
     ) -> None:
-        self._research_dossier_sources[source.source_id] = source
+        self._dossier_sources[source.source_id] = source
 
-    async def append_research_dossier_event(
+    async def append_dossier_event(
         self,
         conn,
-        event: ResearchDossierEvent,
+        event: DossierEvent,
     ) -> None:
-        self._research_dossier_events.setdefault(event.dossier_id, []).append(event)
+        self._dossier_events.setdefault(event.dossier_id, []).append(event)
 
     async def fetch_methodology_blueprint(self, blueprint_id):
         return self._methodology_blueprints.get(blueprint_id)
@@ -878,98 +908,98 @@ class FakeRepository:
             reverse=True,
         )
 
-    async def fetch_research_dossier(self, dossier_id):
-        return self._research_dossiers.get(dossier_id)
+    async def fetch_dossier(self, dossier_id):
+        return self._dossiers.get(dossier_id)
 
-    async def fetch_research_dossier_for_version(self, version_id):
-        for dossier in self._research_dossiers.values():
+    async def fetch_dossier_for_version(self, version_id):
+        for dossier in self._dossiers.values():
             if dossier.version_id == version_id:
                 return dossier
         return None
 
-    async def fetch_research_dossier_source(self, source_id):
-        return self._research_dossier_sources.get(source_id)
+    async def fetch_dossier_source(self, source_id):
+        return self._dossier_sources.get(source_id)
 
-    async def list_research_dossier_sources(self, dossier_id, *, status=None):
+    async def list_dossier_sources(self, dossier_id, *, status=None):
         sources = [
             source
-            for source in self._research_dossier_sources.values()
+            for source in self._dossier_sources.values()
             if source.dossier_id == dossier_id
             and (status is None or source.status == status)
         ]
         return sorted(sources, key=lambda item: item.created_at)
 
-    async def list_research_dossier_events(self, dossier_id):
-        return list(self._research_dossier_events.get(dossier_id, []))
+    async def list_dossier_events(self, dossier_id):
+        return list(self._dossier_events.get(dossier_id, []))
 
-    async def fetch_research_dossier_notebook(self, notebook_id):
-        return self._research_dossier_notebooks.get(notebook_id)
+    async def fetch_dossier_notebook(self, notebook_id):
+        return self._dossier_notebooks.get(notebook_id)
 
-    async def fetch_research_dossier_notebook_for_dossier(self, dossier_id):
-        for notebook in self._research_dossier_notebooks.values():
+    async def fetch_dossier_notebook_for_dossier(self, dossier_id):
+        for notebook in self._dossier_notebooks.values():
             if notebook.dossier_id == dossier_id:
                 return notebook
         return None
 
-    async def fetch_research_dossier_note(self, note_id):
-        return self._research_dossier_notes.get(note_id)
+    async def fetch_dossier_note(self, note_id):
+        return self._dossier_notes.get(note_id)
 
-    async def fetch_research_dossier_note_by_slug(self, notebook_id, slug):
-        for note in self._research_dossier_notes.values():
+    async def fetch_dossier_note_by_slug(self, notebook_id, slug):
+        for note in self._dossier_notes.values():
             if note.notebook_id == notebook_id and note.slug == slug:
                 return note
         return None
 
-    async def list_research_dossier_notes(self, notebook_id, *, note_kind=None, status=None):
+    async def list_dossier_notes(self, notebook_id, *, note_kind=None, status=None):
         notes = [
             note
-            for note in self._research_dossier_notes.values()
+            for note in self._dossier_notes.values()
             if note.notebook_id == notebook_id
             and (note_kind is None or note.note_kind == note_kind)
             and (status is None or note.status == status)
         ]
         return sorted(notes, key=lambda item: (item.note_kind, item.slug))
 
-    async def fetch_research_dossier_concept(self, concept_id):
-        return self._research_dossier_concepts.get(concept_id)
+    async def fetch_dossier_concept(self, concept_id):
+        return self._dossier_concepts.get(concept_id)
 
-    async def fetch_research_dossier_concept_by_slug(self, notebook_id, slug):
-        for concept in self._research_dossier_concepts.values():
+    async def fetch_dossier_concept_by_slug(self, notebook_id, slug):
+        for concept in self._dossier_concepts.values():
             if concept.notebook_id == notebook_id and concept.slug == slug:
                 return concept
         return None
 
-    async def list_research_dossier_concepts(self, notebook_id, *, status=None):
+    async def list_dossier_concepts(self, notebook_id, *, status=None):
         concepts = [
             concept
-            for concept in self._research_dossier_concepts.values()
+            for concept in self._dossier_concepts.values()
             if concept.notebook_id == notebook_id
             and (status is None or concept.status == status)
         ]
         return sorted(concepts, key=lambda item: item.slug)
 
-    async def fetch_research_dossier_claim(self, claim_id):
-        return self._research_dossier_claims.get(claim_id)
+    async def fetch_dossier_claim(self, claim_id):
+        return self._dossier_claims.get(claim_id)
 
-    async def fetch_research_dossier_claim_by_key(self, notebook_id, claim_key):
-        for claim in self._research_dossier_claims.values():
+    async def fetch_dossier_claim_by_key(self, notebook_id, claim_key):
+        for claim in self._dossier_claims.values():
             if claim.notebook_id == notebook_id and claim.claim_key == claim_key:
                 return claim
         return None
 
-    async def list_research_dossier_claims(self, notebook_id, *, status=None):
+    async def list_dossier_claims(self, notebook_id, *, status=None):
         claims = [
             claim
-            for claim in self._research_dossier_claims.values()
+            for claim in self._dossier_claims.values()
             if claim.notebook_id == notebook_id
             and (status is None or claim.status == status)
         ]
         return sorted(claims, key=lambda item: item.created_at)
 
-    async def fetch_research_dossier_link(self, link_id):
-        return self._research_dossier_links.get(link_id)
+    async def fetch_dossier_link(self, link_id):
+        return self._dossier_links.get(link_id)
 
-    async def fetch_research_dossier_link_by_tuple(
+    async def fetch_dossier_link_by_tuple(
         self,
         notebook_id,
         *,
@@ -979,7 +1009,7 @@ class FakeRepository:
         target_ref_id,
         link_kind,
     ):
-        for link in self._research_dossier_links.values():
+        for link in self._dossier_links.values():
             if (
                 link.notebook_id == notebook_id
                 and link.source_type == source_type
@@ -991,16 +1021,16 @@ class FakeRepository:
                 return link
         return None
 
-    async def list_research_dossier_links(self, notebook_id, *, link_kind=None):
+    async def list_dossier_links(self, notebook_id, *, link_kind=None):
         links = [
             link
-            for link in self._research_dossier_links.values()
+            for link in self._dossier_links.values()
             if link.notebook_id == notebook_id
             and (link_kind is None or link.link_kind == link_kind)
         ]
         return sorted(links, key=lambda item: item.created_at)
 
-    async def list_research_dossier_provider_bindings(
+    async def list_dossier_provider_bindings(
         self,
         notebook_id,
         *,
@@ -1008,13 +1038,13 @@ class FakeRepository:
     ):
         bindings = [
             binding
-            for binding in self._research_dossier_provider_bindings.values()
+            for binding in self._dossier_provider_bindings.values()
             if binding.notebook_id == notebook_id
             and (provider_key is None or binding.provider_key == provider_key)
         ]
         return sorted(bindings, key=lambda item: item.created_at)
 
-    async def list_research_dossier_provider_external_refs(
+    async def list_dossier_provider_external_refs(
         self,
         notebook_id,
         *,
@@ -1022,37 +1052,37 @@ class FakeRepository:
     ):
         refs = [
             ref
-            for ref in self._research_dossier_provider_external_refs.values()
+            for ref in self._dossier_provider_external_refs.values()
             if ref.notebook_id == notebook_id
             and (binding_id is None or ref.binding_id == binding_id)
         ]
         return sorted(refs, key=lambda item: item.created_at)
 
-    async def fetch_latest_research_dossier_health_check(self, notebook_id):
+    async def fetch_latest_dossier_health_check(self, notebook_id):
         checks = [
             check
-            for check in self._research_dossier_health_checks.values()
+            for check in self._dossier_health_checks.values()
             if check.notebook_id == notebook_id
         ]
         return max(checks, key=lambda item: item.created_at) if checks else None
 
-    async def fetch_research_dossier_notebook_detail(self, dossier_id):
-        notebook = await self.fetch_research_dossier_notebook_for_dossier(dossier_id)
+    async def fetch_dossier_notebook_detail(self, dossier_id):
+        notebook = await self.fetch_dossier_notebook_for_dossier(dossier_id)
         if notebook is None:
             return None
-        return ResearchDossierNotebookDetail(
+        return DossierNotebookDetail(
             notebook=notebook,
-            provider_bindings=await self.list_research_dossier_provider_bindings(
+            provider_bindings=await self.list_dossier_provider_bindings(
                 notebook.notebook_id
             ),
-            notes=await self.list_research_dossier_notes(notebook.notebook_id),
-            concepts=await self.list_research_dossier_concepts(notebook.notebook_id),
-            claims=await self.list_research_dossier_claims(notebook.notebook_id),
-            links=await self.list_research_dossier_links(notebook.notebook_id),
-            external_refs=await self.list_research_dossier_provider_external_refs(
+            notes=await self.list_dossier_notes(notebook.notebook_id),
+            concepts=await self.list_dossier_concepts(notebook.notebook_id),
+            claims=await self.list_dossier_claims(notebook.notebook_id),
+            links=await self.list_dossier_links(notebook.notebook_id),
+            external_refs=await self.list_dossier_provider_external_refs(
                 notebook.notebook_id
             ),
-            latest_health_check=await self.fetch_latest_research_dossier_health_check(
+            latest_health_check=await self.fetch_latest_dossier_health_check(
                 notebook.notebook_id
             ),
         )
@@ -2028,11 +2058,33 @@ async def test_kernel_create_workspace_attaches_anchor_with_descriptive_advertis
     assert anchor.roles == ["workspace topic alignment reviewer"]
     assert "reviews messages for alignment with the workspace topic" in anchor.capabilities
     assert anchor.metadata["task_routing"]["normal_message_fanout"] is False
+    assert anchor.metadata["deterministic_id_algorithm"] == "sha256-v8"
+    assert anchor.participant_id.version == 8
     anchor_definition = repository._agents[ANCHOR_AGENT_ID]
     assert anchor_definition.endpoint.engine_id == "local-ollama"
     assert anchor_definition.endpoint.provider == "ollama"
     assert anchor_definition.definition["runtime"]["engine_id"] == "local-ollama"
     assert anchor_definition.interaction_contract.response_contract.format == "json"
+
+    legacy_participant_id = uuid4()
+    repository._participants.pop((result.workspace.workspace_id, anchor.participant_id))
+    repository._participants[(result.workspace.workspace_id, legacy_participant_id)] = (
+        anchor.model_copy(
+            update={
+                "participant_id": legacy_participant_id,
+                "metadata": {"legacy_anchor_id": True},
+            }
+        )
+    )
+    repaired_anchor = await kernel._ensure_anchor_attached_for_workspace(
+        None,
+        result.workspace.workspace_id,
+        now=datetime.now(timezone.utc),
+    )
+
+    assert repaired_anchor.participant_id == legacy_participant_id
+    assert repaired_anchor.metadata["legacy_anchor_id"] is True
+    assert repaired_anchor.metadata["deterministic_id_algorithm"] == "sha256-v8"
 
 
 @pytest.mark.asyncio
@@ -3715,17 +3767,24 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
         agent for agent in repository._agents.values() if agent.agent_key == "researcher"
     )
     assert researcher.display_name == "Researcher"
-    assert researcher.role == "evidence discovery and research dossier agent"
-    assert researcher.definition["profile"]["kind"] == "methodology_research_dossier_specialist"
+    assert researcher.role == "evidence discovery and dossier agent"
+    assert researcher.definition["profile"]["kind"] == "methodology_dossier_specialist"
     assert (
         researcher.definition["profile"]["knowledge_layer"]
         == "dossier knowledge storage over retained data and indexed information"
     )
     assert researcher.definition["task_routing"]["normal_message_fanout"] is False
     assert researcher.definition["task_routing"]["accepted_task_kinds"] == [
-        "methodology_research_dossier_build",
-        "methodology_research_dossier_refine",
+        "methodology_dossier_build",
+        "methodology_dossier_refine",
     ]
+    assert researcher.endpoint.engine_id == "openai-responses"
+    assert researcher.endpoint.provider == "openai"
+    assert researcher.endpoint.model == "gpt-5.4-mini"
+    assert researcher.definition["runtime"]["engine_id"] == "openai-responses"
+    assert researcher.definition["runtime"]["model"] == "gpt-5.4-mini"
+    assert researcher.harness.compaction_policy.strategy == "rolling_summary"
+    assert researcher.harness.compaction_policy.max_estimated_input_tokens == 256_000
     assert "Research Scope" in researcher.interaction_contract.response_contract.required_sections
     assert "Contradictions" in researcher.interaction_contract.response_contract.required_sections
     methodologist = next(
@@ -3733,8 +3792,20 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
     )
     assert methodologist.display_name == "Methodologist"
     assert methodologist.role == "methodology extraction and workspace design agent"
-    assert methodologist.endpoint.engine_id == "local-ollama"
-    assert methodologist.endpoint.provider == "ollama"
+    assert methodologist.endpoint.engine_id == "openai-responses"
+    assert methodologist.endpoint.provider == "openai"
+    assert methodologist.endpoint.model == "gpt-5.4-mini"
+    assert methodologist.definition["runtime"]["engine_id"] == "openai-responses"
+    assert methodologist.definition["runtime"]["model"] == "gpt-5.4-mini"
+    assert methodologist.definition["task_routing"]["normal_message_fanout"] is False
+    assert methodologist.definition["task_routing"]["accepted_task_kinds"] == [
+        "methodology_blueprint_draft"
+    ]
+    assert methodologist.harness.compaction_policy.strategy == "rolling_summary"
+    assert methodologist.harness.compaction_policy.max_estimated_input_tokens == 256_000
+    assert methodologist.harness.metadata["task_routing"][
+        "accepted_task_kinds"
+    ] == ["methodology_blueprint_draft"]
     assert (
         methodologist.definition["profile"]["kind"]
         == "methodology_blueprint_synthesis_specialist"
@@ -3798,10 +3869,10 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
         "organizations.create",
         "workspaces.create",
         "iam.agent_identities.list",
-        "methodology.dossiers.sources.create",
-        "methodology.dossiers.notebook.get",
-        "methodology.dossiers.notes.upsert",
-        "methodology.dossiers.navigate",
+        "dossiers.sources.create",
+        "dossiers.notebook.get",
+        "dossiers.notes.upsert",
+        "dossiers.navigate",
         "methodology.blueprints.submit_draft",
         "methodics.resource_requests.approve",
     }.issubset({tool.tool_name for tool in repository._mcp_server_tools[control_plane.server_id]})
@@ -3841,9 +3912,9 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
     researcher_binding = repository._agent_internal_mcp_servers[
         (researcher.agent_id, control_plane.server_id)
     ]
-    assert "methodology.dossiers.mark_ready" in researcher_binding.tool_allowlist
-    assert "methodology.dossiers.notes.upsert" in researcher_binding.tool_allowlist
-    assert "methodology.dossiers.health.submit" in researcher_binding.tool_allowlist
+    assert "dossiers.lifecycle.transition" in researcher_binding.tool_allowlist
+    assert "dossiers.notes.upsert" in researcher_binding.tool_allowlist
+    assert "dossiers.health.submit" in researcher_binding.tool_allowlist
     assert "methodology.blueprints.submit_draft" not in researcher_binding.tool_allowlist
     researcher_library_binding = repository._agent_internal_mcp_servers[
         (researcher.agent_id, library_plugin.server_id)
@@ -3863,8 +3934,8 @@ async def test_managed_system_defaults_repairer_recreates_managed_records():
     methodologist_binding = repository._agent_internal_mcp_servers[
         (methodologist.agent_id, control_plane.server_id)
     ]
-    assert "methodology.dossiers.get" in methodologist_binding.tool_allowlist
-    assert "methodology.dossiers.navigate" in methodologist_binding.tool_allowlist
+    assert "dossiers.get" in methodologist_binding.tool_allowlist
+    assert "dossiers.navigate" in methodologist_binding.tool_allowlist
     assert "methodology.blueprints.submit_draft" in methodologist_binding.tool_allowlist
     methodologist_role = next(role for role in repository._iam_roles.values() if role.name == "methodology_methodologist")
     assert "methodology.write" in methodologist_role.permissions
@@ -4394,6 +4465,87 @@ async def _create_methodology_blueprint_fixture(
     return result.detail
 
 
+async def _advance_dossier_to_synthesizing(
+    kernel: CollaborationKernel,
+    dossier_id: UUID,
+    actor: ParticipantInput,
+) -> None:
+    for target_status in ("collecting", "synthesizing"):
+        await kernel.transition_dossier_lifecycle(
+            dossier_id,
+            DossierLifecycleTransitionRequest(
+                actor=actor,
+                target_status=target_status,
+            ),
+        )
+
+
+FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS = [
+    "research_plan",
+    "source_bibliography",
+    "methodology_basis",
+    "methodology_principles",
+    "methodics_inventory",
+    "participants_and_roles",
+    "tools_and_methods",
+    "information_assets",
+    "libraries_and_dossiers",
+    "quality_evaluation",
+    "contradictions",
+    "gaps",
+    "synthesis",
+]
+
+
+async def _seed_full_methodology_knowledge_components(
+    kernel: CollaborationKernel,
+    dossier_id: UUID,
+    actor: ParticipantInput,
+    *,
+    source_id: UUID | None = None,
+) -> None:
+    if source_id is None:
+        source_result = await kernel.create_dossier_source(
+            dossier_id,
+            CreateDossierSourceRequest(
+                actor=actor,
+                source_kind="webpage",
+                status="included",
+                title="Full methodology coverage source",
+                source_uri="https://example.test/full-methodology-source",
+                citation_id="S1",
+                quality_notes="Seeded source for full-methodology readiness coverage.",
+            ),
+        )
+        assert source_result.source is not None
+        source_id = source_result.source.source_id
+    note_kind_by_component = {
+        "contradictions": "contradiction",
+        "gaps": "gap",
+        "synthesis": "synthesis",
+        "source_bibliography": "source",
+    }
+    for component in FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS:
+        await kernel.upsert_dossier_note(
+            dossier_id,
+            UpsertDossierNoteRequest(
+                actor=actor,
+                note_kind=note_kind_by_component.get(component, "other"),
+                status="active",
+                slug=f"coverage-{component}",
+                title=f"Coverage: {component.replace('_', ' ')}",
+                summary=f"Full methodology research coverage for {component}.",
+                body=(
+                    f"Records the required {component} knowledge component for "
+                    "Methodologist handoff."
+                ),
+                source_id=source_id if component == "source_bibliography" else None,
+                citation_ids=["S1"] if source_id is not None else [],
+                metadata={"knowledge_component": component},
+            ),
+        )
+
+
 @pytest.mark.asyncio
 async def test_methodology_blueprint_creation_creates_dossier_library_and_researcher_task():
     repository, kernel, organization, operations_workspace, actor = (
@@ -4411,17 +4563,21 @@ async def test_methodology_blueprint_creation_creates_dossier_library_and_resear
     assert len(detail.versions) == 1
     version = detail.versions[0]
     assert version.status == "researching"
-    assert version.research_dossier_id == detail.dossier.dossier_id
+    assert version.dossier_id == detail.dossier.dossier_id
     dossier = detail.dossier
     assert dossier is not None
-    assert dossier.status == "researching"
+    assert dossier.status == "scoping"
+    assert dossier.metadata["completion_profile"] == "full_methodology_research"
+    assert dossier.metadata["required_knowledge_components"] == sorted(
+        FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS
+    )
     assert dossier.operations_workspace_id == operations_workspace.workspace_id
     assert dossier.retained_library_id in repository._libraries
     retained_library = repository._libraries[dossier.retained_library_id]
     assert retained_library.scope == "organization"
     assert retained_library.organization_id == organization.organization_id
-    assert retained_library.metadata["research_dossier"] is True
-    notebook_detail = await kernel.get_research_dossier_notebook_detail(
+    assert retained_library.metadata["dossier"] is True
+    notebook_detail = await kernel.get_dossier_notebook_detail(
         dossier.dossier_id,
         actor=actor,
     )
@@ -4443,7 +4599,7 @@ async def test_methodology_blueprint_creation_creates_dossier_library_and_resear
         "synthesis",
     }
     assert len(notebook_detail.external_refs) == 10
-    assert repository._threads[dossier.thread_id].metadata["research_dossier_id"] == str(
+    assert repository._threads[dossier.thread_id].metadata["dossier_id"] == str(
         dossier.dossier_id
     )
 
@@ -4471,7 +4627,7 @@ async def test_methodology_blueprint_creation_creates_dossier_library_and_resear
     assert len(researcher_tasks) == 1
     task = researcher_tasks[0]
     assert task.correlation_id == dossier.dossier_id
-    assert task.metadata["task_kind"] == "methodology_research_dossier_build"
+    assert task.metadata["task_kind"] == "methodology_dossier_build"
     assert task.metadata["retained_library_id"] == str(dossier.retained_library_id)
     assert "Use web follow-up for gaps, recency, and contradiction checks." in task.metadata[
         "task_instructions"
@@ -4480,7 +4636,7 @@ async def test_methodology_blueprint_creation_creates_dossier_library_and_resear
 
 
 @pytest.mark.asyncio
-async def test_research_dossier_notebook_concepts_claims_links_health_and_sync():
+async def test_methodology_research_request_creates_researcher_refine_task_and_state():
     repository, kernel, organization, _operations_workspace, actor = (
         await _seed_methodology_world()
     )
@@ -4491,9 +4647,301 @@ async def test_research_dossier_notebook_concepts_claims_links_health_and_sync()
         actor,
     )
     dossier = detail.dossier
-    source_result = await kernel.create_research_dossier_source(
+
+    state = await kernel.create_methodology_research_request(
+        detail.blueprint.blueprint_id,
+        CreateMethodologyResearchRequest(
+            actor=actor,
+            instructions=(
+                "Research B2C subscription wellness app demand with two internet "
+                "search turns and fill required methodology components."
+            ),
+            max_search_turns=2,
+            required_components=["research_plan", "synthesis"],
+            metadata={"scenario": "b2c_market_research"},
+        ),
+    )
+
+    assert state.dossier.dossier_id == dossier.dossier_id
+    assert state.metadata["required_knowledge_component_count"] == len(
+        FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS
+    )
+    assert state.metadata["can_request_research"] is True
+    assert repository._dossiers[dossier.dossier_id].metadata["last_research_request"][
+        "max_search_turns"
+    ] == 2
+    assert repository._dossiers[dossier.dossier_id].metadata["last_research_request"][
+        "requested_components"
+    ] == ["research_plan", "synthesis"]
+    researcher = await repository.fetch_system_agent_by_key(
+        scope="global",
+        organization_id=None,
+        agent_key="researcher",
+    )
+    researcher_tasks = await kernel.list_pending_tasks_for_system_agent(
+        researcher.agent_id
+    )
+    refine_task = next(
+        task
+        for task in researcher_tasks
+        if task.metadata["task_kind"] == "methodology_dossier_refine"
+    )
+    assert refine_task.correlation_id == dossier.dossier_id
+    assert refine_task.metadata["max_search_turns"] == 2
+    assert set(refine_task.metadata["required_knowledge_components"]) == set(
+        FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS
+    )
+    assert refine_task.metadata["request_metadata"] == {
+        "scenario": "b2c_market_research"
+    }
+    assert any(
+        item.startswith("Research request instructions: Research B2C subscription")
+        for item in refine_task.metadata["task_instructions"]
+    )
+    required_instruction = next(
+        item
+        for item in refine_task.metadata["task_instructions"]
+        if item.startswith("Required knowledge components for this request: ")
+    )
+    assert set(
+        required_instruction.removeprefix(
+            "Required knowledge components for this request: "
+        ).split(", ")
+    ) == set(FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS)
+    assert {
+        item["component"]
+        for item in refine_task.metadata["required_knowledge_component_note_specs"]
+    } == set(FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS)
+    assert "https://www.nngroup.com/articles/user-interviews/" in refine_task.metadata[
+        "source_fallback_candidate_urls"
+    ]
+    assert any(
+        "web_search__fetch for source_fallback_candidate_urls" in item
+        for item in refine_task.metadata["task_instructions"]
+    )
+    assert "dossier.research_requested" in {
+        event.event_type
+        for event in await repository.list_dossier_events(dossier.dossier_id)
+    }
+
+
+@pytest.mark.asyncio
+async def test_methodology_research_request_marks_coverage_repair_components():
+    repository, kernel, organization, _operations_workspace, actor = (
+        await _seed_methodology_world()
+    )
+    detail = await _create_methodology_blueprint_fixture(
+        repository,
+        kernel,
+        organization,
+        actor,
+    )
+    dossier = detail.dossier
+
+    await kernel.create_methodology_research_request(
+        detail.blueprint.blueprint_id,
+        CreateMethodologyResearchRequest(
+            actor=actor,
+            instructions="Persist missing methodology coverage notes before readiness.",
+            max_search_turns=5,
+            required_components=FULL_METHODOLOGY_KNOWLEDGE_COMPONENTS,
+            metadata={
+                "source_gap": 0,
+                "missing_components": ["gaps", "quality_evaluation"],
+            },
+        ),
+    )
+
+    researcher = await repository.fetch_system_agent_by_key(
+        scope="global",
+        organization_id=None,
+        agent_key="researcher",
+    )
+    researcher_tasks = await kernel.list_pending_tasks_for_system_agent(
+        researcher.agent_id
+    )
+    refine_task = next(
+        task
+        for task in reversed(researcher_tasks)
+        if task.metadata["task_kind"] == "methodology_dossier_refine"
+        and task.correlation_id == dossier.dossier_id
+    )
+    assert refine_task.metadata["coverage_repair_components"] == [
+        "gaps",
+        "quality_evaluation",
+    ]
+    coverage_instruction = next(
+        item
+        for item in refine_task.metadata["task_instructions"]
+        if item.startswith("Coverage-repair mode is active")
+    )
+    assert "Before any web_search" in coverage_instruction
+    specs = refine_task.metadata["required_knowledge_component_note_specs"]
+    assert next(item for item in specs if item["component"] == "gaps")[
+        "note_kind"
+    ] == "gap"
+    assert next(item for item in specs if item["component"] == "quality_evaluation")[
+        "metadata"
+    ] == {"knowledge_component": "quality_evaluation"}
+
+
+@pytest.mark.asyncio
+async def test_dossier_note_upsert_infers_methodology_knowledge_component():
+    _repository, kernel, organization, _operations_workspace, actor = (
+        await _seed_methodology_world()
+    )
+    detail = await _create_methodology_blueprint_fixture(
+        _repository,
+        kernel,
+        organization,
+        actor,
+    )
+    dossier = detail.dossier
+
+    result = await kernel.upsert_dossier_note(
         dossier.dossier_id,
-        CreateResearchDossierSourceRequest(
+        UpsertDossierNoteRequest(
+            actor=actor,
+            note_kind="other",
+            status="active",
+            slug="quality-evaluation",
+            title="Quality evaluation",
+            body="Quality gates, validity checks, and confidence limits.",
+        ),
+    )
+
+    assert result.note is not None
+    assert result.note.metadata["knowledge_component"] == "quality_evaluation"
+    state = await kernel.get_methodology_research_state(
+        detail.blueprint.blueprint_id,
+        actor=actor,
+    )
+    quality_component = next(
+        item
+        for item in state.knowledge_components
+        if item.component == "quality_evaluation"
+    )
+    assert quality_component.present is True
+
+
+@pytest.mark.asyncio
+async def test_full_methodology_ready_requires_requested_internet_sources():
+    repository, kernel, organization, _operations_workspace, actor = (
+        await _seed_methodology_world()
+    )
+    detail = await _create_methodology_blueprint_fixture(
+        repository,
+        kernel,
+        organization,
+        actor,
+    )
+    dossier = detail.dossier
+    await kernel.create_methodology_research_request(
+        detail.blueprint.blueprint_id,
+        CreateMethodologyResearchRequest(
+            actor=actor,
+            instructions="Run two internet search turns and persist sources.",
+            max_search_turns=2,
+        ),
+    )
+    await _seed_full_methodology_knowledge_components(
+        kernel,
+        dossier.dossier_id,
+        actor,
+    )
+    await _advance_dossier_to_synthesizing(kernel, dossier.dossier_id, actor)
+
+    with pytest.raises(ValueError, match="missing required included internet sources"):
+        await kernel.transition_dossier_lifecycle(
+            dossier.dossier_id,
+            DossierLifecycleTransitionRequest(
+                actor=actor,
+                target_status="ready",
+                summary="Not enough internet sources.",
+            ),
+        )
+
+    for turn in (1, 2):
+        await kernel.create_dossier_source(
+            dossier.dossier_id,
+            CreateDossierSourceRequest(
+                actor=actor,
+                source_kind="webpage",
+                status="included",
+                title=f"Internet source {turn}",
+                source_uri=f"https://example.test/internet-source-{turn}",
+                fetch_metadata={
+                    "internet_search": True,
+                    "search_turn": turn,
+                    "search_query": f"query {turn}",
+                },
+            ),
+        )
+
+    ready = await kernel.transition_dossier_lifecycle(
+        dossier.dossier_id,
+        DossierLifecycleTransitionRequest(
+            actor=actor,
+            target_status="ready",
+            summary="Ready with requested internet sources.",
+        ),
+    )
+
+    assert ready.status == "ready"
+    assert repository._methodology_blueprint_versions[
+        detail.versions[0].version_id
+    ].status == "ready_for_draft"
+
+
+@pytest.mark.asyncio
+async def test_empty_same_status_dossier_lifecycle_transition_is_blocked():
+    _repository, kernel, organization, _operations_workspace, actor = (
+        await _seed_methodology_world()
+    )
+    detail = await _create_methodology_blueprint_fixture(
+        _repository,
+        kernel,
+        organization,
+        actor,
+    )
+
+    with pytest.raises(ValueError, match="already 'scoping'"):
+        await kernel.transition_dossier_lifecycle(
+            detail.dossier.dossier_id,
+            DossierLifecycleTransitionRequest(
+                actor=actor,
+                target_status="scoping",
+            ),
+        )
+
+    updated = await kernel.transition_dossier_lifecycle(
+        detail.dossier.dossier_id,
+        DossierLifecycleTransitionRequest(
+            actor=actor,
+            target_status="scoping",
+            metadata={"checkpoint": "scope confirmed"},
+        ),
+    )
+
+    assert updated.status == "scoping"
+    assert updated.metadata["checkpoint"] == "scope confirmed"
+
+
+@pytest.mark.asyncio
+async def test_dossier_notebook_concepts_claims_links_health_and_sync():
+    repository, kernel, organization, _operations_workspace, actor = (
+        await _seed_methodology_world()
+    )
+    detail = await _create_methodology_blueprint_fixture(
+        repository,
+        kernel,
+        organization,
+        actor,
+    )
+    dossier = detail.dossier
+    source_result = await kernel.create_dossier_source(
+        dossier.dossier_id,
+        CreateDossierSourceRequest(
             actor=actor,
             source_kind="webpage",
             status="included",
@@ -4506,9 +4954,9 @@ async def test_research_dossier_notebook_concepts_claims_links_health_and_sync()
     source = source_result.source
     assert source is not None
 
-    concept_result = await kernel.upsert_research_dossier_concept(
+    concept_result = await kernel.upsert_dossier_concept(
         dossier.dossier_id,
-        UpsertResearchDossierConceptRequest(
+        UpsertDossierConceptRequest(
             actor=actor,
             slug="evidence-backed-onboarding",
             name="Evidence-backed onboarding",
@@ -4521,9 +4969,9 @@ async def test_research_dossier_notebook_concepts_claims_links_health_and_sync()
     concept = concept_result.concept
     assert concept is not None
 
-    note_result = await kernel.upsert_research_dossier_note(
+    note_result = await kernel.upsert_dossier_note(
         dossier.dossier_id,
-        UpsertResearchDossierNoteRequest(
+        UpsertDossierNoteRequest(
             actor=actor,
             note_kind="concept",
             status="active",
@@ -4537,9 +4985,9 @@ async def test_research_dossier_notebook_concepts_claims_links_health_and_sync()
     note = note_result.note
     assert note is not None
 
-    claim_result = await kernel.upsert_research_dossier_claim(
+    claim_result = await kernel.upsert_dossier_claim(
         dossier.dossier_id,
-        UpsertResearchDossierClaimRequest(
+        UpsertDossierClaimRequest(
             actor=actor,
             claim_key="claim:evidence-onboarding",
             statement="Reusable onboarding should be grounded in retained evidence.",
@@ -4552,9 +5000,9 @@ async def test_research_dossier_notebook_concepts_claims_links_health_and_sync()
     claim = claim_result.claim
     assert claim is not None
 
-    link_result = await kernel.upsert_research_dossier_link(
+    link_result = await kernel.upsert_dossier_link(
         dossier.dossier_id,
-        UpsertResearchDossierLinkRequest(
+        UpsertDossierLinkRequest(
             actor=actor,
             source_type="concept",
             source_ref_id=concept.concept_id,
@@ -4568,9 +5016,9 @@ async def test_research_dossier_notebook_concepts_claims_links_health_and_sync()
     link = link_result.link
     assert link is not None
 
-    navigation = await kernel.navigate_research_dossier(
+    navigation = await kernel.navigate_dossier(
         dossier.dossier_id,
-        NavigateResearchDossierRequest(
+        NavigateDossierRequest(
             actor=actor,
             query="onboarding",
             max_results=5,
@@ -4579,19 +5027,30 @@ async def test_research_dossier_notebook_concepts_claims_links_health_and_sync()
     assert [item.concept_id for item in navigation.concepts] == [concept.concept_id]
     assert any(item.note_id == note.note_id for item in navigation.entry_notes)
     assert navigation.links[0].link_id == link.link_id
-
-    health = await kernel.submit_research_dossier_health_check(
+    multi_term_navigation = await kernel.navigate_dossier(
         dossier.dossier_id,
-        SubmitResearchDossierHealthCheckRequest(
+        NavigateDossierRequest(
+            actor=actor,
+            query="evidence onboarding retained source",
+            max_results=5,
+        ),
+    )
+    assert [item.concept_id for item in multi_term_navigation.concepts] == [
+        concept.concept_id
+    ]
+
+    health = await kernel.submit_dossier_health_check(
+        dossier.dossier_id,
+        SubmitDossierHealthCheckRequest(
             actor=actor,
             status="passed",
             summary="Concept notebook is navigable.",
         ),
     )
     assert health.status == "passed"
-    sync = await kernel.sync_research_dossier_notebook(
+    sync = await kernel.sync_dossier_notebook(
         dossier.dossier_id,
-        SyncResearchDossierNotebookRequest(
+        SyncDossierNotebookRequest(
             actor=actor,
             provider_key="xwiki",
             metadata={"test": True},
@@ -4599,7 +5058,7 @@ async def test_research_dossier_notebook_concepts_claims_links_health_and_sync()
         stats={"pages_synced": 11},
     )
     assert sync.status == "completed"
-    refreshed = await kernel.get_research_dossier_notebook_detail(
+    refreshed = await kernel.get_dossier_notebook_detail(
         dossier.dossier_id,
         actor=actor,
     )
@@ -4608,22 +5067,22 @@ async def test_research_dossier_notebook_concepts_claims_links_health_and_sync()
     assert refreshed.notebook.status == "ready"
     assert refreshed.provider_bindings[0].last_sync_at == sync.completed_at
     assert {
-        event.event_type for event in await repository.list_research_dossier_events(
+        event.event_type for event in await repository.list_dossier_events(
             dossier.dossier_id
         )
     }.issuperset(
         {
-            "research_dossier_notebook.concept_upserted",
-            "research_dossier_notebook.claim_upserted",
-            "research_dossier_notebook.link_upserted",
-            "research_dossier_notebook.health_checked",
-            "research_dossier_notebook.synced",
+            "dossier_notebook.concept_upserted",
+            "dossier_notebook.claim_upserted",
+            "dossier_notebook.link_upserted",
+            "dossier_notebook.health_checked",
+            "dossier_notebook.synced",
         }
     )
 
 
 @pytest.mark.asyncio
-async def test_research_dossier_notebook_upserts_are_idempotent_by_natural_keys():
+async def test_dossier_notebook_upserts_are_idempotent_by_natural_keys():
     repository, kernel, organization, _operations_workspace, actor = (
         await _seed_methodology_world()
     )
@@ -4634,9 +5093,9 @@ async def test_research_dossier_notebook_upserts_are_idempotent_by_natural_keys(
         actor,
     )
     dossier = detail.dossier
-    source_result = await kernel.create_research_dossier_source(
+    source_result = await kernel.create_dossier_source(
         dossier.dossier_id,
-        CreateResearchDossierSourceRequest(
+        CreateDossierSourceRequest(
             actor=actor,
             source_kind="webpage",
             status="included",
@@ -4649,9 +5108,9 @@ async def test_research_dossier_notebook_upserts_are_idempotent_by_natural_keys(
     assert source is not None
 
     first_concept = (
-        await kernel.upsert_research_dossier_concept(
+        await kernel.upsert_dossier_concept(
             dossier.dossier_id,
-            UpsertResearchDossierConceptRequest(
+            UpsertDossierConceptRequest(
                 actor=actor,
                 slug="retry-safe-concept",
                 name="Retry-safe concept",
@@ -4663,9 +5122,9 @@ async def test_research_dossier_notebook_upserts_are_idempotent_by_natural_keys(
         )
     ).concept
     second_concept = (
-        await kernel.upsert_research_dossier_concept(
+        await kernel.upsert_dossier_concept(
             dossier.dossier_id,
-            UpsertResearchDossierConceptRequest(
+            UpsertDossierConceptRequest(
                 actor=actor,
                 slug="retry-safe-concept",
                 name="Retry-safe concept updated",
@@ -4685,9 +5144,9 @@ async def test_research_dossier_notebook_upserts_are_idempotent_by_natural_keys(
     assert second_concept.metadata == {"attempt": 2}
 
     first_note = (
-        await kernel.upsert_research_dossier_note(
+        await kernel.upsert_dossier_note(
             dossier.dossier_id,
-            UpsertResearchDossierNoteRequest(
+            UpsertDossierNoteRequest(
                 actor=actor,
                 note_kind="concept",
                 status="draft",
@@ -4700,9 +5159,9 @@ async def test_research_dossier_notebook_upserts_are_idempotent_by_natural_keys(
         )
     ).note
     second_note = (
-        await kernel.upsert_research_dossier_note(
+        await kernel.upsert_dossier_note(
             dossier.dossier_id,
-            UpsertResearchDossierNoteRequest(
+            UpsertDossierNoteRequest(
                 actor=actor,
                 note_kind="concept",
                 status="active",
@@ -4721,9 +5180,9 @@ async def test_research_dossier_notebook_upserts_are_idempotent_by_natural_keys(
     assert second_note.citation_ids == ["S1", "S2"]
 
     first_claim = (
-        await kernel.upsert_research_dossier_claim(
+        await kernel.upsert_dossier_claim(
             dossier.dossier_id,
-            UpsertResearchDossierClaimRequest(
+            UpsertDossierClaimRequest(
                 actor=actor,
                 claim_key="claim:retry-safe",
                 statement="Initial claim.",
@@ -4734,9 +5193,9 @@ async def test_research_dossier_notebook_upserts_are_idempotent_by_natural_keys(
         )
     ).claim
     second_claim = (
-        await kernel.upsert_research_dossier_claim(
+        await kernel.upsert_dossier_claim(
             dossier.dossier_id,
-            UpsertResearchDossierClaimRequest(
+            UpsertDossierClaimRequest(
                 actor=actor,
                 claim_key="claim:retry-safe",
                 statement="Updated claim.",
@@ -4753,9 +5212,9 @@ async def test_research_dossier_notebook_upserts_are_idempotent_by_natural_keys(
     assert second_claim.statement == "Updated claim."
 
     first_link = (
-        await kernel.upsert_research_dossier_link(
+        await kernel.upsert_dossier_link(
             dossier.dossier_id,
-            UpsertResearchDossierLinkRequest(
+            UpsertDossierLinkRequest(
                 actor=actor,
                 source_type="concept",
                 source_ref_id=second_concept.concept_id,
@@ -4767,9 +5226,9 @@ async def test_research_dossier_notebook_upserts_are_idempotent_by_natural_keys(
         )
     ).link
     second_link = (
-        await kernel.upsert_research_dossier_link(
+        await kernel.upsert_dossier_link(
             dossier.dossier_id,
-            UpsertResearchDossierLinkRequest(
+            UpsertDossierLinkRequest(
                 actor=actor,
                 source_type="concept",
                 source_ref_id=second_concept.concept_id,
@@ -4786,7 +5245,7 @@ async def test_research_dossier_notebook_upserts_are_idempotent_by_natural_keys(
     assert second_link.link_id == first_link.link_id
     assert second_link.rationale == "Updated rationale."
 
-    notebook = await kernel.get_research_dossier_notebook_detail(
+    notebook = await kernel.get_dossier_notebook_detail(
         dossier.dossier_id,
         actor=actor,
     )
@@ -4805,7 +5264,7 @@ async def test_research_dossier_notebook_upserts_are_idempotent_by_natural_keys(
 
 
 @pytest.mark.asyncio
-async def test_research_dossier_agent_events_record_system_agent_id_not_participant_id():
+async def test_dossier_agent_events_record_system_agent_id_not_participant_id():
     repository, kernel, organization, operations_workspace, actor = (
         await _seed_methodology_world()
     )
@@ -4831,9 +5290,9 @@ async def test_research_dossier_agent_events_record_system_agent_id_not_particip
         display_name=researcher.display_name,
     )
 
-    source_result = await kernel.create_research_dossier_source(
+    source_result = await kernel.create_dossier_source(
         dossier.dossier_id,
-        CreateResearchDossierSourceRequest(
+        CreateDossierSourceRequest(
             actor=agent_actor,
             source_kind="webpage",
             status="included",
@@ -4847,14 +5306,14 @@ async def test_research_dossier_agent_events_record_system_agent_id_not_particip
     assert source.discovered_by_system_agent_id != researcher_participant.participant_id
     source_events = [
         event
-        for event in await repository.list_research_dossier_events(dossier.dossier_id)
-        if event.event_type == "research_dossier_source.created"
+        for event in await repository.list_dossier_events(dossier.dossier_id)
+        if event.event_type == "dossier_source.created"
     ]
     assert source_events[0].system_agent_id == researcher.agent_id
 
 
 @pytest.mark.asyncio
-async def test_research_dossier_sources_reject_cross_org_refs_and_ready_handoff():
+async def test_dossier_sources_reject_cross_org_refs_and_ready_handoff():
     repository, kernel, organization, _operations_workspace, actor = (
         await _seed_methodology_world()
     )
@@ -4881,9 +5340,9 @@ async def test_research_dossier_sources_reject_cross_org_refs_and_ready_handoff(
         actor=actor,
     )
 
-    source_result = await kernel.create_research_dossier_source(
+    source_result = await kernel.create_dossier_source(
         dossier.dossier_id,
-        CreateResearchDossierSourceRequest(
+        CreateDossierSourceRequest(
             actor=actor,
             source_kind="library_item",
             status="included",
@@ -4906,8 +5365,8 @@ async def test_research_dossier_sources_reject_cross_org_refs_and_ready_handoff(
     assert source.context_pack_ids == [context_pack.context_pack_id]
     assert {
         event.event_type
-        for event in await repository.list_research_dossier_events(dossier.dossier_id)
-    } == {"research_dossier.created", "research_dossier_source.created"}
+        for event in await repository.list_dossier_events(dossier.dossier_id)
+    } == {"dossier.created", "dossier_source.created"}
 
     cross_org_library = _methodology_library(
         repository,
@@ -4915,9 +5374,9 @@ async def test_research_dossier_sources_reject_cross_org_refs_and_ready_handoff(
         actor=actor,
     )
     with pytest.raises(KeyError, match="not found in organization"):
-        await kernel.create_research_dossier_source(
+        await kernel.create_dossier_source(
             dossier.dossier_id,
-            CreateResearchDossierSourceRequest(
+            CreateDossierSourceRequest(
                 actor=actor,
                 source_kind="library_item",
                 status="included",
@@ -4932,9 +5391,9 @@ async def test_research_dossier_sources_reject_cross_org_refs_and_ready_handoff(
         actor=actor,
     )
     with pytest.raises(ValueError, match="context pack belongs to a different organization"):
-        await kernel.create_research_dossier_source(
+        await kernel.create_dossier_source(
             dossier.dossier_id,
-            CreateResearchDossierSourceRequest(
+            CreateDossierSourceRequest(
                 actor=actor,
                 source_kind="other",
                 status="included",
@@ -4943,23 +5402,31 @@ async def test_research_dossier_sources_reject_cross_org_refs_and_ready_handoff(
             ),
         )
 
-    updated_dossier = await kernel.attach_research_dossier_context_pack(
+    updated_dossier = await kernel.attach_dossier_context_pack(
         dossier.dossier_id,
-        AttachResearchDossierContextPackRequest(
+        AttachDossierContextPackRequest(
             actor=actor,
             context_pack_id=context_pack.context_pack_id,
             source_id=source.source_id,
         ),
     )
     assert updated_dossier.context_pack_ids == [context_pack.context_pack_id]
-    assert repository._research_dossier_sources[source.source_id].context_pack_ids == [
+    assert repository._dossier_sources[source.source_id].context_pack_ids == [
         context_pack.context_pack_id
     ]
 
-    ready = await kernel.mark_research_dossier_ready(
+    await _seed_full_methodology_knowledge_components(
+        kernel,
         dossier.dossier_id,
-        MarkResearchDossierReadyRequest(
+        actor,
+        source_id=source.source_id,
+    )
+    await _advance_dossier_to_synthesizing(kernel, dossier.dossier_id, actor)
+    ready = await kernel.transition_dossier_lifecycle(
+        dossier.dossier_id,
+        DossierLifecycleTransitionRequest(
             actor=actor,
+            target_status="ready",
             summary="Evidence is sufficient for Methodologist.",
             contradictions=[
                 {
@@ -4972,10 +5439,10 @@ async def test_research_dossier_sources_reject_cross_org_refs_and_ready_handoff(
         ),
     )
 
-    assert ready.status == "ready_for_methodologist"
+    assert ready.status == "ready"
     assert ready.summary == "Evidence is sufficient for Methodologist."
     assert repository._methodology_blueprint_versions[detail.versions[0].version_id].status == (
-        "ready_for_methodologist"
+        "ready_for_draft"
     )
     methodologist = await repository.fetch_system_agent_by_key(
         scope="global",
@@ -4995,11 +5462,249 @@ async def test_research_dossier_sources_reject_cross_org_refs_and_ready_handoff(
         source.source_id
     )
     assert methodologist_tasks[0].metadata["dossier_sources"][0]["status"] == "included"
+    methodologist_instructions = "\n".join(
+        methodologist_tasks[0].metadata["task_instructions"]
+    )
+    assert "control_plane__methodology.blueprints.submit_draft" in (
+        methodologist_instructions
+    )
+    assert f'version_id="{detail.versions[0].version_id}"' in (
+        methodologist_instructions
+    )
+    assert f'dossier_id="{dossier.dossier_id}"' in methodologist_instructions
+    assert '"scope":"organization"' in methodologist_instructions
+    assert "control_plane__dossiers.notebook.get" in methodologist_instructions
+    assert "control_plane__dossiers.navigate" in methodologist_instructions
+    assert "Embedded source records" in methodologist_instructions
+    assert "Evidence Note" in methodologist_instructions
     assert repository._methodic_executions == {}
 
 
 @pytest.mark.asyncio
-async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
+async def test_ready_dossier_can_recover_missing_or_failed_methodologist_handoff():
+    repository, kernel, organization, operations_workspace, actor = (
+        await _seed_methodology_world()
+    )
+    detail = await _create_methodology_blueprint_fixture(
+        repository,
+        kernel,
+        organization,
+        actor,
+    )
+    dossier = detail.dossier
+    assert dossier is not None
+    await _seed_full_methodology_knowledge_components(
+        kernel,
+        dossier.dossier_id,
+        actor,
+    )
+    await _advance_dossier_to_synthesizing(kernel, dossier.dossier_id, actor)
+    ready = await kernel.transition_dossier_lifecycle(
+        dossier.dossier_id,
+        DossierLifecycleTransitionRequest(
+            actor=actor,
+            target_status="ready",
+            summary="Ready for Methodologist.",
+        ),
+    )
+
+    methodologist = await repository.fetch_system_agent_by_key(
+        scope="global",
+        organization_id=None,
+        agent_key="methodologist",
+    )
+    initial_tasks = await kernel.list_pending_tasks_for_system_agent(
+        methodologist.agent_id
+    )
+    assert len(initial_tasks) == 1
+    first_task = initial_tasks[0]
+
+    await kernel.transition_dossier_lifecycle(
+        dossier.dossier_id,
+        DossierLifecycleTransitionRequest(
+            actor=actor,
+            target_status="ready",
+            summary=ready.summary,
+            reason="admin_verified_handoff_task_exists",
+            metadata={"ensure_methodologist_task": True},
+        ),
+    )
+    reused_event = repository._dossier_events[dossier.dossier_id][-1]
+    assert reused_event.payload["methodologist_task_id"] == str(first_task.task_id)
+    assert reused_event.payload["methodologist_task_reused"] is True
+    assert len(
+        await repository.list_tasks_for_correlation(
+            dossier.dossier_id,
+            task_kind="methodology_blueprint_draft",
+        )
+    ) == 1
+
+    repository._tasks[first_task.task_id] = first_task.model_copy(
+        update={"status": "failed"}
+    )
+    await kernel.transition_dossier_lifecycle(
+        dossier.dossier_id,
+        DossierLifecycleTransitionRequest(
+            actor=actor,
+            target_status="ready",
+            summary=ready.summary,
+            reason="admin_recovered_failed_methodologist_task",
+            metadata={"ensure_methodologist_task": True},
+        ),
+    )
+
+    recovered_tasks = await repository.list_tasks_for_correlation(
+        dossier.dossier_id,
+        task_kind="methodology_blueprint_draft",
+    )
+    assert len(recovered_tasks) == 2
+    recovered_task = next(task for task in recovered_tasks if task.status == "created")
+    assert recovered_task.metadata["handoff_recovery"] is True
+    assert recovered_task.metadata["previous_methodologist_task_ids"] == [
+        str(first_task.task_id)
+    ]
+    recovered_event = repository._dossier_events[dossier.dossier_id][-1]
+    assert recovered_event.payload["methodologist_task_id"] == str(
+        recovered_task.task_id
+    )
+    assert recovered_event.payload["methodologist_task_recovered"] is True
+
+
+@pytest.mark.asyncio
+async def test_methodology_draft_submission_completes_required_harness_markers():
+    repository, kernel, organization, operations_workspace, actor = (
+        await _seed_methodology_world()
+    )
+    detail = await _create_methodology_blueprint_fixture(
+        repository,
+        kernel,
+        organization,
+        actor,
+    )
+    dossier = detail.dossier
+    assert dossier is not None
+    dossier = dossier.model_copy(
+        update={
+            "topic": "B2C subscription wellness app survey and willingness-to-pay validation",
+            "tasks": [
+                "Include participant roles, tools, source references, and information assets.",
+                "Create survey quantification and willingness-to-pay methodics.",
+            ],
+        }
+    )
+    repository._dossiers[dossier.dossier_id] = dossier
+
+    researcher = await repository.fetch_system_agent_by_key(
+        scope="global",
+        organization_id=None,
+        agent_key="researcher",
+    )
+    methodologist = await repository.fetch_system_agent_by_key(
+        scope="global",
+        organization_id=None,
+        agent_key="methodologist",
+    )
+    researcher_participant = await repository.fetch_agent_participant(
+        operations_workspace.workspace_id,
+        researcher.agent_id,
+    )
+    methodologist_participant = await repository.fetch_agent_participant(
+        operations_workspace.workspace_id,
+        methodologist.agent_id,
+    )
+    researcher_actor = ParticipantInput(
+        participant_id=researcher_participant.participant_id,
+        participant_type="agent",
+        display_name=researcher.display_name,
+    )
+    methodologist_actor = ParticipantInput(
+        participant_id=methodologist_participant.participant_id,
+        participant_type="agent",
+        display_name=methodologist.display_name,
+    )
+    source = (
+        await kernel.create_dossier_source(
+            dossier.dossier_id,
+            CreateDossierSourceRequest(
+                actor=researcher_actor,
+                source_kind="webpage",
+                status="included",
+                title="Pricing survey guide",
+                source_uri="https://www.surveymonkey.com/market-research/resources/pricing-surveys/",
+                citation_id="S1",
+                fetch_metadata={"internet_search": True, "search_turn": 1, "rank": 1},
+            ),
+        )
+    ).source
+    await _seed_full_methodology_knowledge_components(
+        kernel,
+        dossier.dossier_id,
+        researcher_actor,
+        source_id=source.source_id,
+    )
+    await _advance_dossier_to_synthesizing(kernel, dossier.dossier_id, researcher_actor)
+    await kernel.transition_dossier_lifecycle(
+        dossier.dossier_id,
+        DossierLifecycleTransitionRequest(
+            actor=researcher_actor,
+            target_status="ready",
+            summary="Ready for B2C methodology drafting.",
+        ),
+    )
+
+    submitted = await kernel.submit_methodology_blueprint_draft(
+        detail.versions[0].version_id,
+        SubmitMethodologyBlueprintDraftRequest(
+            actor=methodologist_actor,
+            cited_output="# B2C draft\n\nInterview evidence is ready.",
+            harness_draft=WorkspaceHarness(
+                methodics=[
+                    WorkspaceMethodic(
+                        name="Discovery interviewing",
+                        goal="Collect qualitative demand evidence.",
+                        steps=[
+                            WorkspaceMethodicStep(
+                                instruction="Interview target consumers.",
+                            )
+                        ],
+                    )
+                ],
+                metadata={
+                    "dossier_id": str(dossier.dossier_id),
+                    "draft_completion_markers": ["survey", "willingness"],
+                },
+            ),
+        ),
+    )
+
+    draft = submitted.versions[0].harness_draft
+    assert draft is not None
+    draft_json = json.dumps(draft.model_dump(mode="json"), sort_keys=True).lower()
+    for marker in (
+        "participant",
+        "tool",
+        "asset",
+        "source",
+        "survey",
+        "interview",
+        "willingness",
+    ):
+        assert marker in draft_json
+    assert any(
+        "survey" in methodic.name.lower()
+        and "willingness" in methodic.goal.lower()
+        and methodic.steps
+        for methodic in draft.methodics
+    )
+    methodics_json = json.dumps(
+        [methodic.model_dump(mode="json") for methodic in draft.methodics],
+        sort_keys=True,
+    ).lower()
+    assert "asset" in methodics_json
+
+
+@pytest.mark.asyncio
+async def test_compound_dossier_workflow_preserves_knowledge_layers():
     repository, kernel, organization, operations_workspace, actor = (
         await _seed_methodology_world()
     )
@@ -5060,9 +5765,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
     )
 
     local_source = (
-        await kernel.create_research_dossier_source(
+        await kernel.create_dossier_source(
             dossier.dossier_id,
-            CreateResearchDossierSourceRequest(
+            CreateDossierSourceRequest(
                 actor=researcher_actor,
                 source_kind="library_item",
                 status="included",
@@ -5080,9 +5785,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
         )
     ).source
     unresolved_web_source = (
-        await kernel.create_research_dossier_source(
+        await kernel.create_dossier_source(
             dossier.dossier_id,
-            CreateResearchDossierSourceRequest(
+            CreateDossierSourceRequest(
                 actor=researcher_actor,
                 source_kind="webpage",
                 status="unresolved",
@@ -5102,10 +5807,10 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
         )
     ).source
     included_web_source = (
-        await kernel.update_research_dossier_source(
+        await kernel.update_dossier_source(
             dossier.dossier_id,
             unresolved_web_source.source_id,
-            UpdateResearchDossierSourceRequest(
+            UpdateDossierSourceRequest(
                 actor=researcher_actor,
                 status="included",
                 quality_notes="Triaged as relevant and recent enough for synthesis.",
@@ -5114,9 +5819,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
         )
     ).source
     duplicate_source = (
-        await kernel.create_research_dossier_source(
+        await kernel.create_dossier_source(
             dossier.dossier_id,
-            CreateResearchDossierSourceRequest(
+            CreateDossierSourceRequest(
                 actor=researcher_actor,
                 source_kind="webpage",
                 status="duplicate",
@@ -5127,9 +5832,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
         )
     ).source
     excluded_source = (
-        await kernel.create_research_dossier_source(
+        await kernel.create_dossier_source(
             dossier.dossier_id,
-            CreateResearchDossierSourceRequest(
+            CreateDossierSourceRequest(
                 actor=researcher_actor,
                 source_kind="paper",
                 status="excluded",
@@ -5140,9 +5845,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
         )
     ).source
     failed_source = (
-        await kernel.create_research_dossier_source(
+        await kernel.create_dossier_source(
             dossier.dossier_id,
-            CreateResearchDossierSourceRequest(
+            CreateDossierSourceRequest(
                 actor=researcher_actor,
                 source_kind="webpage",
                 status="failed",
@@ -5154,9 +5859,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
         )
     ).source
     unresolved_source = (
-        await kernel.create_research_dossier_source(
+        await kernel.create_dossier_source(
             dossier.dossier_id,
-            CreateResearchDossierSourceRequest(
+            CreateDossierSourceRequest(
                 actor=researcher_actor,
                 source_kind="dataset",
                 status="unresolved",
@@ -5171,9 +5876,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
     assert excluded_source is not None
     assert failed_source is not None
     assert unresolved_source is not None
-    await kernel.attach_research_dossier_context_pack(
+    await kernel.attach_dossier_context_pack(
         dossier.dossier_id,
-        AttachResearchDossierContextPackRequest(
+        AttachDossierContextPackRequest(
             actor=researcher_actor,
             context_pack_id=context_pack.context_pack_id,
             source_id=local_source.source_id,
@@ -5181,9 +5886,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
     )
 
     supported_claim = (
-        await kernel.upsert_research_dossier_claim(
+        await kernel.upsert_dossier_claim(
             dossier.dossier_id,
-            UpsertResearchDossierClaimRequest(
+            UpsertDossierClaimRequest(
                 actor=researcher_actor,
                 claim_key="claim:onboarding-evidence-gates",
                 statement="Team onboarding needs explicit evidence gates before execution.",
@@ -5196,9 +5901,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
         )
     ).claim
     autonomy_claim = (
-        await kernel.upsert_research_dossier_claim(
+        await kernel.upsert_dossier_claim(
             dossier.dossier_id,
-            UpsertResearchDossierClaimRequest(
+            UpsertDossierClaimRequest(
                 actor=researcher_actor,
                 claim_key="claim:approval-depth",
                 statement="Approval-heavy onboarding can reduce team autonomy.",
@@ -5211,9 +5916,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
         )
     ).claim
     concept = (
-        await kernel.upsert_research_dossier_concept(
+        await kernel.upsert_dossier_concept(
             dossier.dossier_id,
-            UpsertResearchDossierConceptRequest(
+            UpsertDossierConceptRequest(
                 actor=researcher_actor,
                 slug="evidence-gated-onboarding",
                 name="Evidence-gated onboarding",
@@ -5230,9 +5935,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
         )
     ).concept
     concept_note = (
-        await kernel.upsert_research_dossier_note(
+        await kernel.upsert_dossier_note(
             dossier.dossier_id,
-            UpsertResearchDossierNoteRequest(
+            UpsertDossierNoteRequest(
                 actor=researcher_actor,
                 note_kind="concept",
                 status="active",
@@ -5246,9 +5951,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
         )
     ).note
     contradiction_note = (
-        await kernel.upsert_research_dossier_note(
+        await kernel.upsert_dossier_note(
             dossier.dossier_id,
-            UpsertResearchDossierNoteRequest(
+            UpsertDossierNoteRequest(
                 actor=researcher_actor,
                 note_kind="contradiction",
                 status="active",
@@ -5262,9 +5967,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
         )
     ).note
     gap_note = (
-        await kernel.upsert_research_dossier_note(
+        await kernel.upsert_dossier_note(
             dossier.dossier_id,
-            UpsertResearchDossierNoteRequest(
+            UpsertDossierNoteRequest(
                 actor=researcher_actor,
                 note_kind="gap",
                 status="active",
@@ -5277,9 +5982,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
         )
     ).note
     source_note = (
-        await kernel.upsert_research_dossier_note(
+        await kernel.upsert_dossier_note(
             dossier.dossier_id,
-            UpsertResearchDossierNoteRequest(
+            UpsertDossierNoteRequest(
                 actor=researcher_actor,
                 note_kind="source",
                 status="active",
@@ -5295,9 +6000,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
     assert contradiction_note is not None
     assert gap_note is not None
     assert source_note is not None
-    await kernel.upsert_research_dossier_link(
+    await kernel.upsert_dossier_link(
         dossier.dossier_id,
-        UpsertResearchDossierLinkRequest(
+        UpsertDossierLinkRequest(
             actor=researcher_actor,
             source_type="concept",
             source_ref_id=concept.concept_id,
@@ -5307,9 +6012,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
             rationale="The concept operationalizes the supported claim.",
         ),
     )
-    await kernel.upsert_research_dossier_link(
+    await kernel.upsert_dossier_link(
         dossier.dossier_id,
-        UpsertResearchDossierLinkRequest(
+        UpsertDossierLinkRequest(
             actor=researcher_actor,
             source_type="claim",
             source_ref_id=autonomy_claim.claim_id,
@@ -5319,9 +6024,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
             rationale="S2 complicates the approval-gate interpretation in S1.",
         ),
     )
-    await kernel.upsert_research_dossier_link(
+    await kernel.upsert_dossier_link(
         dossier.dossier_id,
-        UpsertResearchDossierLinkRequest(
+        UpsertDossierLinkRequest(
             actor=researcher_actor,
             source_type="source",
             source_ref_id=local_source.source_id,
@@ -5331,9 +6036,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
             rationale="The source summary is derived from the retained library item.",
         ),
     )
-    warning = await kernel.submit_research_dossier_health_check(
+    warning = await kernel.submit_dossier_health_check(
         dossier.dossier_id,
-        SubmitResearchDossierHealthCheckRequest(
+        SubmitDossierHealthCheckRequest(
             actor=researcher_actor,
             status="warning",
             summary="Notebook is useful but still has one explicit unresolved dataset.",
@@ -5342,9 +6047,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
         ),
     )
     assert warning.checked_by_system_agent_id == researcher.agent_id
-    passed = await kernel.submit_research_dossier_health_check(
+    passed = await kernel.submit_dossier_health_check(
         dossier.dossier_id,
-        SubmitResearchDossierHealthCheckRequest(
+        SubmitDossierHealthCheckRequest(
             actor=researcher_actor,
             status="passed",
             summary="Notebook is navigable and unresolved items are explicit.",
@@ -5352,9 +6057,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
             findings=[{"kind": "accepted_gap", "note_id": str(gap_note.note_id)}],
         ),
     )
-    sync = await kernel.sync_research_dossier_notebook(
+    sync = await kernel.sync_dossier_notebook(
         dossier.dossier_id,
-        SyncResearchDossierNotebookRequest(
+        SyncDossierNotebookRequest(
             actor=researcher_actor,
             provider_key="xwiki",
             metadata={"provider": "xwiki", "mode": "compound-test"},
@@ -5363,7 +6068,7 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
     )
     assert sync.system_agent_id == researcher.agent_id
 
-    graph = await kernel.get_research_dossier_graph(
+    graph = await kernel.get_dossier_graph(
         dossier.dossier_id,
         actor=researcher_actor,
     )
@@ -5383,9 +6088,9 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
     assert graph.metadata["knowledge_storage"] is True
     assert graph.metadata["node_count"] >= 16
     assert graph.metadata["link_count"] == 3
-    navigation = await kernel.navigate_research_dossier(
+    navigation = await kernel.navigate_dossier(
         dossier.dossier_id,
-        NavigateResearchDossierRequest(
+        NavigateDossierRequest(
             actor=methodologist_actor,
             query="approval",
             max_results=10,
@@ -5395,15 +6100,15 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
     assert any(item.claim_id == autonomy_claim.claim_id for item in navigation.claims)
     assert any(item.note_id == contradiction_note.note_id for item in navigation.contradictions)
     assert any(item.note_id == gap_note.note_id for item in navigation.gaps)
-    focused = await kernel.navigate_research_dossier(
+    focused = await kernel.navigate_dossier(
         dossier.dossier_id,
-        NavigateResearchDossierRequest(
+        NavigateDossierRequest(
             actor=methodologist_actor,
             focus_concept_id=concept.concept_id,
         ),
     )
     assert focused.concepts == [concept]
-    refreshed_notebook = await kernel.get_research_dossier_notebook_detail(
+    refreshed_notebook = await kernel.get_dossier_notebook_detail(
         dossier.dossier_id,
         actor=methodologist_actor,
     )
@@ -5411,11 +6116,19 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
     assert refreshed_notebook.latest_health_check.check_id == passed.check_id
     assert refreshed_notebook.notebook.status == "ready"
 
-    ready = await kernel.mark_research_dossier_ready(
+    await _seed_full_methodology_knowledge_components(
+        kernel,
         dossier.dossier_id,
-        MarkResearchDossierReadyRequest(
+        researcher_actor,
+        source_id=local_source.source_id,
+    )
+    await _advance_dossier_to_synthesizing(kernel, dossier.dossier_id, researcher_actor)
+    ready = await kernel.transition_dossier_lifecycle(
+        dossier.dossier_id,
+        DossierLifecycleTransitionRequest(
             actor=researcher_actor,
-            summary="Research dossier is ready with explicit evidence, contradictions, and gaps.",
+            target_status="ready",
+            summary="Dossier is ready with explicit evidence, contradictions, and gaps.",
             contradictions=[
                 {
                     "claims": [
@@ -5432,7 +6145,7 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
             metadata={"latest_health_check_id": str(passed.check_id)},
         ),
     )
-    assert ready.status == "ready_for_methodologist"
+    assert ready.status == "ready"
     methodologist_tasks = await kernel.list_pending_tasks_for_system_agent(
         methodologist.agent_id
     )
@@ -5479,7 +6192,7 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
             )
         ],
         metadata={
-            "research_dossier_id": str(dossier.dossier_id),
+            "dossier_id": str(dossier.dossier_id),
             "notebook_id": str(refreshed_notebook.notebook.notebook_id),
         },
     )
@@ -5499,7 +6212,25 @@ async def test_compound_research_dossier_workflow_preserves_knowledge_layers():
     assert submitted_version.status == "pending_review"
     assert submitted_version.submitted_by_system_agent_id == methodologist.agent_id
     assert submitted_version.metadata["consumed_via"] == "navigate+graph"
-    assert submitted.dossier.status == "completed"
+    assert submitted.dossier.status == "consumed"
+    edited = await kernel.submit_methodology_blueprint_draft(
+        submitted_version.version_id,
+        SubmitMethodologyBlueprintDraftRequest(
+            actor=methodologist_actor,
+            cited_output="# Evidence-gated onboarding\n\nEdited pending draft [S1]",
+            harness_draft=harness_draft.model_copy(
+                update={"summary": "Edited pending-review onboarding methodology."}
+            ),
+            metadata={"edited_pending_review": True},
+        ),
+    )
+    edited_version = edited.versions[0]
+    assert edited_version.status == "pending_review"
+    assert edited_version.harness_draft.summary == (
+        "Edited pending-review onboarding methodology."
+    )
+    assert edited_version.metadata["edited_pending_review"] is True
+    assert edited.dossier.status == "consumed"
     with pytest.raises(ValueError, match="Only approved"):
         target_workspace = Workspace(
             workspace_id=uuid4(),
@@ -5545,10 +6276,17 @@ async def test_methodology_blueprint_draft_review_and_apply_are_human_gated():
         organization,
         actor,
     )
-    dossier = await kernel.mark_research_dossier_ready(
+    await _seed_full_methodology_knowledge_components(
+        kernel,
         detail.dossier.dossier_id,
-        MarkResearchDossierReadyRequest(
+        actor,
+    )
+    await _advance_dossier_to_synthesizing(kernel, detail.dossier.dossier_id, actor)
+    dossier = await kernel.transition_dossier_lifecycle(
+        detail.dossier.dossier_id,
+        DossierLifecycleTransitionRequest(
             actor=actor,
+            target_status="ready",
             summary="Ready for synthesis.",
         ),
     )
@@ -5609,7 +6347,7 @@ async def test_methodology_blueprint_draft_review_and_apply_are_human_gated():
         ),
     )
     assert submitted.versions[0].status == "pending_review"
-    assert submitted.dossier.status == "completed"
+    assert submitted.dossier.status == "consumed"
 
     target_workspace = Workspace(
         workspace_id=uuid4(),
@@ -5680,6 +6418,178 @@ async def test_methodology_blueprint_draft_review_and_apply_are_human_gated():
     )
     assert applied.workspace.harness.metadata["applied_by_test"] is True
     assert repository._methodic_executions == {}
+
+
+@pytest.mark.asyncio
+async def test_methodology_blueprint_versioned_edits_and_archive_preserve_history():
+    repository, kernel, organization, _operations_workspace, actor = (
+        await _seed_methodology_world()
+    )
+    detail = await _create_methodology_blueprint_fixture(
+        repository,
+        kernel,
+        organization,
+        actor,
+    )
+    source = await kernel.create_dossier_source(
+        detail.dossier.dossier_id,
+        CreateDossierSourceRequest(
+            actor=actor,
+            source_kind="webpage",
+            status="included",
+            title="Onboarding handbook",
+            source_uri="https://example.test/onboarding",
+            citation_id="S1",
+        ),
+    )
+    assert source.source is not None
+    await _seed_full_methodology_knowledge_components(
+        kernel,
+        detail.dossier.dossier_id,
+        actor,
+        source_id=source.source.source_id,
+    )
+    await _advance_dossier_to_synthesizing(kernel, detail.dossier.dossier_id, actor)
+    await kernel.transition_dossier_lifecycle(
+        detail.dossier.dossier_id,
+        DossierLifecycleTransitionRequest(
+            actor=actor,
+            target_status="ready",
+            summary="Ready for synthesis.",
+        ),
+    )
+    base_version = repository._methodology_blueprint_versions[
+        detail.versions[0].version_id
+    ]
+    base_harness = WorkspaceHarness(
+        summary="Base onboarding methodology.",
+        methodology=WorkspaceMethodology(
+            ontology="People, artifacts, and evidence gates.",
+            principles=["Cite every source-backed methodic."],
+        ),
+        methodics=[
+            WorkspaceMethodic(
+                name="Base onboarding",
+                goal="Move a team into evidence-backed execution.",
+                steps=[
+                    WorkspaceMethodicStep(
+                        instruction="Collect constraints.",
+                        expected_artifacts=["constraint note"],
+                        verification=["note cites S1"],
+                    )
+                ],
+                success_criteria=["Reviewer accepts the constraint note."],
+            )
+        ],
+    )
+    await kernel.submit_methodology_blueprint_draft(
+        base_version.version_id,
+        SubmitMethodologyBlueprintDraftRequest(
+            actor=actor,
+            cited_output="# Base methodology\n\nClaim [S1]",
+            harness_draft=base_harness,
+        ),
+    )
+    approved = await kernel.review_methodology_blueprint_version(
+        detail.blueprint.blueprint_id,
+        base_version.version_id,
+        ReviewMethodologyBlueprintVersionRequest(
+            actor=actor,
+            reason="Initial version accepted.",
+        ),
+        approved=True,
+    )
+    assert approved.blueprint.active_version_id == base_version.version_id
+
+    with pytest.raises(ValueError, match="Cannot submit a draft"):
+        await kernel.submit_methodology_blueprint_draft(
+            base_version.version_id,
+            SubmitMethodologyBlueprintDraftRequest(
+                actor=actor,
+                cited_output="# Mutating approved version",
+                harness_draft=base_harness.model_copy(
+                    update={"summary": "Mutated approved methodology."}
+                ),
+            ),
+        )
+
+    revised_harness = base_harness.model_copy(
+        update={"summary": "Edited onboarding methodology."}
+    )
+    revised = await kernel.create_methodology_blueprint_version(
+        detail.blueprint.blueprint_id,
+        CreateMethodologyBlueprintVersionRequest(
+            actor=actor,
+            base_version_id=base_version.version_id,
+            cited_output="# Edited methodology\n\nRefined claim [S1]",
+            harness_draft=revised_harness,
+            reason="Human review edit.",
+            metadata={"edited_by_test": True},
+        ),
+    )
+    assert len(revised.versions) == 2
+    new_version = revised.versions[0]
+    assert new_version.version_number == 2
+    assert new_version.status == "pending_review"
+    assert new_version.dossier_id == base_version.dossier_id
+    assert new_version.metadata["base_version_id"] == str(base_version.version_id)
+    assert new_version.metadata["revision_reason"] == "Human review edit."
+    assert (
+        repository._methodology_blueprint_versions[base_version.version_id].cited_output
+        == "# Base methodology\n\nClaim [S1]"
+    )
+    assert revised.blueprint.active_version_id == base_version.version_id
+
+    reapproved = await kernel.review_methodology_blueprint_version(
+        detail.blueprint.blueprint_id,
+        new_version.version_id,
+        ReviewMethodologyBlueprintVersionRequest(actor=actor, reason="Edit accepted."),
+        approved=True,
+    )
+    assert reapproved.blueprint.active_version_id == new_version.version_id
+
+    archive_result = await kernel.archive_methodology_blueprint(
+        detail.blueprint.blueprint_id,
+        DeleteMethodologyBlueprintRequest(
+            actor=actor,
+            metadata={"archive_reason": "superseded"},
+        ),
+    )
+    assert archive_result["deleted"] is True
+    archived_detail = await kernel.get_methodology_blueprint_detail(
+        detail.blueprint.blueprint_id,
+        actor=actor,
+    )
+    assert archived_detail.blueprint.status == "archived"
+    assert archived_detail.blueprint.metadata["archive_reason"] == "superseded"
+    assert archived_detail.sources[0].source_id == source.source.source_id
+
+    with pytest.raises(ValueError, match="Archived"):
+        await kernel.create_methodology_blueprint_version(
+            detail.blueprint.blueprint_id,
+            CreateMethodologyBlueprintVersionRequest(
+                actor=actor,
+                base_version_id=new_version.version_id,
+                cited_output="# Later edit",
+                harness_draft=revised_harness,
+            ),
+        )
+    with pytest.raises(ValueError, match="Archived"):
+        await kernel.review_methodology_blueprint_version(
+            detail.blueprint.blueprint_id,
+            new_version.version_id,
+            ReviewMethodologyBlueprintVersionRequest(actor=actor),
+            approved=False,
+        )
+    with pytest.raises(ValueError, match="Archived"):
+        await kernel.apply_methodology_blueprint(
+            detail.blueprint.blueprint_id,
+            ApplyMethodologyBlueprintRequest(
+                actor=actor,
+                workspace_id=uuid4(),
+                version_id=new_version.version_id,
+            ),
+        )
 
 
 def _workspace_actor_with_methodics_permissions() -> ParticipantInput:
@@ -6566,6 +7476,253 @@ async def test_kernel_reconcile_expired_execution_leases_routes_requeues_and_ter
     kernel._fail_expired_run_step.assert_awaited_once()  # type: ignore[attr-defined]
     kernel._requeue_expired_tool_call.assert_awaited_once_with(requeue_tool, now=now)  # type: ignore[attr-defined]
     kernel._fail_expired_tool_call.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_kernel_requeues_claimed_run_step_for_retryable_provider_failure():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    kernel._now = lambda: now  # type: ignore[method-assign]
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    task_id = uuid4()
+    run_id = uuid4()
+    step_id = uuid4()
+    system_agent_id = uuid4()
+    participant_id = uuid4()
+    repository._workspaces[workspace_id] = Workspace(
+        workspace_id=workspace_id,
+        name="Runtime",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._threads[thread_id] = Thread(
+        thread_id=thread_id,
+        workspace_id=workspace_id,
+        title="Provider recovery",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._participants[(workspace_id, participant_id)] = ParticipantProfile(
+        participant_id=participant_id,
+        workspace_id=workspace_id,
+        participant_type="agent",
+        system_agent_id=system_agent_id,
+        display_name="Researcher",
+        status="active",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._tasks[task_id] = Task(
+        task_id=task_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        title="Continue research",
+        requested_by=uuid4(),
+        status="claimed",
+        metadata={
+            "target_system_agent_id": str(system_agent_id),
+            "target_participant_id": str(participant_id),
+        },
+        created_at=now,
+        updated_at=now,
+    )
+    repository._runs[run_id] = Run(
+        run_id=run_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        task_id=task_id,
+        participant_id=participant_id,
+        status="progressing",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._run_steps[step_id] = RunStep(
+        step_id=step_id,
+        run_id=run_id,
+        task_id=task_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        system_agent_id=system_agent_id,
+        status="claimed",
+        claimed_by_worker="agent-loop-worker",
+        created_at=now,
+        updated_at=now,
+    )
+
+    result = await kernel.requeue_run_step_for_retry(
+        step_id,
+        "agent-loop-worker",
+        "insufficient_quota",
+        retry_after_seconds=900,
+        reason="llm_provider_unavailable",
+    )
+
+    assert result.step is not None
+    assert result.step.status == "created"
+    assert result.step.claimed_by_worker is None
+    assert result.step.next_retry_at == now + timedelta(seconds=900)
+    assert result.step.metadata["retry_reason"] == "llm_provider_unavailable"
+    assert result.run is not None
+    assert result.run.status == "progressing"
+    assert result.run.metadata["blocked_dependency"] == "llm_provider_unavailable"
+    assert result.events[0].event_type == "run_step.requeued"
+
+
+@pytest.mark.asyncio
+async def test_kernel_resume_runtime_task_releases_failed_task_for_new_claim():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    kernel._now = lambda: now  # type: ignore[method-assign]
+    organization_id = uuid4()
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    task_id = uuid4()
+    system_agent_id = uuid4()
+    failed_run_id = uuid4()
+    actor = _actor()
+    repository._workspaces[workspace_id] = Workspace(
+        workspace_id=workspace_id,
+        organization_id=organization_id,
+        name="Runtime",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._threads[thread_id] = Thread(
+        thread_id=thread_id,
+        workspace_id=workspace_id,
+        title="Provider recovery",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._tasks[task_id] = Task(
+        task_id=task_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        title="Researcher refine",
+        requested_by=uuid4(),
+        status="failed",
+        claimed_by=uuid4(),
+        metadata={
+            "target_system_agent_id": str(system_agent_id),
+            "failed_run_id": str(failed_run_id),
+            "stop_reason": "blocked_dependency",
+        },
+        created_at=now,
+        updated_at=now,
+    )
+
+    result = await kernel.resume_runtime_task(
+        task_id,
+        ResumeRuntimeTaskRequest(
+            actor=actor,
+            reason="OpenAI quota restored.",
+            metadata={"resumed_by_test": True},
+        ),
+        organization_id=organization_id,
+    )
+
+    assert result.task is not None
+    assert result.task.status == "released"
+    assert result.task.claimed_by is None
+    assert result.task.metadata["resume_count"] == 1
+    assert result.task.metadata["resume_reason"] == "OpenAI quota restored."
+    assert result.task.metadata["resumed_by_test"] is True
+    assert result.task.metadata["resume_history"][0]["failed_run_id"] == str(failed_run_id)
+    assert result.events[0].event_type == "task.resumed"
+    pending = await repository.list_pending_tasks_for_system_agent(system_agent_id)
+    assert pending == [result.task]
+
+
+@pytest.mark.asyncio
+async def test_kernel_resume_runtime_task_wakes_deferred_provider_retry_step():
+    repository = FakeRepository()
+    kernel = CollaborationKernel(repository)
+    now = datetime.now(timezone.utc)
+    kernel._now = lambda: now  # type: ignore[method-assign]
+    organization_id = uuid4()
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    task_id = uuid4()
+    run_id = uuid4()
+    step_id = uuid4()
+    system_agent_id = uuid4()
+    participant_id = uuid4()
+    actor = _actor()
+    future_retry_at = now + timedelta(hours=12)
+    repository._workspaces[workspace_id] = Workspace(
+        workspace_id=workspace_id,
+        organization_id=organization_id,
+        name="Runtime",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._threads[thread_id] = Thread(
+        thread_id=thread_id,
+        workspace_id=workspace_id,
+        title="Provider recovery",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._tasks[task_id] = Task(
+        task_id=task_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        title="Researcher refine",
+        requested_by=uuid4(),
+        status="claimed",
+        claimed_by=participant_id,
+        metadata={
+            "target_system_agent_id": str(system_agent_id),
+            "target_participant_id": str(participant_id),
+        },
+        created_at=now,
+        updated_at=now,
+    )
+    repository._runs[run_id] = Run(
+        run_id=run_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        task_id=task_id,
+        participant_id=participant_id,
+        status="progressing",
+        created_at=now,
+        updated_at=now,
+    )
+    repository._run_steps[step_id] = RunStep(
+        step_id=step_id,
+        run_id=run_id,
+        task_id=task_id,
+        workspace_id=workspace_id,
+        thread_id=thread_id,
+        system_agent_id=system_agent_id,
+        status="created",
+        next_retry_at=future_retry_at,
+        metadata={"retry_reason": "llm_provider_unavailable"},
+        created_at=now,
+        updated_at=now,
+    )
+
+    result = await kernel.resume_runtime_task(
+        task_id,
+        ResumeRuntimeTaskRequest(
+            actor=actor,
+            reason="Provider quota restored now.",
+        ),
+        organization_id=organization_id,
+    )
+
+    updated_step = await repository.fetch_run_step(step_id)
+    assert updated_step is not None
+    assert updated_step.status == "created"
+    assert updated_step.next_retry_at == now
+    assert updated_step.metadata["manual_resume_count"] == 1
+    assert result.task is repository._tasks[task_id]
+    assert result.run is not None
+    assert result.run.metadata["manual_resume_reason"] == "Provider quota restored now."
+    assert result.events[0].event_type == "run_step.requeued"
 
 
 @pytest.mark.asyncio

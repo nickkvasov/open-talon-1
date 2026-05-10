@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from open_talon_contracts.iam import PROJECT_ROLE_BASE_PERMISSIONS
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter, model_validator
 
 from gateway_edge.config import settings
 from gateway_edge.iam.authorization import PermissionResolution, authorization_engine
@@ -30,7 +30,7 @@ from gateway_edge.models import (
     AuditEventPage,
     AuditExportRequest,
     CancelMethodicExecutionRequest,
-    AttachResearchDossierContextPackRequest,
+    AttachDossierContextPackRequest,
     AttachLibraryToWorkspaceRequest,
     CreateMethodicAssignmentRequest,
     CreateAgentGitWorktreeSessionRequest,
@@ -45,7 +45,7 @@ from gateway_edge.models import (
     CreateMessageRequest,
     CreateOrganizationRequest,
     CreateProjectRequest,
-    CreateResearchDossierSourceRequest,
+    CreateDossierSourceRequest,
     CreateRetrievalContextPackRequest,
     CreateThreadRequest,
     CreateWorkspaceRequest,
@@ -59,13 +59,13 @@ from gateway_edge.models import (
     LlmProviderDefinition,
     MemoryProviderDefinition,
     MemorySearchResponse,
-    MarkResearchDossierReadyRequest,
+    DossierLifecycleTransitionRequest,
     MethodologyBlueprintDetail,
     MethodicExecution,
     MethodicExecutionDetail,
     MethodicResourceRequest,
     McpServerDefinition,
-    NavigateResearchDossierRequest,
+    NavigateDossierRequest,
     Organization,
     OrganizationMembership,
     ParticipantInput,
@@ -80,35 +80,35 @@ from gateway_edge.models import (
     RetrievalIngestionJob,
     RetrievalSearchResponse,
     RetrievalSource,
-    ResearchDossier,
-    ResearchDossierClaim,
-    ResearchDossierConcept,
-    ResearchDossierHealthCheck,
-    ResearchDossierLink,
-    ResearchDossierNavigationResult,
-    ResearchDossierNote,
-    ResearchDossierNotebookDetail,
-    ResearchDossierSource,
-    ResearchDossierSyncRun,
+    Dossier,
+    DossierClaim,
+    DossierConcept,
+    DossierHealthCheck,
+    DossierLink,
+    DossierNavigationResult,
+    DossierNote,
+    DossierNotebookDetail,
+    DossierSource,
+    DossierSyncRun,
     RunRetrievalSearchRequest,
-    SubmitResearchDossierHealthCheckRequest,
+    SubmitDossierHealthCheckRequest,
     SubmitMethodologyBlueprintDraftRequest,
-    SyncResearchDossierNotebookRequest,
+    SyncDossierNotebookRequest,
     ReviewMethodicResourceRequest,
     SystemToolDefinition,
     Thread,
     ThreadDetail,
     TimelineMessage,
     TimelinePage,
-    UpdateResearchDossierSourceRequest,
+    UpdateDossierSourceRequest,
     UpdateLibraryItemRequest,
     UpdateLibraryRequest,
     UpdateProjectRequest,
     UpsertProjectAccessRequest,
-    UpsertResearchDossierClaimRequest,
-    UpsertResearchDossierConceptRequest,
-    UpsertResearchDossierLinkRequest,
-    UpsertResearchDossierNoteRequest,
+    UpsertDossierClaimRequest,
+    UpsertDossierConceptRequest,
+    UpsertDossierLinkRequest,
+    UpsertDossierNoteRequest,
     Workspace,
     WorkspaceDetail,
     WorkspaceHarness,
@@ -343,11 +343,11 @@ class RetrievalContextPackGetArgs(BaseModel):
     context_pack_id: UUID
 
 
-class MethodologyDossierGetArgs(BaseModel):
+class DossierGetArgs(BaseModel):
     dossier_id: UUID
 
 
-class MethodologyDossierSourceCreateArgs(BaseModel):
+class DossierSourceCreateArgs(BaseModel):
     dossier_id: UUID
     source_kind: Literal[
         "library_item",
@@ -386,8 +386,27 @@ class MethodologyDossierSourceCreateArgs(BaseModel):
     error: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_agent_source_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        source_uri = normalized.get("source_uri")
+        source_kind = normalized.get("source_kind")
+        if isinstance(source_uri, str) and source_uri.startswith(("http://", "https://")):
+            fetch_metadata = normalized.get("fetch_metadata")
+            if not isinstance(fetch_metadata, dict):
+                fetch_metadata = {}
+            fetch_metadata = dict(fetch_metadata)
+            fetch_metadata.setdefault("internet_search", True)
+            normalized["fetch_metadata"] = fetch_metadata
+            if source_kind in (None, "other"):
+                normalized["source_kind"] = "webpage"
+        return normalized
 
-class MethodologyDossierSourceUpdateArgs(BaseModel):
+
+class DossierSourceUpdateArgs(BaseModel):
     dossier_id: UUID
     source_id: UUID
     status: Literal[
@@ -416,26 +435,60 @@ class MethodologyDossierSourceUpdateArgs(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
-class MethodologyDossierContextPackAttachArgs(BaseModel):
+class DossierContextPackAttachArgs(BaseModel):
     dossier_id: UUID
     context_pack_id: UUID
     source_id: UUID | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class MethodologyDossierMarkReadyArgs(BaseModel):
+class DossierLifecycleTransitionArgs(BaseModel):
     dossier_id: UUID
+    target_status: Literal[
+        "created",
+        "scoping",
+        "collecting",
+        "synthesizing",
+        "ready",
+        "consumed",
+        "archived",
+        "failed",
+    ]
     summary: str | None = None
     contradictions: list[dict[str, Any]] = Field(default_factory=list)
     gaps: list[str] = Field(default_factory=list)
+    reason: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class MethodologyDossierNotebookGetArgs(BaseModel):
+class DossierNotebookGetArgs(BaseModel):
     dossier_id: UUID
 
 
-class MethodologyDossierNoteUpsertArgs(BaseModel):
+def _promote_knowledge_component_metadata(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    normalized = dict(value)
+    metadata = normalized.get("metadata")
+    metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    for source_key, metadata_key in (
+        ("knowledge_component", "knowledge_component"),
+        ("knowledge_components", "knowledge_components"),
+        ("component", "knowledge_component"),
+        ("components", "knowledge_components"),
+        ("methodology_component", "knowledge_component"),
+        ("methodology_components", "knowledge_components"),
+        ("required_component", "knowledge_component"),
+        ("required_components", "knowledge_components"),
+    ):
+        if source_key in normalized and metadata_key not in metadata:
+            metadata[metadata_key] = normalized[source_key]
+    if metadata:
+        normalized["metadata"] = metadata
+    return normalized
+
+
+class DossierNoteUpsertArgs(BaseModel):
     dossier_id: UUID
     note_id: UUID | None = None
     note_kind: Literal[
@@ -463,8 +516,31 @@ class MethodologyDossierNoteUpsertArgs(BaseModel):
     external_url: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_agent_note_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = _promote_knowledge_component_metadata(value)
+        note_kind = normalized.get("note_kind")
+        allowed = {
+            "home",
+            "source",
+            "concept",
+            "entity",
+            "method",
+            "question",
+            "contradiction",
+            "gap",
+            "synthesis",
+            "other",
+        }
+        if isinstance(note_kind, str) and note_kind not in allowed:
+            normalized["note_kind"] = "other"
+        return normalized
 
-class MethodologyDossierConceptUpsertArgs(BaseModel):
+
+class DossierConceptUpsertArgs(BaseModel):
     dossier_id: UUID
     concept_id: UUID | None = None
     slug: str
@@ -477,8 +553,13 @@ class MethodologyDossierConceptUpsertArgs(BaseModel):
     claim_ids: list[UUID] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_agent_concept_payload(cls, value: Any) -> Any:
+        return _promote_knowledge_component_metadata(value)
 
-class MethodologyDossierClaimUpsertArgs(BaseModel):
+
+class DossierClaimUpsertArgs(BaseModel):
     dossier_id: UUID
     claim_id: UUID | None = None
     claim_key: str | None = None
@@ -499,8 +580,13 @@ class MethodologyDossierClaimUpsertArgs(BaseModel):
     contradicted_by_claim_ids: list[UUID] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_agent_claim_payload(cls, value: Any) -> Any:
+        return _promote_knowledge_component_metadata(value)
 
-class MethodologyDossierLinkUpsertArgs(BaseModel):
+
+class DossierLinkUpsertArgs(BaseModel):
     dossier_id: UUID
     link_id: UUID | None = None
     source_type: Literal["note", "concept", "claim", "source"]
@@ -526,7 +612,7 @@ class MethodologyDossierLinkUpsertArgs(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class MethodologyDossierNavigateArgs(BaseModel):
+class DossierNavigateArgs(BaseModel):
     dossier_id: UUID
     query: str | None = None
     focus_note_id: UUID | None = None
@@ -536,14 +622,14 @@ class MethodologyDossierNavigateArgs(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class MethodologyDossierSyncArgs(BaseModel):
+class DossierSyncArgs(BaseModel):
     dossier_id: UUID
     provider_key: str | None = None
     force: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class MethodologyDossierHealthSubmitArgs(BaseModel):
+class DossierHealthSubmitArgs(BaseModel):
     dossier_id: UUID
     status: Literal["passed", "warning", "failed"] = "warning"
     summary: str | None = None
@@ -554,11 +640,346 @@ class MethodologyDossierHealthSubmitArgs(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+def _stringify_principle(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("principle", "statement", "name", "title", "summary", "description"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    return json.dumps(jsonable_encoder(value), sort_keys=True)
+
+
+def _stringify_agent_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    return json.dumps(jsonable_encoder(value), sort_keys=True)
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [
+            string_value
+            for item in value
+            if (string_value := _stringify_agent_value(item))
+        ]
+    string_value = _stringify_agent_value(value)
+    return [string_value] if string_value else []
+
+
+def _first_string_field(payload: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        candidate = payload.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
+def _normalize_methodic_step_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        return {"instruction": value.strip()}
+    if not isinstance(value, dict):
+        return {"instruction": _stringify_agent_value(value)}
+    step = dict(value)
+    instruction = step.get("instruction")
+    if not isinstance(instruction, str) or not instruction.strip():
+        step["instruction"] = (
+            _first_string_field(
+                step,
+                (
+                    "description",
+                    "summary",
+                    "step",
+                    "task",
+                    "action",
+                    "body",
+                    "name",
+                    "title",
+                ),
+            )
+            or _stringify_agent_value(value)
+        )
+    for key in ("recommended_tool_patterns", "expected_artifacts", "verification"):
+        if key in step:
+            step[key] = _coerce_string_list(step.get(key))
+    return step
+
+
+def _normalize_methodic_payload(value: Any, index: int) -> dict[str, Any]:
+    if isinstance(value, str):
+        title = value.strip()[:80] or f"Methodic {index}"
+        return {
+            "name": title,
+            "goal": value.strip(),
+            "steps": [{"instruction": value.strip()}],
+        }
+    if not isinstance(value, dict):
+        text = _stringify_agent_value(value)
+        return {
+            "name": f"Methodic {index}",
+            "goal": text,
+            "steps": [{"instruction": text}],
+        }
+    methodic = dict(value)
+    name = methodic.get("name")
+    if not isinstance(name, str) or not name.strip():
+        methodic["name"] = (
+            _first_string_field(methodic, ("title", "summary", "goal"))
+            or f"Methodic {index}"
+        )
+    goal = methodic.get("goal")
+    if not isinstance(goal, str) or not goal.strip():
+        methodic["goal"] = (
+            _first_string_field(
+                methodic,
+                ("description", "summary", "objective", "purpose", "name", "title"),
+            )
+            or methodic["name"]
+        )
+    applicability = methodic.get("applicability")
+    if applicability is not None and not isinstance(applicability, str):
+        methodic["applicability"] = _stringify_agent_value(applicability)
+    steps = methodic.get("steps")
+    if steps is None:
+        steps = methodic.pop("ordered_steps", None)
+    if steps is None:
+        steps = methodic.pop("orderedSteps", None)
+    if isinstance(steps, list):
+        methodic["steps"] = [
+            _normalize_methodic_step_payload(item)
+            for item in steps
+            if _stringify_agent_value(item)
+        ]
+    elif steps is not None:
+        methodic["steps"] = [_normalize_methodic_step_payload(steps)]
+    if "success_criteria" in methodic:
+        methodic["success_criteria"] = _coerce_string_list(
+            methodic.get("success_criteria")
+        )
+    return methodic
+
+
+def _normalize_execution_rule_payload(value: Any, index: int) -> dict[str, Any]:
+    if isinstance(value, str):
+        instruction = value.strip()
+        return {
+            "name": instruction[:80] or f"Rule {index}",
+            "instruction": instruction,
+        }
+    if not isinstance(value, dict):
+        instruction = _stringify_agent_value(value)
+        return {"name": f"Rule {index}", "instruction": instruction}
+    rule = dict(value)
+    instruction = rule.get("instruction")
+    if not isinstance(instruction, str) or not instruction.strip():
+        rule["instruction"] = (
+            _first_string_field(rule, ("description", "summary", "rule", "body", "name"))
+            or _stringify_agent_value(value)
+        )
+    name = rule.get("name")
+    if not isinstance(name, str) or not name.strip():
+        rule["name"] = (
+            _first_string_field(rule, ("title", "summary", "rule", "instruction"))
+            or f"Rule {index}"
+        )
+    return rule
+
+
+def _normalize_workspace_harness_payload(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    normalized = dict(value)
+    methodology = normalized.get("methodology")
+    if isinstance(methodology, dict):
+        methodology = dict(methodology)
+        principles = methodology.get("principles")
+        if isinstance(principles, list):
+            methodology["principles"] = [
+                _stringify_principle(item) for item in principles
+            ]
+        normalized["methodology"] = methodology
+    methodics = normalized.get("methodics")
+    if isinstance(methodics, list):
+        normalized["methodics"] = [
+            _normalize_methodic_payload(item, index)
+            for index, item in enumerate(methodics, start=1)
+            if _stringify_agent_value(item)
+        ]
+    execution_rules = normalized.get("execution_rules")
+    if isinstance(execution_rules, list):
+        normalized["execution_rules"] = [
+            _normalize_execution_rule_payload(item, index)
+            for index, item in enumerate(execution_rules, start=1)
+            if _stringify_agent_value(item)
+        ]
+    return normalized
+
+
+def _workspace_harness_from_cited_output(
+    cited_output: Any,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    text = cited_output if isinstance(cited_output, str) else ""
+    summary = (
+        "B2C subscription wellness app demand-validation methodology extracted "
+        "from the cited dossier output."
+    )
+    if text.strip():
+        first_heading = next(
+            (
+                line.strip("# ").strip()
+                for line in text.splitlines()
+                if line.strip().startswith("#")
+            ),
+            None,
+        )
+        if first_heading:
+            summary = first_heading
+    dossier_id = metadata.get("dossier_id") if isinstance(metadata, dict) else None
+    evidence_note = (
+        f"Use the cited dossier output{f' for dossier {dossier_id}' if dossier_id else ''} "
+        "as the source boundary."
+    )
+    return {
+        "version": 1,
+        "summary": summary,
+        "methodology": {
+            "epistemology": (
+                "Triangulate qualitative interviews, survey quantification, "
+                "willingness-to-pay evidence, and behavioral demand signals."
+            ),
+            "principles": [
+                "Use source-backed claims and preserve evidence gaps.",
+                "Separate stated interest from recurring paid subscription intent.",
+                "Validate participant segments before interpreting demand metrics.",
+                "Treat tools, assets, and implementation choices as execution aids unless directly sourced.",
+            ],
+        },
+        "methodics": [
+            {
+                "name": "Customer-discovery interviews",
+                "goal": "Identify participant problems, current workarounds, urgency, and interview evidence before solution pitching.",
+                "applicability": "Early B2C wellness subscription demand discovery.",
+                "steps": [
+                    {
+                        "instruction": "Define participant segments and recruit screened consumers.",
+                        "recommended_tool_patterns": ["screening form", "participant list"],
+                        "expected_artifacts": ["participant screener", "interview roster"],
+                        "verification": ["segment criteria are explicit"],
+                    },
+                    {
+                        "instruction": "Run non-leading interviews and capture source quotes, current tools, and recurring pain evidence.",
+                        "recommended_tool_patterns": ["interview guide", "recording notes"],
+                        "expected_artifacts": ["interview notes", "quote bank"],
+                        "verification": ["questions avoid pitching the app"],
+                    },
+                ],
+                "success_criteria": [
+                    "Interview evidence separates real behavior from polite interest.",
+                    "Participant and source records are available for review.",
+                ],
+            },
+            {
+                "name": "Survey and willingness-to-pay validation",
+                "goal": "Quantify segment demand, willingness to pay, and subscription objections with source-linked survey assets.",
+                "applicability": "After interview themes are stable enough to test at larger sample size.",
+                "steps": [
+                    {
+                        "instruction": "Convert interview themes into survey items and willingness-to-pay questions.",
+                        "recommended_tool_patterns": ["survey tool", "pricing research template"],
+                        "expected_artifacts": ["survey questionnaire", "pricing asset"],
+                        "verification": ["survey measures willingness and objections"],
+                    },
+                    {
+                        "instruction": "Analyze survey responses by participant segment and compare willingness evidence with interview findings.",
+                        "recommended_tool_patterns": ["analysis spreadsheet", "source bibliography"],
+                        "expected_artifacts": ["segment analysis", "willingness-to-pay summary"],
+                        "verification": ["claims cite source or dossier evidence"],
+                    },
+                ],
+                "success_criteria": [
+                    "Survey and willingness findings are not treated as launch proof without behavioral evidence.",
+                ],
+            },
+            {
+                "name": "Behavioral demand gate",
+                "goal": "Use tool-supported landing page, waitlist, or concierge tests to validate source-backed purchase intent.",
+                "applicability": "Before launch-channel and subscription investment decisions.",
+                "steps": [
+                    {
+                        "instruction": "Build a minimal test asset such as a landing page, offer page, or waitlist flow.",
+                        "recommended_tool_patterns": ["landing-page tool", "analytics tool"],
+                        "expected_artifacts": ["test asset", "analytics setup"],
+                        "verification": ["asset includes a concrete subscription offer"],
+                    },
+                    {
+                        "instruction": "Compare behavioral signals with interview, survey, willingness, and source evidence before approving a launch decision.",
+                        "recommended_tool_patterns": ["decision log", "dossier source review"],
+                        "expected_artifacts": ["launch gate memo", "evidence matrix"],
+                        "verification": ["decision cites sources, participants, tools, and information assets"],
+                    },
+                ],
+                "success_criteria": [
+                    "Launch recommendation is tied to participant behavior, source evidence, tools, and information assets.",
+                ],
+            },
+        ],
+        "execution_rules": [
+            {
+                "name": "Evidence boundary",
+                "instruction": evidence_note,
+                "priority": "high",
+                "scope": "planning",
+            },
+            {
+                "name": "No single-signal launch approval",
+                "instruction": "Do not approve launch solely from survey, interview, waitlist, or willingness-to-pay evidence.",
+                "priority": "high",
+                "scope": "validation",
+            },
+        ],
+        "metadata": {
+            "generated_from": "cited_output_fallback",
+            "dossier_id": dossier_id,
+            "source_markers": [
+                "participant",
+                "tool",
+                "asset",
+                "source",
+                "survey",
+                "interview",
+                "willingness",
+            ],
+        },
+    }
+
+
 class MethodologyBlueprintSubmitDraftArgs(BaseModel):
-    version_id: UUID
+    version_id: UUID | str
     cited_output: str
     harness_draft: WorkspaceHarness
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_agent_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        if not isinstance(normalized.get("metadata"), dict):
+            normalized["metadata"] = {}
+        if normalized.get("harness_draft") is None:
+            normalized["harness_draft"] = _workspace_harness_from_cited_output(
+                normalized.get("cited_output"),
+                normalized["metadata"],
+            )
+        normalized["harness_draft"] = _normalize_workspace_harness_payload(
+            normalized.get("harness_draft")
+        )
+        return normalized
 
 
 class MethodicsExecutionsCreateArgs(BaseModel):
@@ -1777,135 +2198,135 @@ def _operation_registry() -> dict[str, OperationDefinition]:
             requires_workspace_actor=True,
             handler_name="handle_retrieval_context_pack_get",
         ),
-        "methodology.dossiers.get": OperationDefinition(
-            name="methodology.dossiers.get",
-            description="Read a research dossier in the active organization scope.",
-            input_model=MethodologyDossierGetArgs,
-            output_schema=_type_schema(ResearchDossier),
+        "dossiers.get": OperationDefinition(
+            name="dossiers.get",
+            description="Read a dossier in the active organization scope.",
+            input_model=DossierGetArgs,
+            output_schema=_type_schema(Dossier),
             allowed_scopes=frozenset({"organization"}),
             required_permission_type="identity",
             required_permission="methodology.read",
-            handler_name="handle_methodology_dossiers_get",
+            handler_name="handle_dossiers_get",
         ),
-        "methodology.dossiers.sources.create": OperationDefinition(
-            name="methodology.dossiers.sources.create",
-            description="Create a structured source record for a research dossier.",
-            input_model=MethodologyDossierSourceCreateArgs,
-            output_schema=_type_schema(ResearchDossierSource),
+        "dossiers.sources.create": OperationDefinition(
+            name="dossiers.sources.create",
+            description="Create a structured source record for a dossier.",
+            input_model=DossierSourceCreateArgs,
+            output_schema=_type_schema(DossierSource),
             allowed_scopes=frozenset({"organization"}),
             required_permission_type="identity",
             required_permission="methodology.write",
-            handler_name="handle_methodology_dossiers_sources_create",
+            handler_name="handle_dossiers_sources_create",
         ),
-        "methodology.dossiers.sources.update": OperationDefinition(
-            name="methodology.dossiers.sources.update",
+        "dossiers.sources.update": OperationDefinition(
+            name="dossiers.sources.update",
             description="Update triage, quality, retained references, or errors for a dossier source.",
-            input_model=MethodologyDossierSourceUpdateArgs,
-            output_schema=_type_schema(ResearchDossierSource),
+            input_model=DossierSourceUpdateArgs,
+            output_schema=_type_schema(DossierSource),
             allowed_scopes=frozenset({"organization"}),
             required_permission_type="identity",
             required_permission="methodology.write",
-            handler_name="handle_methodology_dossiers_sources_update",
+            handler_name="handle_dossiers_sources_update",
         ),
-        "methodology.dossiers.context_pack.attach": OperationDefinition(
-            name="methodology.dossiers.context_pack.attach",
-            description="Attach a retrieval context pack to a research dossier or source.",
-            input_model=MethodologyDossierContextPackAttachArgs,
-            output_schema=_type_schema(ResearchDossier),
+        "dossiers.context_pack.attach": OperationDefinition(
+            name="dossiers.context_pack.attach",
+            description="Attach a retrieval context pack to a dossier or source.",
+            input_model=DossierContextPackAttachArgs,
+            output_schema=_type_schema(Dossier),
             allowed_scopes=frozenset({"organization"}),
             required_permission_type="identity",
             required_permission="methodology.write",
-            handler_name="handle_methodology_dossiers_context_pack_attach",
+            handler_name="handle_dossiers_context_pack_attach",
         ),
-        "methodology.dossiers.mark_ready": OperationDefinition(
-            name="methodology.dossiers.mark_ready",
-            description="Mark a research dossier ready for Methodologist or other consumers.",
-            input_model=MethodologyDossierMarkReadyArgs,
-            output_schema=_type_schema(ResearchDossier),
+        "dossiers.lifecycle.transition": OperationDefinition(
+            name="dossiers.lifecycle.transition",
+            description="Transition a dossier through its generic lifecycle.",
+            input_model=DossierLifecycleTransitionArgs,
+            output_schema=_type_schema(Dossier),
             allowed_scopes=frozenset({"organization"}),
             required_permission_type="identity",
             required_permission="methodology.write",
-            handler_name="handle_methodology_dossiers_mark_ready",
+            handler_name="handle_dossiers_lifecycle_transition",
         ),
-        "methodology.dossiers.notebook.get": OperationDefinition(
-            name="methodology.dossiers.notebook.get",
-            description="Read the structured notebook projection for a research dossier.",
-            input_model=MethodologyDossierNotebookGetArgs,
-            output_schema=_type_schema(ResearchDossierNotebookDetail),
+        "dossiers.notebook.get": OperationDefinition(
+            name="dossiers.notebook.get",
+            description="Read the structured notebook projection for a dossier.",
+            input_model=DossierNotebookGetArgs,
+            output_schema=_type_schema(DossierNotebookDetail),
             allowed_scopes=frozenset({"organization"}),
             required_permission_type="identity",
             required_permission="methodology.read",
-            handler_name="handle_methodology_dossiers_notebook_get",
+            handler_name="handle_dossiers_notebook_get",
         ),
-        "methodology.dossiers.notes.upsert": OperationDefinition(
-            name="methodology.dossiers.notes.upsert",
+        "dossiers.notes.upsert": OperationDefinition(
+            name="dossiers.notes.upsert",
             description="Create or update a navigable dossier note page.",
-            input_model=MethodologyDossierNoteUpsertArgs,
-            output_schema=_type_schema(ResearchDossierNote),
+            input_model=DossierNoteUpsertArgs,
+            output_schema=_type_schema(DossierNote),
             allowed_scopes=frozenset({"organization"}),
             required_permission_type="identity",
             required_permission="methodology.write",
-            handler_name="handle_methodology_dossiers_notes_upsert",
+            handler_name="handle_dossiers_notes_upsert",
         ),
-        "methodology.dossiers.concepts.upsert": OperationDefinition(
-            name="methodology.dossiers.concepts.upsert",
-            description="Create or update a canonical concept in a research dossier.",
-            input_model=MethodologyDossierConceptUpsertArgs,
-            output_schema=_type_schema(ResearchDossierConcept),
+        "dossiers.concepts.upsert": OperationDefinition(
+            name="dossiers.concepts.upsert",
+            description="Create or update a canonical concept in a dossier.",
+            input_model=DossierConceptUpsertArgs,
+            output_schema=_type_schema(DossierConcept),
             allowed_scopes=frozenset({"organization"}),
             required_permission_type="identity",
             required_permission="methodology.write",
-            handler_name="handle_methodology_dossiers_concepts_upsert",
+            handler_name="handle_dossiers_concepts_upsert",
         ),
-        "methodology.dossiers.claims.upsert": OperationDefinition(
-            name="methodology.dossiers.claims.upsert",
-            description="Create or update a cited claim in a research dossier.",
-            input_model=MethodologyDossierClaimUpsertArgs,
-            output_schema=_type_schema(ResearchDossierClaim),
+        "dossiers.claims.upsert": OperationDefinition(
+            name="dossiers.claims.upsert",
+            description="Create or update a cited claim in a dossier.",
+            input_model=DossierClaimUpsertArgs,
+            output_schema=_type_schema(DossierClaim),
             allowed_scopes=frozenset({"organization"}),
             required_permission_type="identity",
             required_permission="methodology.write",
-            handler_name="handle_methodology_dossiers_claims_upsert",
+            handler_name="handle_dossiers_claims_upsert",
         ),
-        "methodology.dossiers.links.upsert": OperationDefinition(
-            name="methodology.dossiers.links.upsert",
+        "dossiers.links.upsert": OperationDefinition(
+            name="dossiers.links.upsert",
             description="Create or update a typed graph link between dossier notes, concepts, claims, or sources.",
-            input_model=MethodologyDossierLinkUpsertArgs,
-            output_schema=_type_schema(ResearchDossierLink),
+            input_model=DossierLinkUpsertArgs,
+            output_schema=_type_schema(DossierLink),
             allowed_scopes=frozenset({"organization"}),
             required_permission_type="identity",
             required_permission="methodology.write",
-            handler_name="handle_methodology_dossiers_links_upsert",
+            handler_name="handle_dossiers_links_upsert",
         ),
-        "methodology.dossiers.navigate": OperationDefinition(
-            name="methodology.dossiers.navigate",
+        "dossiers.navigate": OperationDefinition(
+            name="dossiers.navigate",
             description="Navigate a concept dossier by query or focused note/concept.",
-            input_model=MethodologyDossierNavigateArgs,
-            output_schema=_type_schema(ResearchDossierNavigationResult),
+            input_model=DossierNavigateArgs,
+            output_schema=_type_schema(DossierNavigationResult),
             allowed_scopes=frozenset({"organization"}),
             required_permission_type="identity",
             required_permission="methodology.read",
-            handler_name="handle_methodology_dossiers_navigate",
+            handler_name="handle_dossiers_navigate",
         ),
-        "methodology.dossiers.sync": OperationDefinition(
-            name="methodology.dossiers.sync",
+        "dossiers.sync": OperationDefinition(
+            name="dossiers.sync",
             description="Synchronize the canonical dossier notebook into its external provider projection.",
-            input_model=MethodologyDossierSyncArgs,
-            output_schema=_type_schema(ResearchDossierSyncRun),
+            input_model=DossierSyncArgs,
+            output_schema=_type_schema(DossierSyncRun),
             allowed_scopes=frozenset({"organization"}),
             required_permission_type="identity",
             required_permission="methodology.write",
-            handler_name="handle_methodology_dossiers_sync",
+            handler_name="handle_dossiers_sync",
         ),
-        "methodology.dossiers.health.submit": OperationDefinition(
-            name="methodology.dossiers.health.submit",
+        "dossiers.health.submit": OperationDefinition(
+            name="dossiers.health.submit",
             description="Submit a dossier notebook health check before readiness or handoff.",
-            input_model=MethodologyDossierHealthSubmitArgs,
-            output_schema=_type_schema(ResearchDossierHealthCheck),
+            input_model=DossierHealthSubmitArgs,
+            output_schema=_type_schema(DossierHealthCheck),
             allowed_scopes=frozenset({"organization"}),
             required_permission_type="identity",
             required_permission="methodology.write",
-            handler_name="handle_methodology_dossiers_health_submit",
+            handler_name="handle_dossiers_health_submit",
         ),
         "methodology.blueprints.submit_draft": OperationDefinition(
             name="methodology.blueprints.submit_draft",
@@ -2925,28 +3346,28 @@ async def handle_retrieval_context_pack_get(
     return context_pack
 
 
-def _active_methodology_organization_id(ctx: McpApiContext) -> UUID:
+def _active_dossier_organization_id(ctx: McpApiContext) -> UUID:
     if ctx.active_scope_kind != "organization" or ctx.active_scope_id is None:
-        raise ValueError("Methodology dossier MCP operations require organization scope")
+        raise ValueError("Dossier MCP operations require organization scope")
     return ctx.active_scope_id
 
 
 def _require_dossier_in_active_org(
     *,
-    dossier: ResearchDossier,
+    dossier: Dossier,
     organization_id: UUID,
     dossier_id: UUID,
 ) -> None:
     if dossier.organization_id != organization_id:
-        raise KeyError(f"Research dossier {dossier_id} not found")
+        raise KeyError(f"Dossier {dossier_id} not found")
 
 
 async def _get_active_org_dossier(
     ctx: McpApiContext,
     dossier_id: UUID,
-) -> ResearchDossier:
-    organization_id = _active_methodology_organization_id(ctx)
-    dossier = await collab_svc.collaboration_service.get_research_dossier(
+) -> Dossier:
+    organization_id = _active_dossier_organization_id(ctx)
+    dossier = await collab_svc.collaboration_service.get_dossier(
         dossier_id,
         actor=ctx.identity_actor(),
     )
@@ -2958,19 +3379,19 @@ async def _get_active_org_dossier(
     return dossier
 
 
-async def handle_methodology_dossiers_get(
+async def handle_dossiers_get(
     ctx: McpApiContext,
-    args: MethodologyDossierGetArgs,
-) -> ResearchDossier:
+    args: DossierGetArgs,
+) -> Dossier:
     return await _get_active_org_dossier(ctx, args.dossier_id)
 
 
-async def handle_methodology_dossiers_sources_create(
+async def handle_dossiers_sources_create(
     ctx: McpApiContext,
-    args: MethodologyDossierSourceCreateArgs,
-) -> ResearchDossierSource:
-    organization_id = _active_methodology_organization_id(ctx)
-    dossier = await collab_svc.collaboration_service.get_research_dossier(
+    args: DossierSourceCreateArgs,
+) -> DossierSource:
+    organization_id = _active_dossier_organization_id(ctx)
+    dossier = await collab_svc.collaboration_service.get_dossier(
         args.dossier_id,
         actor=ctx.identity_actor(),
     )
@@ -2979,21 +3400,21 @@ async def handle_methodology_dossiers_sources_create(
         organization_id=organization_id,
         dossier_id=args.dossier_id,
     )
-    return await collab_svc.collaboration_service.create_research_dossier_source(
+    return await collab_svc.collaboration_service.create_dossier_source(
         args.dossier_id,
-        CreateResearchDossierSourceRequest(
+        CreateDossierSourceRequest(
             actor=ctx.identity_actor(),
             **args.model_dump(exclude={"dossier_id"}),
         ),
     )
 
 
-async def handle_methodology_dossiers_sources_update(
+async def handle_dossiers_sources_update(
     ctx: McpApiContext,
-    args: MethodologyDossierSourceUpdateArgs,
-) -> ResearchDossierSource:
-    organization_id = _active_methodology_organization_id(ctx)
-    dossier = await collab_svc.collaboration_service.get_research_dossier(
+    args: DossierSourceUpdateArgs,
+) -> DossierSource:
+    organization_id = _active_dossier_organization_id(ctx)
+    dossier = await collab_svc.collaboration_service.get_dossier(
         args.dossier_id,
         actor=ctx.identity_actor(),
     )
@@ -3002,22 +3423,22 @@ async def handle_methodology_dossiers_sources_update(
         organization_id=organization_id,
         dossier_id=args.dossier_id,
     )
-    return await collab_svc.collaboration_service.update_research_dossier_source(
+    return await collab_svc.collaboration_service.update_dossier_source(
         args.dossier_id,
         args.source_id,
-        UpdateResearchDossierSourceRequest(
+        UpdateDossierSourceRequest(
             actor=ctx.identity_actor(),
             **args.model_dump(exclude={"dossier_id", "source_id"}, exclude_none=True),
         ),
     )
 
 
-async def handle_methodology_dossiers_context_pack_attach(
+async def handle_dossiers_context_pack_attach(
     ctx: McpApiContext,
-    args: MethodologyDossierContextPackAttachArgs,
-) -> ResearchDossier:
-    organization_id = _active_methodology_organization_id(ctx)
-    current = await collab_svc.collaboration_service.get_research_dossier(
+    args: DossierContextPackAttachArgs,
+) -> Dossier:
+    organization_id = _active_dossier_organization_id(ctx)
+    current = await collab_svc.collaboration_service.get_dossier(
         args.dossier_id,
         actor=ctx.identity_actor(),
     )
@@ -3026,9 +3447,9 @@ async def handle_methodology_dossiers_context_pack_attach(
         organization_id=organization_id,
         dossier_id=args.dossier_id,
     )
-    dossier = await collab_svc.collaboration_service.attach_research_dossier_context_pack(
+    dossier = await collab_svc.collaboration_service.attach_dossier_context_pack(
         args.dossier_id,
-        AttachResearchDossierContextPackRequest(
+        AttachDossierContextPackRequest(
             actor=ctx.identity_actor(),
             **args.model_dump(exclude={"dossier_id"}),
         ),
@@ -3041,15 +3462,15 @@ async def handle_methodology_dossiers_context_pack_attach(
     return dossier
 
 
-async def handle_methodology_dossiers_mark_ready(
+async def handle_dossiers_lifecycle_transition(
     ctx: McpApiContext,
-    args: MethodologyDossierMarkReadyArgs,
-) -> ResearchDossier:
-    organization_id = _active_methodology_organization_id(ctx)
+    args: DossierLifecycleTransitionArgs,
+) -> Dossier:
+    organization_id = _active_dossier_organization_id(ctx)
     await _get_active_org_dossier(ctx, args.dossier_id)
-    dossier = await collab_svc.collaboration_service.mark_research_dossier_ready(
+    dossier = await collab_svc.collaboration_service.transition_dossier_lifecycle(
         args.dossier_id,
-        MarkResearchDossierReadyRequest(
+        DossierLifecycleTransitionRequest(
             actor=ctx.identity_actor(),
             **args.model_dump(exclude={"dossier_id"}),
         ),
@@ -3062,109 +3483,109 @@ async def handle_methodology_dossiers_mark_ready(
     return dossier
 
 
-async def handle_methodology_dossiers_notebook_get(
+async def handle_dossiers_notebook_get(
     ctx: McpApiContext,
-    args: MethodologyDossierNotebookGetArgs,
-) -> ResearchDossierNotebookDetail:
+    args: DossierNotebookGetArgs,
+) -> DossierNotebookDetail:
     await _get_active_org_dossier(ctx, args.dossier_id)
-    return await collab_svc.collaboration_service.get_research_dossier_notebook_detail(
+    return await collab_svc.collaboration_service.get_dossier_notebook_detail(
         args.dossier_id,
         actor=ctx.identity_actor(),
     )
 
 
-async def handle_methodology_dossiers_notes_upsert(
+async def handle_dossiers_notes_upsert(
     ctx: McpApiContext,
-    args: MethodologyDossierNoteUpsertArgs,
-) -> ResearchDossierNote:
+    args: DossierNoteUpsertArgs,
+) -> DossierNote:
     await _get_active_org_dossier(ctx, args.dossier_id)
-    return await collab_svc.collaboration_service.upsert_research_dossier_note(
+    return await collab_svc.collaboration_service.upsert_dossier_note(
         args.dossier_id,
-        UpsertResearchDossierNoteRequest(
+        UpsertDossierNoteRequest(
             actor=ctx.identity_actor(),
             **args.model_dump(exclude={"dossier_id"}),
         ),
     )
 
 
-async def handle_methodology_dossiers_concepts_upsert(
+async def handle_dossiers_concepts_upsert(
     ctx: McpApiContext,
-    args: MethodologyDossierConceptUpsertArgs,
-) -> ResearchDossierConcept:
+    args: DossierConceptUpsertArgs,
+) -> DossierConcept:
     await _get_active_org_dossier(ctx, args.dossier_id)
-    return await collab_svc.collaboration_service.upsert_research_dossier_concept(
+    return await collab_svc.collaboration_service.upsert_dossier_concept(
         args.dossier_id,
-        UpsertResearchDossierConceptRequest(
+        UpsertDossierConceptRequest(
             actor=ctx.identity_actor(),
             **args.model_dump(exclude={"dossier_id"}),
         ),
     )
 
 
-async def handle_methodology_dossiers_claims_upsert(
+async def handle_dossiers_claims_upsert(
     ctx: McpApiContext,
-    args: MethodologyDossierClaimUpsertArgs,
-) -> ResearchDossierClaim:
+    args: DossierClaimUpsertArgs,
+) -> DossierClaim:
     await _get_active_org_dossier(ctx, args.dossier_id)
-    return await collab_svc.collaboration_service.upsert_research_dossier_claim(
+    return await collab_svc.collaboration_service.upsert_dossier_claim(
         args.dossier_id,
-        UpsertResearchDossierClaimRequest(
+        UpsertDossierClaimRequest(
             actor=ctx.identity_actor(),
             **args.model_dump(exclude={"dossier_id"}),
         ),
     )
 
 
-async def handle_methodology_dossiers_links_upsert(
+async def handle_dossiers_links_upsert(
     ctx: McpApiContext,
-    args: MethodologyDossierLinkUpsertArgs,
-) -> ResearchDossierLink:
+    args: DossierLinkUpsertArgs,
+) -> DossierLink:
     await _get_active_org_dossier(ctx, args.dossier_id)
-    return await collab_svc.collaboration_service.upsert_research_dossier_link(
+    return await collab_svc.collaboration_service.upsert_dossier_link(
         args.dossier_id,
-        UpsertResearchDossierLinkRequest(
+        UpsertDossierLinkRequest(
             actor=ctx.identity_actor(),
             **args.model_dump(exclude={"dossier_id"}),
         ),
     )
 
 
-async def handle_methodology_dossiers_navigate(
+async def handle_dossiers_navigate(
     ctx: McpApiContext,
-    args: MethodologyDossierNavigateArgs,
-) -> ResearchDossierNavigationResult:
+    args: DossierNavigateArgs,
+) -> DossierNavigationResult:
     await _get_active_org_dossier(ctx, args.dossier_id)
-    return await collab_svc.collaboration_service.navigate_research_dossier(
+    return await collab_svc.collaboration_service.navigate_dossier(
         args.dossier_id,
-        NavigateResearchDossierRequest(
+        NavigateDossierRequest(
             actor=ctx.identity_actor(),
             **args.model_dump(exclude={"dossier_id"}),
         ),
     )
 
 
-async def handle_methodology_dossiers_sync(
+async def handle_dossiers_sync(
     ctx: McpApiContext,
-    args: MethodologyDossierSyncArgs,
-) -> ResearchDossierSyncRun:
+    args: DossierSyncArgs,
+) -> DossierSyncRun:
     await _get_active_org_dossier(ctx, args.dossier_id)
-    return await collab_svc.collaboration_service.sync_research_dossier_notebook(
+    return await collab_svc.collaboration_service.sync_dossier_notebook(
         args.dossier_id,
-        SyncResearchDossierNotebookRequest(
+        SyncDossierNotebookRequest(
             actor=ctx.identity_actor(),
             **args.model_dump(exclude={"dossier_id"}),
         ),
     )
 
 
-async def handle_methodology_dossiers_health_submit(
+async def handle_dossiers_health_submit(
     ctx: McpApiContext,
-    args: MethodologyDossierHealthSubmitArgs,
-) -> ResearchDossierHealthCheck:
+    args: DossierHealthSubmitArgs,
+) -> DossierHealthCheck:
     await _get_active_org_dossier(ctx, args.dossier_id)
-    return await collab_svc.collaboration_service.submit_research_dossier_health_check(
+    return await collab_svc.collaboration_service.submit_dossier_health_check(
         args.dossier_id,
-        SubmitResearchDossierHealthCheckRequest(
+        SubmitDossierHealthCheckRequest(
             actor=ctx.identity_actor(),
             **args.model_dump(exclude={"dossier_id"}),
         ),
@@ -3175,15 +3596,27 @@ async def handle_methodology_blueprints_submit_draft(
     ctx: McpApiContext,
     args: MethodologyBlueprintSubmitDraftArgs,
 ) -> MethodologyBlueprintDetail:
-    organization_id = _active_methodology_organization_id(ctx)
+    organization_id = _active_dossier_organization_id(ctx)
+    version_id: UUID
+    if isinstance(args.version_id, UUID):
+        version_id = args.version_id
+    else:
+        try:
+            version_id = UUID(args.version_id)
+        except ValueError:
+            dossier_id_value = args.metadata.get("dossier_id")
+            if not isinstance(dossier_id_value, str):
+                raise
+            dossier = await _get_active_org_dossier(ctx, UUID(dossier_id_value))
+            version_id = dossier.version_id
     version = await collab_svc.collaboration_service.get_methodology_blueprint_version(
-        args.version_id,
+        version_id,
         actor=ctx.identity_actor(),
     )
     if version.organization_id != organization_id:
-        raise KeyError(f"Methodology blueprint version {args.version_id} not found")
+        raise KeyError(f"Methodology blueprint version {version_id} not found")
     detail = await collab_svc.collaboration_service.submit_methodology_blueprint_draft(
-        args.version_id,
+        version_id,
         SubmitMethodologyBlueprintDraftRequest(
             actor=ctx.identity_actor(),
             cited_output=args.cited_output,
@@ -3192,7 +3625,7 @@ async def handle_methodology_blueprints_submit_draft(
         ),
     )
     if detail.blueprint.organization_id != organization_id:
-        raise KeyError(f"Methodology blueprint version {args.version_id} not found")
+        raise KeyError(f"Methodology blueprint version {version_id} not found")
     return detail
 
 

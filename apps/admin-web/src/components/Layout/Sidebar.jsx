@@ -1,6 +1,7 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { LayoutDashboard, Users, Bot, FolderKanban, KeySquare, Server, Building2, Wrench, BookOpen } from 'lucide-react';
+import { methodologiesNavItem } from '../../features/methodologies';
 
 const navItems = [
   { path: '/dashboard', label: 'Overview', icon: LayoutDashboard },
@@ -9,6 +10,7 @@ const navItems = [
   { path: '/swarm', label: 'Swarm Resources', icon: Bot },
   { path: '/workspaces', label: 'Workspaces', icon: FolderKanban },
   { path: '/libraries', label: 'Libraries', icon: BookOpen },
+  methodologiesNavItem,
   { path: '/tool-generation', label: 'Tool Generation', icon: Wrench },
   { path: '/providers', label: 'Providers', icon: Server },
   { path: '/api-keys', label: 'API Keys', icon: KeySquare },

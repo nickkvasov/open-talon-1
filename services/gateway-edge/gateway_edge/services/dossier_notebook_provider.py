@@ -13,10 +13,10 @@ from open_talon_contracts.secrets import (
 )
 
 from gateway_edge.models import (
-    ResearchDossierConcept,
-    ResearchDossierNote,
-    ResearchDossierNotebookDetail,
-    ResearchDossierProviderBinding,
+    DossierConcept,
+    DossierNote,
+    DossierNotebookDetail,
+    DossierProviderBinding,
 )
 
 
@@ -47,8 +47,8 @@ class DossierNotebookProvider(Protocol):
     async def sync(
         self,
         *,
-        detail: ResearchDossierNotebookDetail,
-        binding: ResearchDossierProviderBinding,
+        detail: DossierNotebookDetail,
+        binding: DossierProviderBinding,
     ) -> DossierNotebookSyncResult: ...
 
 
@@ -65,8 +65,8 @@ class XWikiDossierNotebookProvider:
     async def sync(
         self,
         *,
-        detail: ResearchDossierNotebookDetail,
-        binding: ResearchDossierProviderBinding,
+        detail: DossierNotebookDetail,
+        binding: DossierProviderBinding,
     ) -> DossierNotebookSyncResult:
         base_url = self._base_url(binding)
         wiki_name = self._wiki_name(binding)
@@ -107,7 +107,7 @@ class XWikiDossierNotebookProvider:
         )
 
     @staticmethod
-    def _base_url(binding: ResearchDossierProviderBinding) -> str:
+    def _base_url(binding: DossierProviderBinding) -> str:
         configured = (
             binding.external_base_url
             or binding.config.get("base_url")
@@ -116,13 +116,13 @@ class XWikiDossierNotebookProvider:
         return str(configured).rstrip("/")
 
     @staticmethod
-    def _wiki_name(binding: ResearchDossierProviderBinding) -> str:
+    def _wiki_name(binding: DossierProviderBinding) -> str:
         configured = binding.config.get("wiki_name") or "xwiki"
         return str(configured).strip("/") or "xwiki"
 
     async def _auth(
         self,
-        binding: ResearchDossierProviderBinding,
+        binding: DossierProviderBinding,
     ) -> tuple[str, str] | None:
         username_refs = secret_references_from_config(binding.secret_config.get("username"))
         password_refs = secret_references_from_config(binding.secret_config.get("password"))
@@ -142,8 +142,8 @@ class XWikiDossierNotebookProvider:
 
     def _pages(
         self,
-        detail: ResearchDossierNotebookDetail,
-        binding: ResearchDossierProviderBinding,
+        detail: DossierNotebookDetail,
+        binding: DossierProviderBinding,
     ) -> list[tuple[str, str, str]]:
         note_pages = [
             (
@@ -165,8 +165,8 @@ class XWikiDossierNotebookProvider:
 
     @staticmethod
     def _note_page_ref(
-        note: ResearchDossierNote,
-        binding: ResearchDossierProviderBinding,
+        note: DossierNote,
+        binding: DossierProviderBinding,
     ) -> str:
         if note.external_page_ref:
             return note.external_page_ref
@@ -175,17 +175,17 @@ class XWikiDossierNotebookProvider:
 
     @staticmethod
     def _concept_page_ref(
-        concept: ResearchDossierConcept,
-        binding: ResearchDossierProviderBinding,
+        concept: DossierConcept,
+        binding: DossierProviderBinding,
     ) -> str:
         space = binding.external_space_ref or "Dossiers.Unknown"
         return f"{space}.Concepts.{concept.slug}.WebHome"
 
     @staticmethod
     def _render_note(
-        detail: ResearchDossierNotebookDetail,
-        note: ResearchDossierNote,
-        binding: ResearchDossierProviderBinding,
+        detail: DossierNotebookDetail,
+        note: DossierNote,
+        binding: DossierProviderBinding,
     ) -> str:
         lines = [
             f"= {note.title} =",
@@ -238,9 +238,9 @@ class XWikiDossierNotebookProvider:
 
     @staticmethod
     def _render_concept(
-        detail: ResearchDossierNotebookDetail,
-        concept: ResearchDossierConcept,
-        binding: ResearchDossierProviderBinding,
+        detail: DossierNotebookDetail,
+        concept: DossierConcept,
+        binding: DossierProviderBinding,
     ) -> str:
         lines = [
             f"= {concept.name} =",

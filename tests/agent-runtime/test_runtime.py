@@ -38,6 +38,7 @@ from agent_runtime.runtime import (
     HttpEndpointExecutor,
     LangfuseRuntimeObserver,
     LocalOllamaExecutor,
+    _coerce_model_text_run_result,
     _debug_prompt_payload,
     _format_thread_message,
     render_prompt,
@@ -79,10 +80,13 @@ from open_talon_contracts.models import (
     ParticipantProfile,
     RoleDefinition,
     Run,
+    RunStep,
     SearchMemoryRequest,
     TargetRef,
     Task,
     Thread,
+    ToolCall,
+    ToolCallResult,
     TimelineMessage,
     ToolExecutionBinding,
     ToolGenerationRequest,
@@ -90,6 +94,7 @@ from open_talon_contracts.models import (
     ToolGenerationRevision,
     Workspace,
     WorkspaceHarness,
+    WorkspaceMcpTool,
     WorkspaceMethodic,
     WorkspaceMethodicStep,
     WorkspaceMethodology,
@@ -122,6 +127,7 @@ class FakeKernel:
         self.progress_calls: list[str] = []
         self.completed_results: list[AgentRunResult] = []
         self.failed_errors: list[str] = []
+        self.requeued_run_steps: list[dict[str, object]] = []
         self.thread_memory_searches: list[SearchMemoryRequest] = []
         self.thread_memory_search_response = MemorySearchResponse(
             query="",
@@ -207,6 +213,38 @@ class FakeKernel:
         assert system_agent_id == self.system_agent.agent_id
         self.failed_errors.append(error)
         return SimpleNamespace(events=self.failure_events)
+
+    async def requeue_run_step_for_retry(
+        self,
+        step_id: UUID,
+        worker_id: str,
+        error: str,
+        *,
+        retry_after_seconds: int = 0,
+        reason: str = "retryable_runtime_failure",
+    ):
+        self.requeued_run_steps.append(
+            {
+                "step_id": step_id,
+                "worker_id": worker_id,
+                "error": error,
+                "retry_after_seconds": retry_after_seconds,
+                "reason": reason,
+            }
+        )
+        event = EventEnvelope(
+            event_type="run_step.requeued",
+            workspace_id=self.context.workspace.workspace_id,
+            thread_id=self.context.thread.thread_id,
+            actor=ActorRef(type="agent", id=self.context.participant.participant_id),
+            target=TargetRef(type="run_step", id=step_id),
+            visibility="agents_only",
+            correlation_id=self.context.run.correlation_id,
+            sequence=6,
+            timestamp=_now(),
+            payload={"step_id": str(step_id), "retry_reason": reason},
+        )
+        return SimpleNamespace(events=[event])
 
     async def search_thread_memory(
         self,
@@ -791,6 +829,65 @@ async def test_agent_runtime_records_failure_when_executor_raises():
         "task.claimed",
         "run.progressed",
         "run.failed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_requeues_retryable_provider_failure():
+    kernel = _build_fixture_context(endpoint_kind="remote")
+    step = RunStep(
+        step_id=uuid4(),
+        run_id=kernel.context.run.run_id,
+        task_id=kernel.context.task.task_id,
+        workspace_id=kernel.context.workspace.workspace_id,
+        thread_id=kernel.context.thread.thread_id,
+        system_agent_id=kernel.system_agent.agent_id,
+        status="claimed",
+        claimed_by_worker="agent-task-worker",
+    )
+    kernel.context = kernel.context.model_copy(update={"run_step": step})
+    published: list[list[EventEnvelope]] = []
+
+    class OpenAIQuotaError(RuntimeError):
+        pass
+
+    OpenAIQuotaError.__module__ = "litellm.exceptions"
+
+    class FailingExecutor:
+        async def execute(self, context: AgentExecutionContext) -> AgentRunResult:
+            raise OpenAIQuotaError("insufficient_quota: quota exhausted")
+
+    async def publish(events: list[EventEnvelope]) -> None:
+        published.append(events)
+
+    runtime = AgentTaskRuntime(
+        kernel=kernel,
+        publish_events=publish,
+        poll_interval_seconds=0.01,
+        provider_failure_retry_seconds=123,
+        executors={
+            "remote": FailingExecutor(),
+        },
+    )
+
+    await runtime._run_iteration()
+    await asyncio.gather(*kernel_safe_processing_tasks(runtime))
+
+    assert kernel.completed_results == []
+    assert kernel.failed_errors == []
+    assert kernel.requeued_run_steps == [
+        {
+            "step_id": step.step_id,
+            "worker_id": "agent-task-worker",
+            "error": "insufficient_quota: quota exhausted",
+            "retry_after_seconds": 123,
+            "reason": "llm_provider_unavailable",
+        }
+    ]
+    assert [events[0].event_type for events in published] == [
+        "task.claimed",
+        "run.progressed",
+        "run_step.requeued",
     ]
 
 
@@ -1754,6 +1851,79 @@ def test_render_prompt_keeps_full_workspace_tool_catalog_with_tool_use_guidance(
     assert "db_query | enabled: yes | Queries the attached database schema." in prompt
 
 
+def test_render_prompt_includes_mcp_input_schema_hints():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    kernel.context = kernel.context.model_copy(
+        update={
+            "internal_mcp_tools": [
+                WorkspaceMcpTool(
+                    server_id=uuid4(),
+                    server_key="control-plane",
+                    server_display_name="Control Plane",
+                    exposed_name="control_plane__dossiers.notes.upsert",
+                    remote_name="dossiers.notes.upsert",
+                    description="Create or update a navigable dossier note page.",
+                    input_schema={
+                        "type": "object",
+                        "required": ["dossier_id", "slug", "title"],
+                        "properties": {
+                            "dossier_id": {"type": "string"},
+                            "slug": {"type": "string"},
+                            "title": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["draft", "active", "failed"],
+                            },
+                        },
+                    },
+                )
+            ],
+        }
+    )
+
+    prompt = render_prompt(kernel.context)
+
+    assert "control_plane__dossiers.notes.upsert" in prompt
+    assert "input_schema:" in prompt
+    assert '"required": ["dossier_id", "slug", "title"]' in prompt
+    assert '"enum": ["draft", "active", "failed"]' in prompt
+
+
+def test_render_prompt_truncates_completed_tool_results():
+    kernel = _build_fixture_context(endpoint_kind="system")
+    now = _now()
+    long_payload = "x" * 10_000
+    kernel.context = kernel.context.model_copy(
+        update={
+            "tool_results": [
+                ToolCall(
+                    tool_call_id=uuid4(),
+                    run_id=kernel.context.run.run_id,
+                    run_step_id=uuid4(),
+                    task_id=kernel.context.task.task_id,
+                    workspace_id=kernel.context.workspace.workspace_id,
+                    thread_id=kernel.context.thread.thread_id,
+                    system_agent_id=kernel.system_agent.agent_id,
+                    tool_name=f"tool_{index}",
+                    status="completed",
+                    result=ToolCallResult(output_payload={"content": long_payload}),
+                    created_at=now,
+                    updated_at=now,
+                )
+                for index in range(14)
+            ],
+        }
+    )
+
+    prompt = render_prompt(kernel.context)
+
+    assert "omitted 2 older completed tool result(s)" in prompt
+    assert "tool_0 |" not in prompt
+    assert "tool_13 | status: completed" in prompt
+    assert "[truncated" in prompt
+    assert long_payload not in prompt
+
+
 def test_render_prompt_sorts_workspace_harness_execution_rules_by_priority():
     kernel = _build_fixture_context(endpoint_kind="system")
     kernel.context = kernel.context.model_copy(
@@ -2050,6 +2220,76 @@ async def test_local_ollama_executor_emits_generation_observation(monkeypatch):
         "completion_tokens": 7,
         "total_tokens": 19,
     }
+
+
+@pytest.mark.asyncio
+async def test_local_ollama_executor_parses_agent_run_result_tool_calls(monkeypatch):
+    kernel = _build_fixture_context(endpoint_kind="local")
+
+    async def fake_acompletion(**kwargs):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps(
+                            {
+                                "stop_reason": "completed",
+                                "message": None,
+                                "tool_calls": [
+                                    {
+                                        "tool_name": "web_search__search",
+                                        "arguments": {"query": "B2C methodology"},
+                                        "summary": "Run first internet search turn.",
+                                    }
+                                ],
+                            }
+                        ),
+                    }
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 20,
+                "completion_tokens": 10,
+                "total_tokens": 30,
+            },
+        }
+
+    monkeypatch.setattr(
+        "agent_runtime.runtime._load_litellm",
+        lambda: SimpleNamespace(acompletion=fake_acompletion),
+    )
+
+    executor = LocalOllamaExecutor(timeout_seconds=1.0, observability=RecordingObserver())
+    result = await executor.execute(kernel.context)
+
+    assert result.message is None
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].tool_name == "web_search__search"
+    assert result.tool_calls[0].arguments == {"query": "B2C methodology"}
+    assert result.metadata["usage"]["total_tokens"] == 30
+
+
+def test_model_text_run_result_parser_recovers_wrapped_tool_calls() -> None:
+    text = (
+        "Researcher update\n\n"
+        "Current source gate: {still waiting on one source}.\n\n"
+        '{"stop_reason":"completed","message":null,"tool_calls":['
+        '{"tool_name":"control_plane__dossiers.notes.upsert",'
+        '"arguments":{"dossier_id":"d1d57238-8e38-4fd8-8560-957e40156342",'
+        '"slug":"coverage-gaps","title":"Gaps","note_kind":"gap",'
+        '"status":"active","body":"Gap analysis.",'
+        '"metadata":{"knowledge_component":"gaps"}},'
+        '"summary":"Persist the gaps knowledge component."}]}'
+    )
+
+    result = _coerce_model_text_run_result(text)
+
+    assert result is not None
+    assert result.message is None
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].tool_name == "control_plane__dossiers.notes.upsert"
+    assert result.tool_calls[0].arguments["metadata"]["knowledge_component"] == "gaps"
 
 
 @pytest.mark.asyncio

@@ -12,15 +12,22 @@ from gateway_edge.models import (
     MethodologyBlueprint,
     MethodologyBlueprintDetail,
     MethodologyBlueprintVersion,
+    MethodologyResearchKnowledgeComponent,
+    MethodologyResearchState,
     OrganizationMembership,
-    ResearchDossierGraph,
-    ResearchDossierNavigationResult,
-    ResearchDossierNote,
-    ResearchDossierNotebook,
-    ResearchDossierNotebookDetail,
-    ResearchDossierProviderBinding,
-    ResearchDossier,
-    ResearchDossierSyncRun,
+    DossierClaim,
+    DossierConcept,
+    DossierEvent,
+    DossierGraph,
+    DossierLink,
+    DossierNavigationResult,
+    DossierNote,
+    DossierNotebook,
+    DossierNotebookDetail,
+    DossierProviderBinding,
+    Dossier,
+    DossierSource,
+    DossierSyncRun,
 )
 
 
@@ -111,20 +118,20 @@ def _blueprint_detail(
                 organization_id=organization_id,
                 version_number=1,
                 status="researching",
-                research_dossier_id=dossier_id,
+                dossier_id=dossier_id,
                 created_by=actor_id,
                 created_at=now,
                 updated_at=now,
                 metadata={},
             )
         ],
-        dossier=ResearchDossier(
+        dossier=Dossier(
             dossier_id=dossier_id,
             blueprint_id=blueprint_id,
             version_id=version_id,
             organization_id=organization_id,
             retained_library_id=uuid4(),
-            status="researching",
+            status="scoping",
             topic="Onboarding methodology",
             tasks=["Discover", "Synthesize"],
             created_by=actor_id,
@@ -136,10 +143,10 @@ def _blueprint_detail(
     )
 
 
-def _notebook_detail(dossier: ResearchDossier) -> ResearchDossierNotebookDetail:
+def _notebook_detail(dossier: Dossier) -> DossierNotebookDetail:
     now = datetime.now(timezone.utc)
     notebook_id = uuid4()
-    note = ResearchDossierNote(
+    note = DossierNote(
         note_id=uuid4(),
         notebook_id=notebook_id,
         dossier_id=dossier.dossier_id,
@@ -154,7 +161,7 @@ def _notebook_detail(dossier: ResearchDossier) -> ResearchDossierNotebookDetail:
         created_at=now,
         updated_at=now,
     )
-    notebook = ResearchDossierNotebook(
+    notebook = DossierNotebook(
         notebook_id=notebook_id,
         dossier_id=dossier.dossier_id,
         organization_id=dossier.organization_id,
@@ -169,7 +176,7 @@ def _notebook_detail(dossier: ResearchDossier) -> ResearchDossierNotebookDetail:
         created_at=now,
         updated_at=now,
     )
-    binding = ResearchDossierProviderBinding(
+    binding = DossierProviderBinding(
         binding_id=uuid4(),
         notebook_id=notebook_id,
         dossier_id=dossier.dossier_id,
@@ -183,7 +190,7 @@ def _notebook_detail(dossier: ResearchDossier) -> ResearchDossierNotebookDetail:
         created_at=now,
         updated_at=now,
     )
-    return ResearchDossierNotebookDetail(
+    return DossierNotebookDetail(
         notebook=notebook,
         provider_bindings=[binding],
         notes=[note],
@@ -224,6 +231,66 @@ async def test_create_methodology_blueprint_route_starts_dossier(
     assert called_payload.tasks == ["Discover", "Synthesize"]
 
 
+async def test_methodology_research_state_and_request_routes_are_org_scoped(
+    client,
+    mock_collaboration_service,
+    actor_payload,
+):
+    detail = _blueprint_detail()
+    state = MethodologyResearchState(
+        blueprint=detail.blueprint,
+        active_or_latest_version=detail.versions[0],
+        dossier=detail.dossier,
+        sources=[],
+        events=[],
+        notebook=None,
+        interaction_requests=[],
+        knowledge_components=[
+            MethodologyResearchKnowledgeComponent(
+                component="research_plan",
+                present=False,
+            )
+        ],
+        search_turns=[],
+        metadata={"can_request_research": True},
+    )
+    mock_collaboration_service.get_methodology_research_state = AsyncMock(
+        return_value=state
+    )
+    mock_collaboration_service.get_methodology_blueprint_detail = AsyncMock(
+        return_value=detail
+    )
+    mock_collaboration_service.create_methodology_research_request = AsyncMock(
+        return_value=state
+    )
+
+    state_response = await client.get(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/blueprints/{detail.blueprint.blueprint_id}/research-state"
+    )
+    request_response = await client.post(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/blueprints/{detail.blueprint.blueprint_id}/research-requests",
+        json={
+            "actor": actor_payload,
+            "instructions": "Run B2C market research web search and fill coverage.",
+            "max_search_turns": 4,
+            "required_components": ["research_plan", "synthesis"],
+            "require_admin_ready_approval": True,
+            "metadata": {"scenario": "b2c"},
+        },
+    )
+
+    assert state_response.status_code == 200
+    assert state_response.json()["metadata"]["can_request_research"] is True
+    assert request_response.status_code == 200
+    called_blueprint_id, called_payload = (
+        mock_collaboration_service.create_methodology_research_request.await_args.args
+    )
+    assert called_blueprint_id == detail.blueprint.blueprint_id
+    assert called_payload.instructions.startswith("Run B2C market research")
+    assert called_payload.max_search_turns == 4
+    assert called_payload.required_components == ["research_plan", "synthesis"]
+
+
 async def test_dossier_source_route_rejects_cross_org_dossier(
     client,
     mock_collaboration_service,
@@ -231,11 +298,11 @@ async def test_dossier_source_route_rejects_cross_org_dossier(
 ):
     wrong_org_detail = _blueprint_detail(organization_id=uuid4())
     dossier = wrong_org_detail.dossier
-    mock_collaboration_service.get_research_dossier = AsyncMock(return_value=dossier)
-    mock_collaboration_service.create_research_dossier_source = AsyncMock()
+    mock_collaboration_service.get_dossier = AsyncMock(return_value=dossier)
+    mock_collaboration_service.create_dossier_source = AsyncMock()
 
     response = await client.post(
-        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/sources",
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/sources",
         json={
             "actor": actor_payload,
             "source_kind": "webpage",
@@ -245,7 +312,141 @@ async def test_dossier_source_route_rejects_cross_org_dossier(
     )
 
     assert response.status_code == 404
-    mock_collaboration_service.create_research_dossier_source.assert_not_awaited()
+    mock_collaboration_service.create_dossier_source.assert_not_awaited()
+
+
+async def test_dossier_events_and_notebook_curation_routes_call_scoped_services(
+    client,
+    mock_collaboration_service,
+    actor_payload,
+):
+    detail = _blueprint_detail()
+    dossier = detail.dossier
+    notebook_detail = _notebook_detail(dossier)
+    now = datetime.now(timezone.utc)
+    source = DossierSource(
+        source_id=uuid4(),
+        dossier_id=dossier.dossier_id,
+        organization_id=dossier.organization_id,
+        source_kind="webpage",
+        status="included",
+        title="B2C market research source",
+        source_uri="https://example.test/b2c",
+        created_at=now,
+        updated_at=now,
+    )
+    event = DossierEvent(
+        event_id=uuid4(),
+        dossier_id=dossier.dossier_id,
+        organization_id=dossier.organization_id,
+        event_type="dossier.research_requested",
+        created_at=now,
+    )
+    concept = DossierConcept(
+        concept_id=uuid4(),
+        notebook_id=notebook_detail.notebook.notebook_id,
+        dossier_id=dossier.dossier_id,
+        organization_id=dossier.organization_id,
+        slug="b2c-demand",
+        name="B2C demand",
+        created_by=dossier.created_by,
+        updated_by=dossier.created_by,
+        created_at=now,
+        updated_at=now,
+    )
+    claim = DossierClaim(
+        claim_id=uuid4(),
+        notebook_id=notebook_detail.notebook.notebook_id,
+        dossier_id=dossier.dossier_id,
+        organization_id=dossier.organization_id,
+        statement="B2C demand should be triangulated.",
+        created_by=dossier.created_by,
+        updated_by=dossier.created_by,
+        created_at=now,
+        updated_at=now,
+    )
+    link = DossierLink(
+        link_id=uuid4(),
+        notebook_id=notebook_detail.notebook.notebook_id,
+        dossier_id=dossier.dossier_id,
+        organization_id=dossier.organization_id,
+        source_type="concept",
+        source_ref_id=concept.concept_id,
+        target_type="claim",
+        target_ref_id=claim.claim_id,
+        created_by=dossier.created_by,
+        updated_by=dossier.created_by,
+        created_at=now,
+        updated_at=now,
+    )
+    mock_collaboration_service.get_dossier = AsyncMock(return_value=dossier)
+    mock_collaboration_service.list_dossier_events = AsyncMock(return_value=[event])
+    mock_collaboration_service.update_dossier_source = AsyncMock(return_value=source)
+    mock_collaboration_service.upsert_dossier_note = AsyncMock(
+        return_value=notebook_detail.notes[0]
+    )
+    mock_collaboration_service.upsert_dossier_concept = AsyncMock(return_value=concept)
+    mock_collaboration_service.upsert_dossier_claim = AsyncMock(return_value=claim)
+    mock_collaboration_service.upsert_dossier_link = AsyncMock(return_value=link)
+
+    events_response = await client.get(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/events"
+    )
+    source_response = await client.patch(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/sources/{source.source_id}",
+        json={"actor": actor_payload, "status": "included"},
+    )
+    note_response = await client.post(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/notes",
+        json={
+            "actor": actor_payload,
+            "note_kind": "synthesis",
+            "status": "active",
+            "slug": "b2c-synthesis",
+            "title": "B2C synthesis",
+            "metadata": {"knowledge_component": "synthesis"},
+        },
+    )
+    concept_response = await client.post(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/concepts",
+        json={
+            "actor": actor_payload,
+            "slug": "b2c-demand",
+            "name": "B2C demand",
+        },
+    )
+    claim_response = await client.post(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/claims",
+        json={
+            "actor": actor_payload,
+            "statement": "B2C demand should be triangulated.",
+        },
+    )
+    link_response = await client.post(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/links",
+        json={
+            "actor": actor_payload,
+            "source_type": "concept",
+            "source_ref_id": str(concept.concept_id),
+            "target_type": "claim",
+            "target_ref_id": str(claim.claim_id),
+            "link_kind": "supports",
+        },
+    )
+
+    assert events_response.status_code == 200
+    assert events_response.json()[0]["event_type"] == "dossier.research_requested"
+    assert source_response.status_code == 200
+    assert note_response.status_code == 200
+    assert concept_response.status_code == 200
+    assert claim_response.status_code == 200
+    assert link_response.status_code == 200
+    mock_collaboration_service.list_dossier_events.assert_awaited_once()
+    mock_collaboration_service.update_dossier_source.assert_awaited_once()
+    mock_collaboration_service.upsert_dossier_note.assert_awaited_once()
+    mock_collaboration_service.upsert_dossier_concept.assert_awaited_once()
+    mock_collaboration_service.upsert_dossier_claim.assert_awaited_once()
+    mock_collaboration_service.upsert_dossier_link.assert_awaited_once()
 
 
 async def test_dossier_notebook_routes_call_scoped_services(
@@ -256,19 +457,19 @@ async def test_dossier_notebook_routes_call_scoped_services(
     detail = _blueprint_detail()
     dossier = detail.dossier
     notebook_detail = _notebook_detail(dossier)
-    graph = ResearchDossierGraph(
+    graph = DossierGraph(
         dossier_id=dossier.dossier_id,
         notebook_id=notebook_detail.notebook.notebook_id,
         nodes=[{"type": "note", "id": str(notebook_detail.notes[0].note_id)}],
         links=[],
     )
-    navigation = ResearchDossierNavigationResult(
+    navigation = DossierNavigationResult(
         dossier_id=dossier.dossier_id,
         notebook_id=notebook_detail.notebook.notebook_id,
         query="home",
         entry_notes=notebook_detail.notes,
     )
-    sync_run = ResearchDossierSyncRun(
+    sync_run = DossierSyncRun(
         sync_run_id=uuid4(),
         binding_id=notebook_detail.provider_bindings[0].binding_id,
         notebook_id=notebook_detail.notebook.notebook_id,
@@ -279,33 +480,45 @@ async def test_dossier_notebook_routes_call_scoped_services(
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
-    mock_collaboration_service.get_research_dossier = AsyncMock(return_value=dossier)
-    mock_collaboration_service.get_research_dossier_notebook_detail = AsyncMock(
+    mock_collaboration_service.get_dossier = AsyncMock(return_value=dossier)
+    mock_collaboration_service.get_dossier_notebook_detail = AsyncMock(
         return_value=notebook_detail
     )
-    mock_collaboration_service.get_research_dossier_graph = AsyncMock(
+    mock_collaboration_service.get_dossier_graph = AsyncMock(
         return_value=graph
     )
-    mock_collaboration_service.navigate_research_dossier = AsyncMock(
+    mock_collaboration_service.navigate_dossier = AsyncMock(
         return_value=navigation
     )
-    mock_collaboration_service.sync_research_dossier_notebook = AsyncMock(
+    mock_collaboration_service.sync_dossier_notebook = AsyncMock(
         return_value=sync_run
+    )
+    mock_collaboration_service.transition_dossier_lifecycle = AsyncMock(
+        return_value=dossier.model_copy(update={"status": "ready"})
     )
 
     notebook_response = await client.get(
-        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/notebook"
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/notebook"
     )
     graph_response = await client.get(
-        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/graph"
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/graph"
     )
     navigate_response = await client.post(
-        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/navigate",
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/navigate",
         json={"actor": actor_payload, "query": "home"},
     )
     sync_response = await client.post(
-        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/sync",
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/sync",
         json={"actor": actor_payload, "provider_key": "xwiki", "force": True},
+    )
+    lifecycle_response = await client.post(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/lifecycle",
+        json={
+            "actor": actor_payload,
+            "target_status": "ready",
+            "summary": "Ready for synthesis.",
+            "reason": "test",
+        },
     )
 
     assert notebook_response.status_code == 200
@@ -316,10 +529,13 @@ async def test_dossier_notebook_routes_call_scoped_services(
     assert navigate_response.json()["entry_notes"][0]["slug"] == "home"
     assert sync_response.status_code == 200
     assert sync_response.json()["stats"]["pages_synced"] == 1
-    mock_collaboration_service.get_research_dossier_notebook_detail.assert_awaited_once()
-    mock_collaboration_service.get_research_dossier_graph.assert_awaited_once()
-    mock_collaboration_service.navigate_research_dossier.assert_awaited_once()
-    mock_collaboration_service.sync_research_dossier_notebook.assert_awaited_once()
+    assert lifecycle_response.status_code == 200
+    assert lifecycle_response.json()["status"] == "ready"
+    mock_collaboration_service.get_dossier_notebook_detail.assert_awaited_once()
+    mock_collaboration_service.get_dossier_graph.assert_awaited_once()
+    mock_collaboration_service.navigate_dossier.assert_awaited_once()
+    mock_collaboration_service.sync_dossier_notebook.assert_awaited_once()
+    mock_collaboration_service.transition_dossier_lifecycle.assert_awaited_once()
 
 
 async def test_dossier_notebook_route_rejects_cross_org_dossier(
@@ -328,15 +544,15 @@ async def test_dossier_notebook_route_rejects_cross_org_dossier(
 ):
     wrong_org_detail = _blueprint_detail(organization_id=uuid4())
     dossier = wrong_org_detail.dossier
-    mock_collaboration_service.get_research_dossier = AsyncMock(return_value=dossier)
-    mock_collaboration_service.get_research_dossier_notebook_detail = AsyncMock()
+    mock_collaboration_service.get_dossier = AsyncMock(return_value=dossier)
+    mock_collaboration_service.get_dossier_notebook_detail = AsyncMock()
 
     response = await client.get(
-        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/notebook"
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/notebook"
     )
 
     assert response.status_code == 404
-    mock_collaboration_service.get_research_dossier_notebook_detail.assert_not_awaited()
+    mock_collaboration_service.get_dossier_notebook_detail.assert_not_awaited()
 
 
 async def test_dossier_notebook_routes_enforce_permission_matrix_and_org_scope(
@@ -372,19 +588,19 @@ async def test_dossier_notebook_routes_enforce_permission_matrix_and_org_scope(
     detail = _blueprint_detail()
     dossier = detail.dossier
     notebook_detail = _notebook_detail(dossier)
-    graph = ResearchDossierGraph(
+    graph = DossierGraph(
         dossier_id=dossier.dossier_id,
         notebook_id=notebook_detail.notebook.notebook_id,
         nodes=[{"type": "note", "id": str(notebook_detail.notes[0].note_id)}],
         links=[],
     )
-    navigation = ResearchDossierNavigationResult(
+    navigation = DossierNavigationResult(
         dossier_id=dossier.dossier_id,
         notebook_id=notebook_detail.notebook.notebook_id,
         query="home",
         entry_notes=notebook_detail.notes,
     )
-    sync_run = ResearchDossierSyncRun(
+    sync_run = DossierSyncRun(
         sync_run_id=uuid4(),
         binding_id=notebook_detail.provider_bindings[0].binding_id,
         notebook_id=notebook_detail.notebook.notebook_id,
@@ -395,45 +611,45 @@ async def test_dossier_notebook_routes_enforce_permission_matrix_and_org_scope(
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
-    mock_collaboration_service.get_research_dossier = AsyncMock(return_value=dossier)
-    mock_collaboration_service.get_research_dossier_notebook_detail = AsyncMock(
+    mock_collaboration_service.get_dossier = AsyncMock(return_value=dossier)
+    mock_collaboration_service.get_dossier_notebook_detail = AsyncMock(
         return_value=notebook_detail
     )
-    mock_collaboration_service.get_research_dossier_graph = AsyncMock(
+    mock_collaboration_service.get_dossier_graph = AsyncMock(
         return_value=graph
     )
-    mock_collaboration_service.navigate_research_dossier = AsyncMock(
+    mock_collaboration_service.navigate_dossier = AsyncMock(
         return_value=navigation
     )
-    mock_collaboration_service.sync_research_dossier_notebook = AsyncMock(
+    mock_collaboration_service.sync_dossier_notebook = AsyncMock(
         return_value=sync_run
     )
 
     owner_notebook = await client.get(
-        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/notebook",
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/notebook",
         headers={"Authorization": "Bearer owner-token"},
     )
     member_graph = await client.get(
-        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/graph",
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/graph",
         headers={"Authorization": "Bearer member-token"},
     )
     member_navigate = await client.post(
-        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/navigate",
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/navigate",
         headers={"Authorization": "Bearer member-token"},
         json={"actor": actor_payload, "query": "home"},
     )
     member_sync = await client.post(
-        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/sync",
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/sync",
         headers={"Authorization": "Bearer member-token"},
         json={"actor": actor_payload, "provider_key": "xwiki", "force": True},
     )
     owner_sync = await client.post(
-        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/sync",
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/sync",
         headers={"Authorization": "Bearer owner-token"},
         json={"actor": actor_payload, "provider_key": "xwiki", "force": True},
     )
     outsider_notebook = await client.get(
-        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{dossier.dossier_id}/notebook",
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{dossier.dossier_id}/notebook",
         headers={"Authorization": "Bearer outsider-token"},
     )
 
@@ -443,19 +659,19 @@ async def test_dossier_notebook_routes_enforce_permission_matrix_and_org_scope(
     assert member_sync.status_code == 403
     assert owner_sync.status_code == 200
     assert outsider_notebook.status_code == 404
-    assert mock_collaboration_service.sync_research_dossier_notebook.await_count == 1
+    assert mock_collaboration_service.sync_dossier_notebook.await_count == 1
 
     wrong_org_dossier = _blueprint_detail(organization_id=uuid4()).dossier
-    mock_collaboration_service.get_research_dossier = AsyncMock(
+    mock_collaboration_service.get_dossier = AsyncMock(
         return_value=wrong_org_dossier
     )
-    mock_collaboration_service.get_research_dossier_graph = AsyncMock()
+    mock_collaboration_service.get_dossier_graph = AsyncMock()
     cross_org_graph = await client.get(
-        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/dossiers/{wrong_org_dossier.dossier_id}/graph",
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/dossiers/{wrong_org_dossier.dossier_id}/graph",
         headers={"Authorization": "Bearer owner-token"},
     )
     assert cross_org_graph.status_code == 404
-    mock_collaboration_service.get_research_dossier_graph.assert_not_awaited()
+    mock_collaboration_service.get_dossier_graph.assert_not_awaited()
 
 
 async def test_methodology_read_routes_do_not_fabricate_actor_without_oidc(
@@ -485,6 +701,95 @@ async def test_methodology_read_routes_do_not_fabricate_actor_without_oidc(
     assert mock_collaboration_service.get_methodology_blueprint_detail.await_args.kwargs[
         "actor"
     ] is None
+
+
+async def test_methodology_version_create_and_archive_routes_are_org_scoped(
+    client,
+    mock_collaboration_service,
+    actor_payload,
+):
+    detail = _blueprint_detail()
+    blueprint_id = detail.blueprint.blueprint_id
+    version_id = detail.versions[0].version_id
+    mock_collaboration_service.get_methodology_blueprint_detail = AsyncMock(
+        return_value=detail
+    )
+    mock_collaboration_service.create_methodology_blueprint_version = AsyncMock(
+        return_value=detail
+    )
+    mock_collaboration_service.archive_methodology_blueprint = AsyncMock(
+        return_value={
+            "deleted": True,
+            "blueprint_id": str(blueprint_id),
+            "status": "archived",
+        }
+    )
+
+    create_response = await client.post(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/blueprints/{blueprint_id}/versions",
+        json={
+            "actor": actor_payload,
+            "base_version_id": str(version_id),
+            "cited_output": "# Edited methodology\n\nClaim [S1]",
+            "harness_draft": {
+                "summary": "Edited onboarding methodology.",
+                "methodics": [],
+                "execution_rules": [],
+                "metadata": {},
+            },
+            "reason": "Human review edit.",
+        },
+    )
+    archive_response = await client.request(
+        "DELETE",
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/blueprints/{blueprint_id}",
+        json={"actor": actor_payload, "metadata": {"archived_by_test": True}},
+    )
+
+    assert create_response.status_code == 200
+    assert archive_response.status_code == 200
+    called_blueprint_id, called_payload = (
+        mock_collaboration_service.create_methodology_blueprint_version.await_args.args
+    )
+    assert called_blueprint_id == blueprint_id
+    assert called_payload.base_version_id == version_id
+    assert called_payload.reason == "Human review edit."
+    mock_collaboration_service.archive_methodology_blueprint.assert_awaited_once()
+
+
+async def test_methodology_version_create_and_archive_reject_cross_org_blueprint(
+    client,
+    mock_collaboration_service,
+    actor_payload,
+):
+    wrong_org_detail = _blueprint_detail(organization_id=uuid4())
+    blueprint_id = wrong_org_detail.blueprint.blueprint_id
+    version_id = wrong_org_detail.versions[0].version_id
+    mock_collaboration_service.get_methodology_blueprint_detail = AsyncMock(
+        return_value=wrong_org_detail
+    )
+    mock_collaboration_service.create_methodology_blueprint_version = AsyncMock()
+    mock_collaboration_service.archive_methodology_blueprint = AsyncMock()
+
+    create_response = await client.post(
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/blueprints/{blueprint_id}/versions",
+        json={
+            "actor": actor_payload,
+            "base_version_id": str(version_id),
+            "cited_output": "# Edited methodology",
+            "harness_draft": {"summary": "Edited methodology."},
+        },
+    )
+    archive_response = await client.request(
+        "DELETE",
+        f"/v1/organizations/{DEFAULT_ORGANIZATION_ID}/methodology/blueprints/{blueprint_id}",
+        json={"actor": actor_payload},
+    )
+
+    assert create_response.status_code == 404
+    assert archive_response.status_code == 404
+    mock_collaboration_service.create_methodology_blueprint_version.assert_not_awaited()
+    mock_collaboration_service.archive_methodology_blueprint.assert_not_awaited()
 
 
 async def test_methodology_review_and_apply_routes_preserve_human_gates(

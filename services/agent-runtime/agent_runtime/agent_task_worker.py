@@ -23,6 +23,7 @@ async def _run() -> None:
         max_pending_tasks_per_agent=settings.agent_step_worker_concurrency,
         progress_events_enabled=True,
         model_timeout_seconds=settings.model_timeout_seconds,
+        provider_failure_retry_seconds=settings.provider_failure_retry_seconds,
     )
     try:
         await runtime.start()

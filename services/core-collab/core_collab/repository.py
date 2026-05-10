@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import hashlib
 import json
 import logging
@@ -91,21 +91,21 @@ from .contracts import (
     RetrievalSearchResponse,
     RetrievalSource,
     RetrievalSourceVersion,
-    ResearchDossier,
-    ResearchDossierClaim,
-    ResearchDossierConcept,
-    ResearchDossierEvent,
-    ResearchDossierGraph,
-    ResearchDossierHealthCheck,
-    ResearchDossierLink,
-    ResearchDossierNavigationResult,
-    ResearchDossierNote,
-    ResearchDossierNotebook,
-    ResearchDossierNotebookDetail,
-    ResearchDossierProviderBinding,
-    ResearchDossierProviderExternalRef,
-    ResearchDossierSource,
-    ResearchDossierSyncRun,
+    Dossier,
+    DossierClaim,
+    DossierConcept,
+    DossierEvent,
+    DossierGraph,
+    DossierHealthCheck,
+    DossierLink,
+    DossierNavigationResult,
+    DossierNote,
+    DossierNotebook,
+    DossierNotebookDetail,
+    DossierProviderBinding,
+    DossierProviderExternalRef,
+    DossierSource,
+    DossierSyncRun,
     ResolvedAssetBinding,
     Run,
     RunStep,
@@ -5767,7 +5767,7 @@ class CollaborationRepository:
             """
             INSERT INTO methodology_blueprint_versions (
                 version_id, blueprint_id, organization_id, version_number, status,
-                research_dossier_id, source_policy, selected_library_ids, cited_output,
+                dossier_id, source_policy, selected_library_ids, cited_output,
                 harness_draft, submitted_by_system_agent_id, submitted_at, approved_by,
                 approved_at, rejected_by, rejected_at, review_reason, created_by,
                 created_at, updated_at, metadata
@@ -5778,7 +5778,7 @@ class CollaborationRepository:
             )
             ON CONFLICT (version_id) DO UPDATE
                 SET status = EXCLUDED.status,
-                    research_dossier_id = EXCLUDED.research_dossier_id,
+                    dossier_id = EXCLUDED.dossier_id,
                     source_policy = EXCLUDED.source_policy,
                     selected_library_ids = EXCLUDED.selected_library_ids,
                     cited_output = EXCLUDED.cited_output,
@@ -5798,7 +5798,7 @@ class CollaborationRepository:
             version.organization_id,
             version.version_number,
             version.status,
-            version.research_dossier_id,
+            version.dossier_id,
             version.source_policy,
             self._json_dumps([str(item) for item in version.selected_library_ids]),
             version.cited_output,
@@ -5818,14 +5818,14 @@ class CollaborationRepository:
             self._json_dumps(version.metadata),
         )
 
-    async def upsert_research_dossier(
+    async def upsert_dossier(
         self,
         conn: asyncpg.Connection,
-        dossier: ResearchDossier,
+        dossier: Dossier,
     ) -> None:
         await conn.execute(
             """
-            INSERT INTO research_dossiers (
+            INSERT INTO dossiers (
                 dossier_id, blueprint_id, version_id, organization_id, retained_library_id,
                 operations_workspace_id, thread_id, researcher_system_agent_id,
                 researcher_participant_id, methodologist_system_agent_id,
@@ -5880,14 +5880,14 @@ class CollaborationRepository:
             self._json_dumps(dossier.metadata),
         )
 
-    async def upsert_research_dossier_source(
+    async def upsert_dossier_source(
         self,
         conn: asyncpg.Connection,
-        source: ResearchDossierSource,
+        source: DossierSource,
     ) -> None:
         await conn.execute(
             """
-            INSERT INTO research_dossier_sources (
+            INSERT INTO dossier_sources (
                 source_id, dossier_id, organization_id, source_kind, status, title,
                 source_uri, library_id, library_item_id, asset_id, asset_version_id,
                 context_pack_ids, citation_id, quality_notes, contradictions, rationale,
@@ -5943,14 +5943,14 @@ class CollaborationRepository:
             self._json_dumps(source.metadata),
         )
 
-    async def append_research_dossier_event(
+    async def append_dossier_event(
         self,
         conn: asyncpg.Connection,
-        event: ResearchDossierEvent,
+        event: DossierEvent,
     ) -> None:
         await conn.execute(
             """
-            INSERT INTO research_dossier_events (
+            INSERT INTO dossier_events (
                 event_id, dossier_id, organization_id, event_type,
                 actor_participant_id, system_agent_id, source_id, payload,
                 created_at, metadata
@@ -5970,14 +5970,14 @@ class CollaborationRepository:
             self._json_dumps(event.metadata),
         )
 
-    async def upsert_research_dossier_notebook(
+    async def upsert_dossier_notebook(
         self,
         conn: asyncpg.Connection,
-        notebook: ResearchDossierNotebook,
+        notebook: DossierNotebook,
     ) -> None:
         await conn.execute(
             """
-            INSERT INTO research_dossier_notebooks (
+            INSERT INTO dossier_notebooks (
                 notebook_id, dossier_id, organization_id, provider_kind, provider_key,
                 status, home_note_id, external_space_ref, external_url, last_sync_at,
                 created_by, created_at, updated_by, updated_at, metadata
@@ -6012,14 +6012,14 @@ class CollaborationRepository:
             self._json_dumps(notebook.metadata),
         )
 
-    async def upsert_research_dossier_note(
+    async def upsert_dossier_note(
         self,
         conn: asyncpg.Connection,
-        note: ResearchDossierNote,
+        note: DossierNote,
     ) -> None:
         await conn.execute(
             """
-            INSERT INTO research_dossier_notes (
+            INSERT INTO dossier_notes (
                 note_id, notebook_id, dossier_id, organization_id, note_kind, status,
                 slug, title, body, summary, source_id, concept_id, citation_ids,
                 related_note_ids, external_page_ref, external_url, created_by,
@@ -6069,14 +6069,14 @@ class CollaborationRepository:
             self._json_dumps(note.metadata),
         )
 
-    async def upsert_research_dossier_concept(
+    async def upsert_dossier_concept(
         self,
         conn: asyncpg.Connection,
-        concept: ResearchDossierConcept,
+        concept: DossierConcept,
     ) -> None:
         await conn.execute(
             """
-            INSERT INTO research_dossier_concepts (
+            INSERT INTO dossier_concepts (
                 concept_id, notebook_id, dossier_id, organization_id, slug, name,
                 aliases, definition, status, confidence, source_ids, claim_ids,
                 created_by, created_at, updated_by, updated_at, metadata
@@ -6114,14 +6114,14 @@ class CollaborationRepository:
             self._json_dumps(concept.metadata),
         )
 
-    async def upsert_research_dossier_claim(
+    async def upsert_dossier_claim(
         self,
         conn: asyncpg.Connection,
-        claim: ResearchDossierClaim,
+        claim: DossierClaim,
     ) -> None:
         await conn.execute(
             """
-            INSERT INTO research_dossier_claims (
+            INSERT INTO dossier_claims (
                 claim_id, notebook_id, dossier_id, organization_id, claim_key,
                 statement, status, confidence, provenance, source_ids, citation_ids,
                 context_pack_ids, contradicted_by_claim_ids, created_by, created_at,
@@ -6162,14 +6162,14 @@ class CollaborationRepository:
             self._json_dumps(claim.metadata),
         )
 
-    async def upsert_research_dossier_link(
+    async def upsert_dossier_link(
         self,
         conn: asyncpg.Connection,
-        link: ResearchDossierLink,
+        link: DossierLink,
     ) -> None:
         await conn.execute(
             """
-            INSERT INTO research_dossier_links (
+            INSERT INTO dossier_links (
                 link_id, notebook_id, dossier_id, organization_id, source_type,
                 source_ref_id, target_type, target_ref_id, link_kind, rationale,
                 confidence, created_by, created_at, updated_by, updated_at, metadata
@@ -6205,14 +6205,14 @@ class CollaborationRepository:
             self._json_dumps(link.metadata),
         )
 
-    async def upsert_research_dossier_provider_binding(
+    async def upsert_dossier_provider_binding(
         self,
         conn: asyncpg.Connection,
-        binding: ResearchDossierProviderBinding,
+        binding: DossierProviderBinding,
     ) -> None:
         await conn.execute(
             """
-            INSERT INTO research_dossier_provider_bindings (
+            INSERT INTO dossier_provider_bindings (
                 binding_id, notebook_id, dossier_id, organization_id, provider_kind,
                 provider_key, status, external_space_ref, external_base_url, auth_kind,
                 config, secret_config, last_sync_at, created_by, created_at,
@@ -6253,14 +6253,14 @@ class CollaborationRepository:
             self._json_dumps(binding.metadata),
         )
 
-    async def upsert_research_dossier_provider_external_ref(
+    async def upsert_dossier_provider_external_ref(
         self,
         conn: asyncpg.Connection,
-        ref: ResearchDossierProviderExternalRef,
+        ref: DossierProviderExternalRef,
     ) -> None:
         await conn.execute(
             """
-            INSERT INTO research_dossier_provider_external_refs (
+            INSERT INTO dossier_provider_external_refs (
                 ref_id, binding_id, notebook_id, dossier_id, organization_id,
                 open_talon_resource_type, open_talon_resource_id, external_kind,
                 external_id, external_url, external_parent_id, sync_hash,
@@ -6292,14 +6292,14 @@ class CollaborationRepository:
             self._json_dumps(ref.metadata),
         )
 
-    async def upsert_research_dossier_sync_run(
+    async def upsert_dossier_sync_run(
         self,
         conn: asyncpg.Connection,
-        sync_run: ResearchDossierSyncRun,
+        sync_run: DossierSyncRun,
     ) -> None:
         await conn.execute(
             """
-            INSERT INTO research_dossier_sync_runs (
+            INSERT INTO dossier_sync_runs (
                 sync_run_id, binding_id, notebook_id, dossier_id, organization_id,
                 status, direction, started_at, completed_at, error, stats,
                 actor_participant_id, system_agent_id, created_at, updated_at, metadata
@@ -6334,14 +6334,14 @@ class CollaborationRepository:
             self._json_dumps(sync_run.metadata),
         )
 
-    async def append_research_dossier_health_check(
+    async def append_dossier_health_check(
         self,
         conn: asyncpg.Connection,
-        check: ResearchDossierHealthCheck,
+        check: DossierHealthCheck,
     ) -> None:
         await conn.execute(
             """
-            INSERT INTO research_dossier_health_checks (
+            INSERT INTO dossier_health_checks (
                 check_id, notebook_id, dossier_id, organization_id, status, summary,
                 findings, unresolved_count, stale_count, broken_link_count,
                 checked_by_participant_id, checked_by_system_agent_id, created_at, metadata
@@ -6407,7 +6407,7 @@ class CollaborationRepository:
         row = await self._pool.fetchrow(
             """
             SELECT version_id, blueprint_id, organization_id, version_number, status,
-                   research_dossier_id, source_policy, selected_library_ids, cited_output,
+                   dossier_id, source_policy, selected_library_ids, cited_output,
                    harness_draft, submitted_by_system_agent_id, submitted_at, approved_by,
                    approved_at, rejected_by, rejected_at, review_reason, created_by,
                    created_at, updated_at, metadata
@@ -6425,7 +6425,7 @@ class CollaborationRepository:
         rows = await self._pool.fetch(
             """
             SELECT version_id, blueprint_id, organization_id, version_number, status,
-                   research_dossier_id, source_policy, selected_library_ids, cited_output,
+                   dossier_id, source_policy, selected_library_ids, cited_output,
                    harness_draft, submitted_by_system_agent_id, submitted_at, approved_by,
                    approved_at, rejected_by, rejected_at, review_reason, created_by,
                    created_at, updated_at, metadata
@@ -6437,10 +6437,10 @@ class CollaborationRepository:
         )
         return [self._methodology_blueprint_version_from_row(row) for row in rows]
 
-    async def fetch_research_dossier(
+    async def fetch_dossier(
         self,
         dossier_id: UUID,
-    ) -> ResearchDossier | None:
+    ) -> Dossier | None:
         row = await self._pool.fetchrow(
             """
             SELECT dossier_id, blueprint_id, version_id, organization_id, retained_library_id,
@@ -6449,17 +6449,17 @@ class CollaborationRepository:
                    methodologist_participant_id, status, topic, tasks, summary,
                    contradictions, gaps, context_pack_ids, created_by, ready_at,
                    created_at, updated_at, metadata
-            FROM research_dossiers
+            FROM dossiers
             WHERE dossier_id = $1
             """,
             dossier_id,
         )
-        return self._research_dossier_from_row(row) if row else None
+        return self._dossier_from_row(row) if row else None
 
-    async def fetch_research_dossier_for_version(
+    async def fetch_dossier_for_version(
         self,
         version_id: UUID,
-    ) -> ResearchDossier | None:
+    ) -> Dossier | None:
         row = await self._pool.fetchrow(
             """
             SELECT dossier_id, blueprint_id, version_id, organization_id, retained_library_id,
@@ -6468,17 +6468,17 @@ class CollaborationRepository:
                    methodologist_participant_id, status, topic, tasks, summary,
                    contradictions, gaps, context_pack_ids, created_by, ready_at,
                    created_at, updated_at, metadata
-            FROM research_dossiers
+            FROM dossiers
             WHERE version_id = $1
             """,
             version_id,
         )
-        return self._research_dossier_from_row(row) if row else None
+        return self._dossier_from_row(row) if row else None
 
-    async def fetch_research_dossier_source(
+    async def fetch_dossier_source(
         self,
         source_id: UUID,
-    ) -> ResearchDossierSource | None:
+    ) -> DossierSource | None:
         row = await self._pool.fetchrow(
             """
             SELECT source_id, dossier_id, organization_id, source_kind, status, title,
@@ -6486,19 +6486,19 @@ class CollaborationRepository:
                    context_pack_ids, citation_id, quality_notes, contradictions, rationale,
                    fetch_metadata, error, discovered_by_participant_id,
                    discovered_by_system_agent_id, created_at, updated_at, metadata
-            FROM research_dossier_sources
+            FROM dossier_sources
             WHERE source_id = $1
             """,
             source_id,
         )
-        return self._research_dossier_source_from_row(row) if row else None
+        return self._dossier_source_from_row(row) if row else None
 
-    async def list_research_dossier_sources(
+    async def list_dossier_sources(
         self,
         dossier_id: UUID,
         *,
         status: str | None = None,
-    ) -> list[ResearchDossierSource]:
+    ) -> list[DossierSource]:
         rows = await self._pool.fetch(
             """
             SELECT source_id, dossier_id, organization_id, source_kind, status, title,
@@ -6506,7 +6506,7 @@ class CollaborationRepository:
                    context_pack_ids, citation_id, quality_notes, contradictions, rationale,
                    fetch_metadata, error, discovered_by_participant_id,
                    discovered_by_system_agent_id, created_at, updated_at, metadata
-            FROM research_dossier_sources
+            FROM dossier_sources
             WHERE dossier_id = $1
               AND ($2::text IS NULL OR status = $2)
             ORDER BY created_at ASC
@@ -6514,108 +6514,108 @@ class CollaborationRepository:
             dossier_id,
             status,
         )
-        return [self._research_dossier_source_from_row(row) for row in rows]
+        return [self._dossier_source_from_row(row) for row in rows]
 
-    async def list_research_dossier_events(
+    async def list_dossier_events(
         self,
         dossier_id: UUID,
-    ) -> list[ResearchDossierEvent]:
+    ) -> list[DossierEvent]:
         rows = await self._pool.fetch(
             """
             SELECT event_id, dossier_id, organization_id, event_type,
                    actor_participant_id, system_agent_id, source_id, payload,
                    created_at, metadata
-            FROM research_dossier_events
+            FROM dossier_events
             WHERE dossier_id = $1
             ORDER BY created_at ASC
             """,
             dossier_id,
         )
-        return [self._research_dossier_event_from_row(row) for row in rows]
+        return [self._dossier_event_from_row(row) for row in rows]
 
-    async def fetch_research_dossier_notebook(
+    async def fetch_dossier_notebook(
         self,
         notebook_id: UUID,
-    ) -> ResearchDossierNotebook | None:
+    ) -> DossierNotebook | None:
         row = await self._pool.fetchrow(
             """
             SELECT notebook_id, dossier_id, organization_id, provider_kind, provider_key,
                    status, home_note_id, external_space_ref, external_url, last_sync_at,
                    created_by, created_at, updated_by, updated_at, metadata
-            FROM research_dossier_notebooks
+            FROM dossier_notebooks
             WHERE notebook_id = $1
             """,
             notebook_id,
         )
-        return self._research_dossier_notebook_from_row(row) if row else None
+        return self._dossier_notebook_from_row(row) if row else None
 
-    async def fetch_research_dossier_notebook_for_dossier(
+    async def fetch_dossier_notebook_for_dossier(
         self,
         dossier_id: UUID,
-    ) -> ResearchDossierNotebook | None:
+    ) -> DossierNotebook | None:
         row = await self._pool.fetchrow(
             """
             SELECT notebook_id, dossier_id, organization_id, provider_kind, provider_key,
                    status, home_note_id, external_space_ref, external_url, last_sync_at,
                    created_by, created_at, updated_by, updated_at, metadata
-            FROM research_dossier_notebooks
+            FROM dossier_notebooks
             WHERE dossier_id = $1
             """,
             dossier_id,
         )
-        return self._research_dossier_notebook_from_row(row) if row else None
+        return self._dossier_notebook_from_row(row) if row else None
 
-    async def fetch_research_dossier_note(
+    async def fetch_dossier_note(
         self,
         note_id: UUID,
-    ) -> ResearchDossierNote | None:
+    ) -> DossierNote | None:
         row = await self._pool.fetchrow(
             """
             SELECT note_id, notebook_id, dossier_id, organization_id, note_kind,
                    status, slug, title, body, summary, source_id, concept_id,
                    citation_ids, related_note_ids, external_page_ref, external_url,
                    created_by, created_at, updated_by, updated_at, metadata
-            FROM research_dossier_notes
+            FROM dossier_notes
             WHERE note_id = $1
             """,
             note_id,
         )
-        return self._research_dossier_note_from_row(row) if row else None
+        return self._dossier_note_from_row(row) if row else None
 
-    async def fetch_research_dossier_note_by_slug(
+    async def fetch_dossier_note_by_slug(
         self,
         notebook_id: UUID,
         slug: str,
-    ) -> ResearchDossierNote | None:
+    ) -> DossierNote | None:
         row = await self._pool.fetchrow(
             """
             SELECT note_id, notebook_id, dossier_id, organization_id, note_kind,
                    status, slug, title, body, summary, source_id, concept_id,
                    citation_ids, related_note_ids, external_page_ref, external_url,
                    created_by, created_at, updated_by, updated_at, metadata
-            FROM research_dossier_notes
+            FROM dossier_notes
             WHERE notebook_id = $1
               AND slug = $2
             """,
             notebook_id,
             slug,
         )
-        return self._research_dossier_note_from_row(row) if row else None
+        return self._dossier_note_from_row(row) if row else None
 
-    async def list_research_dossier_notes(
+    async def list_dossier_notes(
         self,
         notebook_id: UUID,
         *,
         note_kind: str | None = None,
         status: str | None = None,
-    ) -> list[ResearchDossierNote]:
+    ) -> list[DossierNote]:
         rows = await self._pool.fetch(
             """
             SELECT note_id, notebook_id, dossier_id, organization_id, note_kind,
                    status, slug, title, body, summary, source_id, concept_id,
                    citation_ids, related_note_ids, external_page_ref, external_url,
                    created_by, created_at, updated_by, updated_at, metadata
-            FROM research_dossier_notes
+            FROM dossier_notes
             WHERE notebook_id = $1
               AND ($2::text IS NULL OR note_kind = $2)
               AND ($3::text IS NULL OR status = $3)
@@ -6625,55 +6625,55 @@ class CollaborationRepository:
             note_kind,
             status,
         )
-        return [self._research_dossier_note_from_row(row) for row in rows]
+        return [self._dossier_note_from_row(row) for row in rows]
 
-    async def fetch_research_dossier_concept(
+    async def fetch_dossier_concept(
         self,
         concept_id: UUID,
-    ) -> ResearchDossierConcept | None:
+    ) -> DossierConcept | None:
         row = await self._pool.fetchrow(
             """
             SELECT concept_id, notebook_id, dossier_id, organization_id, slug, name,
                    aliases, definition, status, confidence, source_ids, claim_ids,
                    created_by, created_at, updated_by, updated_at, metadata
-            FROM research_dossier_concepts
+            FROM dossier_concepts
             WHERE concept_id = $1
             """,
             concept_id,
         )
-        return self._research_dossier_concept_from_row(row) if row else None
+        return self._dossier_concept_from_row(row) if row else None
 
-    async def fetch_research_dossier_concept_by_slug(
+    async def fetch_dossier_concept_by_slug(
         self,
         notebook_id: UUID,
         slug: str,
-    ) -> ResearchDossierConcept | None:
+    ) -> DossierConcept | None:
         row = await self._pool.fetchrow(
             """
             SELECT concept_id, notebook_id, dossier_id, organization_id, slug, name,
                    aliases, definition, status, confidence, source_ids, claim_ids,
                    created_by, created_at, updated_by, updated_at, metadata
-            FROM research_dossier_concepts
+            FROM dossier_concepts
             WHERE notebook_id = $1
               AND slug = $2
             """,
             notebook_id,
             slug,
         )
-        return self._research_dossier_concept_from_row(row) if row else None
+        return self._dossier_concept_from_row(row) if row else None
 
-    async def list_research_dossier_concepts(
+    async def list_dossier_concepts(
         self,
         notebook_id: UUID,
         *,
         status: str | None = None,
-    ) -> list[ResearchDossierConcept]:
+    ) -> list[DossierConcept]:
         rows = await self._pool.fetch(
             """
             SELECT concept_id, notebook_id, dossier_id, organization_id, slug, name,
                    aliases, definition, status, confidence, source_ids, claim_ids,
                    created_by, created_at, updated_by, updated_at, metadata
-            FROM research_dossier_concepts
+            FROM dossier_concepts
             WHERE notebook_id = $1
               AND ($2::text IS NULL OR status = $2)
             ORDER BY slug ASC
@@ -6681,58 +6681,58 @@ class CollaborationRepository:
             notebook_id,
             status,
         )
-        return [self._research_dossier_concept_from_row(row) for row in rows]
+        return [self._dossier_concept_from_row(row) for row in rows]
 
-    async def fetch_research_dossier_claim(
+    async def fetch_dossier_claim(
         self,
         claim_id: UUID,
-    ) -> ResearchDossierClaim | None:
+    ) -> DossierClaim | None:
         row = await self._pool.fetchrow(
             """
             SELECT claim_id, notebook_id, dossier_id, organization_id, claim_key,
                    statement, status, confidence, provenance, source_ids, citation_ids,
                    context_pack_ids, contradicted_by_claim_ids, created_by, created_at,
                    updated_by, updated_at, metadata
-            FROM research_dossier_claims
+            FROM dossier_claims
             WHERE claim_id = $1
             """,
             claim_id,
         )
-        return self._research_dossier_claim_from_row(row) if row else None
+        return self._dossier_claim_from_row(row) if row else None
 
-    async def fetch_research_dossier_claim_by_key(
+    async def fetch_dossier_claim_by_key(
         self,
         notebook_id: UUID,
         claim_key: str,
-    ) -> ResearchDossierClaim | None:
+    ) -> DossierClaim | None:
         row = await self._pool.fetchrow(
             """
             SELECT claim_id, notebook_id, dossier_id, organization_id, claim_key,
                    statement, status, confidence, provenance, source_ids, citation_ids,
                    context_pack_ids, contradicted_by_claim_ids, created_by, created_at,
                    updated_by, updated_at, metadata
-            FROM research_dossier_claims
+            FROM dossier_claims
             WHERE notebook_id = $1
               AND claim_key = $2
             """,
             notebook_id,
             claim_key,
         )
-        return self._research_dossier_claim_from_row(row) if row else None
+        return self._dossier_claim_from_row(row) if row else None
 
-    async def list_research_dossier_claims(
+    async def list_dossier_claims(
         self,
         notebook_id: UUID,
         *,
         status: str | None = None,
-    ) -> list[ResearchDossierClaim]:
+    ) -> list[DossierClaim]:
         rows = await self._pool.fetch(
             """
             SELECT claim_id, notebook_id, dossier_id, organization_id, claim_key,
                    statement, status, confidence, provenance, source_ids, citation_ids,
                    context_pack_ids, contradicted_by_claim_ids, created_by, created_at,
                    updated_by, updated_at, metadata
-            FROM research_dossier_claims
+            FROM dossier_claims
             WHERE notebook_id = $1
               AND ($2::text IS NULL OR status = $2)
             ORDER BY created_at ASC
@@ -6740,25 +6740,25 @@ class CollaborationRepository:
             notebook_id,
             status,
         )
-        return [self._research_dossier_claim_from_row(row) for row in rows]
+        return [self._dossier_claim_from_row(row) for row in rows]
 
-    async def fetch_research_dossier_link(
+    async def fetch_dossier_link(
         self,
         link_id: UUID,
-    ) -> ResearchDossierLink | None:
+    ) -> DossierLink | None:
         row = await self._pool.fetchrow(
             """
             SELECT link_id, notebook_id, dossier_id, organization_id, source_type,
                    source_ref_id, target_type, target_ref_id, link_kind, rationale,
                    confidence, created_by, created_at, updated_by, updated_at, metadata
-            FROM research_dossier_links
+            FROM dossier_links
             WHERE link_id = $1
             """,
             link_id,
         )
-        return self._research_dossier_link_from_row(row) if row else None
+        return self._dossier_link_from_row(row) if row else None
 
-    async def fetch_research_dossier_link_by_tuple(
+    async def fetch_dossier_link_by_tuple(
         self,
         notebook_id: UUID,
         *,
@@ -6767,13 +6767,13 @@ class CollaborationRepository:
         target_type: str,
         target_ref_id: UUID,
         link_kind: str,
-    ) -> ResearchDossierLink | None:
+    ) -> DossierLink | None:
         row = await self._pool.fetchrow(
             """
             SELECT link_id, notebook_id, dossier_id, organization_id, source_type,
                    source_ref_id, target_type, target_ref_id, link_kind, rationale,
                    confidence, created_by, created_at, updated_by, updated_at, metadata
-            FROM research_dossier_links
+            FROM dossier_links
             WHERE notebook_id = $1
               AND source_type = $2
               AND source_ref_id = $3
@@ -6788,38 +6788,38 @@ class CollaborationRepository:
             target_ref_id,
             link_kind,
         )
-        return self._research_dossier_link_from_row(row) if row else None
+        return self._dossier_link_from_row(row) if row else None
 
-    async def list_research_dossier_links(
+    async def list_dossier_links(
         self,
         notebook_id: UUID,
-    ) -> list[ResearchDossierLink]:
+    ) -> list[DossierLink]:
         rows = await self._pool.fetch(
             """
             SELECT link_id, notebook_id, dossier_id, organization_id, source_type,
                    source_ref_id, target_type, target_ref_id, link_kind, rationale,
                    confidence, created_by, created_at, updated_by, updated_at, metadata
-            FROM research_dossier_links
+            FROM dossier_links
             WHERE notebook_id = $1
             ORDER BY created_at ASC
             """,
             notebook_id,
         )
-        return [self._research_dossier_link_from_row(row) for row in rows]
+        return [self._dossier_link_from_row(row) for row in rows]
 
-    async def list_research_dossier_provider_bindings(
+    async def list_dossier_provider_bindings(
         self,
         notebook_id: UUID,
         *,
         provider_key: str | None = None,
-    ) -> list[ResearchDossierProviderBinding]:
+    ) -> list[DossierProviderBinding]:
         rows = await self._pool.fetch(
             """
             SELECT binding_id, notebook_id, dossier_id, organization_id, provider_kind,
                    provider_key, status, external_space_ref, external_base_url, auth_kind,
                    config, secret_config, last_sync_at, created_by, created_at,
                    updated_by, updated_at, metadata
-            FROM research_dossier_provider_bindings
+            FROM dossier_provider_bindings
             WHERE notebook_id = $1
               AND ($2::text IS NULL OR provider_key = $2)
             ORDER BY provider_key ASC
@@ -6827,21 +6827,21 @@ class CollaborationRepository:
             notebook_id,
             provider_key,
         )
-        return [self._research_dossier_provider_binding_from_row(row) for row in rows]
+        return [self._dossier_provider_binding_from_row(row) for row in rows]
 
-    async def list_research_dossier_provider_external_refs(
+    async def list_dossier_provider_external_refs(
         self,
         notebook_id: UUID,
         *,
         binding_id: UUID | None = None,
-    ) -> list[ResearchDossierProviderExternalRef]:
+    ) -> list[DossierProviderExternalRef]:
         rows = await self._pool.fetch(
             """
             SELECT ref_id, binding_id, notebook_id, dossier_id, organization_id,
                    open_talon_resource_type, open_talon_resource_id, external_kind,
                    external_id, external_url, external_parent_id, sync_hash,
                    created_at, updated_at, metadata
-            FROM research_dossier_provider_external_refs
+            FROM dossier_provider_external_refs
             WHERE notebook_id = $1
               AND ($2::uuid IS NULL OR binding_id = $2)
             ORDER BY external_kind ASC, external_id ASC
@@ -6849,46 +6849,46 @@ class CollaborationRepository:
             notebook_id,
             binding_id,
         )
-        return [self._research_dossier_provider_external_ref_from_row(row) for row in rows]
+        return [self._dossier_provider_external_ref_from_row(row) for row in rows]
 
-    async def fetch_latest_research_dossier_health_check(
+    async def fetch_latest_dossier_health_check(
         self,
         notebook_id: UUID,
-    ) -> ResearchDossierHealthCheck | None:
+    ) -> DossierHealthCheck | None:
         row = await self._pool.fetchrow(
             """
             SELECT check_id, notebook_id, dossier_id, organization_id, status, summary,
                    findings, unresolved_count, stale_count, broken_link_count,
                    checked_by_participant_id, checked_by_system_agent_id, created_at,
                    metadata
-            FROM research_dossier_health_checks
+            FROM dossier_health_checks
             WHERE notebook_id = $1
             ORDER BY created_at DESC
             LIMIT 1
             """,
             notebook_id,
         )
-        return self._research_dossier_health_check_from_row(row) if row else None
+        return self._dossier_health_check_from_row(row) if row else None
 
-    async def fetch_research_dossier_notebook_detail(
+    async def fetch_dossier_notebook_detail(
         self,
         dossier_id: UUID,
-    ) -> ResearchDossierNotebookDetail | None:
-        notebook = await self.fetch_research_dossier_notebook_for_dossier(dossier_id)
+    ) -> DossierNotebookDetail | None:
+        notebook = await self.fetch_dossier_notebook_for_dossier(dossier_id)
         if notebook is None:
             return None
-        bindings = await self.list_research_dossier_provider_bindings(notebook.notebook_id)
-        return ResearchDossierNotebookDetail(
+        bindings = await self.list_dossier_provider_bindings(notebook.notebook_id)
+        return DossierNotebookDetail(
             notebook=notebook,
             provider_bindings=bindings,
-            notes=await self.list_research_dossier_notes(notebook.notebook_id),
-            concepts=await self.list_research_dossier_concepts(notebook.notebook_id),
-            claims=await self.list_research_dossier_claims(notebook.notebook_id),
-            links=await self.list_research_dossier_links(notebook.notebook_id),
-            external_refs=await self.list_research_dossier_provider_external_refs(
+            notes=await self.list_dossier_notes(notebook.notebook_id),
+            concepts=await self.list_dossier_concepts(notebook.notebook_id),
+            claims=await self.list_dossier_claims(notebook.notebook_id),
+            links=await self.list_dossier_links(notebook.notebook_id),
+            external_refs=await self.list_dossier_provider_external_refs(
                 notebook.notebook_id
             ),
-            latest_health_check=await self.fetch_latest_research_dossier_health_check(
+            latest_health_check=await self.fetch_latest_dossier_health_check(
                 notebook.notebook_id
             ),
         )
@@ -7682,6 +7682,30 @@ class CollaborationRepository:
         )
         return self._task_from_row(row) if row else None
 
+    async def list_tasks_for_correlation(
+        self,
+        correlation_id: UUID,
+        *,
+        task_kind: str | None = None,
+        limit: int = 20,
+    ) -> list[Task]:
+        rows = await self._pool.fetch(
+            """
+            SELECT task_id, workspace_id, thread_id, title, description, status,
+                   requested_by, claimed_by, visibility, correlation_id, causation_id,
+                   created_at, updated_at, metadata
+            FROM tasks
+            WHERE correlation_id = $1
+              AND ($2::text IS NULL OR metadata->>'task_kind' = $2)
+            ORDER BY created_at DESC
+            LIMIT $3
+            """,
+            correlation_id,
+            task_kind,
+            limit,
+        )
+        return [self._task_from_row(row) for row in rows]
+
     async def list_pending_tasks_for_system_agent(
         self,
         system_agent_id: UUID,
@@ -7741,6 +7765,19 @@ class CollaborationRepository:
             run_id,
         )
         return self._run_from_row(row) if row else None
+
+    async def list_runs_for_task(self, task_id: UUID) -> list[Run]:
+        rows = await self._pool.fetch(
+            """
+            SELECT run_id, workspace_id, thread_id, task_id, participant_id, status,
+                   output, correlation_id, causation_id, created_at, updated_at, metadata
+            FROM runs
+            WHERE task_id = $1
+            ORDER BY created_at DESC
+            """,
+            task_id,
+        )
+        return [self._run_from_row(row) for row in rows]
 
     async def fetch_run_step(self, step_id: UUID) -> RunStep | None:
         row = await self._pool.fetchrow(
@@ -8843,32 +8880,32 @@ class CollaborationRepository:
     ) -> ExternalIdentityGrant | None:
         row = await self._pool.fetchrow(
             """
-            SELECT grant.grant_id, grant.workspace_id, grant.participant_id, grant.system_id,
-                   grant.account_id, grant.user_id, grant.system_agent_id,
-                   grant.allowed_scopes, grant.allowed_operations, grant.risk_policy,
-                   grant.status, grant.expires_at, grant.created_by, grant.approved_by,
-                   grant.created_at, grant.updated_by, grant.updated_at, grant.metadata
-            FROM external_identity_grants AS grant
-            JOIN external_systems AS system ON system.system_id = grant.system_id
-            LEFT JOIN external_accounts AS account ON account.account_id = grant.account_id
-            WHERE grant.workspace_id = $1
-              AND grant.participant_id = $2
-              AND grant.system_id = $3
-              AND grant.status = 'active'
-              AND (grant.expires_at IS NULL OR grant.expires_at > $5)
+            SELECT eig.grant_id, eig.workspace_id, eig.participant_id, eig.system_id,
+                   eig.account_id, eig.user_id, eig.system_agent_id,
+                   eig.allowed_scopes, eig.allowed_operations, eig.risk_policy,
+                   eig.status, eig.expires_at, eig.created_by, eig.approved_by,
+                   eig.created_at, eig.updated_by, eig.updated_at, eig.metadata
+            FROM external_identity_grants AS eig
+            JOIN external_systems AS system ON system.system_id = eig.system_id
+            LEFT JOIN external_accounts AS account ON account.account_id = eig.account_id
+            WHERE eig.workspace_id = $1
+              AND eig.participant_id = $2
+              AND eig.system_id = $3
+              AND eig.status = 'active'
+              AND (eig.expires_at IS NULL OR eig.expires_at > $5)
               AND system.enabled = TRUE
               AND (
-                    grant.allowed_operations = '[]'::jsonb
-                 OR grant.allowed_operations ? $4
+                    eig.allowed_operations = '[]'::jsonb
+                 OR eig.allowed_operations ? $4
               )
               AND (
-                    grant.account_id IS NULL
+                    eig.account_id IS NULL
                  OR (
                     account.status = 'active'
                     AND (account.expires_at IS NULL OR account.expires_at > $5)
                  )
               )
-            ORDER BY grant.created_at ASC
+            ORDER BY eig.created_at ASC
             LIMIT 1
             """,
             workspace_id,
@@ -10420,7 +10457,7 @@ class CollaborationRepository:
             organization_id=row["organization_id"],
             version_number=row["version_number"],
             status=row["status"],
-            research_dossier_id=row["research_dossier_id"],
+            dossier_id=row["dossier_id"],
             source_policy=row["source_policy"],
             selected_library_ids=CollaborationRepository._uuid_list_from_json(
                 row["selected_library_ids"]
@@ -10445,8 +10482,8 @@ class CollaborationRepository:
         )
 
     @staticmethod
-    def _research_dossier_from_row(row: asyncpg.Record) -> ResearchDossier:
-        return ResearchDossier(
+    def _dossier_from_row(row: asyncpg.Record) -> Dossier:
+        return Dossier(
             dossier_id=row["dossier_id"],
             blueprint_id=row["blueprint_id"],
             version_id=row["version_id"],
@@ -10478,8 +10515,8 @@ class CollaborationRepository:
         )
 
     @staticmethod
-    def _research_dossier_source_from_row(row: asyncpg.Record) -> ResearchDossierSource:
-        return ResearchDossierSource(
+    def _dossier_source_from_row(row: asyncpg.Record) -> DossierSource:
+        return DossierSource(
             source_id=row["source_id"],
             dossier_id=row["dossier_id"],
             organization_id=row["organization_id"],
@@ -10514,8 +10551,8 @@ class CollaborationRepository:
         )
 
     @staticmethod
-    def _research_dossier_event_from_row(row: asyncpg.Record) -> ResearchDossierEvent:
-        return ResearchDossierEvent(
+    def _dossier_event_from_row(row: asyncpg.Record) -> DossierEvent:
+        return DossierEvent(
             event_id=row["event_id"],
             dossier_id=row["dossier_id"],
             organization_id=row["organization_id"],
@@ -10529,10 +10566,10 @@ class CollaborationRepository:
         )
 
     @staticmethod
-    def _research_dossier_notebook_from_row(
+    def _dossier_notebook_from_row(
         row: asyncpg.Record,
-    ) -> ResearchDossierNotebook:
-        return ResearchDossierNotebook(
+    ) -> DossierNotebook:
+        return DossierNotebook(
             notebook_id=row["notebook_id"],
             dossier_id=row["dossier_id"],
             organization_id=row["organization_id"],
@@ -10551,8 +10588,8 @@ class CollaborationRepository:
         )
 
     @staticmethod
-    def _research_dossier_note_from_row(row: asyncpg.Record) -> ResearchDossierNote:
-        return ResearchDossierNote(
+    def _dossier_note_from_row(row: asyncpg.Record) -> DossierNote:
+        return DossierNote(
             note_id=row["note_id"],
             notebook_id=row["notebook_id"],
             dossier_id=row["dossier_id"],
@@ -10582,10 +10619,10 @@ class CollaborationRepository:
         )
 
     @staticmethod
-    def _research_dossier_concept_from_row(
+    def _dossier_concept_from_row(
         row: asyncpg.Record,
-    ) -> ResearchDossierConcept:
-        return ResearchDossierConcept(
+    ) -> DossierConcept:
+        return DossierConcept(
             concept_id=row["concept_id"],
             notebook_id=row["notebook_id"],
             dossier_id=row["dossier_id"],
@@ -10606,8 +10643,8 @@ class CollaborationRepository:
         )
 
     @staticmethod
-    def _research_dossier_claim_from_row(row: asyncpg.Record) -> ResearchDossierClaim:
-        return ResearchDossierClaim(
+    def _dossier_claim_from_row(row: asyncpg.Record) -> DossierClaim:
+        return DossierClaim(
             claim_id=row["claim_id"],
             notebook_id=row["notebook_id"],
             dossier_id=row["dossier_id"],
@@ -10636,8 +10673,8 @@ class CollaborationRepository:
         )
 
     @staticmethod
-    def _research_dossier_link_from_row(row: asyncpg.Record) -> ResearchDossierLink:
-        return ResearchDossierLink(
+    def _dossier_link_from_row(row: asyncpg.Record) -> DossierLink:
+        return DossierLink(
             link_id=row["link_id"],
             notebook_id=row["notebook_id"],
             dossier_id=row["dossier_id"],
@@ -10657,10 +10694,10 @@ class CollaborationRepository:
         )
 
     @staticmethod
-    def _research_dossier_provider_binding_from_row(
+    def _dossier_provider_binding_from_row(
         row: asyncpg.Record,
-    ) -> ResearchDossierProviderBinding:
-        return ResearchDossierProviderBinding(
+    ) -> DossierProviderBinding:
+        return DossierProviderBinding(
             binding_id=row["binding_id"],
             notebook_id=row["notebook_id"],
             dossier_id=row["dossier_id"],
@@ -10685,10 +10722,10 @@ class CollaborationRepository:
         )
 
     @staticmethod
-    def _research_dossier_provider_external_ref_from_row(
+    def _dossier_provider_external_ref_from_row(
         row: asyncpg.Record,
-    ) -> ResearchDossierProviderExternalRef:
-        return ResearchDossierProviderExternalRef(
+    ) -> DossierProviderExternalRef:
+        return DossierProviderExternalRef(
             ref_id=row["ref_id"],
             binding_id=row["binding_id"],
             notebook_id=row["notebook_id"],
@@ -10707,10 +10744,10 @@ class CollaborationRepository:
         )
 
     @staticmethod
-    def _research_dossier_sync_run_from_row(
+    def _dossier_sync_run_from_row(
         row: asyncpg.Record,
-    ) -> ResearchDossierSyncRun:
-        return ResearchDossierSyncRun(
+    ) -> DossierSyncRun:
+        return DossierSyncRun(
             sync_run_id=row["sync_run_id"],
             binding_id=row["binding_id"],
             notebook_id=row["notebook_id"],
@@ -10730,10 +10767,10 @@ class CollaborationRepository:
         )
 
     @staticmethod
-    def _research_dossier_health_check_from_row(
+    def _dossier_health_check_from_row(
         row: asyncpg.Record,
-    ) -> ResearchDossierHealthCheck:
-        return ResearchDossierHealthCheck(
+    ) -> DossierHealthCheck:
+        return DossierHealthCheck(
             check_id=row["check_id"],
             notebook_id=row["notebook_id"],
             dossier_id=row["dossier_id"],
@@ -11687,7 +11724,29 @@ class CollaborationRepository:
 
     @staticmethod
     def _json_dumps(value: Any) -> str:
-        return json.dumps(value)
+        return json.dumps(CollaborationRepository._strip_postgres_null_bytes(value))
+
+    @staticmethod
+    def _strip_postgres_null_bytes(value: Any) -> Any:
+        if isinstance(value, str):
+            return value.replace("\x00", "")
+        if isinstance(value, Mapping):
+            return {
+                CollaborationRepository._strip_postgres_null_bytes(key):
+                CollaborationRepository._strip_postgres_null_bytes(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                CollaborationRepository._strip_postgres_null_bytes(item)
+                for item in value
+            ]
+        if isinstance(value, tuple):
+            return tuple(
+                CollaborationRepository._strip_postgres_null_bytes(item)
+                for item in value
+            )
+        return value
 
     @staticmethod
     def _json_value(value: Any, *, default: Any) -> Any:

@@ -159,6 +159,58 @@ async def test_runtime_overview_returns_runtime_queue_and_token_totals(
     assert body["token_totals"]["by_workspace"][0]["total_tokens"] == 120
 
 
+async def test_organization_runtime_task_resume_releases_failed_task(
+    client,
+    mock_collaboration_service,
+):
+    organization_id = uuid4()
+    workspace_id = uuid4()
+    thread_id = uuid4()
+    task_id = uuid4()
+    actor_id = uuid4()
+    captured = {}
+
+    async def fake_resume_runtime_task(resume_task_id, payload, *, organization_id):
+        captured["task_id"] = resume_task_id
+        captured["organization_id"] = organization_id
+        captured["reason"] = payload.reason
+        return {
+            "task_id": resume_task_id,
+            "workspace_id": workspace_id,
+            "thread_id": thread_id,
+            "title": "Researcher refine",
+            "status": "released",
+            "requested_by": actor_id,
+            "claimed_by": None,
+            "visibility": "agents_only",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "metadata": {"resume_count": 1},
+        }
+
+    mock_collaboration_service.resume_runtime_task = fake_resume_runtime_task
+
+    response = await client.post(
+        f"/v1/organizations/{organization_id}/runtime/tasks/{task_id}/resume",
+        json={
+            "actor": {
+                "participant_id": str(actor_id),
+                "participant_type": "user",
+                "display_name": "Admin",
+            },
+            "reason": "OpenAI quota restored.",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "released"
+    assert captured == {
+        "task_id": task_id,
+        "organization_id": organization_id,
+        "reason": "OpenAI quota restored.",
+    }
+
+
 async def test_runtime_overview_requires_admin_role_in_oidc_mode(client, monkeypatch):
     auth_context = _oidc_context(roles=["workspace-user"])
     monkeypatch.setattr(settings, "auth_mode", "oidc")

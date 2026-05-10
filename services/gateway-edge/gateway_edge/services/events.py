@@ -256,7 +256,14 @@ class EventService:
             return settings.kafka_workspace_events_topic
         if (
             event.visibility == "agents_only"
-            and event.event_type in {"task.created", "tool_call.created", "tool_call.requeued", "run_step.requeued"}
+            and event.event_type
+            in {
+                "task.created",
+                "task.resumed",
+                "tool_call.created",
+                "tool_call.requeued",
+                "run_step.requeued",
+            }
         ):
             return settings.kafka_agent_tasks_topic
         if (

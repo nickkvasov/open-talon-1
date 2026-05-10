@@ -69,6 +69,7 @@ individual commands.
 ./scripts/run-live-tests.sh default-stack
 ./scripts/run-live-tests.sh providers
 ./scripts/run-live-tests.sh xwiki
+./scripts/run-live-tests.sh methodology-deep-research
 ```
 
 The runner has three stack modes:
@@ -76,8 +77,12 @@ The runner has three stack modes:
 - `self`: the test fixture starts and stops its own stack.
 - `default`: the runner starts one shared `./open-talon start` stack for the
   selected operational, Anchor, and Retriever suites.
-- `xwiki`: the runner starts one shared `./open-talon start --xwiki` stack and
-  supplies local XWiki live-test defaults.
+- `xwiki`: the runner starts one shared `./open-talon start --xwiki --web-search`
+  stack and supplies local XWiki live-test defaults. The
+  `methodology-deep-research` suite uses this same stack profile and runs only
+  the real seeded Researcher/Methodologist deep methodology workflow. That
+  workflow uses the `openai-responses` GPT provider for both specialists, so
+  `OPENAI_API_KEY` or the equivalent OpenBao secret must be configured.
 
 The `compose` suite runs the raw Docker Compose infrastructure smoke test and
 resets compose volumes through its fixture. Use named fractions when you need a

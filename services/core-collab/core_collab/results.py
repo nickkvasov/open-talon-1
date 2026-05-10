@@ -41,16 +41,16 @@ from .contracts import (
     RetrievalSearchResponse,
     RetrievalSource,
     RetrievalSourceVersion,
-    ResearchDossier,
-    ResearchDossierClaim,
-    ResearchDossierConcept,
-    ResearchDossierHealthCheck,
-    ResearchDossierLink,
-    ResearchDossierNote,
-    ResearchDossierNotebook,
-    ResearchDossierNotebookDetail,
-    ResearchDossierSource,
-    ResearchDossierSyncRun,
+    Dossier,
+    DossierClaim,
+    DossierConcept,
+    DossierHealthCheck,
+    DossierLink,
+    DossierNote,
+    DossierNotebook,
+    DossierNotebookDetail,
+    DossierSource,
+    DossierSyncRun,
     ResolvedAssetBinding,
     RoleDefinition,
     Run,
@@ -229,16 +229,16 @@ class MethodicExecutionCommandResult(CommandResult):
 @dataclass
 class MethodologyBlueprintCommandResult(CommandResult):
     detail: MethodologyBlueprintDetail | None = None
-    dossier: ResearchDossier | None = None
-    source: ResearchDossierSource | None = None
-    notebook: ResearchDossierNotebook | None = None
-    notebook_detail: ResearchDossierNotebookDetail | None = None
-    note: ResearchDossierNote | None = None
-    concept: ResearchDossierConcept | None = None
-    claim: ResearchDossierClaim | None = None
-    link: ResearchDossierLink | None = None
-    sync_run: ResearchDossierSyncRun | None = None
-    health_check: ResearchDossierHealthCheck | None = None
+    dossier: Dossier | None = None
+    source: DossierSource | None = None
+    notebook: DossierNotebook | None = None
+    notebook_detail: DossierNotebookDetail | None = None
+    note: DossierNote | None = None
+    concept: DossierConcept | None = None
+    claim: DossierClaim | None = None
+    link: DossierLink | None = None
+    sync_run: DossierSyncRun | None = None
+    health_check: DossierHealthCheck | None = None
 
 
 @dataclass

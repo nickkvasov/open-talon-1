@@ -236,17 +236,11 @@ async def test_tinker_can_publish_and_execute_fibonacci_tool(
         tinker_task_claim.context.tool_generation_request.request.request_id
         == requests[0].request.request_id
     )
-
-    tinker_step_claim = await kernel.claim_next_run_step(
-        worker_id="agent-loop-worker",
-        lease_ttl_seconds=30,
-    )
-    assert tinker_step_claim.step is not None
-    assert tinker_step_claim.context is not None
-    assert tinker_step_claim.step.system_agent_id == tinker_agent_id
-    assert {tool.name for tool in tinker_step_claim.context.internal_tools} == {
-        helper_name for helper_name, _, _, _ in _GENERATED_TOOL_INTERNAL_HELPERS
-    }
+    assert tinker_task_claim.context.run_step is not None
+    tinker_step = tinker_task_claim.context.run_step
+    assert tinker_step.status == "claimed"
+    assert tinker_step.claimed_by_worker == "agent-task-worker"
+    assert tinker_step.system_agent_id == tinker_agent_id
 
     revision_result = await kernel.create_tool_generation_revision(
         requests[0].request.request_id,
@@ -311,8 +305,8 @@ async def test_tinker_can_publish_and_execute_fibonacci_tool(
     assert revision_result.detail.revisions[0].manifest.name == "fibonacci_calculator"
 
     tinker_completion = await kernel.complete_run_step(
-        tinker_step_claim.step.step_id,
-        "agent-loop-worker",
+        tinker_step.step_id,
+        "agent-task-worker",
         AgentRunResult(
             stop_reason="completed",
             message="Prepared `fibonacci_calculator` for platform approval.",
@@ -398,20 +392,19 @@ async def test_tinker_can_publish_and_execute_fibonacci_tool(
 
     math_task_claim = await _claim_single_pending_task(kernel, math_agent_id)
     assert math_task_claim.run is not None
-    math_step_claim = await kernel.claim_next_run_step(
-        worker_id="agent-loop-worker",
-        lease_ttl_seconds=30,
-    )
-    assert math_step_claim.step is not None
-    assert math_step_claim.context is not None
-    assert math_step_claim.step.system_agent_id == math_agent_id
-    assert {tool.name for tool in math_step_claim.context.workspace_tools} >= {
+    assert math_task_claim.context is not None
+    assert math_task_claim.context.run_step is not None
+    math_step = math_task_claim.context.run_step
+    assert math_step.status == "claimed"
+    assert math_step.claimed_by_worker == "agent-task-worker"
+    assert math_step.system_agent_id == math_agent_id
+    assert {tool.name for tool in math_task_claim.context.workspace_tools} >= {
         "fibonacci_calculator"
     }
 
     queued = await kernel.queue_tool_calls_for_run_step(
-        math_step_claim.step.step_id,
-        "agent-loop-worker",
+        math_step.step_id,
+        "agent-task-worker",
         [
             AgentToolCallDraft(
                 tool_name="fibonacci_calculator",

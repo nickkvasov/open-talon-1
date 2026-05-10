@@ -9,6 +9,7 @@ import asyncpg
 
 from .contracts import (
     AgentDefinition,
+    AgentCompactionPolicy,
     AgentEndpoint,
     AgentHarness,
     AgentInternalMcpServer,
@@ -34,6 +35,8 @@ from .contracts import (
     ToolExecutionBinding,
     ToolParameterContract,
     Workspace,
+    DEFAULT_OPENAI_ENGINE_ID,
+    DEFAULT_OPENAI_MODEL,
 )
 from .repository import CollaborationRepository
 
@@ -56,14 +59,20 @@ GLOBAL_RESEARCHER_ROLE_ID = UUID("77777777-7777-7777-7777-777777777773")
 GLOBAL_METHODOLOGIST_ROLE_ID = UUID("77777777-7777-7777-7777-777777777774")
 SYSTEM_ACTOR_ID = UUID("00000000-0000-0000-0000-000000000000")
 ANCHOR_TASK_KIND = "workspace_topic_moderation"
-METHODOLOGY_RESEARCH_DOSSIER_BUILD_TASK_KIND = "methodology_research_dossier_build"
-METHODOLOGY_RESEARCH_DOSSIER_REFINE_TASK_KIND = "methodology_research_dossier_refine"
+METHODOLOGY_DOSSIER_BUILD_TASK_KIND = "methodology_dossier_build"
+METHODOLOGY_DOSSIER_REFINE_TASK_KIND = "methodology_dossier_refine"
 METHODOLOGY_BLUEPRINT_DRAFT_TASK_KIND = "methodology_blueprint_draft"
 METHODICS_EXECUTION_START_TASK_KIND = "methodics_execution_start"
 METHODICS_STEP_COORDINATE_TASK_KIND = "methodics_step_coordinate"
 METHODICS_STEP_VERIFY_TASK_KIND = "methodics_step_verify"
 METHODICS_RESOURCE_REVIEW_TASK_KIND = "methodics_resource_review"
 SEEDED_AGENT_PROFILE_VERSION = 1
+RESEARCHER_MAX_ESTIMATED_INPUT_TOKENS = 256_000
+METHODOLOGIST_MAX_ESTIMATED_INPUT_TOKENS = 256_000
+METHODOLOGY_SPECIALIST_OPENAI_MODEL = os.getenv(
+    "OPEN_TALON_METHODOLOGY_SPECIALIST_OPENAI_MODEL",
+    "gpt-5.4-mini",
+)
 ANCHOR_ROLE = "workspace topic alignment reviewer"
 ANCHOR_CAPABILITIES = [
     "reviews messages for alignment with the workspace topic",
@@ -103,6 +112,15 @@ def _seeded_agent_profile(
 def _default_reasoning_model() -> str:
     return os.getenv("OPEN_TALON_DEFAULT_REASONING_MODEL", "gemma4:31b")
 
+
+def _deterministic_uuid_from_name(name: str) -> UUID:
+    digest = bytearray(hashlib.sha256(name.encode("utf-8")).digest()[:16])
+    # Keep the deterministic value UUID-shaped without using MD5/SHA-1 based helpers.
+    digest[6] = (digest[6] & 0x0F) | 0x80
+    digest[8] = (digest[8] & 0x3F) | 0x80
+    return UUID(bytes=bytes(digest))
+
+
 _OPERATIONAL_AGENT_PERMISSIONS = [
     "organization.read",
     "organization.members.read",
@@ -111,6 +129,7 @@ _OPERATIONAL_AGENT_PERMISSIONS = [
     "workspace.list",
     "workspace.read",
     "organization.runtime.read",
+    "organization.runtime.write",
     "agent_catalog.read",
     "agent_catalog.write",
     "tool_catalog.read",
@@ -262,19 +281,19 @@ _RESEARCHER_CONTROL_PLANE_ALLOWLIST = [
     "threads.get",
     "threads.timeline.get",
     "threads.messages.create",
-    "methodology.dossiers.get",
-    "methodology.dossiers.sources.create",
-    "methodology.dossiers.sources.update",
-    "methodology.dossiers.context_pack.attach",
-    "methodology.dossiers.mark_ready",
-    "methodology.dossiers.notebook.get",
-    "methodology.dossiers.notes.upsert",
-    "methodology.dossiers.concepts.upsert",
-    "methodology.dossiers.claims.upsert",
-    "methodology.dossiers.links.upsert",
-    "methodology.dossiers.navigate",
-    "methodology.dossiers.sync",
-    "methodology.dossiers.health.submit",
+    "dossiers.get",
+    "dossiers.sources.create",
+    "dossiers.sources.update",
+    "dossiers.context_pack.attach",
+    "dossiers.lifecycle.transition",
+    "dossiers.notebook.get",
+    "dossiers.notes.upsert",
+    "dossiers.concepts.upsert",
+    "dossiers.claims.upsert",
+    "dossiers.links.upsert",
+    "dossiers.navigate",
+    "dossiers.sync",
+    "dossiers.health.submit",
 ]
 _METHODOLOGIST_CONTROL_PLANE_ALLOWLIST = [
     "session.get_identity",
@@ -286,9 +305,9 @@ _METHODOLOGIST_CONTROL_PLANE_ALLOWLIST = [
     "threads.get",
     "threads.timeline.get",
     "retrieval.context_pack.get",
-    "methodology.dossiers.get",
-    "methodology.dossiers.notebook.get",
-    "methodology.dossiers.navigate",
+    "dossiers.get",
+    "dossiers.notebook.get",
+    "dossiers.navigate",
     "methodology.blueprints.submit_draft",
 ]
 _METHODICS_HUMAN_CONTROL_PLANE_TOOLS = [
@@ -1678,8 +1697,8 @@ class ManagedSystemDefaultsRepairer:
     @staticmethod
     def _researcher_agent_definition(*, now: datetime) -> AgentDefinition:
         accepted_task_kinds = [
-            METHODOLOGY_RESEARCH_DOSSIER_BUILD_TASK_KIND,
-            METHODOLOGY_RESEARCH_DOSSIER_REFINE_TASK_KIND,
+            METHODOLOGY_DOSSIER_BUILD_TASK_KIND,
+            METHODOLOGY_DOSSIER_REFINE_TASK_KIND,
         ]
         return AgentDefinition(
             agent_id=RESEARCHER_AGENT_ID,
@@ -1688,11 +1707,11 @@ class ManagedSystemDefaultsRepairer:
             organization_id=None,
             display_name="Researcher",
             description=(
-                "Builds durable research dossiers by discovering, collecting, "
+                "Builds durable dossiers by discovering, collecting, "
                 "triaging, and organizing evidence from local libraries, indexed "
                 "retrieval corpora, databases, files, media, and web follow-up."
             ),
-            role="evidence discovery and research dossier agent",
+            role="evidence discovery and dossier agent",
             capabilities=[
                 "discovers sources across selected organization libraries and retrieval corpora",
                 "uses web follow-up for recency gaps contradiction checks and missing coverage",
@@ -1700,15 +1719,16 @@ class ManagedSystemDefaultsRepairer:
                 "maps contradictions disagreements and follow-up questions before synthesis",
                 "preserves fetched pages papers files and media in retained dossier libraries",
                 "structures concept notes claims gaps and synthesis pages in the dossier notebook",
-                "submits structured research dossier source records and readiness updates",
+                "submits structured dossier source records and readiness updates",
             ],
             endpoint=AgentEndpoint(
                 kind="system",
-                engine_id="local-ollama",
-                provider="ollama",
+                engine_id=DEFAULT_OPENAI_ENGINE_ID,
+                provider="openai",
+                model=METHODOLOGY_SPECIALIST_OPENAI_MODEL,
             ),
             system_prompt=(
-                "You are Researcher. Build durable research dossiers for specific "
+                "You are Researcher. Build durable dossiers for specific "
                 "topics and tasks. Start with selected local and organization libraries, "
                 "pre-indexed Retriever corpora, files, media, and database-visible context. "
                 "Use web search and fetch only for gaps, recency, contradiction checks, "
@@ -1721,7 +1741,7 @@ class ManagedSystemDefaultsRepairer:
             harness=AgentHarness(
                 version=1,
                 summary=(
-                    "Research dossier harness for auditable multi-step discovery, "
+                    "Dossier harness for auditable multi-step discovery, "
                     "triage, contradiction mapping, and retained source organization."
                 ),
                 operating_principles=[
@@ -1754,7 +1774,7 @@ class ManagedSystemDefaultsRepairer:
                         "Use Library tools to inspect selected and retained dossier libraries.",
                         "Use Retriever tools for indexed searches and context packs.",
                         "Use Web Search only for explicit follow-up discovery, gaps, or recency.",
-                        "Use methodology dossier MCP tools to persist every source, notebook note, concept, claim, link, health check, sync, and readiness update.",
+                        "Use dossier MCP tools to persist every source, notebook note, concept, claim, link, health check, sync, and readiness update.",
                     ],
                     fallback_when_no_tool_fits=(
                         "Record the limitation as an unresolved dossier gap and continue with visible evidence."
@@ -1764,6 +1784,17 @@ class ManagedSystemDefaultsRepairer:
                     use_run_memory=True,
                     use_thread_memory=True,
                     use_workspace_memory=True,
+                ),
+                compaction_policy=AgentCompactionPolicy(
+                    strategy="rolling_summary",
+                    max_estimated_input_tokens=RESEARCHER_MAX_ESTIMATED_INPUT_TOKENS,
+                    recent_message_count=16,
+                    min_recent_message_count=4,
+                    max_run_memory_entries=8,
+                    max_thread_memory_entries=8,
+                    max_workspace_memory_entries=8,
+                    summary_max_chars=6_000,
+                    retrieval_limit=8,
                 ),
                 validation_policy=AgentValidationPolicy(
                     required_checks=[
@@ -1780,17 +1811,17 @@ class ManagedSystemDefaultsRepairer:
                 ),
                 stop_policy=AgentStopPolicy(
                     completion_conditions=[
-                        "The research dossier has structured sources, summary, contradictions, gaps, context packs, and a readiness decision."
+                        "The dossier has structured sources, summary, contradictions, gaps, context packs, and a readiness decision."
                     ],
                     stop_conditions=[
-                        "Do not synthesize the methodology blueprint; hand the completed dossier to Methodologist."
+                        "Do not synthesize the methodology blueprint; hand the ready dossier to Methodologist."
                     ],
                 ),
                 metadata={
                     "seeded": True,
                     "managed": True,
                     "agent_key": "researcher",
-                    "research_dossier_agent": True,
+                    "dossier_agent": True,
                     "task_routing": {
                         "normal_message_fanout": False,
                         "accepted_task_kinds": accepted_task_kinds,
@@ -1799,7 +1830,7 @@ class ManagedSystemDefaultsRepairer:
             ),
             interaction_contract=AgentInteractionContract(
                 instructions=[
-                    "Operate as Researcher, the evidence discovery and research dossier agent.",
+                    "Operate as Researcher, the evidence discovery and dossier agent.",
                     "Build and refine durable dossiers through targeted dossier tasks only.",
                     "Search local libraries and Retriever context first, then use web follow-up for gaps and recency.",
                     "Persist source records, context packs, concept notes, claims, links, contradictions, gaps, health checks, sync, and readiness through dossier MCP operations.",
@@ -1807,7 +1838,7 @@ class ManagedSystemDefaultsRepairer:
                 ],
                 response_contract=AgentResponseContract(
                     format="markdown",
-                    title="Research Dossier Update",
+                    title="Dossier Update",
                     required_sections=[
                         "Research Scope",
                         "Discovery Plan",
@@ -1834,21 +1865,23 @@ class ManagedSystemDefaultsRepairer:
             ),
             definition={
                 "runtime": {
-                    "engine_id": "local-ollama",
-                    "provider": "ollama",
-                    "preferred_capabilities": ["local", "ollama", "reasoning"],
-                    "preferred_locality": "host",
+                    "engine_id": DEFAULT_OPENAI_ENGINE_ID,
+                    "provider": "openai",
+                    "model": METHODOLOGY_SPECIALIST_OPENAI_MODEL,
+                    "required_capabilities": ["tool_calling", "reasoning"],
+                    "preferred_capabilities": ["responses-api", "vision", "image_input"],
+                    "preferred_locality": "cloud",
                 },
                 "seeded": True,
                 "managed": True,
                 "agent_key": "researcher",
-                "research_dossier_agent": True,
+                "dossier_agent": True,
                 "task_routing": {
                     "normal_message_fanout": False,
                     "accepted_task_kinds": accepted_task_kinds,
                 },
                 "profile": _seeded_agent_profile(
-                    kind="methodology_research_dossier_specialist",
+                    kind="methodology_dossier_specialist",
                     mandate=(
                         "Discover, collect, triage, preserve, and organize evidence "
                         "into durable concept dossiers."
@@ -1876,7 +1909,7 @@ class ManagedSystemDefaultsRepairer:
                         "web follow-up results",
                     ],
                     primary_outputs=[
-                        "research dossier",
+                        "dossier",
                         "source records",
                         "retained source refs",
                         "concept notebook",
@@ -1915,7 +1948,7 @@ class ManagedSystemDefaultsRepairer:
                 "managed": True,
                 "seeded": True,
                 "agent_key": "researcher",
-                "research_dossier_agent": True,
+                "dossier_agent": True,
                 "task_routing": {
                     "normal_message_fanout": False,
                     "accepted_task_kinds": accepted_task_kinds,
@@ -1925,6 +1958,7 @@ class ManagedSystemDefaultsRepairer:
 
     @staticmethod
     def _methodologist_agent_definition(*, now: datetime) -> AgentDefinition:
+        accepted_task_kinds = [METHODOLOGY_BLUEPRINT_DRAFT_TASK_KIND]
         return AgentDefinition(
             agent_id=METHODOLOGIST_AGENT_ID,
             agent_key="methodologist",
@@ -1933,12 +1967,12 @@ class ManagedSystemDefaultsRepairer:
             display_name="Methodologist",
             description=(
                 "Extracts methodology basis, methodics, methods, actors, tools, and "
-                "workspace implementation templates from completed research dossiers "
+                "workspace implementation templates from ready dossiers "
                 "or cited domain source material."
             ),
             role="methodology extraction and workspace design agent",
             capabilities=[
-                "consumes completed research dossiers with source records concept notebooks contradictions gaps and context packs",
+                "consumes ready dossiers with source records concept notebooks contradictions gaps and context packs",
                 "analyzes narrow-domain books and source corpora through cited retrieval evidence",
                 "extracts methodology basis including ontology axiology epistemology and principles",
                 "derives methodics as high-level repeatable steps for achieving a stated goal",
@@ -1948,11 +1982,12 @@ class ManagedSystemDefaultsRepairer:
             ],
             endpoint=AgentEndpoint(
                 kind="system",
-                engine_id="local-ollama",
-                provider="ollama",
+                engine_id=DEFAULT_OPENAI_ENGINE_ID,
+                provider="openai",
+                model=METHODOLOGY_SPECIALIST_OPENAI_MODEL,
             ),
             system_prompt=(
-                "You are Methodologist. Analyze completed research dossiers or cited source "
+                "You are Methodologist. Analyze ready dossiers or cited source "
                 "material for a narrow domain and extract the methodology basis, methodics, "
                 "concrete methods, required actors, candidate tools, and a project/workspace "
                 "template for implementing the approach. Use dossier source records, "
@@ -1969,7 +2004,7 @@ class ManagedSystemDefaultsRepairer:
                     "workspace-ready operating templates."
                 ),
                 operating_principles=[
-                    "Start from the user's target goal and the completed dossier or cited source corpus; do not treat general knowledge as source evidence.",
+                    "Start from the user's target goal and the ready dossier or cited source corpus; do not treat general knowledge as source evidence.",
                     "Use dossier source records, concept notebook pages, contradictions, gaps, and context packs as the evidence boundary when a dossier is supplied.",
                     "Separate methodology basis, methodics, methods, tools, actors, artifacts, and workspace template decisions.",
                     "Keep source-grounded extraction distinct from implementation ideation.",
@@ -1995,7 +2030,7 @@ class ManagedSystemDefaultsRepairer:
                     cite_tool_results_in_reasoning=True,
                     verify_side_effects_after_mutation=True,
                     selection_principles=[
-                        "Read and navigate the completed research dossier notebook before synthesizing when a dossier id is supplied.",
+                        "Read and navigate the ready dossier notebook before synthesizing when a dossier id is supplied.",
                         "Use retrieval search or context packs for source evidence before synthesis.",
                         "Inspect existing workspace harness, files, and retrieval corpora before proposing changes.",
                         "Use authoring or catalog tools only when the user asks to materialize the template.",
@@ -2009,6 +2044,17 @@ class ManagedSystemDefaultsRepairer:
                     use_run_memory=True,
                     use_thread_memory=True,
                     use_workspace_memory=True,
+                ),
+                compaction_policy=AgentCompactionPolicy(
+                    strategy="rolling_summary",
+                    max_estimated_input_tokens=METHODOLOGIST_MAX_ESTIMATED_INPUT_TOKENS,
+                    recent_message_count=16,
+                    min_recent_message_count=4,
+                    max_run_memory_entries=8,
+                    max_thread_memory_entries=8,
+                    max_workspace_memory_entries=8,
+                    summary_max_chars=6_000,
+                    retrieval_limit=8,
                 ),
                 validation_policy=AgentValidationPolicy(
                     required_checks=[
@@ -2035,12 +2081,16 @@ class ManagedSystemDefaultsRepairer:
                     "managed": True,
                     "agent_key": "methodologist",
                     "methodology_agent": True,
+                    "task_routing": {
+                        "normal_message_fanout": False,
+                        "accepted_task_kinds": accepted_task_kinds,
+                    },
                 },
             ),
             interaction_contract=AgentInteractionContract(
                 instructions=[
                     "Operate as Methodologist, the methodology extraction and workspace design agent.",
-                    "Use completed research dossiers, cited retrieval, or visible source evidence for source-derived claims.",
+                    "Use ready dossiers, cited retrieval, or visible source evidence for source-derived claims.",
                     "Separate source-grounded extraction from implementation ideation.",
                     "When evidence is missing, state the gap and ask for ingestion, corpus selection, or a clearer target goal.",
                     "Return a structure that can be translated into an Open Talon workspace harness.",
@@ -2075,19 +2125,25 @@ class ManagedSystemDefaultsRepairer:
             ),
             definition={
                 "runtime": {
-                    "engine_id": "local-ollama",
-                    "provider": "ollama",
-                    "preferred_capabilities": ["local", "ollama", "reasoning"],
-                    "preferred_locality": "host",
+                    "engine_id": DEFAULT_OPENAI_ENGINE_ID,
+                    "provider": "openai",
+                    "model": METHODOLOGY_SPECIALIST_OPENAI_MODEL,
+                    "required_capabilities": ["tool_calling", "reasoning"],
+                    "preferred_capabilities": ["responses-api", "vision", "image_input"],
+                    "preferred_locality": "cloud",
                 },
                 "seeded": True,
                 "managed": True,
                 "agent_key": "methodologist",
                 "methodology_agent": True,
+                "task_routing": {
+                    "normal_message_fanout": False,
+                    "accepted_task_kinds": accepted_task_kinds,
+                },
                 "profile": _seeded_agent_profile(
                     kind="methodology_blueprint_synthesis_specialist",
                     mandate=(
-                        "Turn completed research dossiers or cited source corpora into "
+                        "Turn ready dossiers or cited source corpora into "
                         "methodology, methodics, and workspace harness drafts."
                     ),
                     activation=(
@@ -2106,7 +2162,7 @@ class ManagedSystemDefaultsRepairer:
                         "label inferred implementation ideas separately from source-backed claims",
                     ],
                     primary_inputs=[
-                        "ready research dossier",
+                        "ready dossier",
                         "dossier notebook navigation",
                         "source records",
                         "contradictions and gaps",
@@ -2416,7 +2472,7 @@ class ManagedSystemDefaultsRepairer:
             organization_id=None,
             name="methodology_researcher",
             description=(
-                "Least-privilege research dossier permissions for the seeded "
+                "Least-privilege dossier permissions for the seeded "
                 "Researcher specialist."
             ),
             permissions=list(_RESEARCHER_AGENT_PERMISSIONS),
@@ -3147,11 +3203,10 @@ def anchor_participant_for_workspace(
     agent_id: UUID = ANCHOR_AGENT_ID,
     now: datetime,
 ) -> ParticipantProfile:
-    participant_digest = hashlib.md5(  # noqa: S324 - deterministic identifier, not security.
-        f"open-talon-anchor-participant:{workspace_id}".encode("utf-8")
-    ).hexdigest()
     return ParticipantProfile(
-        participant_id=UUID(hex=participant_digest),
+        participant_id=_deterministic_uuid_from_name(
+            f"open-talon-anchor-participant:{workspace_id}"
+        ),
         workspace_id=workspace_id,
         participant_type="agent",
         system_agent_id=agent_id,
@@ -3170,6 +3225,7 @@ def anchor_participant_for_workspace(
             "seeded": True,
             "managed": True,
             "agent_key": "anchor",
+            "deterministic_id_algorithm": "sha256-v8",
             "task_routing": {
                 "normal_message_fanout": False,
                 "accepted_task_kinds": [ANCHOR_TASK_KIND],
@@ -3198,11 +3254,27 @@ async def ensure_anchor_attached_for_workspace(
                 "metadata": {**existing.metadata, **agent.metadata},
             }
         )
+    existing_participant = await repository.fetch_agent_participant(
+        workspace_id,
+        agent.agent_id,
+    )
     participant = anchor_participant_for_workspace(
         workspace_id,
         agent_id=agent.agent_id,
         now=now,
     )
+    if existing_participant is not None:
+        participant = participant.model_copy(
+            update={
+                "participant_id": existing_participant.participant_id,
+                "created_at": existing_participant.created_at,
+                "metadata": {
+                    **existing_participant.metadata,
+                    **participant.metadata,
+                    "deterministic_id_algorithm": "sha256-v8",
+                },
+            }
+        )
     await repository.upsert_system_agent(conn, agent)
     await repository.upsert_participant(conn, participant)
     return participant
