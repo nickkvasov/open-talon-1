@@ -2058,11 +2058,33 @@ async def test_kernel_create_workspace_attaches_anchor_with_descriptive_advertis
     assert anchor.roles == ["workspace topic alignment reviewer"]
     assert "reviews messages for alignment with the workspace topic" in anchor.capabilities
     assert anchor.metadata["task_routing"]["normal_message_fanout"] is False
+    assert anchor.metadata["deterministic_id_algorithm"] == "sha256-v8"
+    assert anchor.participant_id.version == 8
     anchor_definition = repository._agents[ANCHOR_AGENT_ID]
     assert anchor_definition.endpoint.engine_id == "local-ollama"
     assert anchor_definition.endpoint.provider == "ollama"
     assert anchor_definition.definition["runtime"]["engine_id"] == "local-ollama"
     assert anchor_definition.interaction_contract.response_contract.format == "json"
+
+    legacy_participant_id = uuid4()
+    repository._participants.pop((result.workspace.workspace_id, anchor.participant_id))
+    repository._participants[(result.workspace.workspace_id, legacy_participant_id)] = (
+        anchor.model_copy(
+            update={
+                "participant_id": legacy_participant_id,
+                "metadata": {"legacy_anchor_id": True},
+            }
+        )
+    )
+    repaired_anchor = await kernel._ensure_anchor_attached_for_workspace(
+        None,
+        result.workspace.workspace_id,
+        now=datetime.now(timezone.utc),
+    )
+
+    assert repaired_anchor.participant_id == legacy_participant_id
+    assert repaired_anchor.metadata["legacy_anchor_id"] is True
+    assert repaired_anchor.metadata["deterministic_id_algorithm"] == "sha256-v8"
 
 
 @pytest.mark.asyncio

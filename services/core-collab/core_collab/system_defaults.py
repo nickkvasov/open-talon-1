@@ -112,6 +112,15 @@ def _seeded_agent_profile(
 def _default_reasoning_model() -> str:
     return os.getenv("OPEN_TALON_DEFAULT_REASONING_MODEL", "gemma4:31b")
 
+
+def _deterministic_uuid_from_name(name: str) -> UUID:
+    digest = bytearray(hashlib.sha256(name.encode("utf-8")).digest()[:16])
+    # Keep the deterministic value UUID-shaped without using MD5/SHA-1 based helpers.
+    digest[6] = (digest[6] & 0x0F) | 0x80
+    digest[8] = (digest[8] & 0x3F) | 0x80
+    return UUID(bytes=bytes(digest))
+
+
 _OPERATIONAL_AGENT_PERMISSIONS = [
     "organization.read",
     "organization.members.read",
@@ -3194,11 +3203,10 @@ def anchor_participant_for_workspace(
     agent_id: UUID = ANCHOR_AGENT_ID,
     now: datetime,
 ) -> ParticipantProfile:
-    participant_digest = hashlib.md5(  # noqa: S324 - deterministic identifier, not security.
-        f"open-talon-anchor-participant:{workspace_id}".encode("utf-8")
-    ).hexdigest()
     return ParticipantProfile(
-        participant_id=UUID(hex=participant_digest),
+        participant_id=_deterministic_uuid_from_name(
+            f"open-talon-anchor-participant:{workspace_id}"
+        ),
         workspace_id=workspace_id,
         participant_type="agent",
         system_agent_id=agent_id,
@@ -3217,6 +3225,7 @@ def anchor_participant_for_workspace(
             "seeded": True,
             "managed": True,
             "agent_key": "anchor",
+            "deterministic_id_algorithm": "sha256-v8",
             "task_routing": {
                 "normal_message_fanout": False,
                 "accepted_task_kinds": [ANCHOR_TASK_KIND],
@@ -3245,11 +3254,27 @@ async def ensure_anchor_attached_for_workspace(
                 "metadata": {**existing.metadata, **agent.metadata},
             }
         )
+    existing_participant = await repository.fetch_agent_participant(
+        workspace_id,
+        agent.agent_id,
+    )
     participant = anchor_participant_for_workspace(
         workspace_id,
         agent_id=agent.agent_id,
         now=now,
     )
+    if existing_participant is not None:
+        participant = participant.model_copy(
+            update={
+                "participant_id": existing_participant.participant_id,
+                "created_at": existing_participant.created_at,
+                "metadata": {
+                    **existing_participant.metadata,
+                    **participant.metadata,
+                    "deterministic_id_algorithm": "sha256-v8",
+                },
+            }
+        )
     await repository.upsert_system_agent(conn, agent)
     await repository.upsert_participant(conn, participant)
     return participant
