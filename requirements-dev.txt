@@ -13,5 +13,5 @@ psycopg[binary]>=3.3.4
 redis>=7.4.0
 hvac>=2.4.0
 confluent-kafka>=2.5
-python-dotenv>=1.0
+python-dotenv>=1.2.2
 ruff>=0.4
