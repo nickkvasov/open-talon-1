@@ -14,4 +14,4 @@ redis>=7.4.0
 hvac>=2.4.0
 confluent-kafka>=2.5
 python-dotenv>=1.0
-ruff>=0.4
+ruff>=0.15.15
